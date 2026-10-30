@@ -51,6 +51,7 @@ import errno
 import json
 import os
 import select
+import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -289,8 +290,8 @@ class TurnPool:
 
     Accounting only. Who is claimed and what a child does with a turn belong to
     the runner; what belongs here is how many turns are in flight, whether
-    another may be started, and the handover that decides whether a launch that
-    went wrong may be handed back to the queue.
+    another may be started, when a slot comes free, and the handover that
+    decides whether a launch that went wrong may be handed back to the queue.
     """
 
     def __init__(
@@ -312,6 +313,9 @@ class TurnPool:
         self._claim_not_before = 0.0
         self._launch_error = ""
         self._stopping = False
+        #: Set from any thread when a slot may have come free: a turn's child
+        #: exited, or a holder outside this pool called :meth:`slot_freed`.
+        self._freed = threading.Event()
 
     @property
     def launch_error(self) -> str:
@@ -344,6 +348,33 @@ class TurnPool:
         if len(self._turns) >= limit:
             return False
         return self._clock() >= self._claim_not_before
+
+    def slot_freed(self) -> None:
+        """End a :meth:`wait_for_slot` now: a slot held outside this pool came free.
+
+        Safe from any thread. The claim loop counts an environment test as a
+        slot as well, and the test's thread calls this once it is over.
+        """
+        self._freed.set()
+
+    def wait_for_slot(self, timeout: float) -> bool:
+        """Wait ``timeout`` seconds, or less once a slot comes free.
+
+        A turn's child exiting or :meth:`slot_freed` ends it early, and nothing
+        else does, so the caller claims nothing it would not have claimed at
+        the end of the timeout, only sooner. During a launch backoff no freed
+        slot may be claimed, so the wait runs to its end. Whether a turn may
+        now be claimed is the caller's to ask again. Returns whether a freed
+        slot ended the wait.
+        """
+        if self._clock() < self._claim_not_before:
+            time.sleep(timeout)
+            return False
+        freed = self._freed.wait(timeout)
+        # Cleared after the wait, not before it: a slot freed until now is
+        # seen by the caller's next check, and one freed later sets it again.
+        self._freed.clear()
+        return freed
 
     def reap(self) -> list[FinishedTurn]:
         """Forget children that have exited, and say which they were."""
@@ -383,6 +414,7 @@ class TurnPool:
                     accepted=result.outcome == LAUNCH_STARTED,
                 )
             )
+            self._watch(result.handle, job_id=job_id)
         if result.outcome == LAUNCH_STARTED:
             self._launch_succeeded()
         else:
@@ -415,6 +447,39 @@ class TurnPool:
             if not self._turns:
                 return finished
             wait(0.5)
+
+    def _watch(self, handle: TurnHandle, *, job_id: str) -> None:
+        """Set the freed flag as soon as ``handle``'s child exits, without collecting it.
+
+        A thread of its own waits with ``WNOWAIT``: the child stays a zombie,
+        its PID still this host's, until :meth:`reap`'s ``poll`` collects it
+        under ``subprocess.Popen``'s lock as before. ``Popen.wait`` here would
+        hold that lock through the wait, so a ``kill`` just after the exit
+        could take the child for alive and signal a reused PID. A handle with
+        no PID, a Python without ``os.waitid`` (as on macOS), or a thread that
+        cannot start leaves the exit to be found when the caller's wait runs
+        out, as every exit was before.
+        """
+        pid = getattr(handle, "pid", None)
+        if not isinstance(pid, int) or not hasattr(os, "waitid"):
+            return
+
+        def watch() -> None:
+            try:
+                os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+            except OSError:
+                # Collected already: it has exited, and there is nothing to wait for.
+                pass
+            finally:
+                self._freed.set()
+
+        try:
+            threading.Thread(target=watch, name=f"turn-exit-{pid}", daemon=True).start()
+        except RuntimeError:
+            logger.warning(
+                "agent_turn_exit_unwatched",
+                extra={"event": "agent_turn_exit_unwatched", "job_id": job_id},
+            )
 
     def _launch_succeeded(self) -> None:
         self._launch_failures = 0

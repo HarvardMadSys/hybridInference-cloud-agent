@@ -139,7 +139,9 @@ container starts. Its `checkout` measurement includes the remaining clone wait
 stage; an earlier stop discards prepared source. Startup measurements attribute
 qualification to `preflight` and cover claim request through prompt dispatch,
 excluding queue wait and model response time. Declined children do not publish a
-successful startup. A host at capacity checks completed children every second.
+successful startup. A host at capacity claims again as soon as a turn's child
+exits or an environment test ends. Failing that, it checks again after a
+second, or after five seconds while an environment test holds one of its slots.
 
 ### Empty-queue waits and CI evidence
 

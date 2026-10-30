@@ -192,6 +192,11 @@ def service(monkeypatch):
             runner_mod._STOPPING.set()
 
     monkeypatch.setattr(runner_mod.time, "sleep", sleep)
+    # A wait at capacity ends early only when a slot comes free; these fakes free
+    # none, so it is one more scripted sleep (see test_runner_host_slot_wait).
+    monkeypatch.setattr(
+        runner_mod.TurnPool, "wait_for_slot", lambda _p, s: runner_mod.time.sleep(s)
+    )
     # A control plane without the wait endpoint, so an idle host sleeps its
     # interval as these tests expect. The waiting itself is tested below.
     monkeypatch.setattr(runner_mod, "wait_for_work", _no_wait_endpoint)
@@ -573,40 +578,6 @@ def test_a_persisting_qualification_failure_is_reported_once(service, monkeypatc
     )
     assert warnings.count("agent_runtime_qualification_failed") == 1
     assert FakeHeartbeat.last.wakes == 2, "one beat reports the failure and one clears it"
-
-
-@pytest.mark.parametrize("full", [False, True])
-def test_freed_slots_are_detected_without_faster_empty_queue_polling(service, monkeypatch, full):
-    _identity, backend, _released = service
-    waits = []
-    launched = []
-
-    def sleep(seconds):
-        waits.append(seconds)
-        runner_mod._STOPPING.set()
-
-    def launch(_payload):
-        launched.append(FakeHandle())
-        return LaunchResult(LAUNCH_STARTED, launched[-1])
-
-    monkeypatch.setattr(runner_mod.time, "sleep", sleep)
-    monkeypatch.setattr(
-        runner_mod, "claim_payload", lambda **_k: _job(len(launched)) if full else None
-    )
-    assert (
-        runner_mod.run_forever(
-            base_url="http://control",
-            worker_id="runner-a",
-            backend=backend,
-            host="host-a",
-            spawn_turn=launch,
-        )
-        == 0
-    )
-    # Shutdown may sleep while draining live handles; the service's first
-    # sleep is the relevant interval and never triggers an extra API claim.
-    assert waits[0] == (1.0 if full else 5.0)
-    assert len(launched) == (3 if full else 0)
 
 
 @pytest.mark.parametrize("reusable", [False, True])
@@ -1225,7 +1196,7 @@ def test_an_empty_claims_proof_is_the_one_its_environment_poll_presents(service,
     class _Worker:
         busy = False
 
-        def __init__(self, _base_url: str, _backend: Any) -> None:
+        def __init__(self, _base_url: str, _backend: Any, **_kwargs: Any) -> None:
             pass
 
         def poll(self, credential: str, attestation: Any = None) -> None:
