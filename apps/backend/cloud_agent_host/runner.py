@@ -3615,7 +3615,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     # The host proves its runtime here, once, and its children inherit that
     # verdict rather than each booting a probe guest of its own.
     qualification = (
-        HostQualification(backend)
+        HostQualification(backend, renew_network=True)
         if isinstance(backend, ContainerBackend) and spawn_turn is None
         else None
     )
