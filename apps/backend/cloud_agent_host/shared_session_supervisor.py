@@ -34,7 +34,7 @@ from cloud_agent_host.chat_sandbox import (
     SandboxRestoreFailed,
 )
 from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
-from cloud_agent_host.environment_preparation import runs_no_script
+from cloud_agent_host.environment_preparation import prepared_in, runs_no_script
 from cloud_agent_host.guarded_workloads import (
     GuardedWorkload,
     exact_stop_unguarded,
@@ -3428,7 +3428,7 @@ class SharedChatSessionSupervisor:
                 self._accept_inspection_locked(group, current)
             elif group.container_lost:
                 raise RetainedChatLost("shared sandbox container identity was lost")
-            if receipt.get("ready"):
+            if receipt.get("ready") and prepared_in(receipt, group.inspection):
                 return receipt
             self._require_mutation_admission(group)
             if group.operation_tokens or any(
