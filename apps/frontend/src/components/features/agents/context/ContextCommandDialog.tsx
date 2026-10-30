@@ -3,7 +3,7 @@
 // What `/context` opens before a conversation exists: there is no context yet,
 // and the place that compares the owner's earlier conversations. Nothing is
 // sent and the draft is left as it was. In a conversation, `/context` opens
-// the workspace panel's Context tab instead.
+// its main Context tab (beside Chat and Trajectory) instead.
 
 import Link from 'next/link';
 import { useCallback, useId, useRef, useState, type ReactNode } from 'react';

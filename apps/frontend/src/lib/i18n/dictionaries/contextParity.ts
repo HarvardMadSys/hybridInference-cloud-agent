@@ -82,10 +82,8 @@ export const contextParityEn = {
   'context.events.reason.per_request': 'From the model each request reported.',
   'context.events.reason.unknown_runtime': 'Not checked for this agent.',
 
-  'context.panel.tab': 'Context',
-  'context.panel.openFull': 'Open the full Context view',
   'commands.context': 'Context',
-  'commands.contextHint': 'Show this conversation’s context; nothing is sent',
+  'commands.contextHint': 'Open this conversation’s Context tab; nothing is sent',
   'context.command.title': 'Context',
   'context.command.noConversation':
     'There is no context yet: it is recorded from this conversation’s first model request on.',
@@ -225,10 +223,8 @@ export const contextParityZhCN: Record<keyof typeof contextParityEn, string> = {
   'context.events.reason.per_request': '依据每次请求报告的模型。',
   'context.events.reason.unknown_runtime': '没有针对这个 Agent 核对过。',
 
-  'context.panel.tab': '上下文',
-  'context.panel.openFull': '打开完整的上下文视图',
   'commands.context': '上下文',
-  'commands.contextHint': '查看这个会话的上下文，不会发送任何内容',
+  'commands.contextHint': '打开这个会话的「上下文」标签页，不会发送任何内容',
   'context.command.title': '上下文',
   'context.command.noConversation': '还没有上下文：从这个会话的第一次模型请求开始才有记录。',
   'context.command.insights': '设置里的「上下文洞察」可以比较你之前的会话。',

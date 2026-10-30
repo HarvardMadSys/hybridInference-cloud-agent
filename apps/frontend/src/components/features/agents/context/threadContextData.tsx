@@ -1,10 +1,9 @@
 'use client';
 
-// One conversation's Context view data, shared by every place that shows it:
-// the Context tab, the workspace panel's Context tab, and what `/context`
-// opens. The page holds one provider, so however many of them are showing,
-// the conversation is read once and polled once while a turn runs; with none
-// showing, it is not read at all.
+// One conversation's Context view data, for its main Context tab (which
+// `/context` opens). The page holds one provider, so the conversation is read
+// once and polled once while a turn runs, and not at all while the tab is not
+// showing.
 //
 // The data is kept with the conversation it was read for. When the page moves
 // to another conversation it is dropped before anything draws, so a surface

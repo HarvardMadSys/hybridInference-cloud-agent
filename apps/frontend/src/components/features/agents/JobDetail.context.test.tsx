@@ -30,6 +30,9 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentThreadModelTtft: vi.fn().mockResolvedValue(null),
   getAgentThreadContext: vi.fn(),
   getRequestComposition: vi.fn().mockResolvedValue(null),
+  // The workspace's own panels read nothing here: unavailable is enough.
+  getAgentJobGit: vi.fn().mockRejectedValue(new Error('offline')),
+  getAgentJobGitMetadata: vi.fn().mockRejectedValue(new Error('offline')),
   getThreadContextTiming: vi.fn().mockResolvedValue(null),
   getThreadContextDna: vi.fn().mockResolvedValue(null),
 }));
@@ -149,11 +152,18 @@ afterEach(() => {
   sessionStorage.clear();
 });
 
-function contextPanel(): HTMLElement {
-  return document.getElementById('workspace-panel-context')!;
+/** The main Context view's button, beside Chat and Trajectory. */
+function contextView(): HTMLElement {
+  return within(screen.getByRole('navigation', { name: 'Run views' })).getByRole('button', {
+    name: 'context',
+  });
 }
 
-it('/context opens the Context panel beside the chat and sends nothing', async () => {
+function workspacePane(): HTMLElement {
+  return document.getElementById('job-workspace-pane')!;
+}
+
+it('/context opens the main Context view and sends nothing', async () => {
   render(<JobDetail job={job('job-a', 'thread-a')} />);
   const box = await screen.findByLabelText('Add a follow-up');
   fireEvent.change(box, { target: { value: '/context' } });
@@ -161,29 +171,32 @@ it('/context opens the Context panel beside the chat and sends nothing', async (
   expect(screen.getByRole('option', { name: /Context/ })).toBeInTheDocument();
   fireEvent.keyDown(box, { key: 'Enter' });
 
-  const workspace = screen.getByRole('region', { name: 'Job workspace' });
-  expect(workspace).not.toHaveAttribute('hidden');
-  expect(within(workspace).getByRole('tab', { name: 'Context' })).toHaveAttribute(
-    'aria-selected',
-    'true',
-  );
-  expect(await within(contextPanel()).findAllByText('4,321')).not.toHaveLength(0);
+  expect(contextView()).toHaveAttribute('aria-current', 'page');
+  expect(await screen.findAllByText('4,321')).not.toHaveLength(0);
+  // It is the main view, not a workspace tab: the workspace stays closed.
+  expect(workspacePane()).toHaveAttribute('hidden');
+  expect(document.getElementById('workspace-panel-context')).toBeNull();
   // An app command: no message, no new turn, and the token is gone.
   expect(submitThreadMessage).not.toHaveBeenCalled();
   expect(createAgentJob).not.toHaveBeenCalled();
   expect(box).toHaveValue('');
-  // The chat stays: the composer can still be used beside the panel.
-  expect(screen.getByLabelText('Add a follow-up')).toBeInTheDocument();
 });
 
-it('keeps the draft that followed the command', async () => {
+it('keeps the draft that followed the command for the chat', async () => {
   render(<JobDetail job={job('job-a', 'thread-a')} />);
   const box = await screen.findByLabelText('Add a follow-up');
   fireEvent.change(box, { target: { value: '/context then fix the login test' } });
   fireEvent.keyDown(box, { key: 'Enter' });
-  await waitFor(() => expect(box).toHaveValue('then fix the login test'));
+  await waitFor(() => expect(contextView()).toHaveAttribute('aria-current', 'page'));
   expect(submitThreadMessage).not.toHaveBeenCalled();
-  expect(contextPanel()).not.toHaveAttribute('hidden');
+
+  fireEvent.click(
+    within(screen.getByRole('navigation', { name: 'Run views' })).getByRole('button', {
+      name: 'chat',
+    }),
+  );
+  expect(screen.getByLabelText('Add a follow-up')).toHaveValue('then fix the login test');
+  expect(submitThreadMessage).not.toHaveBeenCalled();
 });
 
 it('choosing the menu row by keyboard opens it, and Escape only closes the menu', async () => {
@@ -192,26 +205,32 @@ it('choosing the menu row by keyboard opens it, and Escape only closes the menu'
   fireEvent.change(box, { target: { value: '/' } });
   fireEvent.keyDown(box, { key: 'Escape' });
   expect(screen.queryByRole('option', { name: /Context/ })).not.toBeInTheDocument();
+  expect(contextView()).not.toHaveAttribute('aria-current');
   fireEvent.change(box, { target: { value: '/c' } });
   fireEvent.keyDown(box, { key: 'Enter' });
-  expect(contextPanel()).not.toHaveAttribute('hidden');
+  expect(contextView()).toHaveAttribute('aria-current', 'page');
   expect(box).toHaveValue('');
 });
 
-it('the panel and the Context tab share one read, and the panel steps aside for the tab', async () => {
+it('leaves an open workspace on its own tab, which has no Context entry', async () => {
   render(<JobDetail job={job('job-a', 'thread-a')} />);
   const box = await screen.findByLabelText('Add a follow-up');
+  fireEvent.click(screen.getByRole('button', { name: 'Open workspace' }));
+  const workspace = screen.getByRole('region', { name: 'Job workspace' });
+  const tabs = within(workspace).getByRole('tablist', { name: 'Workspace views' });
+  expect(within(tabs).queryByRole('tab', { name: 'Context' })).not.toBeInTheDocument();
+  fireEvent.click(within(tabs).getByRole('tab', { name: 'Terminal' }));
+
   fireEvent.change(box, { target: { value: '/context' } });
   fireEvent.keyDown(box, { key: 'Enter' });
-  await within(contextPanel()).findAllByText('4,321');
-
-  fireEvent.click(
-    within(contextPanel()).getByRole('button', { name: 'Open the full Context view' }),
-  );
-  expect(document.getElementById('job-workspace-pane')).toHaveAttribute('hidden');
-  expect(screen.getByRole('button', { name: 'context' })).toHaveAttribute('aria-current', 'page');
+  expect(contextView()).toHaveAttribute('aria-current', 'page');
   expect(await screen.findAllByText('4,321')).not.toHaveLength(0);
-  // The full tab drew the data already read; it did not read it again.
+  // The workspace is not opened, closed or switched by it.
+  expect(workspacePane()).not.toHaveAttribute('hidden');
+  expect(within(tabs).getByRole('tab', { name: 'Terminal' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
   expect(getAgentThreadContext).toHaveBeenCalledTimes(1);
 });
 
@@ -220,11 +239,10 @@ it('another conversation never shows the previous one’s context', async () => 
   const box = await screen.findByLabelText('Add a follow-up');
   fireEvent.change(box, { target: { value: '/context' } });
   fireEvent.keyDown(box, { key: 'Enter' });
-  await within(contextPanel()).findAllByText('4,321');
+  expect(await screen.findAllByText('4,321')).not.toHaveLength(0);
 
   rerender(<JobDetail job={job('job-b', 'thread-b')} />);
-  // A new conversation starts with its workspace closed; open its Context tab.
-  fireEvent.click(screen.getByRole('button', { name: 'context' }));
+  fireEvent.click(contextView());
   expect(screen.queryAllByText('4,321')).toHaveLength(0);
   expect(await screen.findAllByText('8,765')).not.toHaveLength(0);
   expect(screen.queryAllByText('4,321')).toHaveLength(0);

@@ -10,7 +10,6 @@ export type WorkspaceTab =
   | 'terminal'
   | 'files'
   | 'environment'
-  | 'context'
   | 'side-chat'
   | `side-chat-${string}`;
 export interface SideChatTab {
@@ -62,8 +61,10 @@ function read(key: string): TabsState {
       new Set(value.chats.map((chat) => chat.id)).size !== value.chats.length
     )
       return initial;
+    // An unknown tab, or Context from when it was a workspace tab (it is a
+    // main view now), falls back to Git.
     if (
-      !['git', 'terminal', 'files', 'environment', 'context'].includes(value.selected) &&
+      !['git', 'terminal', 'files', 'environment'].includes(value.selected) &&
       !value.chats.some((chat) => chat.id === value.selected)
     )
       value.selected = 'git';

@@ -28,7 +28,6 @@ export function WorkspaceTabBar({
     { key: 'terminal', label: 'Terminal' },
     { key: 'files', label: 'Files' },
     { key: 'environment', label: t('environment.title') },
-    { key: 'context', label: t('context.panel.tab') },
     ...chats.map((chat) => {
       const label = t(chat.reviewPrompt ? 'review.tab' : 'sideChat.tab');
       return {

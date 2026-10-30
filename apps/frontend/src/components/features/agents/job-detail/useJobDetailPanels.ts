@@ -351,14 +351,9 @@ export function useJobDetailPanels({
     [getTrajectorySteps, openRun, selectStep],
   );
 
-  // `/context` and the panel's own tab open the context beside the chat, so
-  // the conversation can still be read and answered. From the panel, the
-  // full view takes the main area, and the panel steps aside for it.
-  const openContextPanel = useCallback(() => openWorkspace('context'), [openWorkspace]);
-  const openContextTab = useCallback(() => {
-    setTab('context');
-    setWorkspaceOpen(false);
-  }, [setWorkspaceOpen]);
+  // `/context` opens the main Context view, beside Chat and Trajectory. The
+  // workspace panel is left as it is: Context is not one of its tabs.
+  const openContextView = useCallback(() => setTab('context'), []);
 
   // The trajectory's subagent filter, as its menu value: `[jobId, key]` or empty.
   const setSubagentFilter = useCallback((value: string) => {
@@ -468,8 +463,7 @@ export function useJobDetailPanels({
     closeInspector,
     selectStep,
     openContextPoint,
-    openContextPanel,
-    openContextTab,
+    openContextView,
     inspectTranscriptEvent,
     openRun,
     selectInspectorTab,

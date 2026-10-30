@@ -6,10 +6,9 @@
 // to weigh. Each request, turn, compaction and event opens its step in the
 // trajectory, or its turn when the step has not been read into this page.
 //
-// The same view is the conversation's Context tab, the workspace panel's
-// Context tab and what `/context` opens; they share one read of the data
-// (see `threadContextData`). The panel is narrower, so it leaves the turn
-// table and the capability notes to the full tab.
+// It is the conversation's main Context tab, beside Chat and Trajectory, and
+// what `/context` opens; both use the page's one read of the data (see
+// `threadContextData`).
 
 import { useState } from 'react';
 import { useLocale } from '@/components/providers';
@@ -41,12 +40,6 @@ type ContextViewProps = {
   job: Pick<AgentJob, 'id' | 'threadId' | 'state' | 'conversationState'>;
   onOpenPoint: OpenPoint;
   onOpenTurn: OpenTurn;
-  /** `panel`: the narrow workspace panel, with a way to the full tab. */
-  variant?: 'full' | 'panel';
-  /** Whether it is showing; a hidden view does not keep the data fresh. */
-  visible?: boolean;
-  /** Open the conversation's full Context tab (panel only). */
-  onOpenFull?: () => void;
 };
 
 export function ContextView(props: ContextViewProps) {
@@ -59,18 +52,10 @@ export function ContextView(props: ContextViewProps) {
   );
 }
 
-function ContextViewBody({
-  job,
-  onOpenPoint,
-  onOpenTurn,
-  variant = 'full',
-  visible = true,
-  onOpenFull,
-}: ContextViewProps) {
+function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
   const { t } = useLocale();
-  const { key, view, missing, error, retry } = useThreadContextData(visible);
+  const { key, view, missing, error, retry } = useThreadContextData(true);
   const [selection, setSelection] = useState<{ key: string; index: number } | null>(null);
-  const panel = variant === 'panel';
 
   if (!view) return <ContextState missing={missing} error={error} retry={retry} />;
   const nowMs = Date.parse(view.generated_at);
@@ -81,8 +66,7 @@ function ContextViewBody({
   const point =
     points.find((candidate) => candidate.index === selected) ?? points[points.length - 1] ?? null;
   return (
-    <div className={panel ? 'w-full pb-6' : 'mx-auto w-full max-w-6xl pb-8'}>
-      {panel && onOpenFull ? <OpenFull onOpenFull={onOpenFull} /> : null}
+    <div className="mx-auto w-full max-w-6xl pb-8">
       <ContextDashboard
         jobId={job.id}
         conversationKey={key}
@@ -101,21 +85,19 @@ function ContextViewBody({
       <ContextEvents key={key} view={view} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <LargestChanges changes={view.largest_changes} points={points} onSelect={setSelected} />
-      {panel ? null : (
-        <FullOnly
-          view={view}
-          nowMs={nowMs}
-          selected={point?.index ?? null}
-          onSelect={setSelected}
-          onOpenTurn={onOpenTurn}
-        />
-      )}
+      <ReferenceSections
+        view={view}
+        nowMs={nowMs}
+        selected={point?.index ?? null}
+        onSelect={setSelected}
+        onOpenTurn={onOpenTurn}
+      />
     </div>
   );
 }
 
-/** The full page's reference sections: totals, the raw chart, turns, capabilities. */
-function FullOnly({
+/** The reference sections below the dashboard: totals, the raw chart, turns, capabilities. */
+function ReferenceSections({
   view,
   nowMs,
   selected,
@@ -179,20 +161,5 @@ function ContextState({
     <p role="status" className="p-4 text-sm text-muted">
       {t('context.loading')}
     </p>
-  );
-}
-
-function OpenFull({ onOpenFull }: { onOpenFull: () => void }) {
-  const { t } = useLocale();
-  return (
-    <div className="mb-2 flex justify-end">
-      <button
-        type="button"
-        onClick={onOpenFull}
-        className="ui-button ui-button-ghost min-h-9 px-2 py-1 text-xs [@media(pointer:coarse)]:min-h-11"
-      >
-        {t('context.panel.openFull')}
-      </button>
-    </div>
   );
 }

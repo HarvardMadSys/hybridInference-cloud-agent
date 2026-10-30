@@ -165,7 +165,7 @@ export function JobComposer({
     onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
     onApply: applyGoalObjective,
     onError: setActionError,
-    // `/context` opens the page's context beside the chat; nothing is sent.
+    // `/context` opens the main Context tab; nothing is sent.
     onContext: openContext,
   });
   const [skillsOpen, setSkillsOpen] = useState(false);

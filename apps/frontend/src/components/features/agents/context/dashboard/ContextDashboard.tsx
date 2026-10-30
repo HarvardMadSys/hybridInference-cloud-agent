@@ -4,9 +4,9 @@
 // request's window card and the trend on the left, the browser on the right.
 // The arrangement follows bowenliang123/dsh-context's Context tab (Apache-2.0,
 // commit 32982aa6aa2c70fbda6b81281de98a72ea625001). It measures its own width,
-// so the full tab and the workspace panel lay it out the same way: two
+// not the window's (the main area narrows when the workspace is open): two
 // columns from 760 px (the ~850 px sidebar of the reference screenshot), the
-// top cards side by side from 520 px, one column below that.
+// top cards side by side from 600 px, one column below that.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {

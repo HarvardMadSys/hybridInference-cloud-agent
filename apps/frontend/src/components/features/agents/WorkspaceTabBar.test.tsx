@@ -69,7 +69,7 @@ it('focuses a newly opened chat and returns focus to a surviving tab when closed
   expect(screen.getByRole('tab', { name: /Git/ })).toHaveFocus();
 });
 
-it('always offers the environment and context entries without a feature flag', () => {
+it('always offers the environment entry without a feature flag, and no Context tab', () => {
   render(
     <WorkspaceTabBar
       selected="git"
@@ -81,8 +81,7 @@ it('always offers the environment and context entries without a feature flag', (
     />,
   );
   expect(screen.getByRole('tab', { name: 'Environment' })).toBeInTheDocument();
-  // The conversation's context sits beside the chat like the other tools.
-  const context = screen.getByRole('tab', { name: 'Context' });
-  expect(context).toHaveAttribute('aria-controls', 'workspace-panel-context');
-  expect(screen.getAllByRole('tab')).toHaveLength(5);
+  // Context is a main view beside Chat and Trajectory, not a workspace tab.
+  expect(screen.queryByRole('tab', { name: 'Context' })).not.toBeInTheDocument();
+  expect(screen.getAllByRole('tab')).toHaveLength(4);
 });

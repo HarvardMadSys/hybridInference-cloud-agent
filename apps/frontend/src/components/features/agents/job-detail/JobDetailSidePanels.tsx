@@ -15,9 +15,7 @@ import type { AgentJob } from '../types';
 import type { SideChatTab, WorkspaceTab } from '../useWorkspaceTabs';
 import { WorkspaceTabBar } from '../WorkspaceTabBar';
 import { GitPanel } from './GitPanel';
-import type { OpenPoint, OpenTurn } from '../context/ContextSections';
 import {
-  ContextView,
   RecordedDiffPanel,
   SideChat,
   TerminalWorkspace,
@@ -101,9 +99,6 @@ function WorkspacePanelsView({
   onCloseRecordedFile,
   onReview,
   onWatchPr,
-  onOpenContextPoint,
-  onOpenContextTurn,
-  onOpenContextTab,
 }: {
   job: WorkspaceJob;
   userId?: string;
@@ -127,9 +122,6 @@ function WorkspacePanelsView({
   onCloseRecordedFile: () => void;
   onReview?: () => void;
   onWatchPr?: () => void;
-  onOpenContextPoint: OpenPoint;
-  onOpenContextTurn: OpenTurn;
-  onOpenContextTab: () => void;
 }) {
   const t = useT();
   const isArchived = Boolean(job.archivedAt);
@@ -159,26 +151,6 @@ function WorkspacePanelsView({
             repo={job.repo}
             onTerminal={() => onSelect('terminal')}
             visible={open}
-          />
-        )}
-      </div>
-      <div
-        id="workspace-panel-context"
-        role="tabpanel"
-        aria-labelledby="workspace-tab-context"
-        hidden={tab !== 'context'}
-        className="min-h-0 flex-1 overflow-y-auto px-4 py-3"
-      >
-        {/* Mounted only while chosen: it shares the page's one read of the
-            context, and a hidden tab should not keep it fresh. */}
-        {tab === 'context' && (
-          <ContextView
-            job={job}
-            variant="panel"
-            visible={open}
-            onOpenPoint={onOpenContextPoint}
-            onOpenTurn={onOpenContextTurn}
-            onOpenFull={onOpenContextTab}
           />
         )}
       </div>
@@ -320,9 +292,6 @@ export function JobDetailSidePanels({
     selectInspectorTab,
     selectStep,
     closeInspector,
-    openContextPoint,
-    openContextTab,
-    openRun,
   } = panels;
   const workspaceJob = useWorkspaceJob(job);
   // The page's actions are new on every render. The retained panels hold
@@ -379,9 +348,6 @@ export function JobDetailSidePanels({
             onCloseRecordedFile={closeRecordedFile}
             onReview={onReview ? review : undefined}
             onWatchPr={onWatchPr ? watchPr : undefined}
-            onOpenContextPoint={openContextPoint}
-            onOpenContextTurn={openRun}
-            onOpenContextTab={openContextTab}
           />
         ) : null}
       </aside>
