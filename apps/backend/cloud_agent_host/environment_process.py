@@ -41,17 +41,8 @@ sys.exit(code)
 """
 
 
-def kill_identity(backend: RetainedChatBackend, uid: int) -> None:
-    """Reap all descendants of a reserved operation, including detached ones."""
-    if uid not in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
-        raise SandboxError("Invalid environment operation identity")
-    result = backend.manager.exec_capture(
-        backend.spec,
-        [
-            "python3",
-            "-I",
-            "-c",
-            """import os,signal,sys,time
+# Reaps every process of the identity but its own, detached ones included.
+_REAP = """import os,signal,sys,time
 uid=int(sys.argv[1])
 def live():
  found=[]
@@ -69,23 +60,10 @@ for sig in (signal.SIGTERM,signal.SIGKILL):
   if not live(): sys.exit(0)
   time.sleep(.05)
 sys.exit(1 if live() else 0)
-""",
-            str(uid),
-        ],
-        user_uid=uid,
-        user_gid=backend.manager.backend.gid,
-        workdir="/",
-        timeout_s=10,
-    )
-    if result.returncode:
-        raise SandboxError("Environment operation cleanup could not be confirmed")
+"""
 
-
-def prepare_home(manager: Any, spec: Any, uid: int) -> str:
-    """Open root-owned parents and private leaves without following symlinks."""
-    if uid not in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
-        raise SandboxError("Invalid environment identity")
-    script = """import os,sys
+# Opens root-owned parents and private leaves without following symlinks.
+_HOME = """import os,sys
 uid=int(sys.argv[1])
 path='/run/agent-environments/'+str(uid)
 fd=os.open(path,os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -100,9 +78,84 @@ for name in ('status','status.tmp'):
  try: os.unlink(name,dir_fd=fd)
  except FileNotFoundError: pass
 """
+
+# Makes the shared tool home, executable only where the identity owns it.
+_TOOL_HOME = (
+    "set -eu; umask 002; mkdir -p .cloud-agent-tools/home; "
+    "for directory in .cloud-agent-tools .cloud-agent-tools/home; do "
+    'if [ "$(stat -c %u -- "$directory")" = "$(id -u)" ]; then '
+    'chmod g+rwx,g+s "$directory"; fi; done; '
+    "if [ -d .git ]; then mkdir -p .git/info; touch .git/info/exclude; "
+    "grep -qxF '/.cloud-agent-tools/' .git/info/exclude || "
+    "printf '\\n/.cloud-agent-tools/\\n' >> .git/info/exclude; fi"
+)
+
+# The three in order, in one exec, each as it runs alone and within the limit
+# it had as an exec of its own. The reap runs in this process, which it spares
+# as it spares itself alone; the tool home is a child started only after it,
+# with the environment the exec gave this process, which Python's start may
+# have added to (PEP 538's LC_CTYPE). A failing step stops the rest, its
+# number in the exit status saying which, even when its limit runs out as it
+# returns.
+_PREPARE = """import signal,subprocess,sys
+class Late(BaseException): pass
+def late(*_): raise Late
+signal.signal(signal.SIGALRM,late)
+uid,limit,reap,home,tools,workspace=sys.argv[1:7]
+limit=float(limit)
+for number,source in ((1,reap),(2,home)):
+ sys.argv=['-c',uid]
+ try:
+  signal.setitimer(signal.ITIMER_REAL,limit)
+  try:
+   exec(compile(source,'<step>','exec'),{'__name__':'__main__'})
+  finally:
+   signal.setitimer(signal.ITIMER_REAL,0)
+ except SystemExit as stop:
+  if stop.code: sys.exit(10+number)
+ except (Exception,Late):
+  sys.exit(10+number)
+with open('/proc/self/environ','rb') as handle:
+ environment=dict(entry.split(b'=',1) for entry in handle.read().split(b'\\0') if b'=' in entry)
+try:
+ done=subprocess.run(['/bin/sh','-c',tools],cwd=workspace,env=environment,stdin=subprocess.DEVNULL,timeout=limit)
+except (OSError,subprocess.SubprocessError):
+ sys.exit(13)
+sys.exit(13 if done.returncode else 0)
+"""
+#: Each step's limit, and what the exec may take: its steps and its own start.
+_STEP_S = 10
+_PREPARE_S = 3 * _STEP_S + 10
+_PREPARE_ERRORS = {
+    11: "Environment operation cleanup could not be confirmed",
+    12: "Environment operation home could not be prepared",
+    13: "Environment tool directories could not be prepared",
+}
+
+
+def kill_identity(backend: RetainedChatBackend, uid: int) -> None:
+    """Reap all descendants of a reserved operation, including detached ones."""
+    if uid not in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
+        raise SandboxError("Invalid environment operation identity")
+    result = backend.manager.exec_capture(
+        backend.spec,
+        ["python3", "-I", "-c", _REAP, str(uid)],
+        user_uid=uid,
+        user_gid=backend.manager.backend.gid,
+        workdir="/",
+        timeout_s=10,
+    )
+    if result.returncode:
+        raise SandboxError("Environment operation cleanup could not be confirmed")
+
+
+def prepare_home(manager: Any, spec: Any, uid: int) -> str:
+    """Open root-owned parents and private leaves without following symlinks."""
+    if uid not in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
+        raise SandboxError("Invalid environment identity")
     prepared = manager.exec_capture(
         spec,
-        ["python3", "-I", "-c", script, str(uid)],
+        ["python3", "-I", "-c", _HOME, str(uid)],
         user_uid=uid,
         user_gid=manager.backend.gid,
         workdir="/",
@@ -137,17 +190,7 @@ def prepare_tool_home(manager: Any, spec: Any, uid: int) -> str:
     """Create an executable shared home only with the operation's own identity."""
     result = manager.exec_capture(
         spec,
-        [
-            "/bin/sh",
-            "-c",
-            "set -eu; umask 002; mkdir -p .cloud-agent-tools/home; "
-            "for directory in .cloud-agent-tools .cloud-agent-tools/home; do "
-            'if [ "$(stat -c %u -- "$directory")" = "$(id -u)" ]; then '
-            'chmod g+rwx,g+s "$directory"; fi; done; '
-            "if [ -d .git ]; then mkdir -p .git/info; touch .git/info/exclude; "
-            "grep -qxF '/.cloud-agent-tools/' .git/info/exclude || "
-            "printf '\\n/.cloud-agent-tools/\\n' >> .git/info/exclude; fi",
-        ],
+        ["/bin/sh", "-c", _TOOL_HOME],
         user_uid=uid,
         user_gid=manager.backend.gid,
         workdir="/workspace",
@@ -156,6 +199,31 @@ def prepare_tool_home(manager: Any, spec: Any, uid: int) -> str:
     if result.returncode:
         raise SandboxError("Environment tool directories could not be prepared")
     return TOOLS_ROOT + "/home"
+
+
+def prepare_operation(backend: RetainedChatBackend, uid: int) -> tuple[str, str]:
+    """Reap ``uid``, prepare its private home and the shared tool home, in one exec.
+
+    The three steps a script phase needs before it starts, each with the
+    checks and the error it has alone, for one exec instead of three. Returns
+    the private directory and the tool home.
+    """
+    if uid not in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
+        raise SandboxError("Invalid environment operation identity")
+    steps = [str(_STEP_S), _REAP, _HOME, _TOOL_HOME, "/workspace"]
+    result = backend.manager.exec_capture(
+        backend.spec,
+        ["python3", "-I", "-c", _PREPARE, str(uid), *steps],
+        user_uid=uid,
+        user_gid=backend.manager.backend.gid,
+        workdir="/",
+        timeout_s=_PREPARE_S,
+    )
+    if result.returncode:
+        raise SandboxError(
+            _PREPARE_ERRORS.get(result.returncode, "Environment operation could not be prepared")
+        )
+    return f"/run/agent-environments/{uid}", TOOLS_ROOT + "/home"
 
 
 class EnvironmentProcess(SandboxProcess):
@@ -167,14 +235,13 @@ class EnvironmentProcess(SandboxProcess):
         self.backend = backend
         # An update script amends the installation, so it runs as the installer.
         self.uid = {"setup": 30000, "update": 30000, "start": 30001, "verify": 30002}[phase]
-        kill_identity(backend, self.uid)
-        directory = prepare_home(backend.manager, backend.spec, self.uid)
+        directory, tool_home = prepare_operation(backend, self.uid)
         self.status_path = directory + "/status"
         values = {
             **backend.base_env(),
             **tool_environment(),
             **env,
-            "HOME": prepare_tool_home(backend.manager, backend.spec, self.uid),
+            "HOME": tool_home,
             "AGENT_ENVIRONMENT_SCRIPT": script,
             "AGENT_SCRIPT_STATUS": self.status_path,
             "GIT_CONFIG_NOSYSTEM": "1",
