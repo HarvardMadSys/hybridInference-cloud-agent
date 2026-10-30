@@ -486,8 +486,14 @@ class GitHubAppCredentials:
         Built on first use, because a deployment that never lets users connect
         publishes with the private key alone and needs no encryption key.
         """
-        if self._cipher is None:
+        from cloud_agent.credential_cipher import user_key_ring
+
+        ring = user_key_ring()
+        # Rebuilt when a key rotation stages or retires a key, so a process
+        # reads both keys while stored tokens are re-encrypted.
+        if self._cipher is None or getattr(self, "_cipher_ring", None) != ring:
             self._cipher = SourceControlCipher()
+            self._cipher_ring = ring
         return self._cipher
 
     @property

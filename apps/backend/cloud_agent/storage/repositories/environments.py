@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from cloud_agent.environment_fingerprints import (
+    fingerprint_epoch,
+    optional_setup_fingerprint,
+    setup_fingerprints,
+)
 from cloud_agent.environments import (
     EnvironmentAccessRevoked,
     EnvironmentBusy,
@@ -53,25 +58,6 @@ def _cipher() -> EnvironmentCipher:
     return EnvironmentCipher()
 
 
-def setup_fingerprint(setup_script: str | None, variables: list[EnvironmentVariable]) -> str:
-    """HMAC of what an installation depends on: the script and setup-time values.
-
-    Equal fingerprints install the same thing, so an installation snapshot made
-    for one serves the other. Keyed, so a fingerprint written into a container
-    tells its code nothing about the values.
-    """
-    material = json.dumps(
-        {
-            "v": 1,
-            "setup_script": setup_script or "",
-            "variables": sorted([v.name, v.value] for v in variables if v.phase != "runtime"),
-        },
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return _cipher().mac(material)
-
-
 #: The environments an account may use: its own, and those of every active team
 #: it is an active member of, with its role there. Prefix of a query whose
 #: first parameter is the account.
@@ -104,22 +90,6 @@ def runtime_only(variables: list[EnvironmentVariable]) -> list[EnvironmentVariab
 
 #: Who may change a team's environments; every other active member may use them.
 _TEAM_EDITORS = frozenset({"owner", "admin"})
-
-
-def optional_setup_fingerprint(
-    setup_script: str | None, variables: list[EnvironmentVariable]
-) -> str | None:
-    """The fingerprint, or ``None`` without setup or without the deployment's key.
-
-    Snapshots need the key; tasks do not, so a deployment without it simply
-    never snapshots.
-    """
-    if not setup_script:
-        return None
-    try:
-        return setup_fingerprint(setup_script, variables)
-    except EnvironmentEncryptionError:
-        return None
 
 
 async def lock_environment_snapshots(conn: Any, user_id: str) -> None:
@@ -211,8 +181,10 @@ async def retire_changed_snapshots(
             script, variables = installation
             if row["has_setup_override"]:
                 script = row["setup_override"]
-            current = setup_fingerprint(script, variables) if script else None
-            if current != row["setup_fingerprint"]:
+            # A key rotation may not have rebuilt this one yet: either key's counts.
+            if row["setup_fingerprint"] not in (
+                setup_fingerprints(script, variables) if script else [None]
+            ):
                 stale.append(row["id"])
     except EnvironmentEncryptionError:
         return
@@ -235,8 +207,8 @@ class PostgresEnvironmentRepository:
         self._redactors: OrderedDict[tuple[str, str, str], tuple[float, SecretRedactor]] = (
             OrderedDict()
         )
-        # Versions are immutable, so a pair's fingerprint never changes.
-        self._fingerprints: OrderedDict[tuple[str, str | None], str] = OrderedDict()
+        # Versions are immutable, so a pair's fingerprint changes only with the key.
+        self._fingerprints: OrderedDict[tuple[str, str | None, str], str] = OrderedDict()
 
     @staticmethod
     async def _environment_lock(conn: Any, user_id: str) -> None:
@@ -494,11 +466,11 @@ class PostgresEnvironmentRepository:
                 user_id,
                 environment_ids,
             )
-            cached = self._fingerprints.copy()
+            cached, epoch = self._fingerprints.copy(), fingerprint_epoch()
             missing = [
                 row
                 for row in rows
-                if (row["version_id"], None if row["team_id"] else global_id) not in cached
+                if (row["version_id"], None if row["team_id"] else global_id, epoch) not in cached
                 and _json(row["document"]).get("setup_script")
             ]
             needs_globals = global_id is not None and any(not row["team_id"] for row in missing)
@@ -515,7 +487,7 @@ class PostgresEnvironmentRepository:
             for row in rows:
                 # A team's installation does not depend on the member's globals.
                 scope = None if row["team_id"] else global_id
-                key = (row["version_id"], scope)
+                key = (row["version_id"], scope, epoch)
                 if key in cached:
                     result[row["id"]] = cached[key]
                     continue

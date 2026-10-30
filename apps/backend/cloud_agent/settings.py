@@ -1046,6 +1046,19 @@ def validate_stored_settings(encoded: Mapping[str, Any]) -> None:
     _decode(encoded)
 
 
+def _staged_rotation(
+    before: Mapping[str, SettingValue], after: Mapping[str, SettingValue], key: str
+) -> bool:
+    """Whether this update replaces ``key`` the one way a rotation may: keeping it to decrypt.
+
+    The new key must be set, the old one must become ``<key>_previous`` in the
+    same update, and no earlier rotation may still be keeping a previous key:
+    replacing that one would strand what is still encrypted with it.
+    """
+    previous = key + "_previous"
+    return bool(after[key]) and not before[previous] and after[previous] == before[key]
+
+
 def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, Any]) -> None:
     """Validate an atomic update against the snapshot it replaces.
 
@@ -1066,7 +1079,7 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
     }
     before, after = _decode(previous, []), _decode(encoded, [], changed=changed)
     for key in ("source_control_encryption_key", "compute_encryption_key"):
-        if before[key] and before[key] != after[key]:
+        if before[key] and before[key] != after[key] and not _staged_rotation(before, after, key):
             raise ValueError(
                 f"{SETTINGS_BY_KEY[key].label} cannot be replaced or reset without re-encrypting stored credentials"
             )
@@ -1203,7 +1216,8 @@ def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, An
     return {
         "revision": revision,
         "definitions": [
-            {**setting.definition(), "read_only": setting.key in locked} for setting in SETTINGS
+            {**setting.definition(), "read_only": setting.key in locked or setting.workflow_only}
+            for setting in SETTINGS
         ],
         "values": {
             setting.key: None if setting.secret else values[setting.key] for setting in SETTINGS

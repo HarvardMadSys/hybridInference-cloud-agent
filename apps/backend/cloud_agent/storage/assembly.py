@@ -64,6 +64,7 @@ from cloud_agent.storage.repositories import (
     PostgresWorkInsightsRepository,
 )
 from cloud_agent.storage.repositories.admin_credentials import PostgresAdminCredentialRepository
+from cloud_agent.storage.repositories.credential_rotation import PostgresCredentialRotation
 from cloud_agent.storage.repositories.database_probes import PostgresDatabaseProbes
 from cloud_agent.storage.repositories.deployments import PostgresDeploymentAgentRepository
 from cloud_agent.storage.repositories.environment_snapshots import (
@@ -134,6 +135,7 @@ class Storage:
         self.deployments: DeploymentAgentRepository = PostgresDeploymentAgentRepository(pool)
         self.admin_credentials: AdminCredentialRepository = PostgresAdminCredentialRepository(pool)
         self.root_key_families: RootKeyFamilies = PostgresRootKeyFamilies(pool)
+        self.credential_rotation = PostgresCredentialRotation(pool)
         self.database_probes: DatabaseProbes = PostgresDatabaseProbes(pool)
 
     def __init__(self, pool: asyncpg.Pool) -> None:

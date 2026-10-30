@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from cloud_agent import settings
+from cloud_agent.environment_fingerprints import setup_fingerprint
 from cloud_agent.storage.repositories import environments
 
 
@@ -177,6 +178,6 @@ async def test_missing_key_fingerprint_recovers_after_live_settings_setup(monkey
             ),
         )
         recovered = await repository.current_setup_fingerprints("u", ["e0"])
-        assert recovered["e0"] == environments.setup_fingerprint("install", [])
+        assert recovered["e0"] == setup_fingerprint("install", [])
     finally:
         settings.reset_settings()

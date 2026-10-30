@@ -96,6 +96,19 @@ async def update_settings(
 ) -> dict[str, Any]:
     """Validate and atomically persist the submitted settings, recording safe changes."""
     storage = require_store(store)
+    workflow_only = sorted(
+        key
+        for key in payload.settings
+        if key in settings.SETTINGS_BY_KEY and settings.SETTINGS_BY_KEY[key].workflow_only
+    )
+    if workflow_only:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{settings.SETTINGS_BY_KEY[workflow_only[0]].label} is changed only by its "
+                "rotation on the Deployment page."
+            ),
+        )
     if payload.settings.get("model_connections_enabled") is True and not settings.boolean_setting(
         "model_connections_enabled"
     ):

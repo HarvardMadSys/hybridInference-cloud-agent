@@ -14,11 +14,8 @@
 ``control_signing``      the new signing key signs, the previous one keeps
                          verifying; ``retire`` (confirmed) stops it verifying.
 
-What is not rotated here: the two credential encryption keys
-(``source_control_encryption_key``, ``compute_encryption_key``). Their owning
-data includes MAC-indexed families (model connection scan keys, environment
-value MACs used for snapshot reuse) whose re-keying needs its own design; the
-Security page says so rather than offering a partial rotation.
+The two credential encryption keys rotate in
+:mod:`cloud_agent.application.credential_key_rotation`.
 """
 
 from __future__ import annotations
@@ -646,6 +643,7 @@ async def retire_control_signing(storage: Any, workflow_id: str) -> dict[str, An
 
 def register_advancers() -> None:
     """Add every rotation's advancer to the workflow engine."""
+    from cloud_agent.application.credential_key_rotation import register as register_credential
     from cloud_agent.application.database_workflows import register as register_database
 
     ADVANCERS["admin_token"] = _advance_admin_token
@@ -653,6 +651,7 @@ def register_advancers() -> None:
     ADVANCERS["sandbox_manager_token"] = _advance_sandbox_manager_token
     ADVANCERS["control_signing"] = _advance_control_signing
     register_database()
+    register_credential()
 
 
 __all__ = [

@@ -36,6 +36,9 @@ CONTROL_PLANE_CAPABILITIES: tuple[str, ...] = (
     # Decrypts with AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS during a root key
     # rotation and reports both keys' identifiers.
     "settings-key-rotation-v1",
+    # Decrypts with a credential key's previous key during its rotation and
+    # builds lookup digests with the key the rotation names.
+    "credential-key-rotation-v1",
 )
 
 #: Saved settings a process reads only when it builds a component, by the

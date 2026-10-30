@@ -21,6 +21,46 @@ LATER_MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
             "keep verifying until the rotation retires it. Never used to sign."
         ),
         apply_mode="next_operation",
+        workflow_only=True,
+    ),
+    Setting(
+        "source_control_encryption_key_previous",
+        "Previous user credential encryption key",
+        "Security",
+        "",
+        secret=True,
+        description=(
+            "Set only by the user credential key rotation: stored credentials it has not "
+            "re-encrypted yet still decrypt with it. Never used to encrypt."
+        ),
+        apply_mode="next_operation",
+        workflow_only=True,
+    ),
+    Setting(
+        "compute_encryption_key_previous",
+        "Previous compute credential encryption key",
+        "Security",
+        "",
+        secret=True,
+        description=(
+            "Set only by the compute credential key rotation: stored compute credentials it "
+            "has not re-encrypted yet still decrypt with it. Never used to encrypt."
+        ),
+        apply_mode="next_operation",
+        workflow_only=True,
+    ),
+    Setting(
+        "credential_index_uses_previous",
+        "Lookup digests use the previous user credential key",
+        "Security",
+        False,
+        kind="boolean",
+        description=(
+            "Set only by the user credential key rotation: until it rebuilds the stored "
+            "environment fingerprints, they stay computed with the previous key."
+        ),
+        apply_mode="next_operation",
+        workflow_only=True,
     ),
     _numeric(
         "streams.max_per_user",

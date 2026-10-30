@@ -103,7 +103,7 @@ def test_an_older_host_gets_the_binding_without_snapshot_fields():
 
 
 def test_the_setup_fingerprint_follows_only_what_installation_sees(monkeypatch):
-    from cloud_agent.storage.repositories.environments import (
+    from cloud_agent.environment_fingerprints import (
         optional_setup_fingerprint,
         setup_fingerprint,
     )

@@ -86,6 +86,12 @@ class ConfirmRequest(BaseModel):
     confirm: str = Field(max_length=128)
 
 
+#: Workflow data never shown: sealed values, secrets kept encrypted at rest, probes.
+_UNSHOWN_PROGRESS = frozenset(
+    {"sealed_by_agent", "next_token", "next_secret", "next_key", "probe_token", "tunnel_keys"}
+)
+
+
 def _intent_view(intent: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in intent.items() if k != "sealed"}
 
@@ -292,11 +298,7 @@ async def read_workflow(workflow_id: str, store: Any = Depends(get_storage)) -> 
     await workflows.advance_workflow(storage, workflow)
     return {
         **{k: v for k, v in workflow.items() if k != "data"},
-        "progress": {
-            k: v
-            for k, v in workflow["data"].items()
-            if k not in {"sealed_by_agent", "next_token", "next_secret", "probe_token"}
-        },
+        "progress": {k: v for k, v in workflow["data"].items() if k not in _UNSHOWN_PROGRESS},
         "intents": [
             _intent_view(i)
             for i in await storage.deployments.list_intents(workflow_id=workflow_id, limit=500)
@@ -309,7 +311,7 @@ class WorkflowRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     kind: str = Field(
-        pattern=r"^(admin_token|root_key|sandbox_manager_token|control_signing|database_connection|database_migration)$"
+        pattern=r"^(admin_token|root_key|sandbox_manager_token|control_signing|credential_key|database_connection|database_migration)$"
     )
     params: dict[str, Any] = Field(default_factory=dict)
     #: Each agent's sealed values, by agent id: only that agent can open them.
@@ -329,6 +331,7 @@ async def start_workflow(
 ) -> dict[str, Any]:
     """Start a rotation or database workflow (ADMIN_TOKEN or a signed-in administrator only)."""
     from cloud_agent.api.admin_credentials import require_full_authority
+    from cloud_agent.application.credential_key_rotation import start_credential_key_rotation
     from cloud_agent.application.database_workflows import start_database_workflow
     from cloud_agent.application.key_rotation import start_rotation
 
@@ -344,6 +347,10 @@ async def start_workflow(
                 params=body.params,
                 sealed_by_agent=body.sealed_by_agent,
                 admin_id=admin_id,
+            )
+        elif body.kind == "credential_key":
+            workflow = await start_credential_key_rotation(
+                storage, key=str(body.params.get("key")), secret=body.secret, admin_id=admin_id
             )
         else:
             workflow = await start_rotation(

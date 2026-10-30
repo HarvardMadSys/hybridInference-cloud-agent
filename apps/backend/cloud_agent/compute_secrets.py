@@ -10,10 +10,14 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
-from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
-from cloud_agent.settings import setting_env
+from cloud_agent.credential_cipher import (
+    COMPUTE_CREDENTIAL_ENCRYPTION_KEY,
+    CredentialCipher,
+    CredentialCipherError,
+    compute_key_ring,
+)
 
-ENV_COMPUTE_SECRET_KEY = "AGENT_COMPUTE_SECRET_KEY"
+ENV_COMPUTE_SECRET_KEY = COMPUTE_CREDENTIAL_ENCRYPTION_KEY
 _DOMAIN = b"cloud-agent/compute-credentials/v1"
 
 
@@ -39,24 +43,25 @@ class ComputeSecretStore:
     def __init__(self, connections: ComputeConnectionReader, *, key: str | None = None) -> None:
         self._connections = connections
         self._key_override = key
-        self._material = ""
+        self._material: tuple[str, str] = ("", "")
         self._cipher: CredentialCipher | None = None
         self._refresh_cipher()
 
     def _refresh_cipher(self) -> None:
-        material = (
-            self._key_override
-            if self._key_override is not None
-            else setting_env(ENV_COMPUTE_SECRET_KEY, "") or ""
-        )
-        if material == self._material:
+        if self._key_override is not None:
+            material, previous = self._key_override, ""
+        else:
+            material, previous = compute_key_ring()
+        if (material, previous) == self._material:
             return
         self._cipher = None
         if material:
             if len(material.encode()) < 32:
                 raise ComputeSecretError("compute encryption key must contain at least 32 bytes")
-            self._cipher = CredentialCipher(material, domain=_DOMAIN)
-        self._material = material
+            # A rotation keeps the previous key for decrypting until every
+            # stored compute credential is re-encrypted with the new one.
+            self._cipher = CredentialCipher(material, domain=_DOMAIN, previous=previous)
+        self._material = (material, previous)
 
     @property
     def repository(self) -> ComputeConnectionReader:

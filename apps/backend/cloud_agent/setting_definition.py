@@ -103,6 +103,11 @@ class Setting:
     #: unparsable or out-of-range environment value. The import keeps doing
     #: that rather than stopping the control plane on an old value.
     invalid_env_uses_default: bool = False
+    #: Written only by a rotation workflow (the previous key it keeps for
+    #: verifying or decrypting, which key builds lookup digests). The settings
+    #: page shows it read-only and an administrator's update cannot set it:
+    #: a hand-set value would strand data the workflow has not re-encrypted.
+    workflow_only: bool = False
 
     @property
     def storage_key(self) -> str:
@@ -194,6 +199,8 @@ class Setting:
         if self.minimum_bytes:
             result["minimum_bytes"] = self.minimum_bytes
         result["apply_mode"] = self.apply_mode
+        if self.workflow_only:
+            result["workflow_only"] = True
         if self.apply_description:
             result["apply_description"] = self.apply_description
         return result

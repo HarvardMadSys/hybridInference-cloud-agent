@@ -25,9 +25,9 @@ from fastapi import HTTPException
 
 from cloud_agent.application.residency import _mint_residency_grant, close_released_residencies
 from cloud_agent.credential_cipher import (
-    USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,
+    user_credential_cipher,
 )
 from cloud_agent.domain.execution import FAILED, RUNNING
 from cloud_agent.domain.model_connections import (
@@ -85,18 +85,12 @@ class ModelConnectionStorage(Protocol):
 
 def model_connection_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher connection keys are stored under, in their own domain."""
-    material = (
-        secret if secret is not None else setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or ""
-    )
-    return CredentialCipher(material, domain=MODEL_CONNECTION_KEY_DOMAIN)
+    return user_credential_cipher(MODEL_CONNECTION_KEY_DOMAIN, secret)
 
 
 def model_connection_scan_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher scan-only key copies are stored under."""
-    material = (
-        secret if secret is not None else setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or ""
-    )
-    return CredentialCipher(material, domain=MODEL_CONNECTION_SCAN_DOMAIN)
+    return user_credential_cipher(MODEL_CONNECTION_SCAN_DOMAIN, secret)
 
 
 async def known_connection_secrets(
