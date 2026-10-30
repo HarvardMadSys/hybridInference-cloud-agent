@@ -2758,18 +2758,18 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                     "prepare" if not has_context else ("base_import" if imported_base else "reuse")
                 ),
             )
+        continuity: tuple[str | None, str] = (None, "new")
+        if context_status == "live":
+            continuity = ("hot", "live")
+        elif has_context:
+            continuity = ("warm_native", "restored")
         control.record_chat_process(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,
             residency_generation=launch.residency_generation,
             process_generation=process_generation,
+            continuity=continuity,
         )
-        if context_status == "live":
-            control.report_continuity("hot", context_status="live")
-        elif has_context:
-            control.report_continuity("warm_native", context_status="restored")
-        else:
-            control.report_context_status("new")
 
         stage = _stage(measurement, "prompt_admission")
         # The last point at which a Stop costs nothing.
