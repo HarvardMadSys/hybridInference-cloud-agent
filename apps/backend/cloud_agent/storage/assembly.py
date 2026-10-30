@@ -90,6 +90,7 @@ if TYPE_CHECKING:
         ConversationCommands,
         ConversationQueries,
         CredentialQueries,
+        CredentialRotation,
         DatabaseProbes,
         DeploymentAgentRepository,
         ExecutionQueries,
@@ -97,9 +98,11 @@ if TYPE_CHECKING:
         GoalWakeupRepository,
         GrantRepository,
         HostCapacityRepository,
+        HostCredentials,
         HostPoolRepository,
         InstanceReports,
         LedgerRepository,
+        MaintenanceState,
         McpCatalogRepository,
         McpConnectionRepository,
         ModelConnectionRepository,
@@ -137,9 +140,9 @@ class Storage:
         self.deployments: DeploymentAgentRepository = PostgresDeploymentAgentRepository(pool)
         self.admin_credentials: AdminCredentialRepository = PostgresAdminCredentialRepository(pool)
         self.root_key_families: RootKeyFamilies = PostgresRootKeyFamilies(pool)
-        self.credential_rotation = PostgresCredentialRotation(pool)
-        self.host_credentials = PostgresHostCredentials(pool)
-        self.maintenance = PostgresMaintenance(pool)
+        self.credential_rotation: CredentialRotation = PostgresCredentialRotation(pool)
+        self.host_credentials: HostCredentials = PostgresHostCredentials(pool)
+        self.maintenance: MaintenanceState = PostgresMaintenance(pool)
         self.database_probes: DatabaseProbes = PostgresDatabaseProbes(pool)
 
     def __init__(self, pool: asyncpg.Pool) -> None:

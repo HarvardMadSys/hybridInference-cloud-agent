@@ -598,6 +598,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         compute_builder.assert_called_once_with(
             repository=app.state.storage.compute_resources,
             host_pool=app.state.storage.host_pool,
+            credential_rotation=app.state.storage.credential_rotation,
             http=app.state.http,
         )
         assert "compute" in started
@@ -646,6 +647,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         assert running == {
             "settings_task",
             "instance_report_task",
+            "maintenance_task",
             "mcp_maintenance_task",
             "notification_listener_task",
         }

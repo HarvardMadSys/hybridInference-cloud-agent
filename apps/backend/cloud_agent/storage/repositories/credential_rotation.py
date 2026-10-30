@@ -15,9 +15,11 @@ from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.environment_fingerprints import setup_material
 from cloud_agent.environments import EnvironmentEncryptionError
 from cloud_agent.storage.repositories.environments import (
-    PostgresEnvironmentRepository,
+    decode_environment_variables,
+    environment_installations,
     lock_environment_snapshots,
     runtime_only,
+    stored_environment_variables,
 )
 from cloud_agent_shared.environment import merge_variables
 
@@ -181,7 +183,6 @@ class PostgresCredentialRotation:
         rotation drops the previous key.
         """
         counts = {"bindings": 0, "snapshots": 0, "skipped": 0}
-        repo = PostgresEnvironmentRepository
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_environment_snapshots(conn, user_id)
             moves: dict[tuple[str, str], str] = {}
@@ -195,13 +196,13 @@ class PostgresCredentialRotation:
             )
             for row in bindings:
                 try:
-                    personal = repo._environment_decode(
-                        await repo._environment_stored_variables(conn, row["global_version_id"])
+                    personal = decode_environment_variables(
+                        await stored_environment_variables(conn, row["global_version_id"])
                     )
                     merged = merge_variables(
                         runtime_only(personal) if row["team_id"] else personal,
-                        repo._environment_decode(
-                            await repo._environment_stored_variables(
+                        decode_environment_variables(
+                            await stored_environment_variables(
                                 conn, row["environment_version_id"]
                             )
                         ),
@@ -232,7 +233,7 @@ class PostgresCredentialRotation:
                 "WHERE user_id = $1",
                 user_id,
             )
-            installations = await repo._environment_installations(
+            installations = await environment_installations(
                 conn, user_id, list({row["environment_id"] for row in snapshots})
             )
             for environment_id, (script, variables) in installations.items():

@@ -673,6 +673,7 @@ FAMILIES: tuple[Family, ...] = (
             "CAE_BENCH_DNS_SERVER",
             "CLOUD_AGENT_TEST_API_KEY_FILE",
             "CLOUD_AGENT_TEST_PROXY",
+            "CLOUD_AGENT_E2E_EVIDENCE",
             "CLOUD_AGENT_E2E_PORT",
             "CLOUD_AGENT_E2E_SKIP_BUILD",
             "CI",

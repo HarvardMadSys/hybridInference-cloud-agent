@@ -27,6 +27,7 @@ from cloud_agent.source_control_runtime import SourceControlRuntime
 _EXPECTED_SHUTDOWN_TASKS = (
     "settings_task",
     "instance_report_task",
+    "maintenance_task",
     "workflow_task",
     "mcp_maintenance_task",
     "mcp_catalog_task",
@@ -340,6 +341,7 @@ def _prepare(
     for target, label in (
         ("cloud_agent.settings.synchronize_settings", "settings_task"),
         ("cloud_agent.instances.report_forever", "instance_report_task"),
+        ("cloud_agent.maintenance.watch_forever", "maintenance_task"),
         ("cloud_agent.application.workflows.run_workflows_forever", "workflow_task"),
         ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", "reaper_task"),
         (
@@ -545,6 +547,7 @@ async def test_successful_shutdown_keeps_its_order(
         else [
             "settings_task",
             "instance_report_task",
+            "maintenance_task",
             "mcp_maintenance_task",
             "notification_listener_task",
         ]
