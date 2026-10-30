@@ -202,9 +202,7 @@ class PostgresCredentialRotation:
                     merged = merge_variables(
                         runtime_only(personal) if row["team_id"] else personal,
                         decode_environment_variables(
-                            await stored_environment_variables(
-                                conn, row["environment_version_id"]
-                            )
+                            await stored_environment_variables(conn, row["environment_version_id"])
                         ),
                     )
                 except (EnvironmentEncryptionError, ValueError):
