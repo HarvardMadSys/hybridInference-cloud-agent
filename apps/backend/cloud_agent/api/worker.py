@@ -36,6 +36,7 @@ from cloud_agent.api._body_limits import (
     payload_too_large,
     read_bounded_body,
 )
+from cloud_agent.api._claim_credentials import mint_claim_credentials
 from cloud_agent.api._sensitive_routes import no_store, no_store_exception
 from cloud_agent.api._workspace_access import (
     _workspace_id,
@@ -68,7 +69,6 @@ from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, requi
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.gateway import GatewayError
-from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.goals.controller import continue_after_finish
 from cloud_agent.goals.prompts import prompt_with_goal
 from cloud_agent.goals.report import (
@@ -276,18 +276,6 @@ class _WorkerStorage(Protocol):
 def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
     """Return the store or fail with a clear 503 when the DB is absent."""
     return require_store(store)
-
-
-# The clone credential is narrowed at the point it is minted, not merely by
-# convention: the App also holds `contents: write` for the publisher, and an
-# installation token inherits every permission the App has unless it is asked
-# for less. Keep checkout authority separate from the token explicitly
-# delivered to the sandbox for branch and pull-request publication. That one
-# has the publisher's scope, and is minted for its conversation alone: code in
-# a sandbox can revoke the token it holds, which must not be the publisher's
-# or another conversation's.
-_CLONE_SCOPE = {"contents": "read"}
-_SANDBOX_GITHUB_SCOPE = {"contents": "write", "pull_requests": "write"}
 
 
 #: Cheap structural check before touching the signing key: host credentials
@@ -1079,80 +1067,21 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     token = mint_worker_token(**fence, scope=SCOPE_FULL)
     # A turn on the owner's own connection runs on that key, not on a grant.
     model_connection = await claim_model_connection(job_store, claim, capabilities)
-    sandbox_token = "" if model_connection else await _mint_sandbox_grant(job_store, grants, claim)
+    # The grant and GitHub's two tokens (the runner's read-only clone token and
+    # the sandbox's write token) need nothing from each other, so the gateway
+    # and GitHub are asked at once.
+    sandbox_token, clone_token, github_token = await mint_claim_credentials(
+        job_store.attempt_commands,
+        claim,
+        grant=None if model_connection else lambda: _mint_sandbox_grant(job_store, grants, claim),
+        app_credentials=app_credentials,
+    )
 
     # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token, as
     # none since #974 does: each member's CLI reaches the MCP relay with its
     # residency's mcp_credential. Then this attempt-scoped token, its claim
     # field and the relay's SCOPE_MCP branch go together.
     mcp_token = mint_worker_token(**fence, scope=SCOPE_MCP)
-    # A third credential, weaker than either: read-only, this repository only,
-    # one hour. The runner needs it to check the repository out — a runner that
-    # cannot clone runs the agent in an empty directory — and it is deliberately
-    # not the publisher's token, which can write. It stays in the runner and
-    # never enters the sandbox. Absent (null) is a working configuration: a
-    # public repository clones without any credential at all.
-    clone_token: str | None = None
-    github_token: str | None = None
-    # A temporary workspace has no repository, so there is nothing to clone and
-    # nothing a repository-scoped token could be scoped to: it gets neither.
-    if app_credentials is not None and claim["repo"] is not None:
-        try:
-            clone_token = await app_credentials.token_for(
-                claim["repo"], permissions=_CLONE_SCOPE, repository_scoped=True
-            )
-            # Cached per conversation rather than minted per claim: the CLI
-            # fixes GH_TOKEN when it starts, so a new token on every follow-up
-            # would replace the live process each turn.
-            github_token = await app_credentials.token_for(
-                claim["repo"],
-                permissions=_SANDBOX_GITHUB_SCOPE,
-                repository_scoped=True,
-                holder=str(claim["thread_id"]),
-            )
-        except AppNotInstalled:
-            # A settled answer: the App does not cover this repository. Hand
-            # the job over without credentials — a public repository clones
-            # anonymously, and a private one fails with a message the owner can
-            # act on ("install the App"), which retrying would not improve.
-            logger.info(
-                "agent_job_clone_token_unavailable",
-                extra={"event": "agent_job_clone_token_unavailable", "job_id": claim["id"]},
-            )
-        except Exception as exc:
-            # Anything else is GitHub or the network having a bad minute.
-            # Returning no token here would send the runner off to clone
-            # anonymously, fail on a private repository, and mark the job
-            # *terminally* failed — turning a momentary outage into the owner's
-            # problem.
-            #
-            # Hand the claim back rather than just letting the lease lapse. A
-            # lapsed lease still spends a retry, so a GitHub outage lasting
-            # across three claim cycles would fail every queued private-repo
-            # job outright, without an agent ever having started — the very
-            # outcome this branch exists to avoid, only slower.
-            await job_store.attempt_commands.release_claim(
-                job_id=claim["id"],
-                attempt_id=claim["attempt_id"],
-                lease_generation=claim["lease_generation"],
-                retry_after_seconds=30,
-            )
-            logger.warning(
-                "agent_job_clone_token_error",
-                extra={"event": "agent_job_clone_token_error", "job_id": claim["id"]},
-            )
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "type": "credential_unavailable",
-                        "message": (
-                            "Could not mint a repository credential for this job; it has "
-                            "been returned to the queue and no attempt was spent."
-                        ),
-                    }
-                },
-            ) from exc
 
     # Resolve at every claim, including existing conversations and native
     # resumes. Loading the bindings adds newly connected servers while retaining
