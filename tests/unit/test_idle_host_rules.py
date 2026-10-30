@@ -1,4 +1,4 @@
-"""The idle sweep keeps the host rules renewed while anything of the deployment runs."""
+"""The sweep keeps the host rules renewed on an empty host, and lists what runs behind them."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from tests.unit.test_chat_group_network import _NAMESPACE, _config, _spec
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
 from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL, CHAT_PROBE_LABEL
 from cloud_agent_host.environment_tests import environment_run_spec
-from cloud_agent_host.idle_host_rules import IdleHostRules, deployment_running
+from cloud_agent_host.idle_host_rules import IdleHostRules, running_deployment_container_ids
 from cloud_agent_host.network_guard import GUARD_RENEW_S
 from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_shared.errors import SandboxError
@@ -76,12 +76,25 @@ def _labels(spec, namespace: str = _NAMESPACE) -> dict[str, str]:
     return {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: namespace}
 
 
-def test_an_empty_host_lists_running_containers_once_and_starts_no_guard_helper(monkeypatch):
+def test_an_empty_host_renews_the_rules_without_asking_docker(monkeypatch):
+    """Nothing runs behind the rules, but the next start would otherwise renew them itself."""
     manager, docker, guard = _host(monkeypatch)
 
     manager.network.renew_host_rules()
 
-    assert guard.ensured == []
+    assert guard.ensured == [{"max_age_s": GUARD_RENEW_S}]
+    assert docker.calls == []
+
+
+def test_the_listing_names_every_running_container_of_this_deployment(monkeypatch):
+    """An environment test or prebuild, and a group no member counts, run on guarded bridges."""
+    manager, docker, _guard = _host(monkeypatch)
+    docker.containers["env-run"] = _labels(environment_run_spec("envrun_1", 1, None))
+    docker.containers["stopping-group"] = _labels(_spec())
+    docker.containers["foreign"] = _labels(_spec(), namespace="another-stack")
+    docker.containers["probe"] = {**_labels(_spec()), CHAT_PROBE_LABEL: "1"}
+
+    assert running_deployment_container_ids(manager) == ["env-run", "stopping-group"]  # type: ignore[arg-type]
     assert docker.calls == [
         [
             "docker",
@@ -98,35 +111,6 @@ def test_an_empty_host_lists_running_containers_once_and_starts_no_guard_helper(
     ], "running containers only: a stopped one has nothing behind the rules"
 
 
-def test_an_environment_run_keeps_the_rules_renewed(monkeypatch):
-    """No group lists an environment test or prebuild, but its script runs on a guarded bridge."""
-    manager, docker, guard = _host(monkeypatch)
-    docker.containers["env-run"] = _labels(environment_run_spec("envrun_1", 1, None))
-
-    manager.network.renew_host_rules()
-
-    assert guard.ensured == [{"max_age_s": GUARD_RENEW_S}]
-
-
-def test_a_chat_group_no_member_counts_keeps_the_rules_renewed(monkeypatch):
-    """A group that is stopping, or has no member left, still runs until Docker stops it."""
-    manager, docker, guard = _host(monkeypatch)
-    docker.containers["stopping-group"] = _labels(_spec())
-
-    manager.network.renew_host_rules()
-
-    assert guard.ensured == [{"max_age_s": GUARD_RENEW_S}]
-
-
-def test_another_deployments_containers_are_behind_its_own_rules(monkeypatch):
-    manager, docker, guard = _host(monkeypatch)
-    docker.containers["foreign"] = _labels(_spec(), namespace="another-stack")
-
-    manager.network.renew_host_rules()
-
-    assert guard.ensured == []
-
-
 @pytest.mark.parametrize(
     "failure",
     [
@@ -134,15 +118,12 @@ def test_another_deployments_containers_are_behind_its_own_rules(monkeypatch):
         {"returncode": 1},
     ],
 )
-def test_a_listing_that_fails_counts_as_running(monkeypatch, failure):
-    manager, docker, guard = _host(monkeypatch)
+def test_a_listing_that_fails_answers_nothing(monkeypatch, failure):
+    manager, docker, _guard = _host(monkeypatch)
     for name, value in failure.items():
         setattr(docker, name, value)
 
-    assert deployment_running(manager) is True
-    manager.network.renew_host_rules()
-
-    assert guard.ensured == [{"max_age_s": GUARD_RENEW_S}]
+    assert running_deployment_container_ids(manager) is None  # type: ignore[arg-type]
 
 
 def test_a_host_without_a_sandbox_network_asks_docker_nothing(monkeypatch):

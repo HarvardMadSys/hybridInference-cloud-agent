@@ -51,6 +51,7 @@ from cloud_agent_host.guest_observer import (
     GuestObservation,
     GuestObserverCursor,
 )
+from cloud_agent_host.idle_host_rules import IdleHostRules
 from cloud_agent_host.member_resources import (
     MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
     RUNNING_CHECKPOINT_INTERVAL_S,
@@ -457,6 +458,7 @@ class SharedChatSessionSupervisor:
         self._sample_tick_s = min(0.25, self._sample_interval_s / 4)
         self._sampler_thread: threading.Thread | None = None
         self._manager = manager
+        self._idle_host_rules = IdleHostRules(manager)
         self._idle_timeout_s = idle_timeout_s
         self._sweep_interval_s = sweep_interval_s
         self._clock = clock
@@ -5104,6 +5106,7 @@ class SharedChatSessionSupervisor:
         with self._lock:
             workloads = workloads_with_known(inventory, self._groups.values())
         if not workloads and inventory.complete and not inventory.unresolved_container_ids:
+            self._idle_host_rules.renew()
             return []
         failure = host_rule_failure(self._manager, workloads)
         if failure is None:
