@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
+from cloud_agent_host.sandbox import RUNTIME_BIN_ROOT
 from cloud_agent_shared.runtime_catalog import CODEX
 
 from .base import (
@@ -18,6 +20,133 @@ from .base import (
     compat_launch,
     openai_base_url,
 )
+
+
+@dataclass(frozen=True)
+class ReviewedShim:
+    """One ``bin/codex.js`` of the npm package, whose work :data:`NATIVE_LAUNCH` does.
+
+    ``sha256`` names the file's exact bytes and ``releases`` the first and last
+    release that shipped them when they were read. Each of these shims picks
+    the binary the same way, adds nothing to ``PATH``, and gives the binary its
+    inherited environment plus ``CODEX_MANAGED_PACKAGE_ROOT`` and one
+    ``CODEX_MANAGED_BY_*`` flag. They differ only in the inherited flags they
+    remove first, ``clears``.
+    """
+
+    sha256: str
+    releases: tuple[str, str]
+    clears: tuple[str, ...]
+
+
+_MANAGED_BY = (
+    "CODEX_MANAGED_BY_NPM",
+    "CODEX_MANAGED_BY_BUN",
+    "CODEX_MANAGED_BY_PNPM",
+    "CODEX_MANAGED_BY_VITE_PLUS",
+)
+
+#: The shims the launch replaces. None of them touches ``PATH``: the binary
+#: puts its bundled ripgrep there itself, found beside its own executable
+#: (``codex-rs/arg0`` and ``install-context`` at 0.145.0), so it does the same
+#: when started directly. Before 0.138.0 the shim did that instead, and those
+#: releases keep their shim. To add a shim, read its ``bin/codex.js`` against
+#: the newest one here: if it still picks ``vendor/<triple>/bin/codex`` from
+#: the platform package, leaves ``PATH`` alone and sets only these variables,
+#: add its digest; otherwise change the launch first. An unlisted shim keeps
+#: running as it always has.
+REVIEWED_SHIMS = (
+    ReviewedShim(
+        "d3be844c45c4fd89392536e56e1010963f94785592596b50cd0c45bb8a341406",
+        ("0.138.0", "0.143.0"),
+        clears=(),
+    ),
+    ReviewedShim(
+        "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477",
+        ("0.144.0", "0.152.1"),
+        clears=_MANAGED_BY[:3],
+    ),
+    ReviewedShim(
+        "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70",
+        ("0.153.0", "0.165.0"),
+        clears=_MANAGED_BY,
+    ),
+    ReviewedShim(
+        "e14fc83739c13c1074b12bd1acce4010c893c7f6fbfc1593b4a31d74cabb57af",
+        ("0.166.0", "0.166.0"),
+        clears=_MANAGED_BY,
+    ),
+)
+
+_NATIVE_LAUNCH = r"""CODEX_LAUNCH_PREFIX=__PREFIX__
+CODEX_LAUNCH_SHIM=$(command -v "$0") \
+&& CODEX_LAUNCH_SHIM=$(readlink -f -- "$CODEX_LAUNCH_SHIM") || exec "$0" "$@"
+CODEX_LAUNCH_ROOT=${CODEX_LAUNCH_SHIM#"$CODEX_LAUNCH_PREFIX"}
+CODEX_LAUNCH_ROOT=$CODEX_LAUNCH_PREFIX${CODEX_LAUNCH_ROOT%%/*}/lib/node_modules/@openai/codex
+[ "$CODEX_LAUNCH_SHIM" = "$CODEX_LAUNCH_ROOT/bin/codex.js" ] || exec "$0" "$@"
+case $(uname -m) in
+x86_64) CODEX_LAUNCH_TARGET=x64/x86_64-unknown-linux-musl ;;
+aarch64) CODEX_LAUNCH_TARGET=arm64/aarch64-unknown-linux-musl ;;
+*) exec "$0" "$@" ;;
+esac
+CODEX_LAUNCH_PACKAGE=$CODEX_LAUNCH_ROOT/node_modules/@openai/codex-linux-${CODEX_LAUNCH_TARGET%/*}
+CODEX_LAUNCH_NATIVE=$CODEX_LAUNCH_PACKAGE/vendor/${CODEX_LAUNCH_TARGET#*/}/bin/codex
+[ -f "$CODEX_LAUNCH_PACKAGE/package.json" ] && [ -f "$CODEX_LAUNCH_NATIVE" ] \
+&& [ -x "$CODEX_LAUNCH_NATIVE" ] || exec "$0" "$@"
+CODEX_LAUNCH_SUM=$(sha256sum < "$CODEX_LAUNCH_SHIM") || exec "$0" "$@"
+case ${CODEX_LAUNCH_SUM%% *} in
+__REVIEWED__*) exec "$0" "$@" ;;
+esac
+case ${npm_config_user_agent-} in
+bun/* | *[!0-9A-Z_a-z]bun/*) export CODEX_MANAGED_BY_BUN=1 ;;
+*) case ${npm_execpath-} in
+    *bun*) export CODEX_MANAGED_BY_BUN=1 ;;
+    *) export CODEX_MANAGED_BY_NPM=1 ;;
+    esac ;;
+esac
+export CODEX_MANAGED_PACKAGE_ROOT="$CODEX_LAUNCH_ROOT"
+exec "$CODEX_LAUNCH_NATIVE" "$@"
+"""
+
+
+def _reviewed_case(shim: ReviewedShim) -> str:
+    """The launch's ``case`` arm for one reviewed shim's digest."""
+    clears = f"unset {' '.join(shim.clears)} " if shim.clears else ""
+    return f"{shim.sha256}) {clears};;\n"
+
+
+#: How a Codex member starts: ``sh`` resolves ``codex`` on ``PATH`` as before,
+#: so the directory the runner prepends still selects the version, then execs
+#: that version's native binary in place of the npm package's Node shim, which
+#: cost every member start a Node process and about 44 ms.
+#:
+#: It does so only when ``codex`` resolves into the npm install both the image
+#: (``deploy/sandbox/install-runtimes.sh``) and an admin's download
+#: (``runtime_downloads``) make under ``/opt/runtimes/codex/<version>``, the
+#: shim there is byte for byte one in :data:`REVIEWED_SHIMS`, and the binary
+#: that shim would pick for this machine is in place: the platform package's
+#: ``vendor/<triple>/bin/codex``, chosen by the same architecture table. Then
+#: the binary gets what that shim would have given it: the same path and
+#: arguments, the inherited environment less the flags the shim clears, the
+#: package root, and the npm flag, or the Bun one when the shim's own test of
+#: ``npm_config_user_agent`` and ``npm_execpath`` says so. The shims' pnpm and
+#: Vite+ tests look for those managers' record of this very install, which an
+#: npm install never has, and their Bun path test cannot match under this
+#: prefix. Anything else -- an older image's install, an unknown machine, an
+#: unread shim, a missing binary -- execs ``codex`` exactly as before.
+#:
+#: Exec, not a child: the binary keeps the process the runner started as the
+#: member's session leader, so the PID file, the group signals that stop it
+#: and its exit status are the binary's own, with no forwarding in between.
+#: The script's own variables are named ``CODEX_LAUNCH_*`` because an owner's
+#: environment can never hold a ``CODEX_`` name (``environment.validate_name``
+#: in ``cloud_agent_shared``), so none of them shadows a variable the binary
+#: would see.
+NATIVE_LAUNCH = _NATIVE_LAUNCH.replace("__PREFIX__", f"{RUNTIME_BIN_ROOT}/{CODEX.name}/").replace(
+    "__REVIEWED__", "".join(_reviewed_case(shim) for shim in REVIEWED_SHIMS)
+)
+#: What every Codex launch starts with; the binary's name follows as ``$0``.
+NATIVE_LAUNCHER = ("/bin/sh", "-c", NATIVE_LAUNCH)
 
 
 class CodexRuntime(AgentRuntime):
@@ -57,6 +186,8 @@ class CodexRuntime(AgentRuntime):
         command-line overrides, and the root-owned
         managed MCP allowlist installed before launch remains the final policy
         layer for app-server (which has no ``--ignore-user-config`` flag).
+        The argv starts with :data:`NATIVE_LAUNCHER`, which runs the version's
+        native binary without its npm shim when it can.
         """
         _ = (workdir, provides_isolation, resume_session_id, activation_dir)
         # An owner connection's exact URL, or the Gateway's normalized one. The
@@ -69,6 +200,7 @@ class CodexRuntime(AgentRuntime):
         cli_credential = compat_cli_credential(credential) if translated else credential
         provider = "hybridinference"
         argv = [
+            *NATIVE_LAUNCHER,
             self.binary,
             *self.effort_args(reasoning_effort),
             *(self.TRANSLATED_ARGS if translated else ()),
