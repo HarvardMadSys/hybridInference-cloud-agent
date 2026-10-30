@@ -17,9 +17,9 @@ export const WORKFLOWS: Record<string, WorkflowDefinition> = {
     ],
   },
   admin_token: {
-    title: 'ADMIN_TOKEN',
+    title: 'Recovery administrator token',
     steps: [
-      { id: 'apply', label: 'Write it on each control-plane machine' },
+      { id: 'apply', label: 'Install it on each control-plane machine' },
       { id: 'verify', label: 'Every process uses it' },
     ],
   },
@@ -37,18 +37,18 @@ export const WORKFLOWS: Record<string, WorkflowDefinition> = {
     steps: [
       { id: 'stage', label: 'Every process holds both keys' },
       { id: 'reencrypt', label: 'Re-encrypt stored credentials' },
-      { id: 'switch_index', label: 'Build lookups with the new key' },
-      { id: 'reindex', label: 'Rebuild environment fingerprints' },
+      { id: 'switch_index', label: 'Look up credentials with the new key' },
+      { id: 'reindex', label: 'Rebuild environment lookups' },
       { id: 'retire', label: 'Drop the old key' },
     ],
   },
   control_signing: {
-    title: 'Host and worker signing key',
+    title: 'Server signing key',
     steps: [
       { id: 'stage', label: 'The new key signs' },
       { id: 'adopt', label: 'Every process signs with it' },
       { id: 'renew_hosts', label: 'Every server renews its credential' },
-      { id: 'drain_tokens', label: 'Earlier turns finish' },
+      { id: 'drain_tokens', label: 'Turns started earlier finish' },
       { id: 'retire', label: 'Retire the previous key' },
     ],
   },
@@ -63,7 +63,7 @@ export const WORKFLOWS: Record<string, WorkflowDefinition> = {
       { id: 'verify', label: 'Proved again' },
     ],
   },
-  tunnel_keys: { title: 'Tunnel SSH keys', steps: [] },
+  tunnel_keys: { title: 'Tunnel keys', steps: [] },
   database_connection: {
     title: 'Database connection',
     steps: [
@@ -77,7 +77,7 @@ export const WORKFLOWS: Record<string, WorkflowDefinition> = {
     title: 'Database move',
     steps: [
       { id: 'maintenance', label: 'Every process stops accepting changes' },
-      { id: 'migrate', label: 'Fence, copy, verify, switch' },
+      { id: 'migrate', label: 'Pause writes, copy, verify and switch' },
       { id: 'switch_others', label: 'Switch the other machines' },
       { id: 'verify', label: 'Every process uses the new database' },
     ],
@@ -95,7 +95,7 @@ export const TUNNEL_PHASES = [
 ];
 
 export const WORKFLOW_STATES: Record<DeploymentWorkflow['state'], string> = {
-  running: 'Running',
+  running: 'In progress',
   waiting: 'Waiting',
   succeeded: 'Finished',
   failed: 'Stopped',

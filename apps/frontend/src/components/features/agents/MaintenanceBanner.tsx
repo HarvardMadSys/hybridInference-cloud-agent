@@ -40,8 +40,9 @@ export function MaintenanceBanner() {
       role="status"
       className="bg-amber-100 px-3 py-1.5 text-center text-sm text-amber-900 dark:bg-amber-500/15 dark:text-amber-200"
     >
-      Maintenance: the database is moving. You can read everything, but changes are refused until it
-      finishes, and the service restarts briefly at the end.
+      <span className="font-medium">Scheduled maintenance.</span> The database is being moved. You
+      can keep reading, but changes are paused until it finishes; the service restarts briefly at
+      the end.
     </div>
   );
 }

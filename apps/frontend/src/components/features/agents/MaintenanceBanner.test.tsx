@@ -20,7 +20,7 @@ describe('maintenance banner', () => {
     stub({ maintenance: { active: true } });
     render(<MaintenanceBanner />);
     expect(await screen.findByRole('status')).toBeTruthy();
-    expect(screen.getByText(/changes are refused/)).toBeTruthy();
+    expect(screen.getByText(/changes are paused until it finishes/)).toBeTruthy();
   });
 
   it('stays away otherwise, and from an earlier control plane', async () => {

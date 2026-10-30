@@ -16,15 +16,15 @@ export default function AdminDeploymentPage() {
     );
   }
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <AdminNavigation current="deployment" />
-      <div className={ADMIN_PAGE}>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <section className={ADMIN_PAGE}>
         <AdminPageHeader
           section="Deployment"
-          description="Machines with a deployment agent, what they run, and the operations you can start on them. Every state shown here is reported by a process or an agent."
+          description="Machines, releases, keys and the database, as each machine reports them."
         />
+        <AdminNavigation current="deployment" />
         <DeploymentManagement key={state.user?.id ?? 'admin'} />
-      </div>
+      </section>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useId, useState } from 'react';
+
 import {
   type DatabaseAddress,
   type DeploymentAgent,
@@ -12,14 +13,23 @@ import {
   sealForAgents,
   startWorkflow,
 } from '@/lib/api/adminManagement';
+
+import { when } from './deploymentCopy';
+import {
+  BUTTON_CLASS,
+  type Confirmation,
+  Empty,
+  FieldRow,
+  GroupCard,
+  GuideLink,
+  INPUT_CLASS,
+  PRIMARY_CLASS,
+  type Run,
+  Value,
+  useConfirmation,
+} from './deploymentUi';
 import { isActive } from './workflowSteps';
 
-type Run = (work: () => Promise<string | void>) => Promise<void>;
-
-const BUTTON =
-  'rounded-md border border-border px-3 py-1.5 text-sm font-medium text-foreground hover:bg-surface-hover disabled:opacity-50';
-const INPUT = 'rounded-md border border-border bg-surface px-2 py-1 text-sm text-foreground';
-const SECTION = 'mt-6 rounded-lg border border-border p-4';
 const URL_NAME = 'AGENT_DATABASE_URL';
 
 const PHASES: Record<string, string> = {
@@ -39,17 +49,23 @@ export function MaintenancePanel({ maintenance }: { maintenance?: MaintenanceSta
     .map((operation) => operation.phase)
     .filter((item): item is string => Boolean(item))
     .at(-1);
+  const since = when(maintenance.since);
   return (
-    <div role="status" className="mt-4 rounded-md border border-border bg-surface p-3 text-sm">
-      <strong>Changes are refused while the database moves.</strong>{' '}
-      {maintenance.since && <>Since {new Date(maintenance.since).toLocaleString()}. </>}
-      {phase ? (
-        <>Last step reported: {PHASES[phase] ?? phase}. </>
-      ) : (
-        <>No step reported to this process yet. </>
-      )}
-      Reading keeps working. When the move switches over, the control plane restarts: this page may
-      stop answering for a minute or two, then shows the result from the new database.
+    <div
+      role="status"
+      className="mt-6 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm leading-6 text-foreground sm:px-5"
+    >
+      <p className="font-semibold">Changes are paused while the database moves.</p>
+      <p className="mt-1 text-muted">
+        {since && <>Started {since}. </>}
+        {phase ? (
+          <>Last step reported: {PHASES[phase] ?? 'In progress'}. </>
+        ) : (
+          <>No step has been reported to this server yet. </>
+        )}
+        You can keep reading. When the move switches over, the service restarts: this page may stop
+        answering for a minute or two, then shows the result from the new database.
+      </p>
     </div>
   );
 }
@@ -64,33 +80,66 @@ interface FormState {
 
 const EMPTY: FormState = { host: '', port: '5432', database: '', user: '', password: '' };
 
-function Field({
-  label,
-  value,
-  type = 'text',
-  onChange,
-}: {
-  label: string;
-  value: string;
-  type?: string;
-  onChange: (value: string) => void;
-}) {
+const FIELDS: { name: keyof FormState; label: string; help: string; type?: string }[] = [
+  { name: 'host', label: 'Database host', help: 'The server name or address.' },
+  { name: 'port', label: 'Database port', help: 'Usually 5432.', type: 'number' },
+  { name: 'database', label: 'Database name', help: 'The database on that server.' },
+  { name: 'user', label: 'Database user', help: 'The account the application signs in as.' },
+  {
+    name: 'password',
+    label: 'Database password',
+    help: 'Encrypted for the control-plane machines before it leaves your browser.',
+    type: 'password',
+  },
+];
+
+type Mode = 'connection' | 'move';
+
+const MODES: { id: Mode; title: string; description: string }[] = [
+  {
+    id: 'connection',
+    title: 'Same database, new address or account',
+    description:
+      'Nothing is copied. A live check proves the new connection reaches this same database before anything changes.',
+  },
+  {
+    id: 'move',
+    title: 'Move the data to an empty database',
+    description:
+      'Changes are paused, the data is copied and verified, then the service switches over. The old database is kept read-only.',
+  },
+];
+
+function ModeChoice({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }) {
   return (
-    <label className="flex flex-col text-xs">
-      {label}
-      <input
-        className={INPUT}
-        type={type}
-        value={value}
-        aria-label={label}
-        autoComplete="off"
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
+    <div role="radiogroup" aria-label="What to change" className="grid gap-2 sm:grid-cols-2">
+      {MODES.map((option) => (
+        <label
+          key={option.id}
+          className={`flex cursor-pointer gap-3 rounded-xl border p-3.5 transition-colors focus-within:ring-2 focus-within:ring-crimson dark:focus-within:ring-crimson-light ${
+            mode === option.id
+              ? 'border-accent/40 bg-accent/5'
+              : 'border-border hover:bg-surface-hover'
+          }`}
+        >
+          <input
+            type="radio"
+            name="database-mode"
+            className="mt-1 accent-[rgb(var(--ui-accent))]"
+            checked={mode === option.id}
+            onChange={() => onChange(option.id)}
+          />
+          <span className="min-w-0">
+            <span className="block text-sm font-medium text-foreground">{option.title}</span>
+            <span className="mt-1 block text-xs leading-5 text-muted">{option.description}</span>
+          </span>
+        </label>
+      ))}
+    </div>
   );
 }
 
-/** Same-database connection changes, the bundled password, and moving to another database. */
+/** Same-database connection changes, the database password, and moving to another database. */
 export function DatabaseOperations({
   controlPlane,
   workflows,
@@ -100,14 +149,15 @@ export function DatabaseOperations({
   workflows: DeploymentWorkflow[];
   run: Run;
 }) {
+  const id = useId();
   const current = controlPlane[0]?.observed.database ?? null;
-  const [mode, setMode] = useState<'connection' | 'move'>('connection');
+  const [mode, setMode] = useState<Mode>('connection');
   const [form, setForm] = useState<FormState>(EMPTY);
+  const [confirm, dialog] = useConfirmation();
   const hasTools = controlPlane.some((agent) => agent.observed.policy?.has_database_tools);
   const busy = workflows.some(
     (workflow) => isActive(workflow) && workflow.kind.startsWith('database_'),
   );
-  const set = (name: keyof FormState) => (value: string) => setForm({ ...form, [name]: value });
   const useCurrent = mode === 'connection' && current;
   const address = (password: string): DatabaseAddress => ({
     host: form.host || (useCurrent ? current.host : ''),
@@ -117,7 +167,8 @@ export function DatabaseOperations({
     password,
     query: useCurrent ? current.query : undefined,
   });
-  const complete = form.password && address(form.password).host && address(form.password).database;
+  const target = address(form.password);
+  const complete = Boolean(form.password && target.host && target.database);
   const start = async (kind: string, url: string, rotate: boolean) => {
     await startWorkflow({
       kind,
@@ -126,117 +177,166 @@ export function DatabaseOperations({
     });
     setForm(EMPTY);
   };
+  const placeholder = (name: keyof FormState) =>
+    useCurrent && name !== 'password' ? `Current: ${current[name]}` : '';
+
+  const rotatePassword = () =>
+    confirm({
+      title: 'Rotate the database password?',
+      danger: true,
+      confirmLabel: 'Rotate password',
+      body: (
+        <>
+          <p>A new password is generated in your browser and set on the database.</p>
+          <p>
+            The old password stops working at once. If switching the machines over then fails, it is
+            fixed forward with the new password, which stays on the machines.
+          </p>
+        </>
+      ),
+      action: () =>
+        void run(() =>
+          start(
+            'database_connection',
+            databaseUrl({ ...current!, password: randomSecret() }),
+            true,
+          ),
+        ),
+    });
+
+  const where = (
+    <>
+      <strong className="text-foreground">{target.database}</strong> on{' '}
+      <strong className="text-foreground">
+        {target.host}:{target.port}
+      </strong>
+    </>
+  );
+  const move: Confirmation = {
+    title: 'Move every record to this database?',
+    danger: true,
+    confirmLabel: 'Start move',
+    body: (
+      <>
+        <p>Moving to {where}. A target that already holds any table is refused.</p>
+        <p>
+          Changes are paused until the move finishes, and the service restarts on the new database.
+          The old database stays read-only and is never switched back to automatically.
+        </p>
+      </>
+    ),
+    action: () => void run(() => start('database_migration', databaseUrl(target), false)),
+  };
+  const connect: Confirmation = {
+    title: 'Change the connection to this same database?',
+    confirmLabel: 'Switch connection',
+    body: (
+      <p>
+        Connecting to {where} as <strong className="text-foreground">{target.user}</strong>. Nothing
+        changes unless a live check shows it reaches the same data.
+      </p>
+    ),
+    action: () => void run(() => start('database_connection', databaseUrl(target), false)),
+  };
+  const submit = () => confirm(mode === 'move' ? move : connect);
+
   return (
-    <section className={SECTION} aria-labelledby="database">
-      <h2 id="database" className="text-base font-semibold">
-        Database
-      </h2>
-      {current ? (
-        <p className="mt-1 text-sm text-muted">
-          Now connected to <code>{current.database}</code> on{' '}
-          <code>
-            {current.host}:{current.port}
-          </code>{' '}
-          as <code>{current.user}</code>.
-        </p>
-      ) : (
-        <p className="mt-1 text-sm text-muted">
-          No control-plane agent reports a connection yet, so these operations are not available.
-        </p>
-      )}
-      <div className="mt-2 flex flex-wrap gap-2">
-        <button
-          type="button"
-          className={BUTTON}
-          disabled={!current || busy}
-          onClick={() => {
-            if (
-              window.confirm(
-                'Generate a new database password and set it? The old password stops working at once; if the switch then fails, it can only be fixed forward with the new one, which stays on the machines.',
-              )
-            ) {
-              void run(() =>
-                start(
-                  'database_connection',
-                  databaseUrl({ ...current!, password: randomSecret() }),
-                  true,
-                ),
-              );
+    <>
+      <GroupCard
+        title="Current connection"
+        icon="link"
+        actions={
+          <button
+            type="button"
+            className={BUTTON_CLASS}
+            disabled={!current || busy}
+            onClick={rotatePassword}
+          >
+            Rotate password
+          </button>
+        }
+      >
+        {current ? (
+          <>
+            <FieldRow label="Server" help="As reported by the control-plane machine.">
+              <Value mono>
+                {current.host}:{current.port}
+              </Value>
+            </FieldRow>
+            <FieldRow label="Database">
+              <Value mono>{current.database}</Value>
+            </FieldRow>
+            <FieldRow label="Account">
+              <Value mono>{current.user}</Value>
+            </FieldRow>
+          </>
+        ) : (
+          <Empty>
+            No control-plane machine reports its database connection yet, so these changes are not
+            available.
+          </Empty>
+        )}
+      </GroupCard>
+      <GroupCard title="Change the database" icon="settings">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+        >
+          <FieldRow
+            label="What to change"
+            help={
+              mode === 'connection'
+                ? 'Leave a field empty to keep its current value.'
+                : 'Enter the empty database the data should move to.'
             }
-          }}
-        >
-          Rotate the database password
-        </button>
-      </div>
-      <fieldset className="mt-3">
-        <legend className="text-sm font-medium">Change where the data is reached</legend>
-        <label className="mr-4 text-sm">
-          <input
-            type="radio"
-            name="database-mode"
-            checked={mode === 'connection'}
-            onChange={() => setMode('connection')}
-          />{' '}
-          Same database, new address or account
-        </label>
-        <label className="text-sm">
-          <input
-            type="radio"
-            name="database-mode"
-            checked={mode === 'move'}
-            onChange={() => setMode('move')}
-          />{' '}
-          Move the data to an empty database
-        </label>
-      </fieldset>
-      <p className="mt-1 text-xs text-muted">
-        {mode === 'connection'
-          ? 'A live probe proves the new connection reaches this same database before anything changes. Leave a field empty to keep its current value.'
-          : 'Every process stops accepting changes, then the data is copied to the target and verified. A target with any table is refused. The old database stays read-only and is not switched back to.'}
-      </p>
-      <div className="mt-2 flex flex-wrap items-end gap-2">
-        <Field label="Database host" value={form.host} onChange={set('host')} />
-        <Field label="Database port" value={form.port} onChange={set('port')} />
-        <Field label="Database name" value={form.database} onChange={set('database')} />
-        <Field label="Database user" value={form.user} onChange={set('user')} />
-        <Field
-          label="Database password"
-          type="password"
-          value={form.password}
-          onChange={set('password')}
-        />
-        <button
-          type="button"
-          className={BUTTON}
-          disabled={!complete || busy || !current || (mode === 'move' && !hasTools)}
-          onClick={() => {
-            const url = databaseUrl(address(form.password));
-            const question =
-              mode === 'move'
-                ? 'Move every record to this empty database? Changes are refused until it finishes, and the service restarts on the new database.'
-                : 'Change the connection to this same database?';
-            if (!window.confirm(question)) return;
-            void run(() =>
-              start(mode === 'move' ? 'database_migration' : 'database_connection', url, false),
-            );
-          }}
-        >
-          {mode === 'move' ? 'Move to this database' : 'Change connection'}
-        </button>
-      </div>
-      {mode === 'move' && !hasTools && (
-        <p className="mt-1 text-xs text-muted">
-          A move needs the PostgreSQL client programs named in the control-plane machine&apos;s
-          local policy (<code>database_tools</code>).
-        </p>
-      )}
-      <p className="mt-2 text-xs text-muted">
-        If the control plane cannot be reached, the agent still finishes or resumes a move by
-        itself. On the machine,{' '}
-        <code>python -m deploy.agent --root &lt;root&gt; database status</code> shows where it
-        stands, and <code>database unfence --operation-id &lt;id&gt;</code> reopens the old database
-        before the switch.
-      </p>
-    </section>
+          >
+            <ModeChoice mode={mode} onChange={setMode} />
+          </FieldRow>
+          {FIELDS.map((field) => (
+            <FieldRow
+              key={field.name}
+              label={field.label}
+              help={field.help}
+              htmlFor={`${id}-${field.name}`}
+            >
+              <input
+                id={`${id}-${field.name}`}
+                className={INPUT_CLASS}
+                type={field.type ?? 'text'}
+                value={form[field.name]}
+                placeholder={placeholder(field.name)}
+                autoComplete={field.type === 'password' ? 'new-password' : 'off'}
+                spellCheck={false}
+                onChange={(event) => setForm({ ...form, [field.name]: event.target.value })}
+              />
+            </FieldRow>
+          ))}
+          {mode === 'move' && !hasTools && (
+            <p className="border-b border-border/60 px-4 py-3 text-xs leading-5 text-muted sm:px-5">
+              Moving needs the PostgreSQL client tools on the control-plane machine, and its local
+              policy does not list them yet. Setting them up is described in{' '}
+              <GuideLink section="Moving the database" />.
+            </p>
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-5">
+            <p className="max-w-xl text-xs leading-5 text-muted">
+              If this page stops answering during a move, the control-plane machine finishes or
+              resumes it on its own. Recovery steps are in{' '}
+              <GuideLink section="Moving the database" />.
+            </p>
+            <button
+              type="submit"
+              className={PRIMARY_CLASS}
+              disabled={!complete || busy || !current || (mode === 'move' && !hasTools)}
+            >
+              {mode === 'move' ? 'Move to this database' : 'Change connection'}
+            </button>
+          </div>
+        </form>
+      </GroupCard>
+      {dialog}
+    </>
   );
 }

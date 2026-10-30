@@ -144,6 +144,8 @@ export interface DeploymentWorkflow {
   state: 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled';
   step: string;
   detail: string;
+  /** What it was started with, such as which credential key; never a secret. */
+  params?: Record<string, unknown>;
   created_by: string;
   created_at: string;
   updated_at: string;

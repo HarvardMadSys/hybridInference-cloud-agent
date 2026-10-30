@@ -8,40 +8,43 @@ import {
   getManagementStatus,
 } from '@/lib/api/adminManagement';
 
+import { listing, processName } from '../deployment/deploymentCopy';
+
 const STATUS_POLL_MS = 15_000;
 
 export interface SettingsManagement {
-  /** Saved, and how many reporting processes use it; a count, never a promise. */
+  /** Saved, and how many running processes use it; a count, never a promise. */
   adoption: string;
-  /** Where a field's value comes from and any restart it waits for. */
+  /** Any restart a field's saved value still waits for. */
   fieldNote: (key: string) => string;
 }
 
 export const SettingsManagementContext = createContext<SettingsManagement | null>(null);
+
+function inUse(reporting: number, adopted: number): string {
+  if (reporting === 0) {
+    return 'Saved. No running process has reported yet, so whether these settings are in use is unknown.';
+  }
+  if (adopted === reporting) {
+    return reporting === 1
+      ? 'Saved. The one running process uses these settings.'
+      : `Saved. All ${reporting} running processes use these settings.`;
+  }
+  return `Saved. ${adopted} of ${reporting} running processes use these settings so far.`;
+}
 
 export function managementView(
   catalog: ManagementCatalog | null,
   status: ManagementStatus | null,
 ): SettingsManagement | null {
   if (!catalog && !status) return null;
-  const { reporting = 0, adopted = 0, saved_revision: revision } = status?.settings ?? {};
-  let adoption = '';
-  if (status) {
-    adoption =
-      reporting === 0
-        ? `Saved as revision ${revision}. No process reports, so whether it is in use is unknown.`
-        : `Saved as revision ${revision}. In use by ${adopted} of ${reporting} reporting processes.`;
-  }
+  const { reporting = 0, adopted = 0 } = status?.settings ?? {};
   return {
-    adoption,
+    adoption: status ? inUse(reporting, adopted) : '',
     fieldNote(key) {
-      const item = catalog?.items.find((entry) => entry.setting_keys.includes(key));
-      const source = item?.sources.map((entry) => entry.meaning).join('; ');
       const waiting = status?.settings.restart_required[key];
-      return [
-        source ? ` Stored as: ${source}.` : '',
-        waiting?.length ? ` Waiting for a restart of: ${waiting.join(', ')}.` : '',
-      ].join('');
+      if (!waiting?.length) return '';
+      return ` Still waiting for a restart of ${listing(waiting.map(processName))}.`;
     },
   };
 }
