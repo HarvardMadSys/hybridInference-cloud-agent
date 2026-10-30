@@ -8,7 +8,8 @@
                          decrypting → re-encrypt both data families (saved
                          settings secrets, the archive access key) → retire the
                          old key. Refused unless every participant supports it.
-``sandbox_manager_token`` every host accepts the next credential beside the
+``sandbox_manager_token`` (:mod:`~cloud_agent.application.sandbox_token_rotation`)
+                         every host accepts the next credential beside the
                          current one → the control plane switches its saved
                          credential → hosts promote it.
 ``control_signing``      the new signing key signs, the previous one keeps
@@ -169,6 +170,10 @@ async def _prepare_root_key(storage, agents, names, params, sealed_by_agent, sec
     verdict = await fleet_supports(storage.instances, ROTATION_CAPABILITY)
     if not verdict.supported:
         raise WorkflowRefused("the root key cannot be rotated yet: " + verdict.reason())
+    # Another rotation may hold its new secret encrypted under this key.
+    active = await storage.deployments.list_workflows(active_only=True)
+    if any(w["kind"] != "rollout" for w in active):
+        raise WorkflowRefused("finish the running rotation before rotating the root key")
     cp = _cp_agents(agents)
     _require_online(cp, "control-plane")
     _require_sealed(cp, sealed_by_agent, "AGENT_SETTINGS_ENCRYPTION_KEY")
@@ -180,33 +185,6 @@ async def _prepare_root_key(storage, agents, names, params, sealed_by_agent, sec
         "names": names,
     }
     return prepared, {}, "separate"
-
-
-async def _prepare_sandbox_manager_token(storage, agents, names, params, sealed_by_agent, secret):  # type: ignore[no-untyped-def]
-    from cloud_agent_shared.deployment_contract import key_identifier
-
-    hosts = _host_agents(agents)
-    _require_online(hosts, "host")
-    _require_sealed(hosts, sealed_by_agent, "AGENT_SANDBOX_MANAGER_TOKEN_NEXT")
-    covered = {str((a.get("report") or {}).get("runner_host") or "") for a in hosts}
-    uncovered = [
-        h["host"]
-        for h in await storage.host_pool.list_runner_hosts()
-        if h.get("status") in {"online", "draining"} and h["host"] not in covered
-    ]
-    if uncovered:
-        raise WorkflowRefused(
-            "these servers have no deployment agent, so their credential cannot be "
-            "switched without an outage: " + ", ".join(uncovered[:10])
-        )
-    if not secret or len(secret.encode()) < 32:
-        raise WorkflowRefused("the new credential must be at least 32 bytes")
-    prepared = {
-        "new_token_id": key_identifier(secret),
-        "agents": [a["agent_id"] for a in hosts],
-        "names": names,
-    }
-    return prepared, {"next_token": _seal_at_rest(secret)}, "stage"
 
 
 async def _prepare_control_signing(storage, agents, names, params, sealed_by_agent, secret):  # type: ignore[no-untyped-def]
@@ -222,6 +200,12 @@ async def _prepare_control_signing(storage, agents, names, params, sealed_by_age
         raise WorkflowRefused("the signing key cannot be rotated yet: " + verdict.reason())
     prepared = {"names": names, "new_key_id": key_identifier(secret)}
     return prepared, {"next_secret": _seal_at_rest(secret)}, "stage"
+
+
+async def _prepare_sandbox_manager_token(storage, agents, names, params, sealed_by_agent, secret):  # type: ignore[no-untyped-def]
+    from cloud_agent.application.sandbox_token_rotation import prepare
+
+    return await prepare(storage, agents, names, params, sealed_by_agent, secret)
 
 
 _PREPARE = {
@@ -479,120 +463,21 @@ async def reencrypt_root_families(storage: Any) -> dict[str, int]:
     return {"settings": len(secrets_), "archive": int(archive)}
 
 
-async def _advance_sandbox_manager_token(storage: Any, workflow: dict[str, Any]) -> None:
-    from cloud_agent import settings
-
-    params = workflow["params"]
-    agents = params["agents"]
-    while workflow["state"] in {"running", "waiting"}:
-        step = workflow["step"]
-        if step == "stage":
-            outcome = await _run_agent_step(
-                storage,
-                workflow,
-                "stage",
-                agents,
-                "rotation_step",
-                {
-                    "workflow": "sandbox_manager_token",
-                    "operation_id": workflow["workflow_id"],
-                    "step": "stage",
-                },
-                sealed_for=_sealed_for(workflow, "AGENT_SANDBOX_MANAGER_TOKEN_NEXT"),
-            )
-            if outcome != "succeeded":
-                return
-            reports = {
-                a["agent_id"]: a.get("report") or {}
-                for a in await storage.deployments.list_agents()
-            }
-            lagging = [
-                params["names"].get(a, a)
-                for a in agents
-                if (reports.get(a, {}).get("secret_ids") or {}).get(
-                    "AGENT_SANDBOX_MANAGER_TOKEN_NEXT"
-                )
-                != params["new_token_id"]
-            ]
-            if lagging:
-                await save(
-                    storage,
-                    workflow,
-                    state="waiting",
-                    detail="waiting for hosts to report the next credential: " + ", ".join(lagging),
-                )
-                return
-            await save(
-                storage,
-                workflow,
-                state="running",
-                step="switch",
-                detail="",
-                data=_forget_sealed(workflow),
-            )
-        elif step == "switch":
-            secret = _open_at_rest(workflow["data"]["next_token"])
-            revision, _encoded = await storage.settings.read_settings()
-            new_revision, _encoded, _previous = await storage.settings.update_settings(
-                settings.encode_changes({"sandbox_manager_token": secret}),
-                expected_revision=revision,
-            )
-            data = {k: v for k, v in workflow["data"].items() if k != "next_token"}
-            await save(
-                storage,
-                workflow,
-                state="running",
-                step="adopt",
-                detail="",
-                data={**data, "switch_revision": new_revision},
-            )
-        elif step == "adopt":
-            target = workflow["data"]["switch_revision"]
-            if not await _verify(
-                storage,
-                workflow,
-                lambda instances, target=target: [
-                    _label(i) for i in instances if i["adopted_settings_revision"] < target
-                ],
-                "promote",
-                "waiting for every process to use the new credential",
-            ):
-                return
-        elif step == "promote":
-            outcome = await _run_agent_step(
-                storage,
-                workflow,
-                "promote",
-                agents,
-                "rotation_step",
-                {
-                    "workflow": "sandbox_manager_token",
-                    "operation_id": workflow["workflow_id"],
-                    "step": "promote",
-                },
-            )
-            if outcome == "succeeded":
-                await save(
-                    storage,
-                    workflow,
-                    state="succeeded",
-                    detail="every host uses the new credential",
-                )
-            return
-
-
 def register_advancers() -> None:
     """Add every rotation's advancer to the workflow engine."""
     from cloud_agent.application.credential_key_rotation import register as register_credential
     from cloud_agent.application.database_workflows import register as register_database
+    from cloud_agent.application.sandbox_token_rotation import advance as advance_token
     from cloud_agent.application.signing_key_rotation import advance_control_signing
+    from cloud_agent.application.tunnel_key_rotation import register as register_tunnels
 
     ADVANCERS["admin_token"] = _advance_admin_token
     ADVANCERS["root_key"] = _advance_root_key
-    ADVANCERS["sandbox_manager_token"] = _advance_sandbox_manager_token
+    ADVANCERS["sandbox_manager_token"] = advance_token
     ADVANCERS["control_signing"] = advance_control_signing
     register_database()
     register_credential()
+    register_tunnels()
 
 
 __all__ = [

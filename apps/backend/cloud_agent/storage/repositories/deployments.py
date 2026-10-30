@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
+
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent_shared.deployment_contract import TERMINAL_STATES, can_transition
 
@@ -12,7 +14,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
 
-    import asyncpg
 
 _AGENT_COLUMNS = (
     "agent_id, name, role, machine, public_key, report, enrolled_by, enrolled_at, "
@@ -225,6 +226,44 @@ class PostgresDeploymentAgentRepository:
         workflow_id: str | None = None,
     ) -> dict[str, Any]:
         """Create an intent with the agent's next sequence number, or return the existing one."""
+        try:
+            return await self._insert_intent(
+                agent_id=agent_id,
+                intent_id=intent_id,
+                operation=operation,
+                params=params,
+                sealed=sealed,
+                idempotency_key=idempotency_key,
+                created_by=created_by,
+                expires_at=expires_at,
+                workflow_id=workflow_id,
+            )
+        except asyncpg.UniqueViolationError:
+            # Two advances of one workflow raced to the same step; one row won.
+            async with self._pool.acquire() as conn:
+                winner = await conn.fetchrow(
+                    f"SELECT {_INTENT_COLUMNS} FROM agent_deploy_intents "
+                    "WHERE agent_id = $1 AND idempotency_key = $2",
+                    agent_id,
+                    idempotency_key,
+                )
+            if winner is None:
+                raise
+            return _intent(winner)
+
+    async def _insert_intent(
+        self,
+        *,
+        agent_id: str,
+        intent_id: str,
+        operation: str,
+        params: Mapping[str, Any],
+        sealed: Mapping[str, Any],
+        idempotency_key: str,
+        created_by: str,
+        expires_at: datetime,
+        workflow_id: str | None,
+    ) -> dict[str, Any]:
         async with self._pool.acquire() as conn, conn.transaction():
             existing = await conn.fetchrow(
                 f"SELECT {_INTENT_COLUMNS} FROM agent_deploy_intents "

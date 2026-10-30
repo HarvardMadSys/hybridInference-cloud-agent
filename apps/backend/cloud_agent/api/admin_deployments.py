@@ -95,6 +95,14 @@ _UNSHOWN_PROGRESS = frozenset(
 )
 
 
+def _workflow_view(workflow: dict[str, Any]) -> dict[str, Any]:
+    """A workflow for the page: its counters and any question, never a sealed value."""
+    return {
+        **{k: v for k, v in workflow.items() if k != "data"},
+        "progress": {k: v for k, v in workflow["data"].items() if k not in _UNSHOWN_PROGRESS},
+    }
+
+
 def _intent_view(intent: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in intent.items() if k != "sealed"}
 
@@ -109,7 +117,7 @@ async def overview(store: Any = Depends(get_storage)) -> dict[str, Any]:
         "agents": [deployments.agent_view(agent) for agent in agents],
         "intents": [_intent_view(i) for i in await storage.deployments.list_intents(limit=100)],
         "workflows": [
-            {k: v for k, v in workflow.items() if k != "data"}
+            _workflow_view(workflow)
             for workflow in await storage.deployments.list_workflows(limit=30)
         ],
         "contract": {
@@ -303,8 +311,7 @@ async def read_workflow(workflow_id: str, store: Any = Depends(get_storage)) -> 
         # A fenced database still shows where the workflow stands.
         await workflows.advance_workflow(storage, workflow)
     return {
-        **{k: v for k, v in workflow.items() if k != "data"},
-        "progress": {k: v for k, v in workflow["data"].items() if k not in _UNSHOWN_PROGRESS},
+        **_workflow_view(workflow),
         "intents": [
             _intent_view(i)
             for i in await storage.deployments.list_intents(workflow_id=workflow_id, limit=500)
@@ -317,7 +324,7 @@ class WorkflowRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     kind: str = Field(
-        pattern=r"^(admin_token|root_key|sandbox_manager_token|control_signing|credential_key|database_connection|database_migration)$"
+        pattern=r"^(admin_token|root_key|sandbox_manager_token|control_signing|credential_key|tunnel_keys|database_connection|database_migration)$"
     )
     params: dict[str, Any] = Field(default_factory=dict)
     #: Each agent's sealed values, by agent id: only that agent can open them.
@@ -340,6 +347,7 @@ async def start_workflow(
     from cloud_agent.application.credential_key_rotation import start_credential_key_rotation
     from cloud_agent.application.database_workflows import start_database_workflow
     from cloud_agent.application.key_rotation import start_rotation
+    from cloud_agent.application.tunnel_key_rotation import start_tunnel_rotation
 
     require_full_authority(admin_id)
     if body.confirm != body.kind:
@@ -353,6 +361,10 @@ async def start_workflow(
                 params=body.params,
                 sealed_by_agent=body.sealed_by_agent,
                 admin_id=admin_id,
+            )
+        elif body.kind == "tunnel_keys":
+            workflow = await start_tunnel_rotation(
+                storage, hosts=body.params.get("hosts"), admin_id=admin_id
             )
         elif body.kind == "credential_key":
             workflow = await start_credential_key_rotation(
@@ -377,6 +389,41 @@ async def start_workflow(
         actor_id=admin_id,
     )
     return {k: v for k, v in workflow.items() if k != "data"}
+
+
+class FarEndConfirmation(BaseModel):
+    """An administrator changed a tunnel's far end as the workflow asked."""
+
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=3, max_length=256)
+
+
+@router.post("/workflows/{workflow_id}/confirm-far-end")
+async def confirm_tunnel_far_end(
+    workflow_id: str,
+    body: FarEndConfirmation,
+    request: Request,
+    store: Any = Depends(get_storage),
+    admin_id: str = Depends(verify_admin_access),
+) -> dict[str, Any]:
+    """Tell a tunnel key rotation the requested far-end change is made."""
+    from cloud_agent.api.admin_credentials import require_full_authority
+    from cloud_agent.application.tunnel_key_rotation import confirm_far_end
+
+    require_full_authority(admin_id)
+    storage = require_store(store)
+    try:
+        workflow = await confirm_far_end(storage, workflow_id, body.token)
+    except workflows.WorkflowRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    await log_admin_action(
+        storage,
+        get_client_ip(request),
+        "agent.deployment.workflow.tunnel_keys.confirm",
+        details={"workflow_id": workflow_id, "token": body.token},
+        actor_id=admin_id,
+    )
+    return _workflow_view(workflow)
 
 
 @router.post("/workflows/{workflow_id}/retire")

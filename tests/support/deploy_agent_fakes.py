@@ -8,15 +8,19 @@ real command.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from deploy.agent.store import parse_env
 from deploy.agent.system import CommandResult
 
-if TYPE_CHECKING:
-    from pathlib import Path
+
+def _public_blob(path: Path) -> str:
+    """A stable, valid-looking key body for a private key file."""
+    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest() * 2).decode()
 
 
 @dataclass
@@ -35,6 +39,8 @@ class FakeMachine:
     missing_images: set[str] = field(default_factory=set)
     kata_install_exit: int = 0
     kata_check_exit: int = 0
+    #: What ``ssh`` exits with when a key is tried; 255 is ssh's own failure.
+    ssh_exit: int = 0
     #: Programs run for real (the PostgreSQL clients a database test needs).
     passthrough: tuple[str, ...] = ("psql", "pg_dump", "pg_restore")
 
@@ -62,6 +68,15 @@ class FakeMachine:
             from deploy.agent.system import SubprocessRunner
 
             return SubprocessRunner().run(argv, cwd=cwd, env=env, timeout=timeout)
+        if argv and argv[0] == "ssh-keygen":
+            path = Path(argv[argv.index("-f") + 1])
+            if "-y" in argv:
+                return CommandResult(0, f"ssh-ed25519 {_public_blob(path)} comment\n")
+            path.write_text("private key " + path.name)
+            path.with_name(path.name + ".pub").write_text("public")
+            return CommandResult(0, "")
+        if argv and argv[0] == "ssh":
+            return CommandResult(self.ssh_exit, "")
         if argv[:2] == ["docker", "compose"] and argv[-3:-1] == ["ps", "-q"]:
             return CommandResult(0, f"{argv[-1]}-container\n")
         if argv[:2] == ["docker", "compose"] and "ps" in argv:

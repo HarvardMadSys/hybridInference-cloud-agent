@@ -448,7 +448,7 @@ OPERATIONS: dict[str, Operation] = {
             True,
             "Perform one step of a key rotation workflow.",
             sealed=True,
-            params=("workflow", "operation_id", "step"),
+            params=("workflow", "operation_id", "step", "tunnels", "host"),
         ),
         Operation(
             "database_check",
@@ -476,7 +476,11 @@ OPERATIONS: dict[str, Operation] = {
         ),
     )
 }
-ROTATION_WORKFLOWS = frozenset({"root_key", "admin_token", "sandbox_manager_token"})
+ROTATION_WORKFLOWS = frozenset({"root_key", "admin_token", "sandbox_manager_token", "tunnel_keys"})
+#: The three SSH tunnels of a host, as a tunnel key rotation names them.
+TUNNELS = ("gateway", "mcp", "control")
+_SSH_PUBLIC_KEY = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/]{32,}={0,2}$")
+_HOST_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def check_operation(
@@ -570,6 +574,14 @@ def _check_rotation(operation, role, params, sealed, policy, current) -> None:  
         raise ContractError("operation_id is a rotation operation")
     if not _SERVICE.fullmatch(str(params.get("step", ""))):
         raise ContractError("step names a rotation step")
+    if "host" in params and not _HOST_NAME.fullmatch(str(params["host"])):
+        raise ContractError("host names a server")
+    for tunnel, keys in (params.get("tunnels") or {}).items():
+        values = keys if isinstance(keys, list) else [keys]
+        if tunnel not in TUNNELS or not all(
+            isinstance(v, str) and _SSH_PUBLIC_KEY.fullmatch(v) for v in values
+        ):
+            raise ContractError("tunnels maps a tunnel to its Ed25519 public keys")
 
 
 def _check_database(operation, role, params, sealed, policy, current) -> None:  # type: ignore[no-untyped-def]
@@ -731,6 +743,7 @@ __all__ = [
     "ROLES",
     "SERVICES",
     "TERMINAL_STATES",
+    "TUNNELS",
     "ConfigKey",
     "ContractError",
     "Operation",

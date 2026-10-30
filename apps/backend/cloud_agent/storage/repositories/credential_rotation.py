@@ -144,6 +144,20 @@ class PostgresCredentialRotation:
                     result["not_current"] += 1
         return result
 
+    async def replace_profile_secret(
+        self, *, profile_id: str, expected_ciphertext: str, secret_ciphertext: str
+    ) -> bool:
+        """Replace a deployment profile's encrypted inputs unless they changed since read."""
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                "UPDATE agent_compute_deployment_profiles SET secret_ciphertext = $3 "
+                "WHERE id = $1 AND secret_ciphertext = $2",
+                profile_id,
+                expected_ciphertext,
+                secret_ciphertext,
+            )
+        return not status.endswith(" 0")
+
     async def fingerprint_owners(self, *, after: str, limit: int) -> list[str]:
         """Owners with an environment binding or snapshot, in order after ``after``."""
         async with self._pool.acquire() as conn:
@@ -225,9 +239,9 @@ class PostgresCredentialRotation:
                 if not script:
                     continue
                 material = setup_material(script, variables)
-                old = cipher.mac_with_previous(material)
-                if old is not None:
-                    moves.setdefault((environment_id, old), cipher.mac_with_current(material))
+                digest = cipher.mac_with_previous(material)
+                if digest is not None:
+                    moves.setdefault((environment_id, digest), cipher.mac_with_current(material))
             for row in snapshots:
                 new = moves.get((row["environment_id"], row["setup_fingerprint"]))
                 if new is None:

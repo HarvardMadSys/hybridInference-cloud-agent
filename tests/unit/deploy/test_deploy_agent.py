@@ -391,6 +391,116 @@ def test_a_host_restart_drains_the_runner_before_the_sandbox_manager(tmp_path) -
     assert machine.calls.index(stops[1]) < recreate
 
 
+def _tunnel_host(tmp_path: Path) -> tuple[Executor, FakeMachine, dict[str, Path]]:
+    from deploy.agent.rotation import register
+
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    paths = {name: keys / f"{name}.key" for name in ("gateway", "mcp", "control")}
+    env = ""
+    for name, prefix in (
+        ("gateway", "AGENT_TUNNEL"),
+        ("mcp", "AGENT_MCP_TUNNEL"),
+        ("control", "AGENT_CONTROL_PLANE_TUNNEL"),
+    ):
+        paths[name].write_text(f"old {name}")
+        env += f"{prefix}_SSH_KEY={paths[name]}\n{prefix}_SSH_DESTINATION=tunnel@far\n"
+    host, machine = _agent(tmp_path, role="host", env=env)
+    register(host)
+    return host, machine, paths
+
+
+def _tunnel(step: str, **more: Any) -> dict[str, Any]:
+    return {"workflow": "tunnel_keys", "operation_id": "4" * 32, "step": step, **more}
+
+
+def test_a_tunnel_key_is_generated_here_proved_then_swapped_in(tmp_path) -> None:
+    host, machine, paths = _tunnel_host(tmp_path)
+    made = host.execute("rotation_step", _tunnel("generate"))
+    assert made.state == "succeeded", made.detail
+    public = made.evidence["public_keys"]
+    assert set(public["new"]) == {"gateway", "mcp", "control"}
+    assert public["new"]["mcp"] != public["old"]["mcp"]
+    assert "private" not in json.dumps(public)
+    # Asking again returns the same keys rather than a second set.
+    assert host.execute("rotation_step", _tunnel("generate")).evidence == made.evidence
+
+    switched = host.execute("rotation_step", _tunnel("switch"))
+    assert switched.state == "succeeded", switched.detail
+    assert paths["gateway"].read_text().startswith("private key")
+    assert (paths["gateway"].with_name("gateway.key.previous")).read_text() == "old gateway"
+    tries = [c for c in machine.calls if c[0] == "ssh"]
+    assert len(tries) == 3 and all("-o" in c and "BatchMode=yes" in c for c in tries)
+    assert any("--force-recreate" in c and "control-plane-tunnel" in c for c in machine.calls)
+
+    assert host.execute("rotation_step", _tunnel("finish")).state == "succeeded"
+    assert not (paths["gateway"].with_name("gateway.key.previous")).exists()
+
+
+def test_a_key_the_far_end_refuses_changes_nothing(tmp_path) -> None:
+    host, machine, paths = _tunnel_host(tmp_path)
+    assert host.execute("rotation_step", _tunnel("generate")).state == "succeeded"
+    machine.ssh_exit = 255
+    refused = host.execute("rotation_step", _tunnel("switch"))
+    assert refused.state == "failed" and "refuses the new key" in refused.detail
+    assert paths["mcp"].read_text() == "old mcp"
+    assert not any("--force-recreate" in c for c in machine.calls)
+
+
+def test_tunnels_that_do_not_come_back_get_their_old_keys(tmp_path) -> None:
+    host, machine, paths = _tunnel_host(tmp_path)
+    assert host.execute("rotation_step", _tunnel("generate")).state == "succeeded"
+    machine.unhealthy.add("mcp-tunnel")
+    failed = host.execute("rotation_step", _tunnel("switch"))
+    assert failed.state == "failed" and "previous keys were restored" in failed.detail
+    assert paths["mcp"].read_text() == "old mcp"
+
+
+def test_a_far_end_is_edited_only_where_local_policy_says(tmp_path) -> None:
+    from deploy.agent.rotation import register
+
+    cp, _ = _agent(tmp_path)
+    register(cp)
+    keys = tmp_path / "authorized_keys"
+    keys.write_text("ssh-ed25519 KEEPTHIS other\n")
+    write_json(
+        cp.store.root / "policy.json",
+        {
+            **cp.store.policy(),
+            "tunnel_authorized_keys": {
+                "mcp": {
+                    "path": str(keys),
+                    "options": 'restrict,port-forwarding,permitopen="127.0.0.1:8001"',
+                }
+            },
+        },
+        0o644,
+    )
+    new, old = "ssh-ed25519 " + "A" * 43, "ssh-ed25519 " + "B" * 43
+    add = cp.execute(
+        "rotation_step",
+        _tunnel("authorize", host="gpu-1", tunnels={"mcp": new}),
+    )
+    assert add.state == "succeeded", add.detail
+    assert f'restrict,port-forwarding,permitopen="127.0.0.1:8001" {new}' in keys.read_text()
+    assert "KEEPTHIS" in keys.read_text()
+    refused = cp.execute(
+        "rotation_step", _tunnel("authorize", host="gpu-1", tunnels={"control": new})
+    )
+    assert refused.state == "failed" and "does not manage" in refused.detail
+    # A key that is not an Ed25519 public key never reaches the file.
+    bad = cp.execute(
+        "rotation_step", _tunnel("authorize", host="gpu-1", tunnels={"mcp": "ssh-rsa AAAA x"})
+    )
+    assert bad.state == "rejected"
+    keys.write_text(keys.read_text() + f"{old} legacy\n")
+    assert (
+        cp.execute("rotation_step", _tunnel("revoke", host="gpu-1", tunnels={"mcp": old})).state
+        == "succeeded"
+    )
+    assert old not in keys.read_text() and new in keys.read_text()
+
+
 def test_the_sandbox_manager_accepts_the_next_credential_during_a_rotation(monkeypatch) -> None:
     from fastapi.testclient import TestClient
     from tests.unit.test_agent_sandbox_manager import _SharedSupervisor

@@ -518,6 +518,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 repository=storage.compute_resources,
                 host_pool=storage.host_pool,
                 http=http,
+                credential_rotation=storage.credential_rotation,
             )
             _spawn(app, "compute_resource_task", compute_worker.run())
             from cloud_agent.application.key_rotation import register_advancers

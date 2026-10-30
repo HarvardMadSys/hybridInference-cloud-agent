@@ -374,6 +374,7 @@ class Executor:
                 "kata": policy.get("kata") or [],
                 "has_kata_helper": bool(policy.get("kata_helper")),
                 "has_database_tools": bool(policy.get("database_tools")),
+                "tunnel_authorized_keys": sorted(policy.get("tunnel_authorized_keys") or {}),
             },
             "last_seq": state.get("last_seq", 0),
             "secret_ids": _secret_ids(self.store.current_env()),
