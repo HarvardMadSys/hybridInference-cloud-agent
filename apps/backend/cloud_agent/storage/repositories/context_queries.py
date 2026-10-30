@@ -135,6 +135,13 @@ def _range_runs_sql(f: int, *, day: bool = True, prompt: bool = False) -> str:
     conversation list searches), ``$f+1`` one repository, ``$f+2`` only the
     temporary workspaces (no repository), and with ``day`` ``$f+3``/``$f+4``
     one UTC day inside the range. With ``prompt``, each run's ``task_prompt``.
+
+    Each run's conversation is read by its key, behind ``OFFSET 0`` so the
+    planner keeps it a lookup: joined freely, ``deleted_at IS NULL`` matches
+    the partial ``idx_agent_threads_archive_history``, which, before the
+    conversations have column statistics, is estimated at a handful of rows,
+    and with the runs estimated at one the planner scanned that whole index
+    for every run (4.5 M rows for 3,000 runs).
     """
     q, repo, temporary = f"${f}", f"${f + 1}", f"${f + 2}"
     day_sql = (
@@ -148,7 +155,9 @@ def _range_runs_sql(f: int, *, day: bool = True, prompt: bool = False) -> str:
         ", j.task_prompt" if prompt else ""
     }
     FROM agent_jobs j
-    JOIN agent_threads t ON t.id = j.thread_id
+    CROSS JOIN LATERAL (
+        SELECT t.repo, t.title, t.deleted_at FROM agent_threads t WHERE t.id = j.thread_id OFFSET 0
+    ) t
     WHERE j.user_id = $1 AND j.created_at >= $2 AND j.created_at < $3
       AND j.fork_source_job_id IS NULL AND t.deleted_at IS NULL
       AND ({q}::text = '' OR POSITION(LOWER({q}) IN LOWER(COALESCE(t.title, ''))) > 0

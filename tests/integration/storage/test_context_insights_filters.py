@@ -397,6 +397,19 @@ def _row_visits(node: dict) -> int:
     return own + sum(_row_visits(child) for child in node.get("Plans", []))
 
 
+#: The indexes of ``agent_threads`` that lead with its key.
+_THREAD_KEY_INDEXES = {"agent_threads_pkey", "uq_agent_threads_owner"}
+
+
+def _repeated_thread_scans(node: dict) -> list[dict]:
+    """Every scan of ``agent_threads`` an executed plan ran more than once."""
+    found = [node] if node.get("Relation Name") == "agent_threads" else []
+    found = found if int(node.get("Actual Loops", 1)) > 1 else []
+    return found + [
+        scan for child in node.get("Plans", []) for scan in _repeated_thread_scans(child)
+    ]
+
+
 async def test_composition_stays_linear_whatever_the_planner_knows(db, store):
     # A range's runs are often underestimated: freshly written, or one owner's
     # share of the table. With a row estimate of one, the composition once
@@ -443,7 +456,18 @@ async def test_composition_stays_linear_whatever_the_planner_knows(db, store):
             None,
         ]
         tables = ("agent_threads", "agent_jobs", "agent_attempts", "agent_attempt_context_profiles")
-        for known in ((), ("agent_attempts", "agent_attempt_context_profiles"), tables):
+        cases = (
+            # What a test-db-local run left: the conversations vacuumed and
+            # counted (all-visible, so index-only scans look free) but no
+            # column statistics, and the runs never counted.
+            (("agent_threads",), ()),
+            ((), ()),
+            ((), ("agent_attempts", "agent_attempt_context_profiles")),
+            ((), tables),
+        )
+        for vacuumed, known in cases:
+            for table in vacuumed:
+                await conn.execute(f"VACUUM ANALYZE {table}")
             # Statistics survive the reset's TRUNCATE; forget them, then
             # gather only those this case knows.
             await conn.execute(
@@ -459,9 +483,16 @@ async def test_composition_stays_linear_whatever_the_planner_knows(db, store):
                 )
                 rows = await conn.fetch(context_queries._COMPOSITION_SQL, *params)
             [explained] = json.loads(plan)
+            case = (vacuumed, known)
             # A few index lookups per run; the rescanning plan visited about
             # a thousand rows per run here, and more the longer the history.
-            assert _row_visits(explained["Plan"]) < 40 * runs, known
+            assert _row_visits(explained["Plan"]) < 40 * runs, case
+            # Each run's conversation is read by its key. Scanning another
+            # index of it for every run shows as one row per loop while it
+            # walks the whole index (1.1 of 1.2 s on 10,250 runs).
+            for scan in _repeated_thread_scans(explained["Plan"]):
+                assert scan.get("Index Name") in _THREAD_KEY_INDEXES, (case, scan.get("Index Name"))
+                assert "Index Cond" in scan, (case, scan)
             total = compose(rows)
             assert total.recorded.turns == total.recorded.turns_profiled == runs
             # Each turn's content is its kept (latest) attempt's...
