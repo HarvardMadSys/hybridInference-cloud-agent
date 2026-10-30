@@ -115,15 +115,36 @@ export function tokenTotal(usage: AdminUsageAggregate): number | null {
 }
 
 /**
- * Turns whose usage the Gateway has not reported yet: pending or unavailable.
+ * The share of input tokens read from the cache, as the Admin Usage page's
+ * `cachedShare` reads it.
  *
- * Only those two statuses mean a turn has no readable report. A turn with one is
- * available, partial or stale, even while it is read again. A turn that ended
- * before its agent called a model has no report and needs none, and is available,
- * so counting turns without a snapshot named it unrecorded for good.
+ * Only a ratio both sides fully report is shown: a call that did not report
+ * one of the two would make it a guess, and a cache read larger than the input
+ * means the two were not counted the same way. Input already includes cached
+ * input, so the cache read is a part of it and is never added to it.
  */
-export function unrecordedTurns(usage: AdminUsageAggregate): number {
-  return (usage.status_counts.pending ?? 0) + (usage.status_counts.unavailable ?? 0);
+export function cachedShare(usage: AdminUsageAggregate): number | null {
+  const totals = usage.totals;
+  const unknown = usage.unknown_rows;
+  if (!totals || totals.tokens_in == null || totals.cache_read == null) return null;
+  if (unknown && (unknown.tokens_in > 0 || unknown.cache_read > 0)) return null;
+  if (totals.tokens_in <= 0 || totals.cache_read > totals.tokens_in) return null;
+  return totals.cache_read / totals.tokens_in;
+}
+
+/** `42%`; a share above zero that rounds to none reads `<1%`, and an unknown one a dash. */
+export function formatShare(share: number | null): string {
+  if (share === null || !Number.isFinite(share)) return '—';
+  const percent = Math.round(share * 100);
+  return share > 0 && percent === 0 ? '<1%' : `${percent}%`;
+}
+
+/**
+ * Whether a known reasoning total leaves out calls that did not report one.
+ * An unknown total already reads as a dash and needs no such note.
+ */
+export function reasoningPartly(usage: AdminUsageAggregate): boolean {
+  return usage.totals?.reasoning != null && (usage.unknown_rows?.reasoning ?? 0) > 0;
 }
 
 export interface ChartDay {

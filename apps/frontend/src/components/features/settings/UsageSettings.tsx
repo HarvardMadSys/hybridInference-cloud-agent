@@ -15,10 +15,12 @@ import {
   type OwnerResourceHistory,
   type OwnerTokenUsage,
 } from '@/lib/api/ownerUsage';
+import type { AdminUsageAggregate } from '@/lib/api/adminUsage';
 import { UsageChart } from './UsageChart';
 import {
   STATE_ORDER,
   USAGE_PERIODS,
+  cachedShare,
   chartDays,
   compactCount,
   coreHours,
@@ -26,14 +28,15 @@ import {
   duration,
   formatCost,
   formatMemory,
+  formatShare,
   gibHours,
   historyErrorKey,
   partlyMeasured,
   periodQuery,
   rangeNote,
+  reasoningPartly,
   relativeTime,
   tokenTotal,
-  unrecordedTurns,
   utcMidnightLocal,
   type UsagePeriod,
 } from './usagePresent';
@@ -457,7 +460,6 @@ function HistoryTotals({
     return t(DURATION_UNIT[unit], { value });
   };
   const summary = tokens?.summary;
-  const unrecorded = summary ? unrecordedTurns(summary) : 0;
   let tokenDetail: string | undefined;
   if (summary?.totals) {
     tokenDetail = t('settings.usage.tokensInOut', {
@@ -469,7 +471,7 @@ function HistoryTotals({
     <>
       <dl
         aria-busy={loading}
-        className={`mt-3 grid grid-cols-2 gap-2 lg:grid-cols-5 ${loading ? 'opacity-60' : ''}`}
+        className={`mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4 ${loading ? 'opacity-60' : ''}`}
       >
         <Tile
           label={t('settings.usage.cost')}
@@ -481,6 +483,8 @@ function HistoryTotals({
           value={summary ? compactCount(tokenTotal(summary)) : '—'}
           detail={tokenDetail}
         />
+        <CacheTile usage={summary} />
+        <ReasoningTile usage={summary} />
         <Tile
           label={t('settings.usage.runningTime')}
           value={totals ? hours(totals.running_seconds) : '—'}
@@ -504,12 +508,39 @@ function HistoryTotals({
           })}
         </p>
       ) : null}
-      {unrecorded > 0 ? (
-        <p className="mt-2 text-xs text-muted">
-          {t('settings.usage.unrecorded', { count: unrecorded })}
-        </p>
-      ) : null}
     </>
+  );
+}
+
+/** How much of the input was read from the cache; a dash unless both sides are fully known. */
+function CacheTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
+  const { t } = useLocale();
+  const share = usage ? cachedShare(usage) : null;
+  let detail: string | undefined;
+  if (share !== null && usage?.totals) {
+    detail = t('settings.usage.cacheReadOf', {
+      read: compactCount(usage.totals.cache_read),
+      in: compactCount(usage.totals.tokens_in),
+    });
+  }
+  return (
+    <Tile label={t('settings.usage.cacheHitRate')} value={formatShare(share)} detail={detail} />
+  );
+}
+
+/**
+ * Reasoning tokens. They are a part of output tokens, so the token total holds
+ * them already; they are shown on their own and never added to it again.
+ */
+function ReasoningTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
+  const { t } = useLocale();
+  const partly = usage ? reasoningPartly(usage) : false;
+  return (
+    <Tile
+      label={t('settings.usage.reasoning')}
+      value={compactCount(usage?.totals?.reasoning)}
+      detail={t(partly ? 'settings.usage.reasoningPartly' : 'settings.usage.reasoningInOutput')}
+    />
   );
 }
 
