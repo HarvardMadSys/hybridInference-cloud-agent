@@ -318,8 +318,14 @@ def test_kata_install_needs_a_reviewed_pair_and_the_scripts_own_check(tmp_path) 
     assert ok.state == "succeeded", ok.detail
     helper_calls = [c for c in machine.calls if c[:3] == ["sudo", "-n", "/opt/kata-helper"]]
     assert ["sudo", "-n", "/opt/kata-helper", "install", "3.32.0", "1" * 64] in helper_calls
-    # The runner was stopped first and started again after.
-    assert any("stop" in c and "runner" in c for c in machine.calls)
+    # The runner was drained first, with no forced kill, and started again after.
+    drained = machine.calls.index(["docker", "stop", "--time=-1", "runner-container"])
+    installed = machine.calls.index(helper_calls[-2])
+    assert (
+        drained
+        < installed
+        < next(i for i, c in enumerate(machine.calls) if "--force-recreate" in c and i > installed)
+    )
     assert host.observed()["kata"]["version"] == "3.32.0"
 
 
@@ -537,3 +543,76 @@ def test_a_managed_server_environment_follows_the_same_key_rules() -> None:
         check_rendered_environment("host", {"AGENT_SANDBOX_IMAGE_PULL": "always"})
     with pytest.raises(ContractError):
         check_rendered_environment("host", {"AGENT_SANDBOX_ALLOW_UNISOLATED": "1"})
+
+
+def test_a_rotated_password_is_recorded_for_the_bundled_database_and_not_set_twice(
+    tmp_path,
+) -> None:
+    """Fake client programs: the point is what the agent asks them, and when it stops."""
+    from deploy.agent import database
+    from deploy.agent.operations import OperationFailed
+
+    cp, _ = _agent(
+        tmp_path,
+        env=(
+            "AGENT_DATABASE_URL=postgresql://cloudagent:old-password-long-enough@db:5432/cloudagent\n"
+            "AGENT_POSTGRES_PASSWORD=old-password-long-enough\n"
+        ),
+    )
+    new = "postgresql://cloudagent:new-password-long-enough@db:5432/cloudagent"
+    write_json(
+        cp.store.root / "policy.json",
+        {
+            **cp.store.policy(),
+            "database_tools": {"psql": ["psql"], "pg_dump": ["d"], "pg_restore": ["r"]},
+        },
+        0o644,
+    )
+    altered: list[bytes] = []
+    answers = {"connects": [False, True]}
+
+    def fake_sql(self, statement, *, stdin=None):
+        if stdin is not None:
+            altered.append(stdin)
+            return []
+        if not answers["connects"].pop(0):
+            raise OperationFailed("cannot connect")
+        return ["1"]
+
+    original = database.Database.sql
+    database.Database.sql = fake_sql
+    try:
+        box = seal(
+            cp.store.identity()["public_key"],
+            new,
+            sealed_purpose(cp.agent_id, "AGENT_DATABASE_URL"),
+        )
+        outcome = database.database_switch(
+            cp,
+            {"probe_id": "1" * 32, "rotate_password": True, "leader": True},
+            {"AGENT_DATABASE_URL": box},
+            "r",
+        )
+        assert outcome.state == "succeeded", outcome.detail
+        assert len(altered) == 1 and b"new-password" not in altered[0]
+        env = parse_env(cp.store.current_env())
+        assert env["AGENT_POSTGRES_PASSWORD"] == "new-password-long-enough"
+        # A retry after the password was set connects at once and sets nothing.
+        answers["connects"] = [True]
+        database.database_switch(
+            cp,
+            {"probe_id": "1" * 32, "rotate_password": True, "leader": True},
+            {"AGENT_DATABASE_URL": box},
+            "r",
+        )
+        assert len(altered) == 1
+        # A password that took but does not connect says the old one is gone.
+        cp2_detail = None
+        answers["connects"] = [False, False]
+        try:
+            database._set_password(cp, new, new)
+        except OperationFailed as exc:
+            cp2_detail = str(exc)
+        assert cp2_detail and "old password no longer works" in cp2_detail
+    finally:
+        database.Database.sql = original

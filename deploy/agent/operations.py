@@ -15,6 +15,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote, urlsplit
 
 from deploy.agent import releases
 from deploy.agent.deployment_contract import (
@@ -313,7 +314,7 @@ class Executor:
     # -- Kata ---------------------------------------------------------------
 
     def kata_install(self, version: str, sha256: str) -> Outcome:
-        """Stop the runner, install a reviewed pair through the helper, check, restart."""
+        """Drain the runner, install a reviewed pair through the helper, check, restart."""
         helper = self.store.policy().get("kata_helper")
         if (
             not isinstance(helper, list)
@@ -321,10 +322,9 @@ class Executor:
             or not all(isinstance(a, str) for a in helper)
         ):
             raise OperationFailed("this machine's policy names no Kata helper command")
-        compose = self.compose()
-        stopped = compose.stop(["runner"])
+        stopped = self.compose().drain(["runner"])
         if not stopped.ok:
-            raise OperationFailed("the runner did not stop")
+            raise OperationFailed("the runner did not drain")
         installed = self.runner.run(
             [*helper, "install", version, sha256], cwd=self.store.deploy_root, timeout=3600
         )
@@ -368,6 +368,7 @@ class Executor:
             "release": state.get("release"),
             "kata": state.get("kata"),
             "runner_host": env.get("AGENT_RUNNER_HOST", "") if self.role == "host" else "",
+            "database": _database_address(env.get("AGENT_DATABASE_URL", "")),
             "services": self.compose().running(services) if services else {},
             "policy": {
                 "allowed": policy.get("allowed") or {},
@@ -379,6 +380,23 @@ class Executor:
             "last_seq": state.get("last_seq", 0),
             "secret_ids": _secret_ids(self.store.current_env()),
         }
+
+
+def _database_address(url: str) -> dict[str, Any] | None:
+    """Where this machine's connection points, for a form to start from; never the password."""
+    if not url:
+        return None
+    parts = urlsplit(url.replace("postgresql+asyncpg://", "postgresql://", 1))
+    try:
+        return {
+            "host": parts.hostname or "",
+            "port": parts.port or 5432,
+            "database": unquote(parts.path.lstrip("/")),
+            "user": unquote(parts.username or ""),
+            "query": parts.query,
+        }
+    except ValueError:
+        return None
 
 
 def _secret_ids(env_text: str) -> dict[str, str]:

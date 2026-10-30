@@ -798,7 +798,7 @@ _MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
         secret=True,
         minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
         minimum_bytes_new_values_only=True,
-        description="A random key of at least 32 bytes. Replacing it invalidates existing host and worker credentials; re-enroll hosts before resuming work.",
+        description="A random key of at least 32 bytes. Replace it with the rotation on the Deployment page, which moves every server to it first; saving another value here invalidates host and worker credentials at once.",
     ),
     Setting(
         "source_control_encryption_key",
@@ -809,7 +809,7 @@ _MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
         secret=True,
         minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
         minimum_bytes_new_values_only=True,
-        description="A random key of at least 32 bytes. Protects user source-control, MCP, environment, and SSH credentials. Once configured, rotation requires a separate re-encryption procedure.",
+        description="A random key of at least 32 bytes. Protects user source-control, MCP, environment, and SSH credentials. Once configured, it changes only through the rotation on the Deployment page, which re-encrypts them.",
     ),
     Setting(
         "compute_encryption_key",
@@ -819,7 +819,7 @@ _MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
         env="AGENT_COMPUTE_SECRET_KEY",
         secret=True,
         minimum_bytes=32,
-        description="A random key of at least 32 bytes. Once configured, rotation requires a separate re-encryption procedure.",
+        description="A random key of at least 32 bytes. Once configured, it changes only through the rotation on the Deployment page, which re-encrypts stored compute credentials.",
     ),
     Setting(
         "sandbox_manager_token",
@@ -828,7 +828,7 @@ _MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
         "",
         env="AGENT_SANDBOX_MANAGER_TOKEN",
         secret=True,
-        description="Must match the credential provisioned on each host's sandbox manager. Coordinate changes with those hosts.",
+        description="Must match the credential provisioned on each host's sandbox manager. Change it with the rotation on the Deployment page, which updates every server first.",
     ),
     Setting(
         "sandbox_manager_url_allowed_hosts",

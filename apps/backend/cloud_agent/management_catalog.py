@@ -303,8 +303,12 @@ _HOST_ITEMS = (
         group="Security",
         method="workflow",
         sources=(Source("deployment_store", "tunnel containers", "key and known hosts files"),),
-        owner="workflow:tunnel_key",
-        description="Rotated by generating a new key on the server and switching after it is trusted.",
+        owner="workflow:tunnel_keys",
+        description=(
+            "New keys are authorized beside the old ones on the far end; each server drains, "
+            "switches, and its heartbeat over the new tunnel is the proof before the old keys "
+            "are revoked. A far end nothing here can edit asks an administrator to change it."
+        ),
         role=_HOST,
         env_names=(),
     ),
@@ -645,15 +649,35 @@ _WORKFLOW_ITEMS = (
         owner="workflow:key_rotation",
         env_names=("AGENT_SANDBOX_MANAGER_TOKEN_NEXT",),
         description=(
-            "Host signing key (two keys during the switch, then a confirmed retire) and "
-            "sandbox manager credential (two accepted during the switch). The two credential "
-            "encryption keys are not rotated here: their MAC-indexed data needs its own "
-            "re-keying design, so replacing them stays refused once set."
+            "Host signing key (every server renews its credential and earlier tokens drain "
+            "before the previous key is retired) and sandbox manager credential (every server, "
+            "through its agent or the SSH executor, accepts both during the switch)."
         ),
         setting_keys=(
             "control_signing_secret",
             "control_signing_secret_previous",
             "sandbox_manager_token",
+        ),
+    ),
+    CatalogItem(
+        id="security.credential_keys",
+        label="Credential encryption keys",
+        group="Security",
+        method="workflow",
+        sources=(Source("settings", "control plane", "saved keys"),),
+        owner="workflow:credential_key",
+        description=(
+            "The user credential key and the compute credential key. Every stored value is "
+            "re-encrypted, and environment fingerprints rebuilt, before the previous key is "
+            "dropped; both keep working throughout."
+        ),
+        apply_mode="next_operation",
+        setting_keys=(
+            "source_control_encryption_key",
+            "source_control_encryption_key_previous",
+            "compute_encryption_key",
+            "compute_encryption_key_previous",
+            "credential_index_uses_previous",
         ),
     ),
     CatalogItem(

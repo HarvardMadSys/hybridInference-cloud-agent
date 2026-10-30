@@ -168,7 +168,7 @@ VERIFIED_APPLY: dict[str, tuple[ApplyMode, str]] = {
     "session_signing_secret": ("next_operation", "Existing browser sessions are signed out."),
     "control_signing_secret": (
         "host_reenroll",
-        "Existing host and worker credentials stop working until hosts re-enroll.",
+        "A rotation renews every server's credential; a saved value invalidates them at once.",
     ),
     "gateway_grant_base_path": ("next_operation", "Grant clients read it per call."),
 }

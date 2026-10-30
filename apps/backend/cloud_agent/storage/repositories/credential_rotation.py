@@ -243,14 +243,14 @@ class PostgresCredentialRotation:
                 if digest is not None:
                     moves.setdefault((environment_id, digest), cipher.mac_with_current(material))
             for row in snapshots:
-                new = moves.get((row["environment_id"], row["setup_fingerprint"]))
-                if new is None:
+                target = moves.get((row["environment_id"], row["setup_fingerprint"]))
+                if target is None:
                     continue
                 if row["state"] in {"queued", "building"} and await conn.fetchval(
                     "SELECT 1 FROM agent_environment_snapshots WHERE environment_id = $1 "
                     "AND setup_fingerprint = $2 AND state IN ('queued', 'building')",
                     row["environment_id"],
-                    new,
+                    target,
                 ):
                     counts["skipped"] += 1
                     continue
@@ -258,7 +258,7 @@ class PostgresCredentialRotation:
                     "UPDATE agent_environment_snapshots SET setup_fingerprint = $2 "
                     "WHERE id = $1 AND setup_fingerprint = $3",
                     row["id"],
-                    new,
+                    target,
                     row["setup_fingerprint"],
                 )
                 counts["snapshots"] += 1

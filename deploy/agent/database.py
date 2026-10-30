@@ -180,25 +180,53 @@ def database_check(
     )
 
 
+def _connects(executor: Executor, dsn: str) -> bool:
+    try:
+        Database(executor, dsn).scalar("SELECT 1")
+    except OperationFailed:
+        return False
+    return True
+
+
+def _set_password(executor: Executor, current_dsn: str, new_dsn: str) -> None:
+    """Set the new password over the current connection, unless a retry finds it set already.
+
+    Once it succeeds the old password no longer works, so every later failure
+    has to say so: nothing can restore the previous connection.
+    """
+    password = pg_env(new_dsn)["PGPASSWORD"]
+    if len(password) < 16:
+        raise OperationFailed("the new password must be at least 16 characters")
+    if _connects(executor, new_dsn):
+        return  # an earlier attempt set it and stopped before the switch
+    verifier = scram_verifier(password)
+    Database(executor, current_dsn).sql(
+        "", stdin=f"ALTER ROLE CURRENT_USER WITH PASSWORD '{verifier}';\n".encode()
+    )
+    if not _connects(executor, new_dsn):
+        raise OperationFailed(
+            "the password was changed but the new connection does not work, and the old password "
+            "no longer works; fix forward with a working connection for the new password"
+        )
+
+
 def database_switch(
     executor: Executor, params: dict[str, Any], sealed: dict[str, Any], _record: str
 ) -> Outcome:
     """Write the new connection and restart; with a password rotation, set it first."""
     new = _new_dsn(executor, sealed)
-    rotated = False
-    if params.get("rotate_password") and params.get("leader"):
-        current = parse_env(executor.store.current_env()).get(_URL, "")
-        password = pg_env(new)["PGPASSWORD"]
-        if len(password) < 16:
-            raise OperationFailed("the new password must be at least 16 characters")
-        verifier = scram_verifier(password)
-        Database(executor, current).sql(
-            "", stdin=f"ALTER ROLE CURRENT_USER WITH PASSWORD '{verifier}';\n".encode()
-        )
-        rotated = True
-    Database(executor, new).scalar("SELECT 1")
+    current_env = parse_env(executor.store.current_env())
+    rotated = bool(params.get("rotate_password"))
+    if rotated and params.get("leader"):
+        _set_password(executor, current_env.get(_URL, ""), new)
+    elif not _connects(executor, new):
+        raise OperationFailed("the new connection does not reach the database")
+    changes = {_URL: new}
+    if rotated and "AGENT_POSTGRES_PASSWORD" in current_env:
+        # The bundled PostgreSQL's own record of its password stays true.
+        changes["AGENT_POSTGRES_PASSWORD"] = pg_env(new)["PGPASSWORD"]
     previous_rev = executor.store.adopt_existing()
-    rev = executor.store.stage_version(render_env(executor.store.current_env(), {_URL: new}))
+    rev = executor.store.stage_version(render_env(executor.store.current_env(), changes))
     executor.store.activate_version(rev)
     healthy, states = executor._restart_and_check(_CP_SERVICES)
     if healthy:

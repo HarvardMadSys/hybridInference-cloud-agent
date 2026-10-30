@@ -94,6 +94,9 @@ _HOST_ENV_WRITERS = (
     # deployment agents to write; the control plane reads none of them.
     "apps/backend/cloud_agent/application/key_rotation.py",
     "apps/backend/cloud_agent/application/database_workflows.py",
+    "apps/backend/cloud_agent/application/sandbox_token_rotation.py",
+    # The fixed script a rotation runs on a managed Host names the keys it may change.
+    "apps/backend/cloud_agent/providers/compute/host_apply_scripts.py",
 )
 
 #: An actual read: `os.environ.get(...)`, `os.environ[...]`, `getenv(...)` or
