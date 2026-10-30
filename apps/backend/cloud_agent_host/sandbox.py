@@ -117,7 +117,9 @@ HELPER_VERSION_LABEL_SUFFIX = ".version"
 #: Where `deploy/sandbox/install-runtimes.sh` puts every version it installs.
 #: Selecting one is a PATH prepend and nothing more: all five CLIs resolve
 #: their binary through PATH, so neither the adapters in ``runtimes.py`` nor
-#: the pi/opencode/kilo wrappers have to know a choice was made.
+#: the pi/opencode/kilo wrappers have to know a choice was made. Codex's launch
+#: then reads the npm install behind the ``codex`` PATH found, to start that
+#: version's native binary without its Node shim (``runtimes.codex``).
 RUNTIME_BIN_ROOT = "/opt/runtimes"
 
 # Must match `useradd --uid` in deploy/sandbox/Dockerfile.agent-sandbox. The

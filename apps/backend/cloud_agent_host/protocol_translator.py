@@ -92,6 +92,13 @@ CONNECT_TIMEOUT_S = 30.0
 #: How long the upstream may stay silent mid-answer (a long thinking pause).
 IDLE_TIMEOUT_S = 900.0
 _PR_SET_PDEATHSIG = 1
+#: What CPython ignores from its start. An ignored signal stays ignored across
+#: exec and ``sh`` cannot take one back, so without the defaults restored a CLI
+#: started from here would begin with both ignored, unlike a direct launch.
+#: Codex then passes SIGXFSZ on to every command it runs, where a write past
+#: ``ulimit -f`` fails instead of killing the writer. ``subprocess`` restores
+#: the same two for every command it starts.
+_PYTHON_IGNORED = (signal.SIGPIPE, signal.SIGXFSZ)
 
 #: How the service opens its one upstream connection. Production always uses
 #: ``HTTPSConnection`` with the system trust store; only in-process test code
@@ -497,6 +504,10 @@ def launch(argv: list[str]) -> NoReturn:
         name: value.replace(ORIGIN_PLACEHOLDER, origin).replace(TOKEN_PLACEHOLDER, binding.token)
         for name, value in env.items()
     }
+    # Only the CLI's side of the fork: the service is Python, where a closed
+    # client must stay an error rather than a SIGPIPE.
+    for number in _PYTHON_IGNORED:
+        signal.signal(number, signal.SIG_DFL)
     os.execvpe(cli[0], cli, cli_env)
 
 
