@@ -32,6 +32,13 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, Protocol, cast
 
+from cloud_agent_host.sandbox_archive_ranges import (
+    RANGED_DOWNLOAD_MIN_BYTES,
+    RangeMismatch,
+    RangeTruncated,
+    download_ranges,
+    empty_file,
+)
 from cloud_agent_shared.environment_snapshots import snapshot_object_key
 from cloud_agent_shared.sandbox_archive_settings import (
     DEFAULT_MULTIPART_PART_BYTES,
@@ -425,7 +432,24 @@ class SandboxArchiveS3Uploader:
         arguments: dict[str, Any] = {"Bucket": self.config.bucket, "Key": key}
         if version_id:
             arguments["VersionId"] = version_id
-        response = self._get_client().get_object(**arguments, **self._owner_arguments())
+        arguments.update(self._owner_arguments())
+        client = self._get_client()
+        fd = empty_file(output)
+        if fd is not None and size >= RANGED_DOWNLOAD_MIN_BYTES:
+            try:
+                download_ranges(
+                    partial(client.get_object, **arguments),
+                    fd=fd,
+                    size=size,
+                    sha256=digest,
+                    pinned=bool(version_id),
+                    check_deadline=partial(self._check_deadline, deadline),
+                    what=what,
+                )
+            except (RangeMismatch, RangeTruncated) as exc:
+                raise SandboxArchiveDownloadError(str(exc)) from None
+            return
+        response = client.get_object(**arguments)
         body = response.get("Body")
         if body is None or response.get("ContentLength") not in (None, size):
             raise SandboxArchiveDownloadError(f"{what} object has the wrong size")
