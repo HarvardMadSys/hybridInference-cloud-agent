@@ -1,7 +1,7 @@
 'use client';
 
 // The pieces every card of the Usage page is built from: the card, a metric
-// tile, a load error, and the range control the history and the context
+// tile, a load error, and the one range control the history and the context
 // insights share.
 
 import { useLocale } from '@/components/providers';
@@ -119,8 +119,17 @@ export function RangeSelect({
   );
 }
 
-/** What interval the numbers below cover, in UTC days, as the server resolved it. */
-export function RangeNote({ period }: { period: UsageRange | null | undefined }) {
+/**
+ * What interval the numbers below cover, in UTC days, as the server resolved
+ * it, and, for a chart, what one bar stands for.
+ */
+export function RangeNote({
+  period,
+  bars = true,
+}: {
+  period: UsageRange | null | undefined;
+  bars?: boolean;
+}) {
   const { t, locale } = useLocale();
   if (!period) return null;
   const span = rangeSpan(period, locale);
@@ -134,7 +143,7 @@ export function RangeNote({ period }: { period: UsageRange | null | undefined })
   }
   return (
     <p role="note" className="mt-2 text-xs text-muted">
-      {text} {t(BUCKET_NOTE[period.bucket])}
+      {bars ? `${text} ${t(BUCKET_NOTE[period.bucket])}` : text}
     </p>
   );
 }

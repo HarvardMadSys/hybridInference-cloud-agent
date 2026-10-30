@@ -31,7 +31,7 @@ import { ContextActivityHeatmap } from './ContextActivityHeatmap';
 import { Bar, ContextCompositionChart } from './ContextCompositionChart';
 import { ContextInsightsFilterBar, ContextProjectGroups } from './ContextInsightsFilters';
 import { NO_FILTERS, hasFilters, recordedSlices } from './contextInsightsPresent';
-import { Card, LoadError, RangeNote, RangeSelect, Tile, errorText } from './UsageParts';
+import { Card, LoadError, RangeNote, Tile, errorText } from './UsageParts';
 import { cachedShare, compactCount, formatCost, formatShare, relativeTime } from './usagePresent';
 
 /** How soon to ask again while runs are still being read. */
@@ -110,56 +110,57 @@ function useInsights(range: UsageRangePreset, sort: ContextSort, filters: Contex
   return { page, rows, cursor, error, loading, loadingMore, showMore, retry };
 }
 
-export function ContextInsights({
-  range,
-  onRangeChange,
-}: {
-  range: UsageRangePreset;
-  onRangeChange: (range: UsageRangePreset) => void;
-}) {
+/**
+ * The search, project and day filters. A day belongs to the range it was
+ * picked from; it is dropped while rendering a new range, so no read pairs
+ * the new range with the old day.
+ */
+function useFilters(range: UsageRangePreset) {
+  const [filters, setFilters] = useState<ContextInsightsFilters>(NO_FILTERS);
+  const [dayRange, setDayRange] = useState(range);
+  if (dayRange !== range) {
+    setDayRange(range);
+    if (filters.day) setFilters({ ...filters, day: null });
+  }
+  return [filters, setFilters] as const;
+}
+
+/** Reads the Usage page's one range; search, project, grouping and sort are its own. */
+export function ContextInsights({ range }: { range: UsageRangePreset }) {
   const { t } = useLocale();
   const [sort, setSort] = useState<ContextSort>('recent');
-  const [filters, setFilters] = useState<ContextInsightsFilters>(NO_FILTERS);
+  const [filters, setFilters] = useFilters(range);
   const [grouped, setGrouped] = useState(false);
-  // A day belongs to the range it was picked from.
-  useEffect(
-    () => setFilters((current) => (current.day ? { ...current, day: null } : current)),
-    [range],
-  );
   const { page, rows, cursor, error, loading, loadingMore, showMore, retry } = useInsights(
     range,
     sort,
     filters,
   );
-  const changeFilters = useCallback((next: ContextInsightsFilters) => setFilters(next), []);
   // Only the first page is kept as `page`; later pages add rows, not charts.
   const projects = page?.projects ?? [];
   const nowMs = page ? Date.parse(page.generated_at) : 0;
   const widest = Math.max(0, ...rows.map((row) => row.peak_prompt_tokens ?? 0));
   const controls = (
-    <div className="flex flex-wrap items-center gap-2">
-      <RangeSelect id="settings-context-range" value={range} onChange={onRangeChange} />
-      <Select
-        id="settings-context-sort"
-        value={sort}
-        onValueChange={setSort}
-        aria-label={t('contextInsights.sort')}
-        className="ui-input min-h-9 w-44 text-sm [@media(pointer:coarse)]:min-h-11"
-        options={CONTEXT_SORTS.map((value) => ({ value, label: t(SORT_LABEL[value]) }))}
-      />
-    </div>
+    <Select
+      id="settings-context-sort"
+      value={sort}
+      onValueChange={setSort}
+      aria-label={t('contextInsights.sort')}
+      className="ui-input min-h-9 w-44 text-sm [@media(pointer:coarse)]:min-h-11"
+      options={CONTEXT_SORTS.map((value) => ({ value, label: t(SORT_LABEL[value]) }))}
+    />
   );
   return (
     <Card id="settings-context-insights" title={t('contextInsights.title')} action={controls}>
       <p className="mt-1 text-sm text-muted">{t('contextInsights.description')}</p>
-      <RangeNote period={page?.period} />
+      <RangeNote period={page?.period} bars={false} />
       {error ? <LoadError message={error} onRetry={retry} /> : null}
       <ContextInsightsFilterBar
         filters={filters}
         projects={projects}
         grouped={grouped}
         matching={page && hasFilters(filters) ? page.summary.conversations : null}
-        onChange={changeFilters}
+        onChange={setFilters}
         onGroupedChange={setGrouped}
       />
       <InsightsTiles page={page} loading={loading} />

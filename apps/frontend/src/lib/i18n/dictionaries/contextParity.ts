@@ -131,21 +131,11 @@ export const contextParityEn = {
   'contextInsights.composition': 'Composition',
   'contextInsights.composition.recorded': 'Recorded content (estimate)',
   'contextInsights.composition.recordedNote':
-    'Every stored item counted once: turn prompts, what the platform added, answers, reasoning, tool calls and results, compaction summaries and text the CLI injected. Estimated from characters. CLI system prompts and tool definitions are never stored, so no category stands for them.',
+    'Every stored item counted once: turn prompts, what the platform added, answers, reasoning, tool calls and results, compaction summaries and text the CLI injected. Estimated from characters. CLI system prompts and tool definitions are never stored, so no category stands for them. This is not billed usage: the tokens and cache hit providers reported are in History above.',
   'contextInsights.composition.total': '≈{tokens} tokens recorded',
   'contextInsights.composition.coverage': '{profiled} of {turns} turns read',
   'contextInsights.composition.truncated':
     '{count} turns have clipped records and are undercounted',
-  'contextInsights.composition.provider': 'Request input the providers reported (exact)',
-  'contextInsights.composition.providerNote':
-    'Each model request’s input as its provider reported it, summed over {count} requests. Text the conversation kept is counted again by every request that carried it; cache reads and writes are parts of the input, not additions.',
-  'contextInsights.composition.uncached': 'Not from cache',
-  'contextInsights.composition.cacheRead': 'Cache read',
-  'contextInsights.composition.cacheWrite': 'Cache write',
-  'contextInsights.composition.input': 'Input {tokens}',
-  'contextInsights.composition.output': 'Output {tokens}',
-  'contextInsights.composition.outputUnreported': '{count} requests reported no output',
-  'contextInsights.composition.subagents': 'Subagents: {count} requests, input {tokens}',
   'contextInsights.composition.none': 'Nothing recorded yet for these conversations.',
   'contextInsights.row.recorded': '≈{tokens} recorded',
 } as const;
@@ -269,20 +259,10 @@ export const contextParityZhCN: Record<keyof typeof contextParityEn, string> = {
   'contextInsights.composition': '构成',
   'contextInsights.composition.recorded': '记录的内容（估算）',
   'contextInsights.composition.recordedNote':
-    '存下的每一项内容只算一次：每轮提问、平台加入的内容、回答、推理、工具调用和结果、压缩摘要，以及 CLI 注入的文字。按字符数估算。CLI 的系统提示词和工具定义从来不会存下，所以没有对应的类别。',
+    '存下的每一项内容只算一次：每轮提问、平台加入的内容、回答、推理、工具调用和结果、压缩摘要，以及 CLI 注入的文字。按字符数估算。CLI 的系统提示词和工具定义从来不会存下，所以没有对应的类别。这不是计费用量：服务商报告的 token 和缓存命中见上面的历史用量。',
   'contextInsights.composition.total': '共记录约 {tokens} token',
   'contextInsights.composition.coverage': '{turns} 轮中已读取 {profiled} 轮',
   'contextInsights.composition.truncated': '{count} 轮的记录被截短，估算偏少',
-  'contextInsights.composition.provider': '服务商报告的请求输入（精确值）',
-  'contextInsights.composition.providerNote':
-    '每次模型请求的输入以服务商报告的为准，这里是 {count} 次请求的合计。会话保留下来的内容，每次请求都会再带一遍，所以会被重复计入；缓存读取和写入是输入的一部分，不是另加的。',
-  'contextInsights.composition.uncached': '未走缓存',
-  'contextInsights.composition.cacheRead': '缓存读取',
-  'contextInsights.composition.cacheWrite': '缓存写入',
-  'contextInsights.composition.input': '输入 {tokens}',
-  'contextInsights.composition.output': '输出 {tokens}',
-  'contextInsights.composition.outputUnreported': '{count} 次请求没有报告输出',
-  'contextInsights.composition.subagents': '子 Agent：{count} 次请求，输入 {tokens}',
   'contextInsights.composition.none': '这些会话还没有任何记录。',
   'contextInsights.row.recorded': '记录约 {tokens}',
 };

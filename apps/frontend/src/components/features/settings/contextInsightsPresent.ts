@@ -127,41 +127,16 @@ export function orderedProjects(projects: ContextProject[]): ContextProject[] {
 }
 
 export interface CompositionSlice {
-  key: RecordedCategory | 'uncached' | 'cache_read' | 'cache_write';
+  key: RecordedCategory;
   tokens: number;
   share: number;
 }
 
-function slices<K extends CompositionSlice['key']>(
-  parts: { key: K; tokens: number }[],
-): CompositionSlice[] {
-  const kept = parts.filter((part) => part.tokens > 0);
-  const total = kept.reduce((sum, part) => sum + part.tokens, 0);
-  return kept.map((part) => ({ ...part, share: total > 0 ? part.tokens / total : 0 }));
-}
-
 /** The recorded categories as shares of what was recorded. */
 export function recordedSlices(composition: ContextComposition): CompositionSlice[] {
-  return slices(composition.recorded.categories);
-}
-
-/**
- * The reported input as its billing split. Cache reads and writes are parts
- * of the input, so the rest is what did not come from the cache; nothing is
- * shown when the reported parts do not add up.
- */
-export function providerSlices(composition: ContextComposition): CompositionSlice[] {
-  const {
-    prompt_tokens: input,
-    cache_read_tokens: read,
-    cache_write_tokens: write,
-  } = composition.provider;
-  if (read + write > input) return [];
-  return slices([
-    { key: 'uncached' as const, tokens: input - read - write },
-    { key: 'cache_read' as const, tokens: read },
-    { key: 'cache_write' as const, tokens: write },
-  ]);
+  const kept = composition.recorded.categories.filter((part) => part.tokens > 0);
+  const total = kept.reduce((sum, part) => sum + part.tokens, 0);
+  return kept.map((part) => ({ ...part, share: total > 0 ? part.tokens / total : 0 }));
 }
 
 /** Whether any filter narrows the list. */

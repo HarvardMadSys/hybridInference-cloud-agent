@@ -165,7 +165,7 @@ function page(overrides: Partial<ContextInsightsPage> = {}): ContextInsightsPage
 function show(range: '7d' | 'all' = '7d') {
   return render(
     <LocaleProvider>
-      <ContextInsights range={range} onRangeChange={vi.fn()} />
+      <ContextInsights range={range} />
     </LocaleProvider>,
   );
 }
@@ -265,23 +265,35 @@ it('tells each day of the heatmap and lists the conversations of a chosen day', 
   await waitFor(() => expect(lastFilters()).toEqual(expect.objectContaining({ day: null })));
 });
 
-it('keeps recorded content and reported request input apart', async () => {
+it('analyses recorded content only, not the reported input the history already sums', async () => {
   show();
   const chart = await screen.findByRole('region', { name: 'Composition' });
   expect(within(chart).getByText('Recorded content (estimate)')).toBeInTheDocument();
   expect(within(chart).getByText('≈3,000 tokens recorded')).toBeInTheDocument();
+  expect(within(chart).getByText('Tool results')).toBeInTheDocument();
+  expect(within(chart).getByText('≈2,400 · 80%')).toBeInTheDocument();
   expect(
     within(chart).getByText(
       '3 of 4 turns read · 1 turns have clipped records and are undercounted',
     ),
   ).toBeInTheDocument();
-  expect(
-    within(chart).getByText('Request input the providers reported (exact)'),
-  ).toBeInTheDocument();
-  expect(within(chart).getByText('Input 60K · Output 800')).toBeInTheDocument();
-  expect(within(chart).getByText('Not from cache')).toBeInTheDocument();
-  expect(within(chart).getByText('2 requests reported no output')).toBeInTheDocument();
-  // No category is a difference between the two.
+  // The estimate says it is not billed usage and where the reported tokens are.
+  expect(within(chart).getByText(/This is not billed usage/)).toHaveTextContent(
+    'the tokens and cache hit providers reported are in History above',
+  );
+  // The page carries the provider's 60K input, 40K cache read and 800 output,
+  // but no aggregate of them is drawn here: one bar, the recorded one.
+  expect(within(chart).getAllByRole('img')).toHaveLength(1);
+  for (const text of [
+    /providers reported \(exact\)/,
+    /^Input 60K/,
+    'Not from cache',
+    'Cache read',
+  ]) {
+    expect(screen.queryByText(text)).not.toBeInTheDocument();
+  }
+  expect(screen.queryByText(/reported no output/)).not.toBeInTheDocument();
+  // No category is a difference between the estimate and the reported input.
   expect(within(chart).queryByText(/System prompt/)).not.toBeInTheDocument();
   // Each conversation carries its own recorded content.
   const item = screen.getByRole('link', { name: 'Conversation a' }).closest('li')!;
@@ -294,5 +306,6 @@ it('reads in Chinese', async () => {
   expect(await screen.findByRole('searchbox', { name: '搜索会话' })).toBeInTheDocument();
   expect(screen.getByText('每日活动')).toBeInTheDocument();
   expect(screen.getByText('记录的内容（估算）')).toBeInTheDocument();
-  expect(screen.getByText('服务商报告的请求输入（精确值）')).toBeInTheDocument();
+  expect(screen.getByText(/这不是计费用量/)).toBeInTheDocument();
+  expect(screen.queryByText('服务商报告的请求输入（精确值）')).not.toBeInTheDocument();
 });

@@ -118,13 +118,11 @@ function page(overrides: Partial<ContextInsightsPage> = {}): ContextInsightsPage
 }
 
 function show(range: 'today' | '7d' | '30d' | 'all' = 'all') {
-  const onRangeChange = vi.fn();
-  const view = render(
+  return render(
     <LocaleProvider>
-      <ContextInsights range={range} onRangeChange={onRangeChange} />
+      <ContextInsights range={range} />
     </LocaleProvider>,
   );
-  return { onRangeChange, ...view };
 }
 
 beforeEach(() => {
@@ -251,11 +249,20 @@ describe('ContextInsights', () => {
     );
   });
 
-  it('changes the shared range from its own control', async () => {
-    const { onRangeChange } = show('7d');
-    fireEvent.click(await screen.findByRole('combobox', { name: 'Range' }));
-    fireEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name: 'Today' }));
-    expect(onRangeChange).toHaveBeenCalledWith('today');
+  it('reads the range it is given and has no range control of its own', async () => {
+    const view = show('7d');
+    await screen.findByRole('link', { name: 'Conversation a' });
+    expect(screen.queryByRole('combobox', { name: 'Range' })).not.toBeInTheDocument();
+    view.rerender(
+      <LocaleProvider>
+        <ContextInsights range="today" />
+      </LocaleProvider>,
+    );
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range: 'today', sort: 'recent' }),
+      ),
+    );
   });
 
   it('is empty in words when no conversation has turns in the range', async () => {

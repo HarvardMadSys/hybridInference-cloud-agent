@@ -13,10 +13,12 @@ import {
   getOwnerResources,
   getOwnerTokens,
   type ContextInsightsPage,
+  type ConversationContext,
   type OwnerContainer,
   type OwnerContainerList,
   type OwnerResourceHistory,
   type OwnerTokenUsage,
+  type UsageRange,
 } from '@/lib/api/ownerUsage';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 
@@ -392,30 +394,9 @@ describe('UsageSettings', () => {
     expect(await tile('Tokens')).toBe('150K');
   });
 
-  it('reads both histories and the insights again for another range', async () => {
-    section();
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
-    expect(getOwnerTokens).toHaveBeenLastCalledWith('7d', expect.anything());
-    const [history] = screen.getAllByRole('combobox', { name: 'Range' });
-    fireEvent.click(history);
-    fireEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name: 'All time' }));
-    await waitFor(() => expect(getOwnerTokens).toHaveBeenLastCalledWith('all', expect.anything()));
-    expect(getOwnerResources).toHaveBeenLastCalledWith('all', expect.anything());
-    await waitFor(() =>
-      expect(getContextInsights).toHaveBeenLastCalledWith(
-        expect.objectContaining({ range: 'all', sort: 'recent' }),
-      ),
-    );
-    // Both cards show the one shared range.
-    for (const control of screen.getAllByRole('combobox', { name: 'Range' })) {
-      expect(control).toHaveTextContent('All time');
-    }
-  });
-
   it('offers exactly today, 7 days, 30 days and all time', async () => {
     section();
-    const [history] = await screen.findAllByRole('combobox', { name: 'Range' });
-    fireEvent.click(history);
+    fireEvent.click(await screen.findByRole('combobox', { name: 'Range' }));
     const options = within(screen.getByRole('listbox')).getAllByRole('option');
     expect(options.map((option) => option.textContent)).toEqual([
       'Today',
@@ -490,5 +471,294 @@ describe('UsageSettings', () => {
     expect(
       await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
     ).toBeInTheDocument();
+  });
+});
+
+function conversation(overrides: Partial<ConversationContext> = {}): ConversationContext {
+  return {
+    thread_id: 'athr_ctx',
+    title: 'Long refactor',
+    repo: 'example-org/app',
+    archived: false,
+    latest_job_id: 'job-ctx',
+    turns: 4,
+    first_turn_at: '2026-10-14T00:00:00Z',
+    last_turn_at: '2026-10-15T09:00:00Z',
+    runtimes: ['codex'],
+    models: ['glm-5.1'],
+    attempts: 4,
+    attempts_profiled: 4,
+    main_requests: 12,
+    subagent_requests: 0,
+    peak_prompt_tokens: 90_000,
+    latest_prompt_tokens: 30_000,
+    latest_observed_at: '2026-10-15T09:00:00Z',
+    context_window: 200_000,
+    compactions: 1,
+    usage: aggregate({
+      totals: {
+        calls: 12,
+        tokens_in: 80_000,
+        tokens_out: 4_000,
+        cache_read: 60_000,
+        cache_write: 0,
+        reasoning: null,
+        spent_usd: '2.5',
+      },
+    }),
+    composition: null,
+    ...overrides,
+  };
+}
+
+/** A week of insights with one conversation, a busy day and both compositions. */
+function richInsights(period: UsageRange = WEEK): ContextInsightsPage {
+  return insights({
+    period,
+    summary: {
+      ...insights().summary,
+      conversations: 1,
+      conversations_observed: 1,
+      turns: 4,
+      main_requests: 12,
+      compactions: 1,
+      peak_prompt_tokens: 90_000,
+      peak_thread_id: 'athr_ctx',
+    },
+    conversations: [conversation()],
+    activity: [
+      {
+        day: '2026-10-14',
+        turns: 4,
+        conversations: 1,
+        main_requests: 12,
+        compactions: 1,
+        peak_prompt_tokens: 90_000,
+      },
+    ],
+    composition: {
+      recorded: {
+        basis: 'chars_cjk_v1',
+        categories: [
+          { key: 'turn_prompts', tokens: 1_000 },
+          { key: 'tool_results', tokens: 3_000 },
+        ],
+        total_tokens: 4_000,
+        turns: 4,
+        turns_profiled: 4,
+        turns_truncated: 0,
+      },
+      provider: {
+        requests: 12,
+        prompt_tokens: 80_000,
+        cache_read_tokens: 60_000,
+        cache_write_tokens: 2_000,
+        output_tokens: 4_000,
+        output_unreported: 0,
+        subagent_requests: 0,
+        subagent_prompt_tokens: 0,
+        subagent_output_tokens: 0,
+      },
+    },
+  });
+}
+
+async function chooseRange(name: string) {
+  fireEvent.click(screen.getByRole('combobox', { name: 'Range' }));
+  fireEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name }));
+}
+
+describe('UsageSettings: one range for History and Context insights', () => {
+  beforeEach(() => {
+    vi.mocked(getContextInsights).mockImplementation(async ({ range }) =>
+      richInsights({ ...WEEK, preset: range }),
+    );
+  });
+
+  it('has exactly one range control, above both sections and below the live containers', async () => {
+    section();
+    await screen.findByRole('link', { name: 'Long refactor' });
+    const controls = screen.getAllByRole('combobox', { name: 'Range' });
+    expect(controls).toHaveLength(1);
+    const [control] = controls;
+    expect(control).toHaveTextContent('Last 7 days');
+    const group = screen.getByRole('group', { name: 'Range for History and Context insights' });
+    expect(group).toContainElement(control);
+    expect(group).toHaveAccessibleDescription(
+      'Containers above are live and not limited to this range.',
+    );
+    const containers = screen.getByRole('region', { name: 'Containers' });
+    const history = screen.getByRole('region', { name: 'History' });
+    const insightsCard = screen.getByRole('region', { name: 'Context insights' });
+    for (const card of [containers, history, insightsCard]) {
+      expect(card).not.toContainElement(control);
+    }
+    // Containers, then the control, then the two sections it applies to.
+    const follows = (a: Element, b: Element) =>
+      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(containers, group)).toBe(true);
+    expect(follows(group, history)).toBe(true);
+    expect(follows(history, insightsCard)).toBe(true);
+    // Sorting stays the insights' own.
+    expect(within(insightsCard).getByRole('combobox', { name: 'Sort by' })).toBeInTheDocument();
+    // The live containers are read without any range.
+    expect(getOwnerContainers).toHaveBeenCalledWith({ limit: 50 });
+  });
+
+  it.each([
+    ['Today', 'today'],
+    ['Last 30 days', '30d'],
+    ['All time', 'all'],
+  ] as const)('reads History and Context insights for %s together', async (name, range) => {
+    section();
+    await screen.findByRole('link', { name: 'Long refactor' });
+    expect(getOwnerTokens).toHaveBeenLastCalledWith('7d', expect.anything());
+    expect(getOwnerResources).toHaveBeenLastCalledWith('7d', expect.anything());
+    expect(getContextInsights).toHaveBeenLastCalledWith(expect.objectContaining({ range: '7d' }));
+    const containerReads = vi.mocked(getOwnerContainers).mock.calls.length;
+
+    await chooseRange(name);
+    await waitFor(() => expect(getOwnerTokens).toHaveBeenLastCalledWith(range, expect.anything()));
+    expect(getOwnerResources).toHaveBeenLastCalledWith(range, expect.anything());
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range, sort: 'recent' }),
+      ),
+    );
+    expect(screen.getByRole('combobox', { name: 'Range' })).toHaveTextContent(name);
+    // The live containers are not read again for a range.
+    expect(getOwnerContainers).toHaveBeenCalledTimes(containerReads);
+  });
+
+  it('drops a day picked from the heatmap when the range changes, without a stale read', async () => {
+    section();
+    const day = await screen.findByRole('button', {
+      name: '2026-10-14: 4 turns in 1 conversations, 12 requests, 1 compactions',
+    });
+    fireEvent.click(day);
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          range: '7d',
+          filters: expect.objectContaining({ day: '2026-10-14' }),
+        }),
+      ),
+    );
+    // A day narrows the insights only; History is not read for it.
+    expect(getOwnerTokens).toHaveBeenCalledTimes(1);
+
+    await chooseRange('Last 30 days');
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range: '30d', filters: expect.objectContaining({ day: null }) }),
+      ),
+    );
+    // No read ever paired the new range with the old day.
+    const thirty = vi
+      .mocked(getContextInsights)
+      .mock.calls.filter(([options]) => options.range === '30d');
+    expect(thirty.length).toBeGreaterThan(0);
+    for (const [options] of thirty) expect(options.filters?.day).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Show every day' })).not.toBeInTheDocument();
+    const again = await screen.findByRole('button', {
+      name: '2026-10-14: 4 turns in 1 conversations, 12 requests, 1 compactions',
+    });
+    expect(again).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('keeps search and sorting to the insights and out of the History reads', async () => {
+    section();
+    await screen.findByRole('link', { name: 'Long refactor' });
+    const historyReads = vi.mocked(getOwnerTokens).mock.calls.length;
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search conversations' }), {
+      target: { value: 'refactor' },
+    });
+    await waitFor(
+      () =>
+        expect(getContextInsights).toHaveBeenLastCalledWith(
+          expect.objectContaining({ filters: expect.objectContaining({ q: 'refactor' }) }),
+        ),
+      { timeout: 2_000 },
+    );
+    fireEvent.click(screen.getByRole('combobox', { name: 'Sort by' }));
+    fireEvent.click(
+      within(screen.getByRole('listbox')).getByRole('option', { name: 'Largest context' }),
+    );
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: 'peak', range: '7d' }),
+      ),
+    );
+    expect(getOwnerTokens).toHaveBeenCalledTimes(historyReads);
+    expect(getOwnerResources).toHaveBeenCalledTimes(historyReads);
+    expect(screen.getByRole('combobox', { name: 'Range' })).toHaveTextContent('Last 7 days');
+  });
+
+  it('keeps the whole History beside a context-only Context insights', async () => {
+    const usage = tokens();
+    usage.summary.totals = { ...usage.summary.totals!, cache_read: 36_000, reasoning: 5_000 };
+    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
+    section();
+    const history = await screen.findByRole('region', { name: 'History' });
+    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    // The global consumption metrics are the History's.
+    expect(await tile('Tokens')).toBe('150K');
+    expect(await tile('Cache hit rate')).toBe('30%');
+    expect(await tile('Reasoning tokens')).toBe('5,000');
+    expect(await tile('Container running time')).toBe('10 h');
+    expect(await tile('CPU')).toBe('2 core-hours');
+    expect(await tile('Memory')).toBe('3 GB-hours');
+    expect(
+      within(history).getByText(
+        'CPU and memory cover 4 h of 10 h running time; measurement began recently.',
+      ),
+    ).toBeInTheDocument();
+    // The daily trend still switches metric.
+    const metric = within(history).getByRole('group', { name: 'Chart' });
+    const running = within(metric).getByRole('button', { name: 'Running hours' });
+    fireEvent.click(running);
+    expect(running).toHaveAttribute('aria-pressed', 'true');
+    expect(within(history).getByRole('table', { name: 'By model' })).toBeInTheDocument();
+
+    const insightsCard = screen.getByRole('region', { name: 'Context insights' });
+    // The context analysis: totals, heatmap, recorded composition, one bar.
+    expect(within(insightsCard).getByText('Compactions', { selector: 'dt' })).toBeInTheDocument();
+    expect(
+      within(insightsCard).getByText('Largest request', { selector: 'dt' }),
+    ).toBeInTheDocument();
+    const composition = within(insightsCard).getByRole('region', { name: 'Composition' });
+    expect(within(composition).getByText('≈4,000 tokens recorded')).toBeInTheDocument();
+    expect(within(composition).getAllByRole('img')).toHaveLength(1);
+    // No second, provider-reported overview of input, output or cache.
+    for (const text of [
+      /providers reported \(exact\)/,
+      /^Input 80K/,
+      'Not from cache',
+      'Cache read',
+      'Cache write',
+      'Cache hit rate',
+      'Model cost',
+    ]) {
+      expect(within(insightsCard).queryByText(text)).not.toBeInTheDocument();
+    }
+    // Each conversation keeps its own cost and cache hit, and opens its Context view.
+    const link = within(insightsCard).getByRole('link', { name: 'Long refactor' });
+    expect(link).toHaveAttribute('href', '/job-ctx?view=context');
+    const item = link.closest('li')!;
+    expect(within(item).getByText('$2.50')).toBeInTheDocument();
+    expect(within(item).getByText('75%')).toBeInTheDocument();
+    expect(within(item).getByText('90K · 30K')).toBeInTheDocument();
+  });
+
+  it('names the shared range in Chinese', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    section();
+    await screen.findByRole('link', { name: 'Long refactor' });
+    const control = screen.getByRole('combobox', { name: '时间范围' });
+    expect(control).toHaveTextContent('最近 7 天');
+    expect(screen.getByRole('group', { name: '历史用量和上下文洞察的时间范围' })).toContainElement(
+      control,
+    );
+    expect(screen.getAllByRole('combobox', { name: '时间范围' })).toHaveLength(1);
   });
 });

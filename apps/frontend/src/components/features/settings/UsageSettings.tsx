@@ -13,7 +13,7 @@ import {
 } from '@/lib/api/ownerUsage';
 import { ContextInsights } from './ContextInsights';
 import { UsageHistory } from './UsageHistory';
-import { Card, LoadError, Tile, errorText } from './UsageParts';
+import { Card, LoadError, RangeSelect, Tile, errorText } from './UsageParts';
 import { STATE_ORDER, decimal, formatMemory, relativeTime } from './usagePresent';
 
 /** Hosts sample every 15 seconds; reading faster shows nothing new. */
@@ -53,16 +53,47 @@ const STATE_COUNT: Record<ContainerState, TranslationKey> = {
 
 /**
  * Your containers now, what your work used over a range, and how large each
- * conversation's context got over the same range.
+ * conversation's context got over the same range. The range is chosen once,
+ * between the live containers and the two sections it applies to.
  */
 export function UsageSettings() {
   const [range, setRange] = useState<UsageRangePreset>('7d');
   return (
     <>
       <Containers />
-      <UsageHistory range={range} onRangeChange={setRange} />
-      <ContextInsights range={range} onRangeChange={setRange} />
+      <RangeBar range={range} onChange={setRange} />
+      <UsageHistory range={range} />
+      <ContextInsights range={range} />
     </>
+  );
+}
+
+/** The one range control, saying which sections it applies to and which it does not. */
+function RangeBar({
+  range,
+  onChange,
+}: {
+  range: UsageRangePreset;
+  onChange: (range: UsageRangePreset) => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <div
+      role="group"
+      aria-labelledby="settings-usage-range-scope"
+      aria-describedby="settings-usage-range-note"
+      className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4"
+    >
+      <div className="min-w-0">
+        <p id="settings-usage-range-scope" className="text-sm font-medium text-foreground">
+          {t('usage.range.scope')}
+        </p>
+        <p id="settings-usage-range-note" className="text-xs text-muted">
+          {t('usage.range.scopeNote')}
+        </p>
+      </div>
+      <RangeSelect id="settings-usage-range" value={range} onChange={onChange} />
+    </div>
   );
 }
 

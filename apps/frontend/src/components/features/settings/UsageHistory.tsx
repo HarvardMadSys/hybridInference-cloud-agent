@@ -13,7 +13,7 @@ import {
 } from '@/lib/api/ownerUsage';
 import type { AdminUsageAggregate } from '@/lib/api/adminUsage';
 import { UsageChart } from './UsageChart';
-import { Card, LoadError, RangeNote, RangeSelect, Tile, errorText } from './UsageParts';
+import { Card, LoadError, RangeNote, Tile, errorText } from './UsageParts';
 import {
   cachedShare,
   chartDays,
@@ -74,24 +74,14 @@ function useHistory(range: UsageRangePreset, attempt: number) {
 }
 
 /** The range's model usage and container use, with the chart and the model table. */
-export function UsageHistory({
-  range,
-  onRangeChange,
-}: {
-  range: UsageRangePreset;
-  onRangeChange: (range: UsageRangePreset) => void;
-}) {
+export function UsageHistory({ range }: { range: UsageRangePreset }) {
   const { t } = useLocale();
   const [attempt, setAttempt] = useState(0);
   const { tokens, resources, tokenError, resourceError, loading } = useHistory(range, attempt);
   const retry = () => setAttempt((value) => value + 1);
   const period = tokens?.period ?? resources?.period ?? null;
   return (
-    <Card
-      id="settings-usage-history"
-      title={t('settings.usage.history')}
-      action={<RangeSelect id="settings-usage-range" value={range} onChange={onRangeChange} />}
-    >
+    <Card id="settings-usage-history" title={t('settings.usage.history')}>
       <RangeNote period={period} />
       {tokenError ? <LoadError message={tokenError} onRetry={retry} /> : null}
       {resourceError ? <LoadError message={resourceError} onRetry={retry} /> : null}

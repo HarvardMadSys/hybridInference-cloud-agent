@@ -8,7 +8,6 @@ import {
   heatmapWindow,
   projectChoice,
   projectFilters,
-  providerSlices,
   recordedSlices,
 } from './contextInsightsPresent';
 
@@ -121,24 +120,10 @@ describe('composition slices', () => {
     },
   };
 
-  it('keeps each bar to its own total', () => {
+  it('shares the recorded categories of what was recorded, never of reported input', () => {
     expect(recordedSlices(composition).map((slice) => [slice.key, slice.share])).toEqual([
       ['turn_prompts', 0.25],
       ['tool_results', 0.75],
     ]);
-    expect(providerSlices(composition).map((slice) => [slice.key, slice.tokens])).toEqual([
-      ['uncached', 2_000],
-      ['cache_read', 7_000],
-      ['cache_write', 1_000],
-    ]);
-  });
-
-  it('draws no billing split when the reported parts do not add up', () => {
-    expect(
-      providerSlices({
-        ...composition,
-        provider: { ...composition.provider, cache_read_tokens: 20_000 },
-      }),
-    ).toEqual([]);
   });
 });
