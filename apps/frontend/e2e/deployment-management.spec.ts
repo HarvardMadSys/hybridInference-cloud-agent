@@ -323,6 +323,7 @@ test('a database move seals the target in this browser and shows maintenance', a
   await expect(page.getByText('Changes are refused while the database moves.')).toBeVisible();
   await expect(page.getByText(/Last step reported: Old database fenced/)).toBeVisible();
   await expect(page.getByText(/Maintenance: the database is moving/)).toBeVisible();
+  await page.getByLabel('Move the data to an empty database').check();
   await expect(page.getByRole('button', { name: 'Move to this database' })).toBeDisabled();
   await shot(page, 'database-move-maintenance', 'Operations');
   await page

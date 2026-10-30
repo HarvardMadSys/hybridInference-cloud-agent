@@ -4,8 +4,16 @@ import {
   type DeploymentWorkflow,
   type FarEndRequest,
   confirmFarEnd,
+  retryWorkflow,
 } from '@/lib/api/adminManagement';
-import { TUNNEL_PHASES, WORKFLOWS, WORKFLOW_STATES, isActive, stepStates } from './workflowSteps';
+import {
+  RETRYABLE,
+  TUNNEL_PHASES,
+  WORKFLOWS,
+  WORKFLOW_STATES,
+  isActive,
+  stepStates,
+} from './workflowSteps';
 
 type Run = (work: () => Promise<string | void>) => Promise<void>;
 
@@ -111,6 +119,17 @@ export function WorkflowProgress({ workflow, run }: { workflow: DeploymentWorkfl
       {workflow.detail && <p className="mt-1 text-xs">{workflow.detail}</p>}
       {attention && isActive(workflow) && (
         <FarEndQuestion workflowId={workflow.workflow_id} request={attention} run={run} />
+      )}
+      {workflow.state === 'failed' && RETRYABLE.has(workflow.kind) && (
+        <button
+          type="button"
+          className={`${BUTTON} mt-2`}
+          onClick={() => {
+            void run(() => retryWorkflow(workflow.workflow_id).then(() => undefined));
+          }}
+        >
+          Continue from this step
+        </button>
       )}
     </li>
   );

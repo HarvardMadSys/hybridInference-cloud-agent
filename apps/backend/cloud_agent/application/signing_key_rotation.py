@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cloud_agent.application.key_rotation import _label, _open_at_rest, _verify
-from cloud_agent.application.workflows import WorkflowRefused, save
+from cloud_agent.application.workflows import save
 
 
 async def _stage(storage: Any, workflow: dict[str, Any]) -> bool:
@@ -174,21 +174,4 @@ async def advance_control_signing(storage: Any, workflow: dict[str, Any]) -> Non
             return
 
 
-async def retire_control_signing(storage: Any, workflow_id: str) -> dict[str, Any]:
-    """Re-check a signing key rotation now; it retires the previous key only on evidence.
-
-    Kept for the earlier route, which no longer skips the hosts' renewal or
-    the tokens still signed with the previous key.
-    """
-    workflow = await storage.deployments.get_workflow(workflow_id)
-    if workflow is None or workflow["kind"] != "control_signing":
-        raise WorkflowRefused("this is not a signing key rotation")
-    await advance_control_signing(storage, workflow)
-    if workflow["state"] != "succeeded" and workflow["step"] != "retire":
-        raise WorkflowRefused(
-            "the previous key is retired only once nothing needs it: " + workflow["detail"]
-        )
-    return workflow
-
-
-__all__ = ["advance_control_signing", "host_lag", "retire_control_signing"]
+__all__ = ["advance_control_signing", "host_lag"]

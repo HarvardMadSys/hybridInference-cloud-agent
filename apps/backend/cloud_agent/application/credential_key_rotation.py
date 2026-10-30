@@ -16,9 +16,9 @@
                   snapshots move from the old key's digest to the new one's.
 ``retire``        the previous key is cleared; adopted by everyone.
 
-Before ``reencrypt`` starts, going back is writing the old key back (nothing is
-encrypted with the new one that the old one cannot be restored over by the
-same rotation in reverse); once it starts, the workflow only goes forward.
+The workflow only goes forward: once the new key encrypts, values exist that the
+old key alone cannot open. A step that fails stops with the previous key kept,
+and ``retry_workflow`` continues from it.
 """
 
 from __future__ import annotations

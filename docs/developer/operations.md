@@ -169,8 +169,10 @@ appear on the page with hidden values. See [the environment inventory](../../ENV
 **Admin → Deployment** rotates every key the deployment holds. Each rotation
 keeps the old material working until every process and server has moved, and
 says which ones it is waiting for; new values are generated in the browser and
-are not shown, except `ADMIN_TOKEN`, once. Every step can be retried, and a
-rotation that stops says what state it left.
+are not shown, except `ADMIN_TOKEN`, once. A rotation that stops says what state
+it left and keeps the old material; continue it from the same page, from the
+step that stopped. An `ADMIN_TOKEN` rotation and a database workflow are started
+again instead.
 
 | Material | What happens | What it waits for |
 |---|---|---|

@@ -102,6 +102,15 @@ export const WORKFLOW_STATES: Record<DeploymentWorkflow['state'], string> = {
   cancelled: 'Cancelled',
 };
 
+/** Rotations that continue from the step that stopped; the others start again. */
+export const RETRYABLE = new Set([
+  'root_key',
+  'credential_key',
+  'control_signing',
+  'sandbox_manager_token',
+  'tunnel_keys',
+]);
+
 export type StepState = 'done' | 'current' | 'pending';
 
 /** Where each step stands. A finished workflow's steps are all done; a stopped one's current. */

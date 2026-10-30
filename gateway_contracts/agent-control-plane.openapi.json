@@ -26241,10 +26241,10 @@
         "summary": "Confirm Tunnel Far End"
       }
     },
-    "/admin/agent/deployments/workflows/{workflow_id}/retire": {
+    "/admin/agent/deployments/workflows/{workflow_id}/retry": {
       "post": {
-        "description": "Stop verifying with the previous signing key after hosts re-enrolled.",
-        "operationId": "retire_previous_signing_key_admin_agent_deployments_workflows__workflow_id__retire_post",
+        "description": "Continue a stopped rotation from the step that stopped.",
+        "operationId": "retry_workflow_admin_agent_deployments_workflows__workflow_id__retry_post",
         "parameters": [
           {
             "in": "path",
@@ -26272,23 +26272,13 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConfirmRequest"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
-                  "title": "Response Retire Previous Signing Key Admin Agent Deployments Workflows  Workflow Id  Retire Post",
+                  "title": "Response Retry Workflow Admin Agent Deployments Workflows  Workflow Id  Retry Post",
                   "type": "object"
                 }
               }
@@ -26306,7 +26296,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Retire Previous Signing Key"
+        "summary": "Retry Workflow"
       }
     },
     "/admin/agent/host-settings": {

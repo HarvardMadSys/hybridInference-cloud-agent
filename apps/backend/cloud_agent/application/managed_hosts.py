@@ -247,9 +247,10 @@ async def _perform(
         entry: dict[str, Any] = {"state": "succeeded"}
     except (ProviderError, ComputeSecretError, ValueError) as exc:
         entry = {"state": "failed", "detail": str(exc)[:500]}
+    try:
+        await _record(storage, workflow_id, key, entry)
     finally:
         _tasks.pop((workflow_id, key), None)
-    await _record(storage, workflow_id, key, entry)
 
 
 async def run_step(

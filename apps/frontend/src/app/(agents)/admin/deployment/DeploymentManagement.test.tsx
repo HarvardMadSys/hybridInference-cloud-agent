@@ -253,6 +253,26 @@ describe('deployment management', () => {
     expect(request.sealed_by_agent?.[agent.agent_id].AGENT_DATABASE_URL.v).toBe(1);
   });
 
+  it('offers to continue a stopped rotation, and only a rotation', async () => {
+    mock([agent], {
+      workflows: [
+        workflow({ state: 'failed', detail: 'stopped here' }),
+        workflow({
+          workflow_id: 'c'.repeat(32),
+          kind: 'database_connection',
+          state: 'failed',
+          step: 'probe',
+        }),
+      ],
+    });
+    const retry = vi.spyOn(api, 'retryWorkflow').mockResolvedValue(workflow({}));
+    render(<DeploymentManagement />);
+    const buttons = await screen.findAllByRole('button', { name: 'Continue from this step' });
+    expect(buttons).toHaveLength(1);
+    fireEvent.click(buttons[0]);
+    await waitFor(() => expect(retry).toHaveBeenCalledWith('b'.repeat(32)));
+  });
+
   it('names the outage during a move and what it has heard', async () => {
     mock([agent], {
       maintenance: {

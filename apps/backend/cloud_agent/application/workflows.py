@@ -16,6 +16,8 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
+
 from cloud_agent.application import deployments
 
 if TYPE_CHECKING:
@@ -52,6 +54,12 @@ async def save(
     return updated
 
 
+def attempt_step(workflow: dict[str, Any], step: str) -> str:
+    """The step's name in its intents' keys; a retry asks each agent afresh."""
+    attempt = int(workflow["data"].get("attempt") or 0)
+    return f"{step}~{attempt}" if attempt else step
+
+
 async def step_intents(
     storage: Any,
     workflow: dict[str, Any],
@@ -72,7 +80,9 @@ async def step_intents(
                 operation=operation,
                 params=params,
                 sealed=sealed_for(agent_id) if sealed_for else {},
-                idempotency_key=f"{workflow['workflow_id']}:{step}:{agent_id}",
+                idempotency_key=(
+                    f"{workflow['workflow_id']}:{attempt_step(workflow, step)}:{agent_id}"
+                ),
                 confirm=operation,
                 admin_id=workflow["created_by"],
                 workflow_id=workflow["workflow_id"],
@@ -95,12 +105,13 @@ async def current_intents(
     storage: Any, workflow: dict[str, Any], step: str
 ) -> list[dict[str, Any]]:
     """This step's intents, read fresh."""
+    wanted = attempt_step(workflow, step)
     return [
         intent
         for intent in await storage.deployments.list_intents(
             workflow_id=workflow["workflow_id"], limit=500
         )
-        if intent["idempotency_key"].split(":")[1] == step
+        if intent["idempotency_key"].split(":")[1] == wanted
     ]
 
 
@@ -119,6 +130,35 @@ async def advance_workflow(storage: Any, workflow: dict[str, Any]) -> None:
     if advancer is None or workflow["state"] not in {"running", "waiting"}:
         return
     await advancer(storage, workflow)
+
+
+#: Rotations that continue from the step that stopped: their steps are idempotent,
+#: and each keeps what it still needs. A database workflow or an ADMIN_TOKEN
+#: rotation is started again instead, with a value entered or generated again.
+RETRYABLE = frozenset(
+    {"root_key", "credential_key", "control_signing", "sandbox_manager_token", "tunnel_keys"}
+)
+
+
+async def retry_workflow(storage: Any, workflow_id: str) -> dict[str, Any]:
+    """Continue a stopped rotation from its step, asking anything that failed again."""
+    workflow = await storage.deployments.get_workflow(workflow_id)
+    if workflow is None or workflow["state"] != "failed" or workflow["kind"] not in RETRYABLE:
+        raise WorkflowRefused("only a stopped rotation can be retried")
+    steps = workflow["data"].get("host_steps") or {}
+    data = {
+        **workflow["data"],
+        "attempt": int(workflow["data"].get("attempt") or 0) + 1,
+        "verify_started_at": None,
+        "host_steps": {k: v for k, v in steps.items() if v.get("state") != "failed"},
+    }
+    data.pop("verify_started_at")
+    try:
+        await save(storage, workflow, state="running", detail="", data=data)
+    except asyncpg.UniqueViolationError:
+        raise WorkflowRefused("another run of this rotation is unfinished") from None
+    await advance_workflow(storage, workflow)
+    return workflow
 
 
 async def advance_after_agent_update(storage: Any, agent_id: str) -> None:
@@ -249,11 +289,14 @@ ADVANCERS["rollout"] = _advance_rollout
 
 __all__ = [
     "ADVANCERS",
+    "RETRYABLE",
     "ROLLOUT_STEPS",
     "WorkflowRefused",
     "advance_after_agent_update",
     "advance_workflow",
+    "attempt_step",
     "current_intents",
+    "retry_workflow",
     "run_workflows_forever",
     "save",
     "start_rollout",

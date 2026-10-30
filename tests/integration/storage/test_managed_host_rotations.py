@@ -389,6 +389,16 @@ async def test_a_managed_server_that_fails_stops_the_rotation_on_the_old_credent
     _revision, encoded = await store.settings.read_settings()
     assert settings._decode(encoded)["sandbox_manager_token"] == OLD
 
+    # The server recovers: the rotation continues from there, not from the start.
+    bootstrap.fail_on = None
+    calls = len(bootstrap.calls)
+    await workflows.retry_workflow(store, workflow["workflow_id"])
+    resumed = await _advance(store, workflow["workflow_id"])
+    assert resumed["state"] == "succeeded", resumed["detail"]
+    assert bootstrap.calls[calls][0] == "gpu-2"  # gpu-1 keeps the stage it finished
+    with pytest.raises(workflows.WorkflowRefused):
+        await workflows.retry_workflow(store, workflow["workflow_id"])
+
 
 async def test_a_managed_servers_tunnel_keys_rotate_and_the_old_ones_are_revoked_last(
     store, fleet

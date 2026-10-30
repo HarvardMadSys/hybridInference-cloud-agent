@@ -303,6 +303,9 @@ export const startWorkflow = (request: {
     confirm: request.kind,
   });
 
+export const retryWorkflow = (workflowId: string) =>
+  post<DeploymentWorkflow>(`${DEPLOYMENTS}/workflows/${encodeURIComponent(workflowId)}/retry`, {});
+
 export const confirmFarEnd = (workflowId: string, token: string) =>
   post<DeploymentWorkflow>(
     `${DEPLOYMENTS}/workflows/${encodeURIComponent(workflowId)}/confirm-far-end`,

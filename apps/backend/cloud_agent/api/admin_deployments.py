@@ -426,34 +426,30 @@ async def confirm_tunnel_far_end(
     return _workflow_view(workflow)
 
 
-@router.post("/workflows/{workflow_id}/retire")
-async def retire_previous_signing_key(
+@router.post("/workflows/{workflow_id}/retry")
+async def retry_workflow(
     workflow_id: str,
-    body: ConfirmRequest,
     request: Request,
     store: Any = Depends(get_storage),
     admin_id: str = Depends(verify_admin_access),
 ) -> dict[str, Any]:
-    """Stop verifying with the previous signing key after hosts re-enrolled."""
+    """Continue a stopped rotation from the step that stopped."""
     from cloud_agent.api.admin_credentials import require_full_authority
-    from cloud_agent.application.signing_key_rotation import retire_control_signing
 
     require_full_authority(admin_id)
-    if body.confirm != "retire":
-        raise HTTPException(status_code=422, detail="Confirm by typing: retire")
     storage = require_store(store)
     try:
-        workflow = await retire_control_signing(storage, workflow_id)
+        workflow = await workflows.retry_workflow(storage, workflow_id)
     except workflows.WorkflowRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     await log_admin_action(
         storage,
         get_client_ip(request),
-        "agent.deployment.workflow.control_signing.retire",
-        details={"workflow_id": workflow_id},
+        "agent.deployment.workflow.retry",
+        details={"workflow_id": workflow_id, "kind": workflow["kind"]},
         actor_id=admin_id,
     )
-    return {k: v for k, v in workflow.items() if k != "data"}
+    return _workflow_view(workflow)
 
 
 @router.get("/host-credentials")
