@@ -1,0 +1,1933 @@
+{
+ "catalog": {
+  "methods": [
+   "edit",
+   "apply",
+   "workflow",
+   "observe",
+   "object"
+  ],
+  "apply_modes": [
+   "next_operation",
+   "new_session",
+   "restart",
+   "host_reenroll",
+   "unverified"
+  ],
+  "items": [
+   {
+    "id": "settings.operations",
+    "label": "Operations",
+    "group": "Operations",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Operations",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_LOG_LEVEL",
+     "AGENT_LOG_FORMAT",
+     "AGENT_ALERT_WEBHOOK_URL",
+     "AGENT_ONCALL_USER_ID",
+     "AGENT_ONCALL_DISPATCH_TOKEN",
+     "AGENT_RESIDENCY_TTL_S",
+     "AGENT_MAX_STREAMS_PER_USER",
+     "AGENT_API_DOCS"
+    ],
+    "setting_keys": [
+     "log_level",
+     "log_format",
+     "alert_webhook_url",
+     "oncall_user_id",
+     "oncall_dispatch_token",
+     "residency_ttl_s",
+     "queue_alert_after_s",
+     "queue_monitor_interval_s",
+     "queue_alert_cooldown_s",
+     "max_attempts",
+     "grant_renewal_concurrency",
+     "ledger_refresh_concurrency",
+     "ledger_refresh_timeout_s",
+     "ledger_idle_s",
+     "snapshot_idle_s",
+     "snapshot_capture_interval_s",
+     "capacity_history_retention_s",
+     "streams.max_per_user",
+     "api_docs"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.gateway",
+    "label": "Gateway",
+    "group": "Gateway",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Gateway",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "GATEWAY_BASE_URL",
+     "GATEWAY_GRANT_DISPATCH_TOKEN",
+     "GATEWAY_GRANT_BASE_PATH",
+     "GATEWAY_GRANT_BINDING_ID"
+    ],
+    "setting_keys": [
+     "gateway_request_timeout_s",
+     "gateway_connect_timeout_s",
+     "gateway_base_url",
+     "gateway_dispatch_token",
+     "gateway_grant_base_path",
+     "gateway_grant_binding_id"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.source_control",
+    "label": "Source control",
+    "group": "Source control",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Source control",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_REPO_ALLOWLIST",
+     "AGENT_GITHUB_APP_ID",
+     "AGENT_GITHUB_APP_CLIENT_ID",
+     "AGENT_GITHUB_APP_CLIENT_SECRET",
+     "AGENT_GITHUB_APP_PRIVATE_KEY",
+     "AGENT_GITHUB_APP_INSTALL_URL",
+     "AGENT_GITHUB_API",
+     "AGENT_GITLAB_OAUTH_CLIENT_ID",
+     "AGENT_GITLAB_OAUTH_CLIENT_SECRET",
+     "AGENT_GITLAB_OAUTH_REDIRECT_URI"
+    ],
+    "setting_keys": [
+     "github_reload_interval_s",
+     "github_repository_cache_s",
+     "github_request_timeout_s",
+     "gitlab_request_timeout_s",
+     "repo_allowlist",
+     "github_app_id",
+     "github_app_client_id",
+     "github_app_client_secret",
+     "github_app_private_key",
+     "github_app_install_url",
+     "github_api_url",
+     "gitlab_client_id",
+     "gitlab_client_secret",
+     "gitlab_redirect_uri"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.publication",
+    "label": "Publication",
+    "group": "Publication",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Publication",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_GITHUB_TOKEN",
+     "AGENT_PUBLISH_BASE_BRANCH",
+     "AGENT_GIT_AUTHOR_NAME",
+     "AGENT_GIT_AUTHOR_EMAIL"
+    ],
+    "setting_keys": [
+     "publish_poll_seconds",
+     "publish_idle_seconds",
+     "publish_git_timeout_s",
+     "publish_pr_timeout_s",
+     "github_publish_token",
+     "publish_base_branch",
+     "git_author_name",
+     "git_author_email"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.mcp",
+    "label": "MCP",
+    "group": "MCP",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:MCP",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_MCP_PUBLIC_BASE_URL",
+     "AGENT_MCP_GITHUB_CLIENT_ID",
+     "AGENT_MCP_GITHUB_CLIENT_SECRET",
+     "AGENT_MCP_ALLOW_PRIVATE_TARGETS",
+     "AGENT_MCP_ALLOW_PLAIN_HTTP"
+    ],
+    "setting_keys": [
+     "mcp_registry_url",
+     "mcp_catalog_sync_seconds",
+     "mcp_catalog_retry_seconds",
+     "mcp_catalog_sync_timeout_s",
+     "mcp_catalog_request_timeout_s",
+     "mcp_catalog_storage_timeout_s",
+     "mcp_request_timeout_s",
+     "mcp_connect_timeout_s",
+     "mcp_metadata_timeout_s",
+     "mcp_public_base_url",
+     "mcp_github_client_id",
+     "mcp_github_client_secret",
+     "mcp_allow_private_targets",
+     "mcp_allow_plain_http"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.web_search",
+    "label": "Web search",
+    "group": "Web search",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Web search",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "WEB_SEARCH_PROVIDER",
+     "SERPER_API_KEY",
+     "BRAVE_SEARCH_API_KEY",
+     "PARALLEL_API_KEY"
+    ],
+    "setting_keys": [
+     "web_search_provider",
+     "serper_api_key",
+     "brave_search_api_key",
+     "parallel_api_key"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.appearance",
+    "label": "Appearance",
+    "group": "Appearance",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Appearance",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_WEB_APP_NAME",
+     "AGENT_WEB_ORG_NAME",
+     "AGENT_WEB_ORG_URL",
+     "AGENT_WEB_STATUS_URL",
+     "AGENT_WEB_DOCS_URL",
+     "AGENT_WEB_CONTACT_URL",
+     "AGENT_WEB_GATEWAY_URL",
+     "AGENT_WEB_FEATURE_RAG"
+    ],
+    "setting_keys": [
+     "site.app_name",
+     "site.org_name",
+     "site.org_url",
+     "site.status_url",
+     "site.docs_url",
+     "site.contact_url",
+     "site.gateway_url",
+     "site.feature_rag"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.compute",
+    "label": "Compute",
+    "group": "Compute",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Compute",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_CLOUDLAB_API_URL",
+     "AGENT_COMPUTE_REGISTRATION_URL"
+    ],
+    "setting_keys": [
+     "compute.cloudlab_api_url",
+     "compute.registration_url",
+     "compute.poll_seconds",
+     "compute.observation_seconds"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.sign_in",
+    "label": "Sign-in",
+    "group": "Sign-in",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Sign-in",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "GATEWAY_AUTHORIZE_URL",
+     "AGENT_SESSION_REDIRECT_URI",
+     "AGENT_WEB_BASE_URL",
+     "GATEWAY_ISSUER",
+     "GATEWAY_JWKS_URL"
+    ],
+    "setting_keys": [
+     "gateway_authorize_url",
+     "session_redirect_uri",
+     "web_base_url",
+     "gateway_issuer",
+     "gateway_jwks_url"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.attachments",
+    "label": "Attachments",
+    "group": "Attachments",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Attachments",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [],
+    "setting_keys": [
+     "attachments.max_file_bytes",
+     "attachments.max_total_bytes",
+     "attachments.max_files",
+     "attachments.staged_retention_hours",
+     "attachments.max_user_bytes"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.skills",
+    "label": "Skills",
+    "group": "Skills",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Skills",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [],
+    "setting_keys": [
+     "skills.max_skill_bytes",
+     "skills.max_selection_bytes",
+     "skills.max_selected",
+     "skills.max_library"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.goals",
+    "label": "Goals",
+    "group": "Goals",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Goals",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [],
+    "setting_keys": [
+     "goals.arm_after_seconds",
+     "goals.stalled_after_seconds",
+     "goals.max_wakeup_attempts",
+     "goals.wakeup_backoff_seconds",
+     "goals.wakeup_backoff_max_seconds"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.task_titles",
+    "label": "Task titles",
+    "group": "Task titles",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Task titles",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [],
+    "setting_keys": [
+     "task_titles.max_chars",
+     "task_titles.input_max_chars",
+     "task_titles.timeout_seconds",
+     "task_titles.total_timeout_seconds",
+     "task_titles.max_attempts",
+     "task_titles.max_tokens"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.sandbox_archives",
+    "label": "Sandbox archives",
+    "group": "Sandbox archives",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Sandbox archives",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_SANDBOX_ARCHIVE_S3_BUCKET",
+     "AGENT_SANDBOX_ARCHIVE_S3_REGION",
+     "AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT",
+     "AGENT_SANDBOX_ARCHIVE_S3_PREFIX"
+    ],
+    "setting_keys": [
+     "sandbox_archive.bucket",
+     "sandbox_archive.region",
+     "sandbox_archive.endpoint",
+     "sandbox_archive.prefix"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.database_tools",
+    "label": "Database tools",
+    "group": "Database tools",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Database tools",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_PGADMIN_URL",
+     "AGENT_PGADMIN_PUBLIC_URL"
+    ],
+    "setting_keys": [
+     "pgadmin_url",
+     "pgadmin_public_url"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.security",
+    "label": "Security",
+    "group": "Security",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Security",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_SESSION_SECRET",
+     "AGENT_CONTROL_TOKEN_SECRET",
+     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
+     "AGENT_COMPUTE_SECRET_KEY",
+     "AGENT_SESSION_COOKIE_SECURE",
+     "AGENT_TRUST_PROXY_HEADERS"
+    ],
+    "setting_keys": [
+     "session_signing_secret",
+     "control_signing_secret",
+     "source_control_encryption_key",
+     "compute_encryption_key",
+     "session_cookie_secure",
+     "trust_proxy_headers",
+     "control_signing_secret_previous",
+     "source_control_encryption_key_previous",
+     "compute_encryption_key_previous",
+     "credential_index_uses_previous"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.execution",
+    "label": "Execution",
+    "group": "Execution",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Execution",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_SANDBOX_MANAGER_TOKEN",
+     "AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS",
+     "AGENT_DEFAULT_EXECUTION_PROFILE",
+     "AGENT_DEFAULT_MODEL",
+     "AGENT_MODEL_CONNECTIONS_ENABLED"
+    ],
+    "setting_keys": [
+     "sandbox_manager_token",
+     "sandbox_manager_url_allowed_hosts",
+     "default_execution_profile",
+     "default_model",
+     "model_connections_enabled"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "settings.agent_versions",
+    "label": "Agent versions",
+    "group": "Agent versions",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved setting"
+     }
+    ],
+    "owner": "settings:Agent versions",
+    "description": "Edited on the Settings page; each field states when it takes effect.",
+    "apply_mode": "per_setting",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_RUNTIME_REGISTRY_URL"
+    ],
+    "setting_keys": [
+     "runtime_registry_url"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "hosts.runtime_settings",
+    "label": "Server runtime settings",
+    "group": "Servers",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "host_settings",
+      "reader": "runner and sandbox manager",
+      "meaning": "value for all servers"
+     },
+     {
+      "kind": "host_settings",
+      "reader": "runner and sandbox manager",
+      "meaning": "value for one server"
+     },
+     {
+      "kind": "observed",
+      "reader": "each server",
+      "meaning": "local bootstrap value (settings_local)"
+     }
+    ],
+    "owner": "host_settings",
+    "description": "Saved for all servers or one server and delivered on the heartbeat; each server reports the values it applies.",
+    "apply_mode": "next_operation",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_SANDBOX_CPU_MILLICORES",
+     "AGENT_SANDBOX_MEMORY_MIB",
+     "AGENT_SANDBOX_DISK_MIB",
+     "AGENT_TIMEOUT_S",
+     "AGENT_SOURCE_IMPORT_MAX_MIB",
+     "AGENT_CHAT_IDLE_TIMEOUT_S",
+     "AGENT_STORAGE_MIN_AVAILABLE_MIB",
+     "AGENT_SHARED_RESIDENT_CAPACITY",
+     "AGENT_LEASE_TTL",
+     "AGENT_TERMINAL_IDLE_TTL_SECONDS",
+     "AGENT_TERMINAL_HARD_TTL_SECONDS",
+     "AGENT_TERMINAL_MAX_SESSIONS",
+     "AGENT_TERMINAL_MAX_SESSIONS_PER_WORKSPACE",
+     "AGENT_WORKSPACE_COMMAND_TIMEOUT_S",
+     "AGENT_WORKSPACE_FILE_WRITE_MAX_MIB",
+     "AGENT_WORKSPACE_FILE_PREVIEW_MAX_KIB",
+     "AGENT_WORKSPACE_COMMAND_OUTPUT_MAX_MIB",
+     "AGENT_WORKSPACE_DIRECTORY_MAX_ENTRIES",
+     "AGENT_WORKSPACE_DOWNLOAD_MAX_MIB",
+     "AGENT_TERMINAL_BUFFER_MAX_MIB",
+     "AGENT_TERMINAL_BUFFER_MAX_EVENTS",
+     "AGENT_TERMINAL_OUTPUT_MAX_MIB",
+     "AGENT_TERMINAL_INPUT_MAX_KIB",
+     "AGENT_TERMINAL_MAX_STREAMS_PER_SESSION"
+    ],
+    "setting_keys": [
+     "sandbox_cpu_millicores",
+     "sandbox_memory_mib",
+     "sandbox_disk_mib",
+     "agent_timeout_s",
+     "source_import_max_mib",
+     "chat_idle_timeout_s",
+     "storage_min_available_mib",
+     "shared_resident_capacity",
+     "lease_ttl_s",
+     "terminal_idle_ttl_s",
+     "terminal_hard_ttl_s",
+     "terminal_max_sessions",
+     "terminal_max_sessions_per_workspace",
+     "workspace_command_timeout_s",
+     "workspace_file_write_max_mib",
+     "workspace_file_preview_max_kib",
+     "workspace_command_output_max_mib",
+     "workspace_directory_max_entries",
+     "workspace_download_max_mib",
+     "terminal_buffer_max_mib",
+     "terminal_buffer_max_events",
+     "terminal_output_max_mib",
+     "terminal_input_max_kib",
+     "terminal_max_streams_per_session"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "hosts.slots",
+    "label": "Turn slots per server",
+    "group": "Servers",
+    "method": "edit",
+    "sources": [
+     {
+      "kind": "host_settings",
+      "reader": "runner",
+      "meaning": "admin limit per server"
+     }
+    ],
+    "owner": "servers",
+    "description": "Set per server on the Servers page; delivered on the heartbeat.",
+    "apply_mode": "next_operation",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_HOST_SLOTS"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "hosts.identity",
+    "label": "Server identity and enrollment",
+    "group": "Servers",
+    "method": "object",
+    "sources": [
+     {
+      "kind": "observed",
+      "reader": "each server",
+      "meaning": "host name and physical server it reports"
+     },
+     {
+      "kind": "deployment_store",
+      "reader": "runner",
+      "meaning": "enrollment token and host credential"
+     }
+    ],
+    "owner": "object:servers",
+    "description": "Enrollment tokens are issued and servers removed or re-enrolled on the Servers page; identity is reported, not edited.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": "host",
+    "env_names": [
+     "AGENT_ENROLL_TOKEN",
+     "AGENT_HOST_CREDENTIAL",
+     "AGENT_HOST_CREDENTIAL_FILE",
+     "AGENT_RUNNER_HOST",
+     "AGENT_PHYSICAL_HOST",
+     "AGENT_WORKER_ID"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "hosts.topology",
+    "label": "Server topology and paths",
+    "group": "Deployment",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "runner, sandbox manager, tunnels",
+      "meaning": "host .env"
+     }
+    ],
+    "owner": "deployment:apply_config",
+    "description": "The sandbox manager address, tunnels, state directories and probes of one server. Applied by the server's deployment agent, or by the control plane's SSH executor for managed compute servers.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "runner",
+     "sandbox-manager",
+     "tunnels"
+    ],
+    "role": "host",
+    "env_names": [
+     "AGENT_SANDBOX_MANAGER_URL",
+     "AGENT_SANDBOX_MANAGER_ADVERTISE_URL",
+     "AGENT_SANDBOX_MANAGER_REVERSE_BIND",
+     "AGENT_SANDBOX_MANAGER_REVERSE_PORT",
+     "AGENT_SANDBOX_MANAGER_REVERSE_TARGET_HOST",
+     "AGENT_SANDBOX_MANAGER_REVERSE_TARGET_PORT",
+     "AGENT_SANDBOX_MANAGER_STOP_GRACE",
+     "AGENT_RUNNER_STOP_GRACE",
+     "AGENT_CONTROL_PLANE_HOSTNAME",
+     "AGENT_GATEWAY_HOSTNAME",
+     "AGENT_MCP_HOSTNAME",
+     "AGENT_GATEWAY_URL",
+     "AGENT_SANDBOX_MCP_URL",
+     "AGENT_SHARED_LIVE_READY_FILE",
+     "AGENT_RUNTIME_DOWNLOAD_NETWORK",
+     "AGENT_REPO_CLONE_BASE_URL",
+     "AGENT_HOST_STATE_ROOT",
+     "AGENT_HOST_CONTAINERD_CONTENT_DIR",
+     "AGENT_CONTAINERD_CONTENT_DIR",
+     "AGENT_SANDBOX_ARCHIVE_STATE_DIR",
+     "AGENT_RETAINED_DOCKER_DATA_ROOT",
+     "AGENT_UPLOAD_RECEIPT_DIR",
+     "AGENT_HOST_CAPACITY_ENABLED",
+     "AGENT_HOST_STORAGE_PROBE",
+     "AGENT_SANDBOX_IMAGE_PULL",
+     "COMPOSE_PROJECT",
+     "SIBLING_COMPOSE_PROJECTS",
+     "SHARED_READY_TIMEOUT",
+     "AGENT_TUNNEL_",
+     "AGENT_MCP_TUNNEL_",
+     "AGENT_CONTROL_PLANE_TUNNEL_",
+     "AGENT_CONTROL_PLANE_URL"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "hosts.sandbox_boundary",
+    "label": "Sandbox isolation and network",
+    "group": "Deployment",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "runner and sandbox manager",
+      "meaning": "host .env"
+     },
+     {
+      "kind": "observed",
+      "reader": "each server",
+      "meaning": "runtime it actually runs (sandbox_runtime)"
+     }
+    ],
+    "owner": "deployment:apply_config",
+    "description": "Chosen only among values the server's local policy lists; protected ranges can only grow. Isolation-weakening switches are observed, never set here (AGENTS.md section 7).",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "role": "host",
+    "env_names": [
+     "AGENT_SANDBOX_BACKEND",
+     "AGENT_SANDBOX_RUNTIME",
+     "AGENT_SANDBOX_ALLOW_UNISOLATED",
+     "AGENT_SANDBOX_EXTRA_ARGS",
+     "AGENT_SANDBOX_UID",
+     "AGENT_SANDBOX_GID",
+     "AGENT_SANDBOX_HOME",
+     "AGENT_SANDBOX_DOCKER",
+     "AGENT_SANDBOX_IMAGE",
+     "AGENT_SANDBOX_NAMESPACE",
+     "AGENT_EGRESS_CHAT_NETWORK_POOL",
+     "AGENT_EGRESS_DNS_SERVER",
+     "AGENT_EGRESS_PROTECTED_CIDRS",
+     "AGENT_RELAY_NETWORK"
+    ],
+    "setting_keys": [],
+    "bounded": true
+   },
+   {
+    "id": "hosts.kata",
+    "label": "Kata runtime version",
+    "group": "Deployment",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "release",
+      "reader": "host recipe",
+      "meaning": "reviewed version and digest pairs"
+     },
+     {
+      "kind": "observed",
+      "reader": "host agent",
+      "meaning": "installed version and digest"
+     }
+    ],
+    "owner": "deployment:kata_install",
+    "description": "Installs a reviewed version and digest pair after draining the server; the download source and paths are the server's local configuration.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "runner"
+    ],
+    "role": "host",
+    "env_names": [
+     "KATA_VERSION",
+     "KATA_SHA256",
+     "KATA_DOWNLOAD_BASE",
+     "KATA_LINK_DIR",
+     "KATA_CONFIG_PATH",
+     "KATA_DEBUG_KERNEL_PATH",
+     "KATA_SETUP_SCRIPT"
+    ],
+    "setting_keys": [],
+    "bounded": true
+   },
+   {
+    "id": "hosts.tunnel_keys",
+    "label": "Tunnel SSH keys",
+    "group": "Security",
+    "method": "workflow",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "tunnel containers",
+      "meaning": "key and known hosts files"
+     }
+    ],
+    "owner": "workflow:tunnel_keys",
+    "description": "New keys are authorized beside the old ones on the far end; each server drains, switches, and its heartbeat over the new tunnel is the proof before the old keys are revoked. A far end nothing here can edit asks an administrator to change it.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": "host",
+    "env_names": [],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.control_plane_listeners",
+    "label": "Control-plane listeners and network",
+    "group": "Deployment",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "Compose",
+      "meaning": "control-plane .env"
+     }
+    ],
+    "owner": "deployment:apply_config",
+    "description": "Bind addresses and ports of the API, MCP listener, web server and edge, and the Compose network. The agent checks the new address answers before keeping it.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "role": "control-plane",
+    "env_names": [
+     "AGENT_CONTROL_PLANE_BIND",
+     "AGENT_CONTROL_PLANE_PORT",
+     "AGENT_MCP_RELAY_BIND",
+     "AGENT_MCP_RELAY_PORT",
+     "AGENT_WEB_BIND",
+     "AGENT_WEB_PORT",
+     "AGENT_EDGE_BIND",
+     "AGENT_EDGE_PORT",
+     "AGENT_EDGE_CONFIG_FILE",
+     "AGENT_NETWORK_NAME"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.optional_services",
+    "label": "Optional services",
+    "group": "Deployment",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "Compose",
+      "meaning": "COMPOSE_PROFILES"
+     }
+    ],
+    "owner": "deployment:apply_config",
+    "description": "Turns the bundled pgAdmin and edge services on or off.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "pgadmin",
+     "edge"
+    ],
+    "role": "control-plane",
+    "env_names": [
+     "COMPOSE_PROFILES"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.pgadmin",
+    "label": "pgAdmin service",
+    "group": "Database tools",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "pgAdmin and control plane",
+      "meaning": "first-time setup routing"
+     },
+     {
+      "kind": "deployment_store",
+      "reader": "control plane",
+      "meaning": "services a saved pgAdmin URL may reach"
+     }
+    ],
+    "owner": "deployment:apply_config",
+    "description": "First-time setup address, cookie security and the deployment's own list of pgAdmin services. A service outside the bundled one needs its address here.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "pgadmin",
+     "control-plane"
+    ],
+    "role": "control-plane",
+    "env_names": [
+     "AGENT_PGADMIN_BOOTSTRAP_URL",
+     "AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL",
+     "AGENT_PGADMIN_BOOTSTRAP_DIR",
+     "AGENT_PGADMIN_COOKIE_SECURE",
+     "AGENT_PGADMIN_ENTRYPOINT_FILE",
+     "AGENT_PGADMIN_SERVERS_FILE"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.profiling",
+    "label": "Operation profiling ceiling",
+    "group": "Operations",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "control plane and hosts",
+      "meaning": "profiling ceiling"
+     }
+    ],
+    "owner": "deployment:apply_config",
+    "description": "The deployment's ceiling for operation profiling; the Admin profiling control works within it. Raising it widens what may be collected.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "control-plane",
+     "runner"
+    ],
+    "role": "any",
+    "env_names": [
+     "AGENT_OPERATION_PROFILING_DEPLOYMENT",
+     "AGENT_OPERATION_PROFILING_MODE",
+     "AGENT_OPERATION_PROFILING_ENABLED",
+     "AGENT_OPERATION_PROFILING_RUN",
+     "AGENT_OPERATION_PROFILING_SINK"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.web_routing",
+    "label": "Web routing",
+    "group": "Deployment",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "release",
+      "reader": "web image",
+      "meaning": "build-time base path (variant)"
+     },
+     {
+      "kind": "deployment_store",
+      "reader": "web server",
+      "meaning": "control-plane address"
+     }
+    ],
+    "owner": "deployment:apply_config",
+    "description": "The web variant (root or /agents) is chosen with the desired release; a base path change is submitted with the matching sign-in redirect.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "web"
+    ],
+    "role": "control-plane",
+    "env_names": [
+     "AGENT_WEB_API_URL",
+     "AGENT_WEB_BASE_PATH",
+     "NEXT_PUBLIC_AGENT_API_URL",
+     "NEXT_PUBLIC_BASE_PATH",
+     "AGENT_WEB_VARIANT"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.compose_override",
+    "label": "Compose override file",
+    "group": "Deployment",
+    "method": "observe",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "Compose",
+      "meaning": "override file path"
+     }
+    ],
+    "owner": "deployment:observe",
+    "description": "Shown when present. Its content is arbitrary container configuration and is not edited here.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": "control-plane",
+    "env_names": [
+     "AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.mounted_files",
+    "label": "Mounted keys and compute profiles",
+    "group": "Compute",
+    "method": "object",
+    "sources": [
+     {
+      "kind": "mounted_file",
+      "reader": "control plane",
+      "meaning": "GitHub App key file"
+     },
+     {
+      "kind": "mounted_file",
+      "reader": "control plane",
+      "meaning": "trusted compute profiles"
+     },
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "inline GitHub App key (wins when set)"
+     }
+    ],
+    "owner": "object:compute_setup",
+    "description": "The inline GitHub App key and registered compute profiles are managed on their pages; file-backed ones are listed by source.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": "control-plane",
+    "env_names": [
+     "AGENT_COMPUTE_CONFIG",
+     "AGENT_COMPUTE_DIRECTORY",
+     "AGENT_GITHUB_APP_PRIVATE_KEY_PATH",
+     "AGENT_GITHUB_APP_PRIVATE_KEY_FILE"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "compute.setup_prefill",
+    "label": "Compute setup addresses",
+    "group": "Compute",
+    "method": "object",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "Compute setup form",
+      "meaning": "prefilled SSH addresses"
+     }
+    ],
+    "owner": "object:compute_setup",
+    "description": "Prefills the automatic compute setup form; the saved request wins.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": "control-plane",
+    "env_names": [
+     "AGENT_GATEWAY_SSH_HOST",
+     "AGENT_CONTROL_PLANE_SSH_HOST"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "release.desired",
+    "label": "Desired release",
+    "group": "Deployment",
+    "method": "apply",
+    "sources": [
+     {
+      "kind": "release",
+      "reader": "deployment agents",
+      "meaning": "verified release lock on each machine"
+     }
+    ],
+    "owner": "deployment:release",
+    "description": "Chosen from manifests each machine's agent has verified and imported. Hosts are prepared and activated before the control plane, as the release recipe requires.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "control-plane",
+     "runner"
+    ],
+    "role": "any",
+    "env_names": [
+     "DEPLOY_SHA",
+     "SOURCE_REPO",
+     "HEALTH_TIMEOUT",
+     "AGENT_DEPLOY_MODE",
+     "AGENT_DEPLOY_DRAINING_HOST",
+     "AGENT_RELEASE_MANIFEST"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "release.identity",
+    "label": "Running release",
+    "group": "Deployment",
+    "method": "observe",
+    "sources": [
+     {
+      "kind": "observed",
+      "reader": "control-plane instances",
+      "meaning": "build commit"
+     },
+     {
+      "kind": "observed",
+      "reader": "hosts",
+      "meaning": "deployment commit on the heartbeat"
+     },
+     {
+      "kind": "observed",
+      "reader": "deployment agents",
+      "meaning": "deployed commit and manifest"
+     }
+    ],
+    "owner": "deployment:observe",
+    "description": "What actually runs, from evidence; never edited.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_DEPLOYMENT_SHA",
+     "AGENT_WEB_DEPLOYED_AT",
+     "AGENT_RUNNER_VERSION",
+     "AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY",
+     "BUILD_SHA",
+     "BUILD_TIMESTAMP",
+     "SOURCE_COMMIT",
+     "NEXT_PUBLIC_BUILD_SHA",
+     "NEXT_PUBLIC_BUILD_TIMESTAMP"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "release.image_inputs",
+    "label": "Image build inputs",
+    "group": "Agent versions",
+    "method": "observe",
+    "sources": [
+     {
+      "kind": "release",
+      "reader": "release manifest",
+      "meaning": "runtime catalog of the images"
+     }
+    ],
+    "owner": "deployment:observe",
+    "description": "Part of the release. The Agent CLI version new chats use is managed under Agent versions.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "CLAUDE_CODE_VERSION",
+     "CLAUDE_CODE_VERSIONS",
+     "CLAUDE_CODE_EXTRA_VERSIONS",
+     "CODEX_VERSION",
+     "CODEX_VERSIONS",
+     "CODEX_EXTRA_VERSIONS",
+     "KILO_VERSION",
+     "KILO_VERSIONS",
+     "KILO_EXTRA_VERSIONS",
+     "OPENCODE_VERSION",
+     "OPENCODE_VERSIONS",
+     "OPENCODE_EXTRA_VERSIONS",
+     "PI_VERSION",
+     "PI_VERSIONS",
+     "PI_EXTRA_VERSIONS",
+     "DEBIAN_MIRROR",
+     "PIP_DEFAULT_TIMEOUT",
+     "UV_HTTP_TIMEOUT",
+     "UV_VERSION"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.agent_install",
+    "label": "Deployment agent installation",
+    "group": "Deployment",
+    "method": "observe",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "deployment agent",
+      "meaning": "its own install paths"
+     }
+    ],
+    "owner": "deployment:observe",
+    "description": "Where each machine's agent and deployment root live; set on the machine.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": "any",
+    "env_names": [
+     "DEPLOY_ROOT",
+     "APP_DIR",
+     "AGENT_DEPLOY_PYTHON",
+     "AGENT_CONTROL_PLANE_MACHINE"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "deployment.legacy_names",
+    "label": "Retired variable names",
+    "group": "Deployment",
+    "method": "observe",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "deployment agent",
+      "meaning": "names still present"
+     }
+    ],
+    "owner": "deployment:observe",
+    "description": "Reported by each agent so a retired name can be removed from its .env.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": "any",
+    "env_names": [
+     "AGENT_WORKSPACE_BROKER_TOKEN",
+     "AGENT_WORKSPACE_BROKER_URL",
+     "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
+     "AGENT_BROKER_URL_ALLOWED_HOSTS",
+     "AGENT_BROKER_REVERSE_BIND",
+     "AGENT_BROKER_REVERSE_PORT",
+     "AGENT_BROKER_REVERSE_TARGET_HOST",
+     "AGENT_BROKER_REVERSE_TARGET_PORT",
+     "AGENT_BROKER_STOP_GRACE",
+     "AGENT_RUNNER_REPLICAS"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "security.admin_credentials",
+    "label": "Administrator API credentials",
+    "group": "Security",
+    "method": "object",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "one-way verifier per credential"
+     }
+    ],
+    "owner": "object:admin_credentials",
+    "description": "Named, revocable credentials for administrator automation, shown once when created. They never replace the deployment's ADMIN_TOKEN.",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "security.admin_token",
+    "label": "Deployment ADMIN_TOKEN",
+    "group": "Security",
+    "method": "workflow",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "API and MCP listener",
+      "meaning": "full administrator token"
+     }
+    ],
+    "owner": "workflow:admin_token",
+    "description": "Grants full administrator access on every request and opens /setup when Gateway sign-in is broken. Rotated through the control-plane machines' agents.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "role": "control-plane",
+    "env_names": [
+     "ADMIN_TOKEN"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "security.settings_root_key",
+    "label": "Settings root key",
+    "group": "Security",
+    "method": "workflow",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "control plane",
+      "meaning": "dedicated root key"
+     },
+     {
+      "kind": "deployment_store",
+      "reader": "control plane",
+      "meaning": "AGENT_SESSION_SECRET fallback root"
+     }
+    ],
+    "owner": "workflow:root_key",
+    "description": "Decrypts the settings row. First separated from the session secret with the same bytes, then rotated with re-encryption; never stored in the database.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "role": "control-plane",
+    "env_names": [
+     "AGENT_SETTINGS_ENCRYPTION_KEY",
+     "AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "security.key_rotation",
+    "label": "Signing key and sandbox credential rotation",
+    "group": "Security",
+    "method": "workflow",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved keys"
+     }
+    ],
+    "owner": "workflow:key_rotation",
+    "description": "Host signing key (every server renews its credential and earlier tokens drain before the previous key is retired) and sandbox manager credential (every server, through its agent or the SSH executor, accepts both during the switch).",
+    "apply_mode": "unverified",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [
+     "AGENT_SANDBOX_MANAGER_TOKEN_NEXT"
+    ],
+    "setting_keys": [
+     "control_signing_secret",
+     "control_signing_secret_previous",
+     "sandbox_manager_token"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "security.credential_keys",
+    "label": "Credential encryption keys",
+    "group": "Security",
+    "method": "workflow",
+    "sources": [
+     {
+      "kind": "settings",
+      "reader": "control plane",
+      "meaning": "saved keys"
+     }
+    ],
+    "owner": "workflow:credential_key",
+    "description": "The user credential key and the compute credential key. Every stored value is re-encrypted, and environment fingerprints rebuilt, before the previous key is dropped; both keep working throughout.",
+    "apply_mode": "next_operation",
+    "restart_scope": [],
+    "role": null,
+    "env_names": [],
+    "setting_keys": [
+     "source_control_encryption_key",
+     "source_control_encryption_key_previous",
+     "compute_encryption_key",
+     "compute_encryption_key_previous",
+     "credential_index_uses_previous"
+    ],
+    "bounded": false
+   },
+   {
+    "id": "database.connection",
+    "label": "Database connection",
+    "group": "Database",
+    "method": "workflow",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "control plane and migrations",
+      "meaning": "connection URL"
+     },
+     {
+      "kind": "deployment_store",
+      "reader": "bundled PostgreSQL",
+      "meaning": "database, user and password"
+     }
+    ],
+    "owner": "workflow:database_connection",
+    "description": "Changes the address or credentials of the same database after proving, by live probes, that the new connection reaches it. Data is not moved.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "role": "control-plane",
+    "env_names": [
+     "AGENT_DATABASE_URL",
+     "AGENT_POSTGRES_DB",
+     "AGENT_POSTGRES_USER",
+     "AGENT_POSTGRES_PASSWORD"
+    ],
+    "setting_keys": [],
+    "bounded": false
+   },
+   {
+    "id": "database.migration",
+    "label": "Move to another database",
+    "group": "Database",
+    "method": "workflow",
+    "sources": [
+     {
+      "kind": "deployment_store",
+      "reader": "deployment agent",
+      "meaning": "migration journal"
+     }
+    ],
+    "owner": "workflow:database_migration",
+    "description": "Fences every writer, copies into an empty target, verifies it and switches. Once writes resume on the target the source is never switched back to automatically.",
+    "apply_mode": "restart",
+    "restart_scope": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "role": "control-plane",
+    "env_names": [],
+    "setting_keys": [],
+    "bounded": false
+   }
+  ]
+ },
+ "config_keys": {
+  "control-plane": {
+   "AGENT_CONTROL_PLANE_BIND": {
+    "kind": "bind",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_CONTROL_PLANE_PORT": {
+    "kind": "port",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_MCP_RELAY_BIND": {
+    "kind": "bind",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_MCP_RELAY_PORT": {
+    "kind": "port",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_WEB_BIND": {
+    "kind": "bind",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_WEB_PORT": {
+    "kind": "port",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_EDGE_BIND": {
+    "kind": "bind",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_EDGE_PORT": {
+    "kind": "port",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_NETWORK_NAME": {
+    "kind": "name",
+    "item": "deployment.control_plane_listeners",
+    "services": [
+     "control-plane",
+     "mcp-relay",
+     "web",
+     "edge"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "COMPOSE_PROFILES": {
+    "kind": "choice",
+    "item": "deployment.optional_services",
+    "services": [
+     "pgadmin",
+     "edge"
+    ],
+    "choices": [
+     "",
+     "edge",
+     "pgadmin",
+     "edge,pgadmin"
+    ],
+    "boundary": ""
+   },
+   "AGENT_PGADMIN_BOOTSTRAP_URL": {
+    "kind": "url",
+    "item": "deployment.pgadmin",
+    "services": [
+     "pgadmin",
+     "control-plane"
+    ],
+    "choices": [],
+    "boundary": "policy"
+   },
+   "AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL": {
+    "kind": "url",
+    "item": "deployment.pgadmin",
+    "services": [
+     "pgadmin",
+     "control-plane"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_PGADMIN_BOOTSTRAP_DIR": {
+    "kind": "path",
+    "item": "deployment.pgadmin",
+    "services": [
+     "pgadmin",
+     "control-plane"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_PGADMIN_COOKIE_SECURE": {
+    "kind": "choice",
+    "item": "deployment.pgadmin",
+    "services": [
+     "pgadmin",
+     "control-plane"
+    ],
+    "choices": [
+     "True",
+     "False"
+    ],
+    "boundary": ""
+   },
+   "AGENT_PGADMIN_URL": {
+    "kind": "url",
+    "item": "deployment.pgadmin",
+    "services": [
+     "pgadmin",
+     "control-plane"
+    ],
+    "choices": [],
+    "boundary": "policy"
+   },
+   "AGENT_OPERATION_PROFILING_MODE": {
+    "kind": "choice",
+    "item": "deployment.profiling",
+    "services": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "choices": [
+     "disabled",
+     "environment",
+     "admin"
+    ],
+    "boundary": "policy"
+   },
+   "AGENT_OPERATION_PROFILING_DEPLOYMENT": {
+    "kind": "name",
+    "item": "deployment.profiling",
+    "services": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_WEB_VARIANT": {
+    "kind": "choice",
+    "item": "deployment.web_routing",
+    "services": [
+     "web"
+    ],
+    "choices": [
+     "root",
+     "agents"
+    ],
+    "boundary": ""
+   },
+   "ADMIN_TOKEN": {
+    "kind": "secret",
+    "item": "security.admin_token",
+    "services": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_SETTINGS_ENCRYPTION_KEY": {
+    "kind": "secret",
+    "item": "security.settings_root_key",
+    "services": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS": {
+    "kind": "secret",
+    "item": "security.settings_root_key",
+    "services": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_DATABASE_URL": {
+    "kind": "secret",
+    "item": "database.connection",
+    "services": [
+     "control-plane",
+     "mcp-relay"
+    ],
+    "choices": [],
+    "boundary": ""
+   }
+  },
+  "host": {
+   "AGENT_RUNNER_STOP_GRACE": {
+    "kind": "text",
+    "item": "hosts.topology",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_SANDBOX_MANAGER_STOP_GRACE": {
+    "kind": "text",
+    "item": "hosts.topology",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_HOST_CAPACITY_ENABLED": {
+    "kind": "choice",
+    "item": "hosts.topology",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [
+     "1",
+     "0"
+    ],
+    "boundary": ""
+   },
+   "AGENT_SANDBOX_IMAGE_PULL": {
+    "kind": "choice",
+    "item": "hosts.topology",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [
+     "true",
+     "false"
+    ],
+    "boundary": ""
+   },
+   "AGENT_RUNTIME_DOWNLOAD_NETWORK": {
+    "kind": "name",
+    "item": "hosts.topology",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_SANDBOX_RUNTIME": {
+    "kind": "choice",
+    "item": "hosts.sandbox_boundary",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [
+     "runc",
+     "io.containerd.kata.v2",
+     "kata"
+    ],
+    "boundary": "policy"
+   },
+   "AGENT_EGRESS_DNS_SERVER": {
+    "kind": "bind",
+    "item": "hosts.sandbox_boundary",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [],
+    "boundary": "policy"
+   },
+   "AGENT_EGRESS_CHAT_NETWORK_POOL": {
+    "kind": "cidrs",
+    "item": "hosts.sandbox_boundary",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [],
+    "boundary": "policy"
+   },
+   "AGENT_EGRESS_PROTECTED_CIDRS": {
+    "kind": "cidrs",
+    "item": "hosts.sandbox_boundary",
+    "services": [
+     "runner",
+     "sandbox-manager"
+    ],
+    "choices": [],
+    "boundary": "grow"
+   },
+   "AGENT_SANDBOX_MANAGER_TOKEN": {
+    "kind": "secret",
+    "item": "hosts.sandbox_manager_token",
+    "services": [
+     "sandbox-manager",
+     "runner"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_SANDBOX_MANAGER_TOKEN_NEXT": {
+    "kind": "secret",
+    "item": "hosts.sandbox_manager_token",
+    "services": [
+     "sandbox-manager",
+     "runner"
+    ],
+    "choices": [],
+    "boundary": ""
+   },
+   "AGENT_OPERATION_PROFILING_MODE": {
+    "kind": "choice",
+    "item": "deployment.profiling",
+    "services": [
+     "runner"
+    ],
+    "choices": [
+     "disabled",
+     "environment",
+     "admin"
+    ],
+    "boundary": "policy"
+   }
+  }
+ },
+ "services": {
+  "control-plane": [
+   "control-plane",
+   "mcp-relay",
+   "web",
+   "edge",
+   "pgadmin"
+  ],
+  "host": [
+   "runner",
+   "sandbox-manager",
+   "gateway-tunnel",
+   "mcp-tunnel",
+   "control-plane-tunnel"
+  ]
+ }
+}
