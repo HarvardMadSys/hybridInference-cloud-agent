@@ -4,7 +4,8 @@
 // Gateway reported.
 
 export const contextDashboardEn = {
-  'dashboard.selected': 'Selected request',
+  'dashboard.selected': 'Request details',
+  'dashboard.browser.noMatch': 'No item in this category matches.',
   'dashboard.raw': 'Request sizes (as reported)',
   'dashboard.notRecorded': 'not recorded',
   'dashboard.notRecordedTip':
@@ -89,6 +90,7 @@ export const contextDashboardEn = {
   'dashboard.window.free': '{free} left in the reported window',
   'dashboard.window.noWindow': 'The window size was not reported, so no share is shown.',
   'dashboard.window.recordedTrack': 'Recorded before it (estimate)',
+  'dashboard.window.uncoveredShort': 'Not covered by records (no size)',
   'dashboard.window.uncovered':
     'Not covered by recorded content: system prompt, tool schemas, clipped text. No size claimed.',
   'dashboard.window.estimate': '≈{estimate} recorded of {observed} observed.',
@@ -114,6 +116,8 @@ export const contextDashboardEn = {
   'dashboard.trend.durationTip':
     'Gateway latency where a request joins one by its id (solid), otherwise the step time between events (dashed).',
   'dashboard.trend.adaptive': 'Adaptive',
+  'dashboard.trend.zoomIn': 'Show fewer requests',
+  'dashboard.trend.zoomOut': 'Show more requests',
   'dashboard.trend.adaptiveTip': 'Fit the scale to the requests shown.',
   'dashboard.trend.aria': 'Context of {count} columns. Left and right arrows choose one.',
   'dashboard.trend.tipStep': 'Request {index} · turn {turn}',
@@ -136,6 +140,7 @@ export const contextDashboardEn = {
     'Areas: stored text before each request, estimated. Line: the input the provider reported. A rise or drop alone is not an event.',
 
   'dashboard.browser.title': 'Context Browser',
+  'dashboard.browser.sources': 'Sources, exclusions and the CLI’s own account',
   'dashboard.browser.base': 'Compare with the previous',
   'dashboard.browser.previous': 'Previous request',
   'dashboard.browser.next': 'Next request',
@@ -151,7 +156,8 @@ export const contextDashboardEn = {
 } as const;
 
 export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, string> = {
-  'dashboard.selected': '选中的请求',
+  'dashboard.selected': '请求详情',
+  'dashboard.browser.noMatch': '这一类里没有匹配的条目。',
   'dashboard.raw': '请求大小（报告值）',
   'dashboard.notRecorded': '未记录',
   'dashboard.notRecordedTip':
@@ -234,6 +240,7 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.window.free': '报告的窗口还剩 {free}',
   'dashboard.window.noWindow': '没有报告窗口大小，因此不显示比例。',
   'dashboard.window.recordedTrack': '此前记录的内容（估算）',
+  'dashboard.window.uncoveredShort': '记录未覆盖（不给大小）',
   'dashboard.window.uncovered':
     '记录内容没有覆盖的部分：系统提示词、工具定义、被截短的文字。不给出大小。',
   'dashboard.window.estimate': '观测 {observed} 中，记录约 {estimate}。',
@@ -258,6 +265,8 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.trend.durationTip':
     '能按 id 对上 Gateway 记录的请求画 Gateway 延迟（实线），否则画事件之间的步骤时间（虚线）。',
   'dashboard.trend.adaptive': '自适应',
+  'dashboard.trend.zoomIn': '放大：显示更少的请求',
+  'dashboard.trend.zoomOut': '缩小：显示更多的请求',
   'dashboard.trend.adaptiveTip': '让刻度适应当前显示的请求。',
   'dashboard.trend.aria': '{count} 列的上下文。用左右方向键选择。',
   'dashboard.trend.tipStep': '第 {index} 次请求 · 第 {turn} 轮',
@@ -280,6 +289,7 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
     '面积：每次请求之前存下的文字，估算值。线：服务商报告的输入。单纯的升降不算事件。',
 
   'dashboard.browser.title': '上下文浏览器',
+  'dashboard.browser.sources': '数据来源、未计入的内容和 CLI 自己的统计',
   'dashboard.browser.base': '与前一个比较',
   'dashboard.browser.previous': '上一次请求',
   'dashboard.browser.next': '下一次请求',

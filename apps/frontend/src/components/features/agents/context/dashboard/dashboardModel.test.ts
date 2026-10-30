@@ -5,7 +5,7 @@ import { translate, type TranslationKey } from '@/lib/i18n/translate';
 import { basePoint, itemKey } from './ContextBrowser';
 import { TOP_PAIR_PX, TWO_COLUMNS_PX, layoutFor } from './ContextDashboard';
 import { shareText } from './DashCard';
-import { donutArcs } from './Donut';
+import { centerFont, donutArcs } from './Donut';
 import { timingRows } from './TimingStats';
 import { providerValues } from './TokenStats';
 import { coverageOf } from './WindowCard';
@@ -20,6 +20,7 @@ import {
   maxima,
   stackedRuns,
   trendColumns,
+  zoomWindow,
 } from './trendModel';
 
 function point(index: number, overrides: Partial<ContextPointApi> = {}): ContextPointApi {
@@ -67,6 +68,14 @@ describe('donutArcs', () => {
       { key: 'a', stroke: 's', len: 100, offset: 125 },
     ]);
     expect(donutArcs([{ key: 'a', stroke: 's', value: 0 }])).toEqual([]);
+  });
+});
+
+describe('centerFont', () => {
+  it('shrinks a long centre value to stay inside the ring', () => {
+    expect(centerFont('13m', 104)).toBe(15);
+    expect(centerFont('≈146.5K', 104)).toBeLessThan(15);
+    expect(centerFont('≈146.5K', 104) * 7 * 0.6).toBeLessThanOrEqual(104 * 0.58);
   });
 });
 
@@ -154,6 +163,13 @@ describe('trend model', () => {
     expect(initialWindow(3, 4)).toEqual({ from: 0, to: 2 });
     expect(clampWindow(8, 12, 10)).toEqual({ from: 5, to: 9 });
     expect(clampWindow(-3, 1, 10)).toEqual({ from: 0, to: 4 });
+  });
+
+  it('zooms about the middle, never below four columns or past the history', () => {
+    expect(zoomWindow(0, 34, 35, true)).toEqual({ from: 9, to: 26 });
+    expect(zoomWindow(9, 26, 35, false)).toEqual({ from: 0, to: 34 });
+    expect(zoomWindow(30, 33, 35, true)).toEqual({ from: 30, to: 33 });
+    expect(zoomWindow(28, 34, 35, false)).toEqual({ from: 21, to: 34 });
   });
 
   it('breaks an area where a request has no recorded categories', () => {

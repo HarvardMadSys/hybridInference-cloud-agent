@@ -128,6 +128,23 @@ export function clampWindow(from: number, to: number, n: number): { from: number
   return { from: start, to: start + span - 1 };
 }
 
+/** The window halved (zoom in) or doubled (zoom out) about its middle, kept in range. */
+export function zoomWindow(
+  from: number,
+  to: number,
+  n: number,
+  zoomIn: boolean,
+): { from: number; to: number } {
+  const size = to - from + 1;
+  const next = zoomIn ? Math.max(MIN_WINDOW, Math.ceil(size / 2)) : Math.min(n, size * 2);
+  const middle = (from + to) / 2;
+  const start = Math.round(middle - (next - 1) / 2);
+  return clampWindow(start, start + next - 1, n);
+}
+
+/** The fewest columns a zoomed window shows. */
+export const MIN_WINDOW = 4;
+
 /** Stacked areas: per category, the polygon points of each unbroken run. */
 export function stackedRuns(
   columns: TrendColumn[],

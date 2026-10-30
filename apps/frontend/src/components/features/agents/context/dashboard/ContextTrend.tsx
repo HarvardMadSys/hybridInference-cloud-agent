@@ -36,6 +36,8 @@ import {
   type Maxima,
   type Mode,
   type TrendColumn,
+  MIN_WINDOW,
+  zoomWindow,
 } from './trendModel';
 import { DNA_MAX_COLUMNS, useDnaBands } from './useDnaBands';
 
@@ -180,6 +182,7 @@ export function ContextTrend({
           from={from}
           to={to}
           onWindow={(a, b) => setWin(clampWindow(a, b, n))}
+          onZoom={(zoomIn) => setWin(zoomWindow(from, to, n, zoomIn))}
           label={t('dashboard.trend.window', {
             from: (from + 1).toLocaleString(locale),
             to: (to + 1).toLocaleString(locale),
@@ -560,18 +563,23 @@ function dnaStacks(
   ];
 }
 
+const OVERVIEW_BUTTON =
+  'ui-focus-ring rounded px-1.5 hover:text-foreground disabled:opacity-40 [@media(pointer:coarse)]:min-h-11';
+
 /** The whole history in miniature, with the shown window draggable over it. */
 function Overview({
   columns,
   from,
   to,
   onWindow,
+  onZoom,
   label,
 }: {
   columns: number[];
   from: number;
   to: number;
   onWindow: (from: number, to: number) => void;
+  onZoom: (zoomIn: boolean) => void;
   label: string;
 }) {
   const { t } = useLocale();
@@ -613,9 +621,23 @@ function Overview({
           </button>
           <button
             type="button"
-            className="ui-focus-ring rounded px-1.5 hover:text-foreground [@media(pointer:coarse)]:min-h-11"
-            onClick={() => onWindow(0, n - 1)}
+            aria-label={t('dashboard.trend.zoomIn')}
+            disabled={size + 1 <= MIN_WINDOW}
+            className={OVERVIEW_BUTTON}
+            onClick={() => onZoom(true)}
           >
+            +
+          </button>
+          <button
+            type="button"
+            aria-label={t('dashboard.trend.zoomOut')}
+            disabled={size + 1 >= n}
+            className={OVERVIEW_BUTTON}
+            onClick={() => onZoom(false)}
+          >
+            −
+          </button>
+          <button type="button" className={OVERVIEW_BUTTON} onClick={() => onWindow(0, n - 1)}>
             {t('dashboard.trend.all')}
           </button>
           <button

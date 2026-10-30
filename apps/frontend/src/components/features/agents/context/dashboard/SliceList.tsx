@@ -29,7 +29,7 @@ export function SliceList({
   label: string;
 }) {
   return (
-    <ul aria-label={label} className="min-w-0 flex-1 space-y-0.5 text-xs">
+    <ul aria-label={label} className="min-w-[11rem] flex-1 space-y-0.5 text-xs">
       {rows.map((row) => (
         <li
           key={row.key}

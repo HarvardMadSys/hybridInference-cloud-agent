@@ -182,8 +182,6 @@ function Carried({
   const baseKeys = baseEntries ? new Set(baseEntries.map(itemKey)) : null;
   return (
     <>
-      <ProviderInput request={composition.request} />
-      <Note>{t('contextRequest.reconstructed.note')}</Note>
       <p className="mt-1 text-[11px] tabular-nums text-muted">
         {t('dashboard.browser.totals', {
           observed: compactCount(observed),
@@ -239,12 +237,20 @@ function Carried({
           </li>
         ))}
       </ul>
-      {rebuilt.entries_omitted > 0 ? (
-        <Note>{t('contextRequest.native.omitted', { count: rebuilt.entries_omitted })}</Note>
-      ) : null}
       <BoundaryNote rebuilt={rebuilt} />
-      <Excluded rebuilt={rebuilt} />
-      <NativeSection composition={composition} />
+      {/* Where the numbers come from, and what was left out: on request. */}
+      <details className="mt-2 text-xs">
+        <summary className="ui-focus-ring cursor-pointer rounded text-muted [@media(pointer:coarse)]:min-h-11">
+          {t('dashboard.browser.sources')}
+        </summary>
+        <ProviderInput request={composition.request} />
+        <Note>{t('contextRequest.reconstructed.note')}</Note>
+        {rebuilt.entries_omitted > 0 ? (
+          <Note>{t('contextRequest.native.omitted', { count: rebuilt.entries_omitted })}</Note>
+        ) : null}
+        <Excluded rebuilt={rebuilt} />
+        <NativeSection composition={composition} />
+      </details>
     </>
   );
 }
@@ -350,6 +356,7 @@ function CategoryRow({
     : null;
   const isNew = (entry: CompositionEntryApi) => baseKeys !== null && !baseKeys.has(itemKey(entry));
   const added = own.filter(isNew).length;
+  const shown = expanded ? filterEntries(entries, category.key, query, order) : [];
   return (
     <li>
       <button
@@ -391,8 +398,11 @@ function CategoryRow({
               {t('dashboard.browser.added', { count: added })}
             </p>
           ) : null}
+          {shown.length === 0 ? (
+            <p className="mt-1 text-[11px] text-muted">{t('dashboard.browser.noMatch')}</p>
+          ) : null}
           <ul className="mt-1 divide-y divide-border rounded border border-border">
-            {filterEntries(entries, category.key, query, order).map((entry) => (
+            {shown.map((entry) => (
               <EntryRow
                 key={itemKey(entry)}
                 entry={entry}

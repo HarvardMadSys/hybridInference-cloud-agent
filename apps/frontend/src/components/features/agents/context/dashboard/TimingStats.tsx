@@ -227,7 +227,7 @@ function TimingStrip({
         {ticks.map((frac) => (
           <span
             key={frac}
-            className="absolute -translate-x-1/2 first:translate-x-0 last:-translate-x-full"
+            className="absolute -translate-x-1/2 whitespace-nowrap first:translate-x-0 last:-translate-x-full"
             style={{ left: `${frac * 100}%` }}
           >
             {frac === 0 ? '0' : formatDuration(model.total * frac)}

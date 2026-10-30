@@ -22,7 +22,7 @@ import { TokenStats } from './TokenStats';
 import { WindowCard } from './WindowCard';
 
 export const TWO_COLUMNS_PX = 760;
-export const TOP_PAIR_PX = 520;
+export const TOP_PAIR_PX = 600;
 
 export type DashboardLayout = 'wide' | 'medium' | 'narrow';
 

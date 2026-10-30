@@ -43,6 +43,15 @@ export function donutArcs(
   return arcs;
 }
 
+/** The centre text's size: smaller for a long value, so it stays inside the ring. */
+export function centerFont(text: ReactNode, size: number): number {
+  const full = Math.max(12, Math.round(size * 0.14));
+  if (typeof text !== 'string') return full;
+  // The hole is about 0.6 of the ring; a digit is about 0.6 em wide.
+  const fits = Math.floor((size * 0.58) / (Math.max(1, text.length) * 0.6));
+  return Math.max(10, Math.min(full, fits));
+}
+
 export function Donut({
   segments,
   centerTop,
@@ -90,7 +99,7 @@ export function Donut({
       <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center leading-tight">
         <b
           className="tabular-nums text-foreground"
-          style={{ fontSize: Math.max(12, Math.round(size * 0.14)) }}
+          style={{ fontSize: centerFont(centerTop, size) }}
         >
           {centerTop}
         </b>

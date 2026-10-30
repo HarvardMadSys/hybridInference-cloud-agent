@@ -89,14 +89,13 @@ export function WindowCard({
       title={t(isLatest ? 'dashboard.window.latest' : 'dashboard.window.selected')}
       aside={<span className="text-[11px] text-muted">{meta.filter(Boolean).join(' · ')}</span>}
     >
-      <p className="tabular-nums text-foreground">
+      <p className="tabular-nums text-foreground" title={t('dashboard.window.observedNote')}>
         <b className="text-lg">{compactCount(observed)}</b>
         <span className="text-xs text-muted">{size}</span>
         {usedPct !== null ? (
           <span className="ml-2 text-sm font-semibold">{`${usedPct.toFixed(1)}%`}</span>
         ) : null}
       </p>
-      <p className="text-[11px] text-muted">{t('dashboard.window.observedNote')}</p>
       <ObservedTrack observed={observed} window={window} />
       <RecordedTrack coverage={coverageOf(keys, point.categories, observed)} observed={observed} />
       {isLatest && latest?.compacted_after ? (
@@ -119,7 +118,7 @@ function ObservedTrack({ observed, window }: { observed: number; window: number 
   }
   return (
     <div className="mt-2">
-      <p className="text-[11px] text-muted">{t('dashboard.window.observedTrack')}</p>
+      <TrackHeader name={t('dashboard.window.observedTrack')} value={note} />
       <div
         role="img"
         aria-label={label}
@@ -133,7 +132,6 @@ function ObservedTrack({ observed, window }: { observed: number; window: number 
           />
         ) : null}
       </div>
-      <p className="mt-0.5 text-[11px] text-muted">{note}</p>
     </div>
   );
 }
@@ -141,23 +139,41 @@ function ObservedTrack({ observed, window }: { observed: number; window: number 
 const HATCH =
   'bg-[repeating-linear-gradient(45deg,transparent_0_3px,rgb(148_163_184/0.6)_3px_5px)]';
 
+function TrackHeader({ name, value }: { name: string; value: string }) {
+  return (
+    <p className="flex flex-wrap justify-between gap-x-2 text-[11px] text-muted">
+      <span>{name}</span>
+      <span className="tabular-nums">{value}</span>
+    </p>
+  );
+}
+
 function RecordedTrack({ coverage, observed }: { coverage: Coverage | null; observed: number }) {
   const { t } = useLocale();
   if (!coverage) {
     return (
       <div className="mt-2">
-        <p className="text-[11px] text-muted">{t('dashboard.window.recordedTrack')}</p>
-        <p className="text-[11px] text-muted">{t('dashboard.window.noRecorded')}</p>
+        <TrackHeader
+          name={t('dashboard.window.recordedTrack')}
+          value={t('dashboard.window.noRecorded')}
+        />
       </div>
     );
   }
   const uncovered = coverage.uncoveredPct > 0;
+  const summary = t(coverage.exceeds ? 'dashboard.window.exceeds' : 'dashboard.window.estimate', {
+    estimate: compactCount(coverage.estimate),
+    observed: compactCount(observed),
+  });
   return (
     <div className="mt-2">
-      <p className="text-[11px] text-muted">{t('dashboard.window.recordedTrack')}</p>
+      <TrackHeader
+        name={t('dashboard.window.recordedTrack')}
+        value={coverage.exceeds ? '' : summary}
+      />
       <div
         role="img"
-        aria-label={t('dashboard.window.recordedTrack')}
+        aria-label={`${t('dashboard.window.recordedTrack')}: ${summary}`}
         className="mt-0.5 flex h-2.5 overflow-hidden rounded-full bg-surface-muted"
       >
         {coverage.parts.map((part) => (
@@ -171,38 +187,28 @@ function RecordedTrack({ coverage, observed }: { coverage: Coverage | null; obse
           <span className={`h-full ${HATCH}`} style={{ width: `${coverage.uncoveredPct}%` }} />
         ) : null}
       </div>
-      <ul className="mt-1 grid grid-cols-1 gap-x-3 gap-y-0.5 text-[11px] sm:grid-cols-2">
+      {coverage.exceeds ? <p className="mt-0.5 text-[11px] text-muted">{summary}</p> : null}
+      <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted">
         {coverage.parts.map((part) => (
-          <li key={part.key} className="flex items-center justify-between gap-2">
-            <span className="flex min-w-0 items-center gap-1.5 text-muted">
-              <span
-                aria-hidden="true"
-                className={`h-2 w-2 shrink-0 rounded-full ${swatchOf(part.key).bg}`}
-              />
-              <span className="truncate">{t(labelOf(part.key))}</span>
-            </span>
+          <li key={part.key} className="flex items-center gap-1">
+            <span
+              aria-hidden="true"
+              className={`h-2 w-2 shrink-0 rounded-full ${swatchOf(part.key).bg}`}
+            />
+            {t(labelOf(part.key))}
             <span className="tabular-nums text-foreground">
-              ≈{compactCount(part.tokens)}{' '}
-              <span className="text-muted">{shareText(part.tokens, coverage.estimate)}</span>
+              ≈{compactCount(part.tokens)}
+              <span className="ml-1 text-muted">{shareText(part.tokens, coverage.estimate)}</span>
             </span>
           </li>
         ))}
         {uncovered ? (
-          <li className="flex items-center gap-1.5 text-muted sm:col-span-2">
-            <span
-              aria-hidden="true"
-              className="h-2 w-2 shrink-0 rounded-full border border-dashed border-muted"
-            />
-            {t('dashboard.window.uncovered')}
+          <li className="flex items-center gap-1" title={t('dashboard.window.uncovered')}>
+            <span aria-hidden="true" className={`h-2 w-3 shrink-0 rounded-sm ${HATCH}`} />
+            {t('dashboard.window.uncoveredShort')}
           </li>
         ) : null}
       </ul>
-      <p className="mt-1 text-[11px] text-muted">
-        {t(coverage.exceeds ? 'dashboard.window.exceeds' : 'dashboard.window.estimate', {
-          estimate: compactCount(coverage.estimate),
-          observed: compactCount(observed),
-        })}
-      </p>
     </div>
   );
 }

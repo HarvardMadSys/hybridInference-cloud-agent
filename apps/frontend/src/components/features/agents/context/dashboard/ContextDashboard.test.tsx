@@ -345,6 +345,8 @@ describe('ContextDashboard', () => {
     fireEvent.click(row);
     expect(within(browser).getByText('1 new since the compared request')).toBeInTheDocument();
     expect(within(browser).getAllByText('new')).toHaveLength(1);
+    fireEvent.change(within(browser).getByRole('searchbox'), { target: { value: 'nothing' } });
+    expect(within(browser).getByText('No item in this category matches.')).toBeInTheDocument();
   });
 
   it('drops a composition reply for a request no longer selected', async () => {
