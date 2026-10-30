@@ -38,6 +38,26 @@ class AllCapabilities:
         """Legacy fixtures have no configured environment unless overridden."""
         return None
 
+    # The host credential renewal capability, inert: no key ids recorded, no
+    # renewal pending. Fakes that test renewal override these.
+    async def record_key(self, *, host: str, credential_hash: str, key_id: str) -> None:
+        """Record nothing: legacy fixtures do not track which key minted a credential."""
+        return None
+
+    async def issue_renewal(
+        self, *, host: str, current_hash: str, pending_hash: str, key_id: str
+    ) -> bool:
+        """Never renew: legacy fixtures model a pool with no renewal pending."""
+        return False
+
+    async def request_renewal(self, host: str) -> bool:
+        """No host is asked to renew."""
+        return False
+
+    async def credential_status(self) -> list[dict[str, Any]]:
+        """No credential bookkeeping."""
+        return []
+
     async def maintain_environments(self) -> None:
         """Legacy fixtures have no archived environments or test leases to reap."""
         return None
