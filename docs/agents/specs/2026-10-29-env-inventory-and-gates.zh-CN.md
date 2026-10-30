@@ -9,7 +9,7 @@
   `tests/unit/config/test_app_config_registry.py`、`tests/unit/config/test_no_raw_env_reads.py`
 - 性质：两部分，标注分开。
   - **已实现**（本分支）：盘点和门禁。不迁移任何产品设置，不改默认值、安全策略或网络策略。
-  - **提议**（未实现）：每个变量族的目标管理方式（§4.2、§7）、控制与恢复边界（§8）、统一的 Admin 体验（§9）。
+  - **提议**：每个变量族的目标管理方式（§4.2、§7）、控制与恢复边界（§8）、统一的 Admin 体验（§9）。2026-10-30 起已按实施计划实现，见 [实现记录](../reviews/2026-10-30-unified-config-management-implementation.zh-CN.md)；本文其余「当前」描述与数字仍以 `4b7b826d` 基线为准。
     分阶段的实施计划见 [2026-10-30-unified-config-management-plan.zh-CN.md](2026-10-30-unified-config-management-plan.zh-CN.md)。
     提议部分不表示任何能力已经存在。
 - 实现：`tests/support/env_scan.py`（扫描器）、`tests/support/env_shell.py`（shell 扫描器）、

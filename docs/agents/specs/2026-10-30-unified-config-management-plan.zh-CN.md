@@ -1,7 +1,7 @@
 # 统一前端配置管理：分阶段实施计划
 
 - 日期：2026-10-30
-- 状态：**计划，未实现**。本文没有任何一项已经交付；各工作包的实现和验收另行记录在 `docs/agents/reviews/`。
+- 状态：WP1–WP12 已按本计划实现，例外与限制见 [实现记录](../reviews/2026-10-30-unified-config-management-implementation.zh-CN.md)（凭据加密密钥轮换未实现）；与计划不同的设计决定见 [部署代理与流程设计](2026-10-30-deployment-agent-and-workflows-design.zh-CN.md) §10。
 - 依据：[P1 第二次修订](2026-10-29-env-inventory-and-gates.zh-CN.md)（两轴映射 §7、边界 §8、Admin 体验 §9）；
   [设置管理设计](2026-10-28-settings-management-design.zh-CN.md) 及其 [执行卡](2026-10-28-settings-management-dsh-steps.zh-CN.md)
   （S01–S12 已实现，S13 起未实现）；[发布说明](../../../deploy/release/README.md)；
