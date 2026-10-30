@@ -39,6 +39,9 @@ CONTROL_PLANE_CAPABILITIES: tuple[str, ...] = (
     # Decrypts with a credential key's previous key during its rotation and
     # builds lookup digests with the key the rotation names.
     "credential-key-rotation-v1",
+    # Accepts a host's renewed credential (promoting it on first use) and the
+    # one it replaced for a short grace; issues renewals at heartbeats.
+    "host-credential-renewal-v1",
 )
 
 #: Saved settings a process reads only when it builds a component, by the

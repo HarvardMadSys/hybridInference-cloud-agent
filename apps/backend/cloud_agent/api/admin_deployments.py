@@ -383,7 +383,7 @@ async def retire_previous_signing_key(
 ) -> dict[str, Any]:
     """Stop verifying with the previous signing key after hosts re-enrolled."""
     from cloud_agent.api.admin_credentials import require_full_authority
-    from cloud_agent.application.key_rotation import retire_control_signing
+    from cloud_agent.application.signing_key_rotation import retire_control_signing
 
     require_full_authority(admin_id)
     if body.confirm != "retire":
@@ -401,3 +401,60 @@ async def retire_previous_signing_key(
         actor_id=admin_id,
     )
     return {k: v for k, v in workflow.items() if k != "data"}
+
+
+@router.get("/host-credentials")
+async def host_credentials(store: Any = Depends(get_storage)) -> dict[str, Any]:
+    """Every enrolled server's credential: which signing key minted it, whether a renewal waits."""
+    from cloud_agent.application.signing_key_rotation import host_lag
+    from cloud_agent.tokens import signing_key_id
+
+    storage = require_store(store)
+    key_id = signing_key_id()
+    return {
+        "signing_key_id": key_id,
+        "hosts": [
+            {
+                "host": row["host"],
+                "status": row["status"],
+                "current_key": bool(key_id) and row["credential_key_id"] == key_id,
+                "key_known": row["credential_key_id"] is not None,
+                "renews": bool(row["renews"]),
+                "renewal_pending": bool(row["renewal_pending"]),
+                "renewal_requested": bool(row["renewal_requested"]),
+                "last_heartbeat_at": row["last_heartbeat_at"],
+                "lag": None if row["credential_key_id"] == key_id else host_lag(row),
+            }
+            for row in await storage.host_credentials.credential_status()
+        ],
+    }
+
+
+@router.post("/host-credentials/{host}/renew")
+async def renew_host_credential(
+    host: str,
+    body: ConfirmRequest,
+    request: Request,
+    store: Any = Depends(get_storage),
+    admin_id: str = Depends(verify_admin_access),
+) -> dict[str, Any]:
+    """Give one server a fresh credential at its next heartbeat; the old one lapses after a grace.
+
+    The renewal replaces re-enrollment for a server whose runner can renew:
+    no enrollment token, no restart, and the old credential stops working
+    shortly after the new one's first use.
+    """
+    require_deployment_authority(request, admin_id)
+    if body.confirm != host:
+        raise HTTPException(status_code=422, detail="Confirm by typing the server's name.")
+    storage = require_store(store)
+    if not await storage.host_credentials.request_renewal(host):
+        raise HTTPException(status_code=404, detail="No enrolled server has this name.")
+    await log_admin_action(
+        storage,
+        get_client_ip(request),
+        "agent.runner_host.renew_credential",
+        details={"host": host},
+        actor_id=admin_id,
+    )
+    return {"requested": True}

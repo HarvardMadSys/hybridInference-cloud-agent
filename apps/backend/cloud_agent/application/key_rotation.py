@@ -12,7 +12,8 @@
                          current one → the control plane switches its saved
                          credential → hosts promote it.
 ``control_signing``      the new signing key signs, the previous one keeps
-                         verifying; ``retire`` (confirmed) stops it verifying.
+                         verifying while every host renews its credential and
+                         the tokens signed before drain; then it is retired.
 
 The two credential encryption keys rotate in
 :mod:`cloud_agent.application.credential_key_rotation`.
@@ -209,9 +210,18 @@ async def _prepare_sandbox_manager_token(storage, agents, names, params, sealed_
 
 
 async def _prepare_control_signing(storage, agents, names, params, sealed_by_agent, secret):  # type: ignore[no-untyped-def]
+    from cloud_agent.instances import fleet_supports
+    from cloud_agent_shared.deployment_contract import key_identifier
+
     if not secret or len(secret.encode()) < 32:
         raise WorkflowRefused("the new signing key must be at least 32 bytes")
-    return {"names": names}, {"next_secret": _seal_at_rest(secret)}, "stage"
+    # Hosts move to the new key by renewing their credentials, which every
+    # process must accept before any host switches.
+    verdict = await fleet_supports(storage.instances, "host-credential-renewal-v1")
+    if not verdict.supported:
+        raise WorkflowRefused("the signing key cannot be rotated yet: " + verdict.reason())
+    prepared = {"names": names, "new_key_id": key_identifier(secret)}
+    return prepared, {"next_secret": _seal_at_rest(secret)}, "stage"
 
 
 _PREPARE = {
@@ -571,85 +581,16 @@ async def _advance_sandbox_manager_token(storage: Any, workflow: dict[str, Any])
             return
 
 
-async def _advance_control_signing(storage: Any, workflow: dict[str, Any]) -> None:
-    from cloud_agent import settings
-
-    if workflow["step"] == "stage":
-        revision, encoded = await storage.settings.read_settings()
-        current = settings._decode(encoded)["control_signing_secret"]
-        secret = _open_at_rest(workflow["data"]["next_secret"])
-        new_revision, _encoded, _previous = await storage.settings.update_settings(
-            settings.encode_changes(
-                {"control_signing_secret": secret, "control_signing_secret_previous": current}
-            ),
-            expected_revision=revision,
-        )
-        data = {k: v for k, v in workflow["data"].items() if k != "next_secret"}
-        await save(
-            storage,
-            workflow,
-            state="running",
-            step="adopt",
-            detail="",
-            data={**data, "stage_revision": new_revision},
-        )
-    if workflow["step"] == "adopt":
-        target = workflow["data"]["stage_revision"]
-        await _verify(
-            storage,
-            workflow,
-            lambda instances, target=target: [
-                _label(i) for i in instances if i["adopted_settings_revision"] < target
-            ],
-            "retire_pending",
-            "waiting for every process to sign with the new key",
-        )
-    if workflow["step"] == "retire_pending" and workflow["state"] != "waiting":
-        await save(
-            storage,
-            workflow,
-            state="waiting",
-            detail=(
-                "the new key signs and the previous one still verifies. Re-enroll every host, "
-                "then retire the previous key; credentials signed before the rotation stop working then"
-            ),
-        )
-
-
-async def retire_control_signing(storage: Any, workflow_id: str) -> dict[str, Any]:
-    """Stop verifying with the previous signing key (an administrator's confirmed step)."""
-    from cloud_agent import settings
-
-    workflow = await storage.deployments.get_workflow(workflow_id)
-    if (
-        workflow is None
-        or workflow["kind"] != "control_signing"
-        or workflow["step"] != "retire_pending"
-    ):
-        raise WorkflowRefused("this signing key rotation is not waiting to retire")
-    revision, _encoded = await storage.settings.read_settings()
-    await storage.settings.update_settings(
-        settings.encode_changes({"control_signing_secret_previous": ""}), expected_revision=revision
-    )
-    await save(
-        storage,
-        workflow,
-        state="succeeded",
-        step="retired",
-        detail="the previous signing key no longer verifies",
-    )
-    return workflow
-
-
 def register_advancers() -> None:
     """Add every rotation's advancer to the workflow engine."""
     from cloud_agent.application.credential_key_rotation import register as register_credential
     from cloud_agent.application.database_workflows import register as register_database
+    from cloud_agent.application.signing_key_rotation import advance_control_signing
 
     ADVANCERS["admin_token"] = _advance_admin_token
     ADVANCERS["root_key"] = _advance_root_key
     ADVANCERS["sandbox_manager_token"] = _advance_sandbox_manager_token
-    ADVANCERS["control_signing"] = _advance_control_signing
+    ADVANCERS["control_signing"] = advance_control_signing
     register_database()
     register_credential()
 
@@ -658,6 +599,5 @@ __all__ = [
     "ROTATION_CAPABILITY",
     "reencrypt_root_families",
     "register_advancers",
-    "retire_control_signing",
     "start_rotation",
 ]

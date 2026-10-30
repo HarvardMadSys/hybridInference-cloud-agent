@@ -53,7 +53,12 @@ from cloud_agent.schemas import (
     RetainedSandboxBeat,
     RetainedSandboxStop,
 )
-from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
+from cloud_agent.tokens import (
+    InvalidHostToken,
+    mint_host_token,
+    parse_host_token,
+    signing_key_id,
+)
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_DESTINATION_CAPABILITY,
@@ -150,8 +155,10 @@ async def authenticate_host(
     # The capacity half of a heartbeat re-checks it inside the statement that
     # writes, which is what refuses a delayed request from a credential that
     # has since been replaced by a re-enrollment of the same name; it is never
-    # logged, never stored in a snapshot and never returned to a caller.
-    return {**host, "credential_hash": hash_secret(token)}
+    # logged, never stored in a snapshot and never returned to a caller. It is
+    # the row's current digest: a renewed credential presented for the first
+    # time was promoted by the authentication itself.
+    return host
 
 
 def _checked_sandbox_manager_url(url: str | None) -> str | None:
@@ -221,6 +228,7 @@ async def register_host(
             },
         )
     credential = mint_host_token(host=body.name)
+    credential_key_id = signing_key_id()
     try:
         host = await job_store.host_pool.register_host(
             host=body.name,
@@ -269,6 +277,12 @@ async def register_host(
                 }
             },
         ) from exc
+    renewals = getattr(job_store, "host_credentials", None)
+    if renewals is not None and credential_key_id:
+        # Unknown until recorded, which only delays this host's retirement evidence.
+        await renewals.record_key(
+            host=host["host"], credential_hash=hash_secret(credential), key_id=credential_key_id
+        )
     return HostRegisterResponse(
         host=host["host"],
         credential=credential,
@@ -280,6 +294,59 @@ async def register_host(
             host["host"], body.sandbox_manager_url, force=True
         ),
     )
+
+
+#: A host advertises this when it can store a renewed credential and switch to it.
+HOST_RENEWAL_CAPABILITY = "host-credential-renewal-v1"
+_fleet_renews: dict[str, Any] = {"at": 0.0, "supported": False}
+
+
+async def _every_process_renews(job_store: Any) -> bool:
+    """Whether every control-plane process accepts a renewed credential (cached briefly).
+
+    A process from before renewal compares only the current digest: a host
+    that switched would be refused there. So nothing is renewed until every
+    process, with no unidentified database session, says it accepts renewals.
+    """
+    import time
+
+    from cloud_agent.instances import fleet_supports
+
+    if time.monotonic() - _fleet_renews["at"] > 30:
+        instances = getattr(job_store, "instances", None)
+        supported = False
+        if instances is not None:
+            supported = (await fleet_supports(instances, HOST_RENEWAL_CAPABILITY)).supported
+        _fleet_renews.update(at=time.monotonic(), supported=supported)
+    return bool(_fleet_renews["supported"])
+
+
+async def _credential_renewal(
+    job_store: Any, host: dict[str, Any], capabilities: list[str] | None
+) -> str | None:
+    """A renewed credential for this host, when its current one needs replacing.
+
+    Needed when the key that signs now did not mint the current one (a signing
+    key rotation, or a credential from before key ids were recorded) or an
+    administrator asked for it. Only to a host that can keep it.
+    """
+    from cloud_agent.tokens import mint_renewed_host_token, signing_key_id
+
+    renewals = getattr(job_store, "host_credentials", None)
+    key_id = signing_key_id()
+    if (
+        renewals is None
+        or not key_id
+        or HOST_RENEWAL_CAPABILITY not in (capabilities or [])
+        or not await _every_process_renews(job_store)
+    ):
+        return None
+    current = str(host.get("credential_hash") or "")
+    renewed = mint_renewed_host_token(host=host["host"], current_hash=current)
+    issued = await renewals.issue_renewal(
+        host=host["host"], current_hash=current, pending_hash=hash_secret(renewed), key_id=key_id
+    )
+    return renewed if issued else None
 
 
 @router.post("/heartbeat", response_model=HostHeartbeatResponse)
@@ -415,6 +482,7 @@ async def heartbeat_host(
         # The saved registry, so every host downloads from the one the
         # Settings page lists versions from (runtime_upgrades.registry_url).
         runtime_registry_url=configured_registry_url(),
+        credential_renewal=await _credential_renewal(job_store, host, body.capabilities),
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_S,

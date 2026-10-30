@@ -37,6 +37,7 @@ from cloud_agent.sandbox_archive_credentials import (
     stored_archive_policy,
 )
 from cloud_agent.settings import number_setting
+from cloud_agent.storage._sql import host_credentials as credential_sql
 from cloud_agent.storage._sql.compute_admission import (
     host_compute_admission,
     lock_compute_entry,
@@ -421,7 +422,7 @@ class PostgresHostPoolRepository:
                     broker_url = EXCLUDED.broker_url,
                     runner_version = EXCLUDED.runner_version,
                     labels = EXCLUDED.labels,
-                    credential_hash = EXCLUDED.credential_hash,
+                    credential_hash = EXCLUDED.credential_hash, {credential_sql.RESET_ON_ENROLL}
                     last_heartbeat_at = NULL,
                     capacity_snapshot = NULL,
                     capacity_received_at = NULL,
@@ -452,25 +453,24 @@ class PostgresHostPoolRepository:
         return self._host_row_to_dict(row)
 
     async def authenticate_host(self, *, host: str, credential_hash: str) -> dict[str, Any] | None:
-        """Return the host iff this credential is the one it currently holds.
+        """Return the host iff this is its current credential, its renewal, or the one just replaced.
 
+        A renewal is promoted by its first use (``_sql.host_credentials``).
         Fails closed on every other reading: an unknown host, a revoked
         credential (``credential_hash`` nulled), a superseded one, or a
         disabled row all answer ``None``. Compared in SQL so a revocation that
         commits mid-request is seen by the next call rather than by the next
-        restart.
+        restart. The answer's ``credential_hash`` is the row's current one.
         """
+        sql, cols = credential_sql, HOST_COLUMNS
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"""
-                SELECT {HOST_COLUMNS} FROM agent_runner_hosts
-                WHERE host = $1 AND credential_hash IS NOT NULL AND credential_hash = $2
-                  AND status <> '{HOST_DISABLED}'
-                """,
+                sql.PROMOTE_PENDING.format(columns=cols, grace=sql.PREVIOUS_CREDENTIAL_GRACE),
                 host,
                 credential_hash,
-            )
-        return None if row is None else self._host_row_to_dict(row)
+            ) or await conn.fetchrow(sql.AUTHENTICATE.format(columns=cols), host, credential_hash)
+        host_row = None if row is None else self._host_row_to_dict(row)
+        return host_row and {**host_row, "credential_hash": host_row.pop("current_credential_hash")}
 
     async def record_host_heartbeat(
         self,

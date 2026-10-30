@@ -218,6 +218,47 @@ def store_credential(credential: str) -> None:
             os.close(directory)
 
 
+#: Advertised while this host can keep a renewed credential: its credential is
+#: the file's, not injected through the environment (which it cannot rewrite).
+CREDENTIAL_RENEWAL_CAPABILITY = "host-credential-renewal-v1"
+
+
+def credential_renewable() -> bool:
+    """Whether a renewed credential can be stored where this host reads it at start."""
+    return not (os.environ.get(ENV_HOST_CREDENTIAL) or "").strip()
+
+
+def reload_credential(identity: HostIdentity) -> None:
+    """Pick up a credential another runner on this machine stored after a renewal."""
+    stored = load_credential()
+    if stored and stored != identity.credential:
+        identity.credential = stored
+
+
+def _adopt_renewed_credential(answer: dict[str, Any], identity: HostIdentity) -> None:
+    """Store a renewed credential first, then use it; a failed write keeps the current one.
+
+    The control plane sends it again on the next beat until it is used, and
+    keeps accepting the current one until then.
+    """
+    renewed = answer.get("credential_renewal")
+    if not (isinstance(renewed, str) and renewed.startswith("aht.") and credential_renewable()):
+        return
+    if renewed == identity.credential:
+        return
+    try:
+        store_credential(renewed)
+    except OSError as exc:
+        print(
+            f"host credential renewal could not be stored ({type(exc).__name__}); "
+            "keeping the current credential",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    identity.credential = renewed
+
+
 def _post(url: str, body: dict[str, Any], *, bearer: str = "") -> dict[str, Any]:
     """POST JSON and return the parsed answer.
 
@@ -427,6 +468,7 @@ def heartbeat(
         bearer=identity.credential,
     )
     _warn_sandbox_manager_error(answer, identity.host)
+    _adopt_renewed_credential(answer, identity)
     lost = answer.get("residencies_lost")
     if lost and on_residencies_lost is not None:
         # The control plane's side of the fence, delivered with the
@@ -743,6 +785,9 @@ class HostHeartbeat:
                 capabilities = (
                     self._capabilities() if callable(self._capabilities) else self._capabilities
                 )
+                if credential_renewable():
+                    reload_credential(self._identity)
+                    capabilities = [*(capabilities or []), CREDENTIAL_RENEWAL_CAPABILITY]
                 settings_applied, settings_local = (
                     self._settings_report() if self._settings_report is not None else (None, None)
                 )

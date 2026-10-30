@@ -245,6 +245,36 @@ def mint_host_token(*, host: str) -> str:
     return f"{_HOST_TOKEN_PREFIX}.{_b64encode(payload)}.{_b64encode(signature)}"
 
 
+def signing_key_id() -> str:
+    """The one-way identifier of the key that signs now; ``""`` when none is set."""
+    from cloud_agent.settings import setting_env
+    from cloud_agent_shared.deployment_contract import key_identifier
+
+    secret = setting_env(ENV_SIGNING_SECRET) or ""
+    return key_identifier(secret) if secret else ""
+
+
+def mint_renewed_host_token(*, host: str, current_hash: str) -> str:
+    """The credential a host switches to, signed with the current key.
+
+    Deterministic for one host, one current credential and one signing key,
+    so issuing it again (an answer lost on the way, or two runners on one
+    machine beating at once) issues the same credential rather than a second
+    one that would orphan the first. Nobody without the signing key can
+    compute it: its nonce is a MAC under that key.
+    """
+    nonce = hmac.new(
+        _signing_key(),
+        b"host-credential-renewal\0" + f"{host}\0{current_hash}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:16]
+    payload = json.dumps(
+        {"h": host, "n": nonce, "s": SCOPE_HOST}, separators=(",", ":"), sort_keys=True
+    ).encode()
+    signature = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
+    return f"{_HOST_TOKEN_PREFIX}.{_b64encode(payload)}.{_b64encode(signature)}"
+
+
 def parse_host_token(token: str) -> dict[str, Any]:
     """Verify a host credential and return the machine it names.
 

@@ -512,6 +512,16 @@ class HostHeartbeatResponse(BaseModel):
             "only to a host advertising sandbox-archive-destination-v1."
         ),
     )
+    credential_renewal: str | None = Field(
+        None,
+        max_length=1024,
+        description=(
+            "A renewed credential for this host, signed with the current key. The host "
+            "stores it in its credential file and presents it from then on; its first use "
+            "replaces the current one. Sent only to a host that advertises "
+            "host-credential-renewal-v1, again on each beat until it is used."
+        ),
+    )
     runtime_registry_url: str | None = Field(
         None,
         max_length=2048,
