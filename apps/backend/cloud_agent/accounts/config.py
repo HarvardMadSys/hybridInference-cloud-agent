@@ -80,6 +80,7 @@ CUTOVER_RUNBOOK = "docs/developer/upgrade-notes.md#independent-accounts-cutover"
 #: behaviour, so startup stops instead of silently ignoring it.
 RETIRED_GATEWAY_VARIABLES = (
     "AGENT_AUTH_MODE",
+    "AGENT_GATEWAY_SSH_HOST",
     "AGENT_GATEWAY_URL",
     "AGENT_SESSION_REDIRECT_URI",
     "AGENT_WEB_GATEWAY_URL",

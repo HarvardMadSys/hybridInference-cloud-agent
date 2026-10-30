@@ -115,7 +115,7 @@ def _world(monkeypatch, spec):
     assert network is not None
     docker.connect(network["Id"], SANDBOX, [])
     docker(["docker", "stop", SANDBOX])
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp"}
+    assert docker.names_on(name) == {"relay-mcp"}
     assert docker.containers[SANDBOX]["networks"][name]["NetworkID"] == network["Id"]
     docker.calls.clear()
     return manager, docker, name, network["Id"]

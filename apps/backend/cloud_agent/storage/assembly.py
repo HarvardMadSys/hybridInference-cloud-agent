@@ -177,6 +177,6 @@ class Storage:
         self.teams: TeamRepository = PostgresTeamRepository(pool)
         self.team_admin: TeamAdminQueries = PostgresTeamAdminQueries(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)
-        #: Local accounts (AGENT_AUTH_MODE=local only) and the work they end.
+        #: Accounts and the work ended with them.
         self.local_accounts: LocalAccountRepository = PostgresLocalAccountRepository(pool)
         self.owner_work: OwnerWorkTermination = PostgresOwnerWorkRepository(pool)

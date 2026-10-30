@@ -192,7 +192,7 @@ BENCH_ADMIN_TOKEN = "bench-overhead-admin-token"
 BENCH_SESSION_SECRET = "bench-overhead-session-secret-32-bytes-minimum"
 BENCH_CONTROL_TOKEN_SECRET = "bench-overhead-control-token-secret"
 BENCH_SANDBOX_MANAGER_TOKEN = "bench-overhead-sandbox-manager-token"
-BENCH_GATEWAY_ISSUER = "https://bench-gateway.example"
+BENCH_ENCRYPTION_KEY = "bench-overhead-encryption-key-32-bytes-minimum"
 
 #: The terminal id the sandbox manager stand-in answers with. The route validates ids
 #: against ``^term_[A-Za-z0-9_-]{1,80}$``.
@@ -253,15 +253,13 @@ RUN_LIFETIME = timedelta(minutes=30)
 
 #: Docker plumbing for ``--startup``: the same shape the file-open benchmark
 #: uses. The manager builds a real group bridge behind real host rules, so it
-#: needs a relay network with two listening relays, a pool of its own, and an
+#: needs a relay network with a listening relay, a pool of its own, and an
 #: image carrying ``nft`` for the host-rule helper (the guest image doubles as
 #: it). The resolver is never queried; override it where 1.1.1.1 is wrong.
 BENCH_IMAGE = "cae-bench-guest:bookworm"
 BENCH_NAMESPACE = "cae-overhead-bench"
 BENCH_RELAY_NET = "cae-overhead-relays"
 BENCH_POOL = "10.251.0.0/16"
-BENCH_GATEWAY = "cae-overhead-gateway"
-BENCH_GATEWAY_PORT = 8080
 BENCH_MCP = "cae-overhead-mcp"
 BENCH_MCP_PORT = 8000
 BENCH_STARTUP_THREAD = "athr_overhead_bench"
@@ -644,8 +642,8 @@ class DestinationStorage:
         return getattr(self._storage, name)
 
 
-class BenchGateway:
-    """Gateway admission that always grants the one benchmark user ``agent.use``."""
+class BenchOwners:
+    """Account admission that always grants the one benchmark user ``agent.use``."""
 
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         """Return the decision the owner routes require."""
@@ -730,8 +728,8 @@ def _open_session_environment(config: dict[str, Any], args: argparse.Namespace) 
             "AGENT_DATABASE_URL": _dsn(config),
             "AGENT_CONTROL_TOKEN_SECRET": BENCH_CONTROL_TOKEN_SECRET,
             "ADMIN_TOKEN": BENCH_ADMIN_TOKEN,
-            "AGENT_SESSION_SECRET": BENCH_SESSION_SECRET,
-            "GATEWAY_ISSUER": BENCH_GATEWAY_ISSUER,
+            "AGENT_LOCAL_SESSION_SECRET": BENCH_SESSION_SECRET,
+            "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": BENCH_ENCRYPTION_KEY,
             "AGENT_SANDBOX_MANAGER_TOKEN": BENCH_SANDBOX_MANAGER_TOKEN,
             "AGENT_REPO_ALLOWLIST": BENCH_REPO,
             "AGENT_OPERATION_PROFILING_ENABLED": "",
@@ -847,9 +845,9 @@ async def _open_session(config: dict[str, Any], args: argparse.Namespace) -> Ben
     import asyncpg
     import httpx
 
-    from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
+    from cloud_agent.api._owner_auth import authenticate_agent_owner
+    from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
     from cloud_agent.app import create_app
-    from cloud_agent.identity import SESSION_COOKIE, mint_session
     from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
 
     _open_session_environment(config, args)
@@ -859,15 +857,19 @@ async def _open_session(config: dict[str, Any], args: argparse.Namespace) -> Ben
     await _truncate(pool)
 
     app = create_app()
-    app.dependency_overrides[get_gateway_client] = lambda: BenchGateway()
+    # The one benchmark user, with no account row: every cohort skips the same
+    # session read, and what they differ in is the measured operation.
+    app.dependency_overrides[authenticate_agent_owner] = lambda: {
+        "user_id": BENCH_USER_ID,
+        "authenticated": True,
+    }
+    app.dependency_overrides[get_owner_directory] = lambda: BenchOwners()
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     server, task, url = await _serve(app)
     storage = app.state.storage
     rows = await _seed_workspace_rows(storage)
-    session_token = mint_session(user_id=BENCH_USER_ID)
     client = httpx.AsyncClient(
         base_url=url,
-        cookies={SESSION_COOKIE: session_token},
         timeout=httpx.Timeout(120.0),
     )
     session = BenchSession(
@@ -1575,7 +1577,6 @@ class StartupSandbox:
                 "AGENT_EGRESS_CHAT_NETWORK_POOL": BENCH_POOL,
                 "AGENT_EGRESS_DNS_SERVER": os.environ.get("CAE_BENCH_DNS_SERVER", "1.1.1.1"),
                 "AGENT_RELAY_NETWORK": BENCH_RELAY_NET,
-                "AGENT_GATEWAY_URL": f"http://{BENCH_GATEWAY}:{BENCH_GATEWAY_PORT}",
                 "AGENT_SANDBOX_MCP_URL": f"http://{BENCH_MCP}:{BENCH_MCP_PORT}",
             }
         )
@@ -1606,7 +1607,7 @@ class StartupSandbox:
         return self.spec.container_name
 
     def _relay(self, name: str, port: int) -> None:
-        # Listening, because the guest check dials both relays before the
+        # Listening, because the guest check dials the relay before the
         # sandbox counts as started.
         _docker("rm", "-f", name, check=False)
         _docker(
@@ -1628,9 +1629,8 @@ class StartupSandbox:
         )
 
     def up(self) -> None:
-        """Create the relay network and its two listening relay stand-ins."""
+        """Create the relay network and its listening relay stand-in."""
         _docker("network", "create", "--internal", BENCH_RELAY_NET, check=False)
-        self._relay(BENCH_GATEWAY, BENCH_GATEWAY_PORT)
         self._relay(BENCH_MCP, BENCH_MCP_PORT)
 
     def remove_container(self) -> None:
@@ -1642,8 +1642,7 @@ class StartupSandbox:
         from cloud_agent_host.chat_sandbox import CHAT_NAMESPACE_LABEL
 
         _docker("rm", "-f", self.container_name, check=False)
-        for name in (BENCH_GATEWAY, BENCH_MCP):
-            _docker("rm", "-f", name, check=False)
+        _docker("rm", "-f", BENCH_MCP, check=False)
         listed = _docker(
             "network",
             "ls",
@@ -1765,6 +1764,7 @@ def _startup_launch(*, native_session_id: str | None) -> Any:
     deliberately excludes from transport compatibility.
     """
     from cloud_agent_host.resident_transport import ResidentLaunch
+    from cloud_agent_shared.model_connections import runtime_protocol
 
     return ResidentLaunch(
         thread_id=BENCH_STARTUP_THREAD,
@@ -1773,10 +1773,12 @@ def _startup_launch(*, native_session_id: str | None) -> Any:
         native_session_id=native_session_id,
         model="bench-model",
         reasoning_effort=None,
-        gateway_base_url="http://gateway.invalid",
         credential="bench-residency-credential",
         slot_id=0,
         residency_generation=BENCH_RESIDENCY_GENERATION,
+        inference_base_url="https://bench-provider.invalid/v1",
+        inference_protocol=runtime_protocol(BENCH_RUNTIME_ID) or "chat_completions",
+        inference_source=f"mconn_{'0' * 32}@1",
     )
 
 

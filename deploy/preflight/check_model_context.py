@@ -1,4 +1,4 @@
-"""Opt-in Flash recall check against the inference gateway used by a deployment.
+"""Opt-in Flash recall check against the model endpoint a deployment uses.
 
 Only synthetic messages are sent. This checks model behavior, complementing
 (but not replacing) the pinned native CLI and retained-container regressions.
@@ -150,7 +150,7 @@ def read_reply(response: httpx.Response) -> ModelReply:
             continue
         event = json.loads(line[6:])
         if event.get("type") == "error":
-            raise ValueError("gateway returned a streaming error")
+            raise ValueError("endpoint returned a streaming error")
         if event.get("type") == "content_block_delta":
             answer += event.get("delta", {}).get("text", "")
             saw_thinking |= bool(event.get("delta", {}).get("thinking"))
@@ -187,22 +187,22 @@ def assess_reply(reply: ModelReply, expected: str | dict[str, str]) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("gateway_url")
+    parser.add_argument("base_url")
     parser.add_argument("--key-file", default=os.environ.get("CLOUD_AGENT_TEST_API_KEY_FILE"))
     parser.add_argument("--proxy", default=os.environ.get("CLOUD_AGENT_TEST_PROXY"))
     parser.add_argument("--repetitions", type=int, choices=range(1, 11), default=3)
     args = parser.parse_args()
-    parsed = urlsplit(args.gateway_url)
+    parsed = urlsplit(args.base_url)
     if parsed.scheme != "https" and not (
         parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
     ):
-        parser.error("use HTTPS for a remote gateway, or HTTP on loopback")
+        parser.error("use HTTPS for a remote endpoint, or HTTP on loopback")
     if not args.key_file:
         parser.error("set CLOUD_AGENT_TEST_API_KEY_FILE or --key-file (never pass a key itself)")
     key = Path(args.key_file).read_text().strip()
     if not key:
         parser.error("key file is empty")
-    endpoint = args.gateway_url.rstrip("/").removesuffix("/v1") + "/v1/messages"
+    endpoint = args.base_url.rstrip("/").removesuffix("/v1") + "/v1/messages"
     failures = 0
     with httpx.Client(timeout=120, trust_env=False, proxy=args.proxy) as client:
         for repetition in range(args.repetitions):
@@ -230,7 +230,7 @@ def main() -> int:
                         result["status"] = response.status_code
                         result["request_id"] = response.headers.get("x-request-id")
                         if response.status_code != 200:
-                            raise ValueError("gateway returned a non-200 response")
+                            raise ValueError("endpoint returned a non-200 response")
                         result.update(assess_reply(read_reply(response), expected))
                 except (httpx.HTTPError, ValueError) as exc:
                     # Network exception text can contain URLs; log the type only.

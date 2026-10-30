@@ -9,6 +9,8 @@ no model connection is refused rather than run anywhere else.
 from __future__ import annotations
 
 import importlib.util
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -255,3 +257,81 @@ async def test_owner_directory_without_a_store_refuses():
     assert refused.value.status_code == 503
     with pytest.raises(OwnerDirectoryError):
         await owners.user_email("anyone")
+
+
+_REPO = Path(__file__).resolve().parents[2]
+#: Where the retired names may appear: the code and scripts that refuse them.
+_REFUSES_RETIRED = {
+    "apps/backend/cloud_agent/accounts/config.py",
+    "apps/backend/cloud_agent/providers/compute/host_bootstrap.py",
+    "apps/backend/cloud_agent_host/retired_configuration.py",
+    "deploy/control-plane/deploy.sh",
+    "deploy/host/sandbox_host.sh",
+    "deploy/local/dev.sh",
+}
+_RETIRED_NAMES = re.compile(
+    r"\b(?:%s)\b"
+    % "|".join(
+        (
+            *config.RETIRED_GATEWAY_VARIABLES,
+            "AGENT_GATEWAY_HOSTNAME",
+            "AGENT_TUNNEL_SSH_DESTINATION",
+            "AGENT_TUNNEL_SSH_KEY",
+            "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
+            "AGENT_TUNNEL_LISTEN_PORT",
+        )
+    )
+)
+_REMOVED_CODE = re.compile(
+    r"\b(?:GatewayClient|GrantClient|LocalModeGateway|LocalModeGrantClient|get_gateway_client"
+    r"|get_grant_client|local_mode\(\)|auth_mode\(\))|gateway-tunnel|agent-gateway-tunnel"
+)
+
+
+def _deployment_surfaces() -> list[Path]:
+    """Everything a deployment or a release is configured from, and the code that ships."""
+    found: list[Path] = []
+    for root in (".github/workflows", "deploy", "scripts", "apps/backend"):
+        for path in (_REPO / root).rglob("*"):
+            if (
+                path.is_file()
+                and "__pycache__" not in path.parts
+                and "egg-info" not in str(path)
+                and path.suffix not in {".pyc", ".png"}
+            ):
+                found.append(path)
+    return found
+
+
+async def test_no_deployment_surface_names_a_retired_variable():
+    offenders = [
+        str(path.relative_to(_REPO))
+        for path in _deployment_surfaces()
+        if str(path.relative_to(_REPO)) not in _REFUSES_RETIRED
+        and _RETIRED_NAMES.search(path.read_text(errors="replace"))
+    ]
+    assert offenders == []
+
+
+async def test_no_removed_gateway_code_or_service_is_referenced():
+    offenders = [
+        str(path.relative_to(_REPO))
+        for path in _deployment_surfaces()
+        if _REMOVED_CODE.search(path.read_text(errors="replace"))
+    ]
+    assert offenders == []
+
+
+async def test_the_release_smoke_boots_with_what_the_account_system_needs(monkeypatch):
+    """The control image's smoke and the release acceptance share this environment."""
+    from deploy.release import smoke
+
+    environment = smoke._control_environment("postgresql://smoke@db/agent")
+    config.refuse_retired_configuration(environment)
+    for name in config.RETIRED_GATEWAY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    config.check_local_configuration()
+    assert environment["AGENT_PUBLIC_API_URL"].startswith("https://")
+    assert environment["AGENT_LOCAL_SESSION_SECRET"] != environment.get("AGENT_SESSION_SECRET")

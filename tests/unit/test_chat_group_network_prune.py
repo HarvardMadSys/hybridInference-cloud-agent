@@ -29,7 +29,7 @@ def test_a_stale_orphan_bridge_and_its_exceptions_are_pruned(monkeypatch):
     name, _ = _group_bridge(manager, docker, orphan, age_s=3600)
     manager._network_lifecycle._attach_relays(name)
     bridge = manager._network_lifecycle._network().bridge_name(name)
-    guard.relays[bridge] = {("10.240.9.3", 8080)}
+    guard.relays[bridge] = {("10.240.9.3", 8000)}
 
     manager.network.prune_orphan_networks([])
 
@@ -188,7 +188,7 @@ def test_a_running_environment_runs_bridge_is_not_an_orphan(monkeypatch, caplog)
         supervisor.start()
         supervisor.close()
 
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp", "sandbox-container"}
+    assert docker.names_on(name) == {"relay-mcp", "sandbox-container"}
     assert "chat_network_prune_failed" not in caplog.text
 
 
@@ -206,6 +206,6 @@ def test_one_bridge_that_cannot_be_pruned_leaves_the_others_to_be_pruned(monkeyp
     with caplog.at_level(logging.WARNING):
         manager.network.prune_orphan_networks([])
 
-    assert docker.names_on(held_name) == {"relay-gateway", "relay-mcp", "stranger"}
+    assert docker.names_on(held_name) == {"relay-mcp", "stranger"}
     assert docker.network(orphan_name) is None
     assert "chat_network_prune_failed" in caplog.text

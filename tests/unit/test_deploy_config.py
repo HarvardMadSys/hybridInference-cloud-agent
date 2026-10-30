@@ -468,7 +468,7 @@ def test_the_standalone_edge_is_probed_before_a_deploy_succeeds():
         ("deploy/control-plane/edge.nginx.conf", "/api", "http://cloud_agent_api"),
         ("deploy/local/nginx.conf", "/api", "http://cloud_agent_api"),
         (
-            "deploy/reverse-proxy/agents-under-gateway.conf",
+            "deploy/reverse-proxy/agents-under-parent-site.conf",
             "/agents/api",
             "http://127.0.0.1:8000",
         ),
@@ -500,7 +500,7 @@ def test_edge_allows_the_largest_supported_attachment_json(file, prefix, upstrea
 
 @pytest.mark.parametrize(
     "file",
-    ["deploy/control-plane/edge.nginx.conf", "deploy/reverse-proxy/agents-under-gateway.conf"],
+    ["deploy/control-plane/edge.nginx.conf", "deploy/reverse-proxy/agents-under-parent-site.conf"],
 )
 def test_shipped_proxies_overwrite_the_forwarded_address(file):
     """The audit trail must not record an address the caller wrote.

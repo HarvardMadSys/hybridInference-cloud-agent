@@ -1,4 +1,4 @@
-"""Phone sign-up, sign-in and codes: ``/v1/auth/phone/*`` (``AGENT_AUTH_MODE=local``).
+"""Phone sign-up, sign-in and codes: ``/v1/auth/phone/*``.
 
 Adapted from HybridInference ``phone_auth_routes.py`` at
 ``8b49872d1dcbed5c4bc8132b026b6740c3437aa7`` (MIT License, Copyright (c)

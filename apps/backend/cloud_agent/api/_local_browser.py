@@ -1,4 +1,4 @@
-"""Signing accounts in and out of a browser (``AGENT_AUTH_MODE=local``).
+"""Signing accounts in and out of a browser.
 
 Adapted from HybridInference ``auth/browser_sessions.py`` at
 ``8b49872d1dcbed5c4bc8132b026b6740c3437aa7`` (MIT License, Copyright (c) 2026

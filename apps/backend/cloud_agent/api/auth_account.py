@@ -1,4 +1,4 @@
-"""The signed-in owner's own account: ``/v1/auth/account/*`` (``AGENT_AUTH_MODE=local``).
+"""The signed-in owner's own account: ``/v1/auth/account/*``.
 
 Changing or setting the password, binding or changing the email, binding a
 phone number and deleting the account, each as HybridInference allows (see

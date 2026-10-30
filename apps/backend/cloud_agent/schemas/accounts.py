@@ -1,6 +1,5 @@
 """Wire models for local accounts, the waiting list and their administration.
 
-Only ``AGENT_AUTH_MODE=local`` serves these, apart from ``AuthConfigResponse``.
 Request models forbid unknown fields: a body cannot carry a status, an admin
 flag or a version the route did not ask for.
 """

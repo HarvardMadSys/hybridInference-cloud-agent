@@ -27,7 +27,7 @@ IMAGE = os.environ.get("AGENT_UPLOAD_TEST_NGINX_IMAGE", "nginx:1.27.5-alpine")
 CASES = [
     ("deploy/control-plane/edge.nginx.conf", "/api", 80),
     ("deploy/local/nginx.conf", "/api", 8088),
-    ("deploy/reverse-proxy/agents-under-gateway.conf", "/agents/api", 80),
+    ("deploy/reverse-proxy/agents-under-parent-site.conf", "/agents/api", 80),
 ]
 MOCKS = r"""
 server {

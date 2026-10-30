@@ -1,7 +1,6 @@
 """Persistence for local accounts, their sessions, emailed tokens and abuse counters.
 
-Only ``AGENT_AUTH_MODE=local`` reaches this port. Every method that changes an
-account or its admission bumps the account's one version in the same
+Every method that changes an account or its admission bumps the account's one version in the same
 transaction, and every administrator change writes its audit row there too.
 """
 

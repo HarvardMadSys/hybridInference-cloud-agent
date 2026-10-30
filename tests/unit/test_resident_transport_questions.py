@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+from tests.support.owners import launch_connection
 
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.drivers import InputOutcome

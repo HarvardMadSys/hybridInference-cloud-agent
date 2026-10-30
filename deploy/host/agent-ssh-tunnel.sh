@@ -52,10 +52,10 @@ REVERSE_PORT="${TUNNEL_REVERSE_PORT:-}"
 REVERSE_TARGET_HOST="${TUNNEL_REVERSE_TARGET_HOST:-agent-sandbox-manager}"
 REVERSE_TARGET_PORT="${TUNNEL_REVERSE_TARGET_PORT:-8092}"
 
-die() { printf '[agent-gateway-tunnel] ERROR: %s\n' "$*" >&2; exit 1; }
+die() { printf '[agent-ssh-tunnel] ERROR: %s\n' "$*" >&2; exit 1; }
 
 [ -n "${TUNNEL_SSH_DESTINATION:-}" ] || die \
-    "TUNNEL_SSH_DESTINATION is required (user@gateway-host)"
+    "TUNNEL_SSH_DESTINATION is required (user@far-host)"
 [ -r "$KEY_SRC" ] || die "no readable ssh key at $KEY_SRC (mount one read-only)"
 
 # Host verification is not optional here. Turning it off would hand the
@@ -63,7 +63,7 @@ die() { printf '[agent-gateway-tunnel] ERROR: %s\n' "$*" >&2; exit 1; }
 # address — the exact attack encrypting the hop is meant to prevent.
 [ -s "$KNOWN_HOSTS" ] || die \
     "no known_hosts at $KNOWN_HOSTS. Generate it on the runner host with
-     'ssh-keyscan -p $SSH_PORT <gateway-host>', check the fingerprint, and mount
+     'ssh-keyscan -p $SSH_PORT <far-host>', check the fingerprint, and mount
      it. This is not disabled by an option: an unverified hop would leak the
      enrolled-host credential to anything that answers."
 
@@ -84,7 +84,7 @@ fi
 # ssh refuses a key others can read, and a bind mount keeps the host's mode.
 install -m 600 "$KEY_SRC" /tmp/tunnel-key
 
-printf '[agent-gateway-tunnel] %s -> %s:%s via %s\n' \
+printf '[agent-ssh-tunnel] %s -> %s:%s via %s\n' \
     "0.0.0.0:${LISTEN_PORT}" "$REMOTE_HOST" "$REMOTE_PORT" "$TUNNEL_SSH_DESTINATION"
 
 # ExitOnForwardFailure: without it ssh stays up having bound nothing, and every
@@ -109,7 +109,7 @@ set -- -N \
     -L "0.0.0.0:${LISTEN_PORT}:${REMOTE_HOST}:${REMOTE_PORT}"
 
 if [ -n "$REVERSE_SET" ]; then
-    printf '[agent-gateway-tunnel] reverse: %s:%s on the far host -> %s:%s here\n' \
+    printf '[agent-ssh-tunnel] reverse: %s:%s on the far host -> %s:%s here\n' \
         "$REVERSE_BIND" "$REVERSE_PORT" "$REVERSE_TARGET_HOST" "$REVERSE_TARGET_PORT"
     set -- "$@" -R "${REVERSE_BIND}:${REVERSE_PORT}:${REVERSE_TARGET_HOST}:${REVERSE_TARGET_PORT}"
 fi

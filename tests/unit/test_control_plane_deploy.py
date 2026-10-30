@@ -33,6 +33,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cloud_agent.accounts.config import RETIRED_GATEWAY_VARIABLES
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "deploy" / "control-plane" / "docker-compose.yml"
 DOCKERFILE_PATH = REPO_ROOT / "deploy" / "control-plane" / "Dockerfile"
@@ -41,7 +43,6 @@ DEPLOY_SCRIPT_PATH = REPO_ROOT / "deploy" / "control-plane" / "deploy.sh"
 #: Signing and encryption keys. Each must be `:?` — required — rather than
 #: `:-` — defaulted.
 REQUIRED_SECRETS = (
-    "AGENT_SESSION_SECRET",
     "AGENT_CONTROL_TOKEN_SECRET",
     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
 )
@@ -62,14 +63,13 @@ def test_missing_migrated_secrets_allow_setup_without_using_a_public_default(
     control_plane_env: dict, variable: str, monkeypatch
 ) -> None:
     """Setup can start with empty imports; credential use still fails closed."""
-    from cloud_agent import identity, settings, tokens
+    from cloud_agent import settings, tokens
     from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
     assert control_plane_env[variable] == "${" + variable + ":-}"
     monkeypatch.delenv(variable, raising=False)
     settings.reset_settings()
     operations = {
-        "AGENT_SESSION_SECRET": (identity._session_secret, identity.IdentityNotConfigured),
         "AGENT_CONTROL_TOKEN_SECRET": (tokens._signing_key, ValueError),
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": (SourceControlCipher, SourceControlError),
     }
@@ -78,53 +78,20 @@ def test_missing_migrated_secrets_allow_setup_without_using_a_public_default(
         operation()
 
 
-async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
-    control_plane_env: dict, monkeypatch
-) -> None:
-    """An empty import disables grants; a saved credential configures the live client."""
-    from cloud_agent.grants import GrantClient
-
-    from cloud_agent import settings
-    from cloud_agent.accounts.directory import OwnerDirectoryError
-
-    assert control_plane_env["GATEWAY_GRANT_DISPATCH_TOKEN"] == (
-        "${GATEWAY_GRANT_DISPATCH_TOKEN:-}"
-    )
-    monkeypatch.delenv("GATEWAY_GRANT_DISPATCH_TOKEN", raising=False)
-    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "k" * 32)
-    settings.reset_settings()
-    try:
-        settings.apply_settings(1, {"gateway_base_url": "https://gateway.example"})
-        client = GrantClient()
-        assert not client.configured
-        with pytest.raises(OwnerDirectoryError):
-            await client._post("/internal/agent-grants", {})
-        encoded = settings.encode_changes(
-            {"gateway_dispatch_token": "saved-gateway-dispatch-credential-32b"}
-        )
-        settings.apply_settings(2, {"gateway_base_url": "https://gateway.example", **encoded})
-        assert client.configured
-        assert "GATEWAY_GRANT_DISPATCH_TOKEN" not in os.environ
-        assert "saved-gateway-dispatch-credential-32b" not in str(
-            settings.settings_response(2, encoded)
-        )
-    finally:
-        settings.reset_settings()
-
-
 def test_the_database_is_required_and_the_service_owns_it(control_plane_env: dict) -> None:
     """Defaulting the DSN points a fresh deployment at whatever is on
     localhost, which in a co-located cutover is the gateway's own database."""
     assert ":?" in control_plane_env["AGENT_DATABASE_URL"]
 
 
-def test_both_listeners_allow_a_one_time_identity_import_from_the_environment(
-    compose: dict,
-) -> None:
-    """The shared lifespan verifies the saved issuer against the database binding."""
-    expected = "${GATEWAY_ISSUER:-}"
+def test_both_listeners_require_the_account_key_and_no_gateway_setting(compose: dict) -> None:
+    """Both listeners read sessions; neither is handed anything of the removed Gateway."""
     for service in ("control-plane", "mcp-relay"):
-        assert compose["services"][service]["environment"]["GATEWAY_ISSUER"] == expected
+        environment = compose["services"][service]["environment"]
+        assert environment["AGENT_LOCAL_SESSION_SECRET"].startswith(
+            "${AGENT_LOCAL_SESSION_SECRET:?"
+        )
+        assert not set(environment) & set(RETIRED_GATEWAY_VARIABLES)
 
 
 def test_postgres_publishes_no_port(compose: dict) -> None:
@@ -363,13 +330,27 @@ def test_a_failed_identity_check_does_not_start_or_replace_listeners(tmp_path: P
         mcp_running=running,
     )
     assert result.returncode == 18
-    assert docker_calls.index(" run --rm --no-deps migrate") < docker_calls.index(
-        "cloud_agent.identity_namespace --check"
-    )
+    # Refused read-only, before anything could change the database it refused.
+    assert "cloud_agent.identity_namespace --check" in docker_calls
+    assert " run --rm --no-deps migrate" not in docker_calls
     assert "cloud_agent.deploy_readiness" not in docker_calls
     assert " up -d --no-deps " not in docker_calls
     assert " up -d --remove-orphans" not in docker_calls
     assert " stop " not in docker_calls
+
+
+@pytest.mark.parametrize("variable", RETIRED_GATEWAY_VARIABLES)
+def test_a_retired_variable_in_the_env_file_stops_the_deploy_before_docker(
+    tmp_path: Path, variable: str
+) -> None:
+    """Compose would drop it without a word; the deployment must say so instead."""
+    result, docker_calls = _run_control_deploy(
+        tmp_path, readiness_exit=0, dotenv=f"{variable}=stale\n"
+    )
+    assert result.returncode != 0
+    assert variable in result.stderr
+    assert " run --rm --no-deps migrate" not in docker_calls
+    assert " up -d" not in docker_calls
 
 
 def test_a_failed_readiness_probe_never_replaces_the_running_stack(
@@ -381,8 +362,8 @@ def test_a_failed_readiness_probe_never_replaces_the_running_stack(
     assert (
         docker_calls.index(" build")
         < docker_calls.index(" up -d --wait --wait-timeout 1 postgres")
-        < docker_calls.index(" run --rm --no-deps migrate")
         < docker_calls.index("cloud_agent.identity_namespace --check")
+        < docker_calls.index(" run --rm --no-deps migrate")
         < docker_calls.index("cloud_agent.deploy_readiness")
     )
     assert " up -d --remove-orphans" not in docker_calls
