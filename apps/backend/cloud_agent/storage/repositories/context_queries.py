@@ -313,80 +313,88 @@ _CATEGORY_SUMS_SQL = ",\n           ".join(
     for category in CONTENT_CATEGORIES
 )
 
-#: One summed column per reported request total, for the main agent and its
-#: delegated agents; every attempt counts, a retried one included: its
-#: requests were sent.
+#: The reported request totals, for the main agent and its delegated agents.
+_TOTALS = [(side, field) for side in ("main", "subagent") for field in TOTAL_FIELDS]
+
+#: One run's reported totals over every attempt it made, a retried one
+#: included: its requests were sent.
+_RUN_TOTALS_SQL = ",\n               ".join(
+    f"SUM((rp.profile->'totals'->'{side}'->>'{field}')::bigint) AS {side}_{field}"
+    for side, field in _TOTALS
+)
+
+#: A conversation's reported totals: the sum of its runs'.
 _TOTAL_SUMS_SQL = ",\n           ".join(
-    f"COALESCE(SUM((p.profile->'totals'->'{side}'->>'{field}')::bigint), 0) AS {side}_{field}"
-    for side in ("main", "subagent")
-    for field in TOTAL_FIELDS
+    f"COALESCE(SUM(reported.{side}_{field}), 0) AS {side}_{field}" for side, field in _TOTALS
 )
 
 #: Each matching conversation's composition. Recorded content counts every
 #: stored item once: the attempt each turn kept (its latest), the turn's own
 #: prompt and what the platform wrapped it in at claim, estimated
 #: (``chars_cjk_v1``). Reported request sizes sum every attempt's requests.
+#:
+#: One row per run, each run's kept attempt and reported totals read by its
+#: own index lookups, then summed per conversation. Joining whole-range sets
+#: to each other instead let a row estimate of one (a range's runs are often
+#: underestimated: freshly written, or one owner's share of the table) pick a
+#: nested loop that rescanned one set for every row of the other: on 10,250
+#: runs, 4 s with no profile stored and over a minute with every attempt
+#: profiled, where these lookups take a quarter of a second either way.
 _COMPOSITION_SQL = f"""
     /* context_insights_composition */
     WITH runs AS ({_range_runs_sql(5)}),
     chosen AS (
         SELECT * FROM runs WHERE $10::text[] IS NULL OR thread_id = ANY($10::text[])
-    ),
-    kept AS (
-        SELECT DISTINCT ON (a.job_id) a.job_id, a.id AS attempt_id
-        FROM agent_attempts a
-        WHERE a.job_id IN (SELECT id FROM chosen)
-        ORDER BY a.job_id, a.attempt_no DESC, a.id DESC
-    ),
-    recorded AS (
-        SELECT r.thread_id,
-               COUNT(*) AS turns,
-               -- A turn whose kept attempt stored no event has nothing to
-               -- read: it is as read as one whose profile is stored.
-               COUNT(*) FILTER (
-                   WHERE p.attempt_id IS NOT NULL
-                      OR NOT EXISTS (SELECT 1 FROM agent_job_events e
-                                     WHERE e.attempt_id = k.attempt_id)
-               ) AS turns_profiled,
-               COUNT(*) FILTER (WHERE (p.profile->'content'->>'truncated')::boolean)
-                   AS turns_truncated,
-               COALESCE(SUM(prompt.tokens), 0) AS prompt_tokens,
-               COALESCE(SUM(platform.tokens), 0) AS platform_tokens,
-               {_CATEGORY_SUMS_SQL}
-        FROM chosen r
-        JOIN agent_jobs j ON j.id = r.id
-        LEFT JOIN kept k ON k.job_id = r.id
-        LEFT JOIN agent_attempt_context_profiles p
-            ON p.attempt_id = k.attempt_id AND p.reducer_version = $4
-        CROSS JOIN LATERAL (
-            SELECT CEIL(ascii / 4.0) + cjk + CEIL(GREATEST(chars - ascii - cjk, 0) / 2.0)
-                       AS tokens
-            FROM (SELECT length(COALESCE(j.task_prompt, '')) AS chars,
-                         length(regexp_replace(COALESCE(j.task_prompt, ''), '{CJK_CLASS}', '', 'g'))
-                             AS cjk,
-                         length(regexp_replace(COALESCE(j.task_prompt, ''), '{ASCII_CLASS}', '', 'g'))
-                             AS ascii) counts
-        ) prompt
-        CROSS JOIN LATERAL (
-            SELECT SUM((ev->>'tokens')::bigint) AS tokens
-            FROM jsonb_array_elements(COALESCE(p.profile->'events', '[]'::jsonb)) ev
-            WHERE ev->>'kind' = 'injection' AND left(ev->>'source', 9) = 'platform_'
-              AND ev->>'tokens' ~ '^[0-9]{{1,12}}$'
-        ) platform
-        GROUP BY r.thread_id
-    ),
-    reported AS (
-        SELECT r.thread_id AS reported_thread,
-               {_TOTAL_SUMS_SQL}
-        FROM chosen r
-        JOIN agent_attempts a ON a.job_id = r.id
-        JOIN agent_attempt_context_profiles p
-            ON p.attempt_id = a.id AND p.reducer_version = $4
-        GROUP BY r.thread_id
     )
-    SELECT recorded.*, reported.*
-    FROM recorded
-    LEFT JOIN reported ON reported.reported_thread = recorded.thread_id
+    SELECT r.thread_id,
+           COUNT(*) AS turns,
+           -- A turn whose kept attempt stored no event has nothing to
+           -- read: it is as read as one whose profile is stored.
+           COUNT(*) FILTER (
+               WHERE p.attempt_id IS NOT NULL
+                  OR NOT EXISTS (SELECT 1 FROM agent_job_events e
+                                 WHERE e.attempt_id = k.attempt_id)
+           ) AS turns_profiled,
+           COUNT(*) FILTER (WHERE (p.profile->'content'->>'truncated')::boolean)
+               AS turns_truncated,
+           COALESCE(SUM(prompt.tokens), 0) AS prompt_tokens,
+           COALESCE(SUM(platform.tokens), 0) AS platform_tokens,
+           {_CATEGORY_SUMS_SQL},
+           {_TOTAL_SUMS_SQL}
+    FROM chosen r
+    JOIN agent_jobs j ON j.id = r.id
+    LEFT JOIN LATERAL (
+        SELECT a.id AS attempt_id
+        FROM agent_attempts a
+        WHERE a.job_id = r.id
+        ORDER BY a.attempt_no DESC, a.id DESC
+        LIMIT 1
+    ) k ON TRUE
+    LEFT JOIN agent_attempt_context_profiles p
+        ON p.attempt_id = k.attempt_id AND p.reducer_version = $4
+    CROSS JOIN LATERAL (
+        SELECT CEIL(ascii / 4.0) + cjk + CEIL(GREATEST(chars - ascii - cjk, 0) / 2.0)
+                   AS tokens
+        FROM (SELECT length(COALESCE(j.task_prompt, '')) AS chars,
+                     length(regexp_replace(COALESCE(j.task_prompt, ''), '{CJK_CLASS}', '', 'g'))
+                         AS cjk,
+                     length(regexp_replace(COALESCE(j.task_prompt, ''), '{ASCII_CLASS}', '', 'g'))
+                         AS ascii) counts
+    ) prompt
+    CROSS JOIN LATERAL (
+        SELECT SUM((ev->>'tokens')::bigint) AS tokens
+        FROM jsonb_array_elements(COALESCE(p.profile->'events', '[]'::jsonb)) ev
+        WHERE ev->>'kind' = 'injection' AND left(ev->>'source', 9) = 'platform_'
+          AND ev->>'tokens' ~ '^[0-9]{{1,12}}$'
+    ) platform
+    CROSS JOIN LATERAL (
+        SELECT {_RUN_TOTALS_SQL}
+        FROM agent_attempts ra
+        JOIN agent_attempt_context_profiles rp
+            ON rp.attempt_id = ra.id AND rp.reducer_version = $4
+        WHERE ra.job_id = r.id
+    ) reported
+    GROUP BY r.thread_id
 """
 
 _CJK_CLASS, _ASCII_CLASS = CJK_CLASS, ASCII_CLASS

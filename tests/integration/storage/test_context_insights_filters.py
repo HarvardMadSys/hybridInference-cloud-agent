@@ -42,6 +42,7 @@ from cloud_agent.context_insights import (
     context_cursor_scope,
 )
 from cloud_agent.context_profile import CONTEXT_PROFILE_VERSION
+from cloud_agent.storage.repositories import context_queries
 from cloud_agent.storage.repositories.context_queries import PostgresContextQueries
 from cloud_agent_shared.text_tokens import estimate_text_tokens
 
@@ -300,6 +301,86 @@ async def test_repeated_reads_stay_planned_for_their_filters(db, store):
         # Nothing is left on the pooled connection for the next caller.
         assert await conn.fetchval("SHOW plan_cache_mode") == "auto"
         assert await conn.fetchval("SHOW statement_timeout") == "0"
+
+
+def _row_visits(node: dict) -> int:
+    """Rows every node of an executed plan produced, over all of its loops."""
+    own = int(node.get("Actual Rows", 0)) * int(node.get("Actual Loops", 1))
+    return own + sum(_row_visits(child) for child in node.get("Plans", []))
+
+
+async def test_composition_stays_linear_whatever_the_planner_knows(db, store):
+    # A range's runs are often underestimated: freshly written, or one owner's
+    # share of the table. With a row estimate of one, the composition once
+    # joined whole-range sets with a nested loop that rescanned one for every
+    # row of the other; CI timed out when only the attempts had statistics.
+    runs = 3_000
+    await _bulk_history(db, store, user_id=OWNER, runs=runs, span_days=400)
+    async with db.acquire() as conn:
+        # Every fifth run was retried, and every attempt has a stored profile,
+        # so both the kept attempt and every attempt's requests have rows.
+        await conn.execute(
+            """
+            INSERT INTO agent_attempts (job_id, thread_id, attempt_no, lease_owner,
+                lease_generation, lease_expires_at, status, started_at, finished_at)
+            SELECT a.job_id, a.thread_id, 2, 'bulk', 2, NOW(), 'finished',
+                   a.started_at, a.finished_at
+            FROM agent_attempts a WHERE a.id % 5 = 0
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_attempt_context_profiles (attempt_id, event_seq, reducer_version,
+                main_requests, subagent_requests, compactions, profile)
+            SELECT a.id, 1, $1::int, 1, 0, 0, jsonb_build_object(
+                'v', $1::int, 'events', '[]'::jsonb,
+                'content', jsonb_build_object('categories', jsonb_build_object(
+                    'assistant', jsonb_build_object('tokens', a.attempt_no, 'chars', 4,
+                                                    'items', 1))),
+                'totals', jsonb_build_object('main', jsonb_build_object(
+                    'requests', 1, 'prompt_tokens', 1000)))
+            FROM agent_attempts a
+            """,
+            CONTEXT_PROFILE_VERSION,
+        )
+        retried = await conn.fetchval("SELECT COUNT(*) FROM agent_attempts WHERE attempt_no = 2")
+        first = await store.owner_usage.first_record_at(OWNER)
+        since = first.replace(hour=0, minute=0, second=0, microsecond=0)
+        params = [
+            OWNER,
+            since,
+            datetime.now(UTC),
+            CONTEXT_PROFILE_VERSION,
+            *InsightsFilters().params(),
+            None,
+        ]
+        tables = ("agent_threads", "agent_jobs", "agent_attempts", "agent_attempt_context_profiles")
+        for known in ((), ("agent_attempts", "agent_attempt_context_profiles"), tables):
+            # Statistics survive the reset's TRUNCATE; forget them, then
+            # gather only those this case knows.
+            await conn.execute(
+                "DELETE FROM pg_statistic WHERE starelid = ANY($1::regclass[])", list(tables)
+            )
+            for table in known:
+                await conn.execute(f"ANALYZE {table}")
+            async with conn.transaction():
+                await conn.execute("SET LOCAL statement_timeout = '30s'")
+                await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
+                plan = await conn.fetchval(
+                    "EXPLAIN (ANALYZE, FORMAT JSON) " + context_queries._COMPOSITION_SQL, *params
+                )
+                rows = await conn.fetch(context_queries._COMPOSITION_SQL, *params)
+            [explained] = json.loads(plan)
+            # A few index lookups per run; the rescanning plan visited about
+            # a thousand rows per run here, and more the longer the history.
+            assert _row_visits(explained["Plan"]) < 40 * runs, known
+            total = compose(rows)
+            assert total.recorded.turns == total.recorded.turns_profiled == runs
+            # Each turn's content is its kept (latest) attempt's...
+            assert sum(row["assistant"] for row in rows) == runs + retried
+            # ...and every attempt's requests count, the retried ones too.
+            assert total.provider.requests == runs + retried
+            assert total.provider.prompt_tokens == 1000 * (runs + retried)
 
 
 async def test_dna_bands_are_the_items_each_request_carried(db, store):
