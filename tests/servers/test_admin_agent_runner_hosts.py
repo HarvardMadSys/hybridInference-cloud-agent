@@ -598,7 +598,12 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "terminal_output_max_mib",
         "terminal_input_max_kib",
         "terminal_max_streams_per_session",
+        "lease_ttl_s",
     }
+    # A lease shorter than one renewal round trip would expire before it renews.
+    assert definitions["lease_ttl_s"]["minimum"] == 41
+    assert definitions["lease_ttl_s"]["maximum"] == 900
+    assert definitions["lease_ttl_s"]["scope"] == "runner"
     assert definitions["source_import_max_mib"] | {"label": None, "description": None} == {
         "key": "source_import_max_mib",
         "env": "AGENT_SOURCE_IMPORT_MAX_MIB",
