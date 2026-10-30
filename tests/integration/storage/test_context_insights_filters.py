@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -239,6 +240,93 @@ async def test_composition_counts_each_item_once_and_every_request(db, store):
     total = compose(result["composition"])
     assert total.recorded.turns == 4
     assert total.provider.prompt_tokens == 5_010 + 9_010 + 2_010 + 1_010 + 3_010
+
+
+async def test_composition_estimates_each_prompt_as_the_shared_estimator(db, store):
+    # ASCII prompts take a shortcut past the two character-class rewrites;
+    # every kind of prompt must still read as the Python estimator counts it.
+    prompts = {
+        "ascii": "Fix the login redirect, then run make check.",
+        "cjk": "先看测试再改代码\uff0c然后提交。",  # a full-width comma, too
+        "latin": "Résumé of the naïve café rewrite",
+        "emoji": "ship it 🚀✨ when green",
+        "mixed": "Review PR 42: 先 run tests, é then 한국어 ok",
+        "empty": "",
+    }
+    for name, prompt in prompts.items():
+        [job] = await _thread(db, store, f"athr_prompt_{name}")
+        async with db.acquire() as conn:
+            await conn.execute("UPDATE agent_jobs SET task_prompt = $2 WHERE id = $1", job, prompt)
+    result = await _read(store)
+    rows = {row["thread_id"]: row for row in result["composition"]}
+    for name, prompt in prompts.items():
+        assert rows[f"athr_prompt_{name}"]["prompt_tokens"] == estimate_text_tokens(prompt), name
+
+
+class _SettingsSeen:
+    """The connection, noting the JIT and plan settings each insights statement ran with."""
+
+    def __init__(self, conn) -> None:
+        self.conn = conn
+        self.seen: dict[str, set[tuple[str, str]]] = {}
+
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
+    async def _note(self, sql: str) -> None:
+        tag = re.search(r"/\* (context_insights_\w+) \*/", sql)
+        if tag:
+            jit = await self.conn.fetchval("SHOW jit")
+            plans = await self.conn.fetchval("SHOW plan_cache_mode")
+            self.seen.setdefault(tag.group(1), set()).add((jit, plans))
+
+    async def fetch(self, sql, *args, **kwargs):
+        await self._note(sql)
+        return await self.conn.fetch(sql, *args, **kwargs)
+
+    async def fetchrow(self, sql, *args, **kwargs):
+        await self._note(sql)
+        return await self.conn.fetchrow(sql, *args, **kwargs)
+
+    async def fetchval(self, sql, *args, **kwargs):
+        await self._note(sql)
+        return await self.conn.fetchval(sql, *args, **kwargs)
+
+
+async def test_every_insights_statement_runs_without_jit_on_any_pool(db, store):
+    # The service's pool opens sessions with JIT off; the dbtest pools keep
+    # the server's default. The read must run the same way on either.
+    await _seed(db, store)
+    async with db.acquire() as conn:
+        before = (await conn.fetchval("SHOW jit"), await conn.fetchval("SHOW plan_cache_mode"))
+        watched = _SettingsSeen(conn)
+        result = await PostgresContextQueries(_OneConnection(watched)).insights_page(
+            user_id=OWNER,
+            since=SINCE,
+            until=UNTIL,
+            sort="peak",
+            cursor=None,
+            limit=25,
+            refresh_attempts=50,
+            refresh_events=100_000,
+            pending_cap=100,
+            filters=InsightsFilters(),
+        )
+        assert len(result["composition"]) == 3
+        assert set(watched.seen) >= {
+            "context_insights_stale",
+            "context_insights_page",
+            "context_insights_summary",
+            "context_insights_pending",
+            "context_insights_activity",
+            "context_insights_projects",
+            "context_insights_composition",
+        }
+        assert all(seen == {("off", "force_custom_plan")} for seen in watched.seen.values())
+        # Nothing is left on the pooled connection for the next caller.
+        assert (await conn.fetchval("SHOW jit"), await conn.fetchval("SHOW plan_cache_mode")) == (
+            before
+        )
 
 
 class _OneConnection:

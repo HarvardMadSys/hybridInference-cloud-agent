@@ -127,14 +127,14 @@ _STORE_SQL = """
 """
 
 
-def _range_runs_sql(f: int, *, day: bool = True) -> str:
+def _range_runs_sql(f: int, *, day: bool = True, prompt: bool = False) -> str:
     """The owner's runs in a range, as the usage history selects them, filtered.
 
     Only conversations the owner can still open; Fork copies are left out.
     ``$f`` is the search (title or repository, case-insensitive, as the
     conversation list searches), ``$f+1`` one repository, ``$f+2`` only the
     temporary workspaces (no repository), and with ``day`` ``$f+3``/``$f+4``
-    one UTC day inside the range.
+    one UTC day inside the range. With ``prompt``, each run's ``task_prompt``.
     """
     q, repo, temporary = f"${f}", f"${f + 1}", f"${f + 2}"
     day_sql = (
@@ -144,7 +144,9 @@ def _range_runs_sql(f: int, *, day: bool = True) -> str:
         else ""
     )
     return f"""
-    SELECT j.id, j.thread_id, j.created_at, j.runtime, j.model, t.repo
+    SELECT j.id, j.thread_id, j.created_at, j.runtime, j.model, t.repo{
+        ", j.task_prompt" if prompt else ""
+    }
     FROM agent_jobs j
     JOIN agent_threads t ON t.id = j.thread_id
     WHERE j.user_id = $1 AND j.created_at >= $2 AND j.created_at < $3
@@ -325,7 +327,7 @@ _RUN_TOTALS_SQL = ",\n               ".join(
 
 #: A conversation's reported totals: the sum of its runs'.
 _TOTAL_SUMS_SQL = ",\n           ".join(
-    f"COALESCE(SUM(reported.{side}_{field}), 0) AS {side}_{field}" for side, field in _TOTALS
+    f"COALESCE(SUM(k.{side}_{field}), 0) AS {side}_{field}" for side, field in _TOTALS
 )
 
 #: Each matching conversation's composition. Recorded content counts every
@@ -340,13 +342,21 @@ _TOTAL_SUMS_SQL = ",\n           ".join(
 #: nested loop that rescanned one set for every row of the other: on 10,250
 #: runs, 4 s with no profile stored and over a minute with every attempt
 #: profiled, where these lookups take a quarter of a second either way.
+#:
+#: Each run costs what it must and no more, because the read runs on small,
+#: busy machines too: one scan of the run's attempts yields both the kept one
+#: and every one's reported totals; the prompt comes with the run, not from a
+#: second read of it; an ASCII prompt (most are) is counted
+#: without the two character-class rewrites, which give it exactly ``chars``
+#: ASCII and no CJK; and conversations are grouped bytewise, which groups
+#: their ids exactly as the database collation does, without its comparisons.
 _COMPOSITION_SQL = f"""
     /* context_insights_composition */
-    WITH runs AS ({_range_runs_sql(5)}),
+    WITH runs AS ({_range_runs_sql(5, prompt=True)}),
     chosen AS (
         SELECT * FROM runs WHERE $10::text[] IS NULL OR thread_id = ANY($10::text[])
     )
-    SELECT r.thread_id,
+    SELECT r.thread_id COLLATE "C" AS thread_id,
            COUNT(*) AS turns,
            -- A turn whose kept attempt stored no event has nothing to
            -- read: it is as read as one whose profile is stored.
@@ -362,24 +372,24 @@ _COMPOSITION_SQL = f"""
            {_CATEGORY_SUMS_SQL},
            {_TOTAL_SUMS_SQL}
     FROM chosen r
-    JOIN agent_jobs j ON j.id = r.id
-    LEFT JOIN LATERAL (
-        SELECT a.id AS attempt_id
+    CROSS JOIN LATERAL (
+        SELECT (ARRAY_AGG(a.id ORDER BY a.attempt_no DESC, a.id DESC))[1] AS attempt_id,
+               {_RUN_TOTALS_SQL}
         FROM agent_attempts a
+        LEFT JOIN agent_attempt_context_profiles rp
+            ON rp.attempt_id = a.id AND rp.reducer_version = $4
         WHERE a.job_id = r.id
-        ORDER BY a.attempt_no DESC, a.id DESC
-        LIMIT 1
-    ) k ON TRUE
+    ) k
     LEFT JOIN agent_attempt_context_profiles p
         ON p.attempt_id = k.attempt_id AND p.reducer_version = $4
     CROSS JOIN LATERAL (
-        SELECT CEIL(ascii / 4.0) + cjk + CEIL(GREATEST(chars - ascii - cjk, 0) / 2.0)
-                   AS tokens
-        FROM (SELECT length(COALESCE(j.task_prompt, '')) AS chars,
-                     length(regexp_replace(COALESCE(j.task_prompt, ''), '{CJK_CLASS}', '', 'g'))
-                         AS cjk,
-                     length(regexp_replace(COALESCE(j.task_prompt, ''), '{ASCII_CLASS}', '', 'g'))
-                         AS ascii) counts
+        SELECT CASE WHEN prompt_text !~ '{ASCII_CLASS}' THEN CEIL(length(prompt_text) / 4.0)
+                    ELSE CEIL(ascii / 4.0) + cjk + CEIL(GREATEST(chars - ascii - cjk, 0) / 2.0)
+               END AS tokens
+        FROM (SELECT prompt_text, length(prompt_text) AS chars,
+                     length(regexp_replace(prompt_text, '{CJK_CLASS}', '', 'g')) AS cjk,
+                     length(regexp_replace(prompt_text, '{ASCII_CLASS}', '', 'g')) AS ascii
+              FROM (SELECT COALESCE(r.task_prompt, '') AS prompt_text) given) counts
     ) prompt
     CROSS JOIN LATERAL (
         SELECT SUM((ev->>'tokens')::bigint) AS tokens
@@ -387,14 +397,7 @@ _COMPOSITION_SQL = f"""
         WHERE ev->>'kind' = 'injection' AND left(ev->>'source', 9) = 'platform_'
           AND ev->>'tokens' ~ '^[0-9]{{1,12}}$'
     ) platform
-    CROSS JOIN LATERAL (
-        SELECT {_RUN_TOTALS_SQL}
-        FROM agent_attempts ra
-        JOIN agent_attempt_context_profiles rp
-            ON rp.attempt_id = ra.id AND rp.reducer_version = $4
-        WHERE ra.job_id = r.id
-    ) reported
-    GROUP BY r.thread_id
+    GROUP BY r.thread_id COLLATE "C"
 """
 
 _CJK_CLASS, _ASCII_CLASS = CJK_CLASS, ASCII_CLASS
@@ -578,9 +581,18 @@ async def refresh_profiles(
 #: five runs on one connection Postgres may switch a prepared statement to a
 #: generic plan that cannot use the filters' values; for the composition that
 #: plan ran past the timeout on a 12,000-run history. Planning each read for
-#: its own values costs milliseconds. Session state is never left on a pooled
-#: connection (``bootstrap/lifespan._release_as_is``): reset, or ``LOCAL``.
-_CUSTOM_PLANS_SQL = "SET {scope}plan_cache_mode = force_custom_plan"
+#: its own values costs milliseconds.
+#:
+#: No JIT, as every session of the service's own pool already opens
+#: (``bootstrap/lifespan.DATABASE_SESSION_SETTINGS``), set here so the read
+#: runs the same way on any connection it is handed. Its per-run lookups are
+#: priced once per run, so a long range is estimated past
+#: ``jit_optimize_above_cost``: compiling then took longer than running (0.37
+#: of 0.61 s on 10,250 runs, and more on a busy machine).
+#:
+#: Session state is never left on a pooled connection
+#: (``bootstrap/lifespan._release_as_is``): reset, or ``LOCAL``.
+_READ_SETTINGS_SQL = "SET {scope}plan_cache_mode = force_custom_plan; SET {scope}jit = off"
 
 
 class PostgresContextQueries:
@@ -643,7 +655,7 @@ class PostgresContextQueries:
         runs = chosen.params()
         async with self._pool.acquire() as conn:
             await conn.execute("SET statement_timeout = '5s'")
-            await conn.execute(_CUSTOM_PLANS_SQL.format(scope=""))
+            await conn.execute(_READ_SETTINGS_SQL.format(scope=""))
             try:
                 stale = [
                     dict(row)
@@ -659,10 +671,10 @@ class PostgresContextQueries:
                 ]
                 refreshed = await refresh_profiles(conn, stale, event_budget=refresh_events)
             finally:
-                await conn.execute("RESET statement_timeout; RESET plan_cache_mode")
+                await conn.execute("RESET statement_timeout; RESET plan_cache_mode; RESET jit")
             async with conn.transaction(isolation="repeatable_read", readonly=True):
                 await conn.execute("SET LOCAL statement_timeout = '5s'")
-                await conn.execute(_CUSTOM_PLANS_SQL.format(scope="LOCAL "))
+                await conn.execute(_READ_SETTINGS_SQL.format(scope="LOCAL "))
                 page = [
                     dict(row)
                     for row in await conn.fetch(
