@@ -97,7 +97,8 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0088_sandbox_retry_budget").down_revision == (
         "0087_sandbox_deletion_attempts"
     )
-    assert script.get_revision(_HEAD).down_revision == "0110_admin_credentials"
+    assert script.get_revision(_HEAD).down_revision == "0111_database_probes"
+    assert script.get_revision("0111_database_probes").down_revision == "0110_admin_credentials"
     assert script.get_revision("0110_admin_credentials").down_revision == ("0109_deployment_agents")
     assert script.get_revision("0109_deployment_agents").down_revision == (
         "0108_control_plane_instances"
