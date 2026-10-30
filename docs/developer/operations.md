@@ -1638,6 +1638,52 @@ The per-turn table is therefore a member-UID lifecycle census of process starts 
 after that turn's cursor, not a point-in-time snapshot of resident processes
 that were already running before the turn and not a whole-container total.
 
+#### Faster VM boot settings (opt-in)
+
+Two settings may shorten the VM boot that every new or resumed sandbox group
+waits for. Both stay off until they are qualified on a Kata host
+([#1054](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/1054)).
+To try them on one host, pass them to the installer:
+
+```bash
+sudo KATA_STATIC_SANDBOX_RESOURCES=true KATA_DEFAULT_MEMORY_MIB=1024 \
+  deploy/host/setup_kata_runtime.sh
+```
+
+- `KATA_STATIC_SANDBOX_RESOURCES=true` sets `runtime.static_sandbox_resource_mgmt`.
+  Kata then boots each VM with its container's `--cpus` and `--memory` already
+  added to `default_vcpus` and `default_memory`, instead of hot-plugging them
+  after boot. The VM cannot grow afterwards. Nothing on the platform resizes a
+  running sandbox, and a group keeps the limits it was created with, so this
+  loses nothing. Nothing caps the VM at the host's memory either: a VM larger
+  than the host's memory plus 1 GiB, the most Kata lets QEMU address, fails to
+  start, where hot-plug would stop adding memory at the host's limit.
+- `KATA_DEFAULT_MEMORY_MIB` sets `hypervisor.qemu.default_memory`, otherwise
+  Kata's 2048 MiB. Each VM gets it on top of its container's memory limit,
+  with or without static sizing. It must hold what that limit does not cover:
+  the guest kernel, its page structures for all of the VM's memory (64 bytes
+  per 4 KiB page), and the Kata agent. A container started without a limit,
+  such as a deployment probe, gets nothing else. The installer refuses less
+  than 256 MiB, which Kata would replace with 2048 MiB without saying so.
+
+The installer writes them to one drop-in, `config.d/cloud-agent-vm-boot.toml`
+beside the runtime configuration, and `--check` reads them back from it, so
+deployment passes nothing. Kata applies every file in that directory over the
+main configuration, so `--check` refuses any other file there and any change
+to this one. An install without the settings deletes the drop-in, says so,
+and restores Kata's defaults. The control plane's automated deploy of a
+managed compute host is such an install whenever it installs prerequisites,
+which it does by default, so each of those deploys reverts the settings until
+they are passed to the installer again. They are for qualification runs until
+the defaults switch. Every install starts a new runtime generation, so
+runners requalify the guest either way.
+
+VM templating stays off: it shares kernel memory and RNG/KASLR state across
+tenants. The release's uncompressed copy of the same debug kernel is not
+offered either. QEMU boots it directly, without the decompressor that
+randomizes the kernel's address (KASLR), so every guest would run its kernel at
+the same published addresses.
+
 #### Guest networking
 
 Docker's embedded DNS resolver (`127.0.0.11`) is outside the guest. After each
