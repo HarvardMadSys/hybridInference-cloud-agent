@@ -318,6 +318,54 @@ describe('UsageSettings', () => {
       screen.queryByRole('link', { name: 'Daily limit and account usage' }),
     ).not.toBeInTheDocument();
     expect(document.querySelector('a[href^="https://gateway.example"]')).toBeNull();
+  });
+
+  it('shows the cache hit rate, and reasoning tokens as a part of output', async () => {
+    const usage = tokens();
+    usage.summary.totals = { ...usage.summary.totals!, cache_read: 36_000, reasoning: 5_000 };
+    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
+    section();
+    await waitFor(async () => expect(await tile('Cache hit rate')).toBe('30%'));
+    expect(screen.getByText('36K of 120K input from cache')).toBeInTheDocument();
+    expect(await tile('Reasoning tokens')).toBe('5,000');
+    expect(screen.getByText('Included in output tokens')).toBeInTheDocument();
+    expect(await tile('Tokens')).toBe('150K');
+  });
+
+  it('reads a cache hit rate or reasoning it cannot know as a dash, not zero', async () => {
+    const usage = tokens();
+    usage.summary.unknown_rows = {
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_read: 2,
+      cache_write: 0,
+      reasoning: 0,
+      spent_usd: 0,
+    };
+    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
+    section();
+    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    expect(await tile('Cache hit rate')).toBe('—');
+    expect(await tile('Reasoning tokens')).toBe('—');
+  });
+
+  it('says when reasoning is only partly reported, still as a part of output', async () => {
+    const usage = tokens();
+    usage.summary.totals = { ...usage.summary.totals!, reasoning: 5_000 };
+    usage.summary.unknown_rows = {
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_read: 0,
+      cache_write: 0,
+      reasoning: 3,
+      spent_usd: 0,
+    };
+    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
+    section();
+    await waitFor(async () => expect(await tile('Reasoning tokens')).toBe('5,000'));
+    expect(
+      screen.getByText('Some calls did not report it · included in output tokens'),
+    ).toBeInTheDocument();
     expect(await tile('Tokens')).toBe('150K');
   });
 
@@ -432,6 +480,9 @@ describe('UsageSettings', () => {
     expect(await screen.findByText('1 个运行中 · 1 个已停止')).toBeInTheDocument();
     expect(screen.getByText('最后使用：3小时前')).toBeInTheDocument();
     expect(await screen.findByText('估算，不是账单')).toBeInTheDocument();
+    expect(await tile('缓存命中率')).toBe('0%');
+    expect(await tile('推理 Token')).toBe('—');
+    expect(screen.getByText('已计入输出 Token')).toBeInTheDocument();
     expect(
       await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
     ).toBeInTheDocument();
