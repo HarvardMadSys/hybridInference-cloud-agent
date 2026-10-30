@@ -70,3 +70,8 @@
 
 shell 扫描是词法近似，不是解释器；看不到的写法（调用方赋值、source 进来的值、交给另一个 shell 的字符串、
 用 `grep`/`sed` 从 `.env` 取值、函数内的执行顺序）见规格 §6.4 末尾。
+
+## 后续：按统一前端管理修订 P1
+
+2026-10-30 按用户纠正的产品目标修订了 P1 并新增实施计划；分类表只改说明文字。验证见
+[2026-10-30-env-inventory-ui-management.zh-CN.md](2026-10-30-env-inventory-ui-management.zh-CN.md)。

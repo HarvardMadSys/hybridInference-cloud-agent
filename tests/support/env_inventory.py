@@ -7,10 +7,11 @@ Compose file, an example env file, a Dockerfile ``ARG`` or the web app must
 have exactly one entry here, and an entry nothing names any more must go. The
 table lives with the tests, not in an image: nothing at runtime reads it.
 
-Dispositions say where a variable's value should come from, not every fact
-about it. Secrets, restart needs and irreversibility are orthogonal and stay in
-each reason. ``docs/agents/specs/2026-10-29-env-inventory-and-gates.zh-CN.md``
-explains each family and what moving one would take.
+Dispositions say where a variable's value comes from today and who reads it,
+not every fact about it, and not how an administrator should manage it later.
+Secrets, restart needs and irreversibility are orthogonal and stay in each
+reason. ``docs/agents/specs/2026-10-29-env-inventory-and-gates.zh-CN.md`` maps
+each family to its intended frontend management, which these gates do not check.
 """
 
 from __future__ import annotations
@@ -27,14 +28,18 @@ Disposition = Literal[
     # (``cloud_agent_shared.host_settings.HOST_SETTINGS``, or a host's slots).
     # The host's environment is only its value before the first answer.
     "host_admin",
-    # Not admin-managed yet, and could be with the existing machinery.
+    # Read from the environment today; the existing settings machinery could
+    # carry it as is.
     "candidate",
-    # Could leave the environment only after a design of its own.
+    # Read from the environment today; the settings machinery needs one more
+    # mechanism first.
     "design",
     # Startup, bootstrap, topology, release identity, isolation boundaries,
-    # build inputs: the deployment owns the value.
+    # build inputs: today the deployment environment, a mounted file or a
+    # build supplies the value.
     "deployment",
-    # A deployment value whose change is a dedicated procedure (key rotation).
+    # Supplied by the deployment today; changing it is a dedicated procedure
+    # (key rotation).
     "operation",
     # Set by this code for a process it starts; an operator never sets it.
     "internal",
@@ -281,14 +286,15 @@ FAMILIES: tuple[Family, ...] = (
     # -- deployment -------------------------------------------------------
     Family(
         "deployment",
-        "Control-plane bootstrap: needed before the settings row can be read, or the "
-        "recovery door when Gateway sign-in is broken.",
+        "Control-plane bootstrap: needed before the settings row can be read. ADMIN_TOKEN "
+        "grants full admin authority on every request, and is also the way in when "
+        "Gateway sign-in is broken.",
         names=("AGENT_DATABASE_URL", "ADMIN_TOKEN"),
     ),
     Family(
         "deployment",
         "Mounted files and their paths, and the trusted compute profiles that reference "
-        "deployment secrets; never accepted through the Admin API.",
+        "deployment secrets; the Admin API does not accept them today.",
         names=(
             "AGENT_COMPUTE_CONFIG",
             "AGENT_COMPUTE_DIRECTORY",
@@ -416,8 +422,8 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "deployment",
         "Sandbox isolation and the sandbox network (AGENTS.md section 7). A value here can "
-        "weaken isolation or widen what a sandbox reaches, so it never becomes an admin "
-        "setting; changing the boundary is a design change.",
+        "weaken isolation or widen what a sandbox reaches, so no setting or control may "
+        "widen it; widening the boundary is a design change.",
         names=(
             "AGENT_SANDBOX_BACKEND",
             "AGENT_SANDBOX_RUNTIME",
