@@ -184,7 +184,7 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
             (
                 "AGENT_OPERATION_PROFILING_MODE",
                 "choice",
-                {"choices": ("disabled", "admin", "always"), "boundary": "policy"},
+                {"choices": ("disabled", "environment", "admin"), "boundary": "policy"},
             ),
             ("AGENT_OPERATION_PROFILING_DEPLOYMENT", "name"),
         ),
@@ -219,8 +219,8 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
             ("runner", "sandbox-manager"),
             ("AGENT_RUNNER_STOP_GRACE", "text"),
             ("AGENT_SANDBOX_MANAGER_STOP_GRACE", "text"),
-            ("AGENT_HOST_CAPACITY_ENABLED", "bool"),
-            ("AGENT_SANDBOX_IMAGE_PULL", "choice", {"choices": ("always", "missing", "never")}),
+            ("AGENT_HOST_CAPACITY_ENABLED", "choice", {"choices": ("1", "0")}),
+            ("AGENT_SANDBOX_IMAGE_PULL", "choice", {"choices": ("true", "false")}),
             ("AGENT_RUNTIME_DOWNLOAD_NETWORK", "name"),
         ),
         *_keys(
@@ -255,7 +255,7 @@ CONFIG_KEYS_BY_ROLE["host"]["AGENT_OPERATION_PROFILING_MODE"] = ConfigKey(
     kind="choice",
     item="deployment.profiling",
     services=("runner",),
-    choices=("disabled", "admin", "always"),
+    choices=("disabled", "environment", "admin"),
     boundary="policy",
 )
 #: Names never accepted from an intent, whatever a schema change might add:
@@ -333,6 +333,22 @@ def _check_policy(key: ConfigKey, value: str, allowed: dict[str, Any]) -> None:
     values = [p.strip() for p in value.split(",") if p.strip()] if key.kind == "cidrs" else [value]
     if any(item not in permitted for item in values):
         raise ContractError(f"{key.name} names a value this machine's policy does not allow")
+
+
+def check_rendered_environment(role: Role, environment: dict[str, str]) -> None:
+    """Hold an environment another executor renders to the same key rules.
+
+    The control plane's SSH executor renders a managed server's ``.env``
+    itself; it checks every key this contract knows with the same rules an
+    agent applies, and refuses the keys no executor may write.
+    """
+    keys = CONFIG_KEYS_BY_ROLE[role]
+    for name, value in environment.items():
+        if name in FORBIDDEN_KEYS:
+            raise ContractError(f"{name} cannot be written by a deployment executor")
+        key = keys.get(name)
+        if key is not None and key.kind != "secret":
+            key.check(value)
 
 
 def services_for(role: Role, names: list[str]) -> list[str]:
@@ -440,7 +456,7 @@ OPERATIONS: dict[str, Operation] = {
             False,
             "Prove a candidate connection reaches this same database.",
             sealed=True,
-            params=("probe_id", "probe_token"),
+            params=("probe_id", "probe_token", "rotate_password"),
         ),
         Operation(
             "database_switch",
@@ -448,7 +464,7 @@ OPERATIONS: dict[str, Operation] = {
             True,
             "Switch the control plane to a checked connection.",
             sealed=True,
-            params=("probe_id", "rotate_password"),
+            params=("probe_id", "rotate_password", "leader"),
         ),
         Operation(
             "database_migrate",
@@ -564,8 +580,11 @@ def _check_database(operation, role, params, sealed, policy, current) -> None:  
             raise ContractError("probe_token is the probe's first value")
         if set(sealed) != {"AGENT_DATABASE_URL"}:
             raise ContractError("database_check takes the candidate AGENT_DATABASE_URL, sealed")
-    elif not isinstance(params.get("rotate_password", False), bool):
-        raise ContractError("rotate_password is true or false")
+    elif set(sealed) != {"AGENT_DATABASE_URL"}:
+        raise ContractError("database_switch takes the new AGENT_DATABASE_URL, sealed")
+    for flag in ("rotate_password", "leader"):
+        if not isinstance(params.get(flag, False), bool):
+            raise ContractError(f"{flag} is true or false")
 
 
 def _check_migrate(operation, role, params, sealed, policy, current) -> None:  # type: ignore[no-untyped-def]
@@ -681,6 +700,23 @@ def open_sealed(private_pem: bytes, box: dict[str, Any], purpose: str) -> str:
         raise ContractError("a sealed value does not open with this agent's key") from exc
 
 
+def key_identifier(secret: str) -> str:
+    """A one-way identifier for a key: equal keys have equal identifiers.
+
+    HMAC-SHA256 keyed by the secret over a fixed label, truncated. Control-plane
+    instances, agents and the browser compute the same value, so a rotation can
+    prove which key every participant holds without any of them revealing it.
+    """
+    import hashlib
+    import hmac
+
+    if not secret:
+        return ""
+    return hmac.new(secret.encode(), b"cloud-agent key identifier v1", hashlib.sha256).hexdigest()[
+        :16
+    ]
+
+
 def sealed_purpose(agent_id: str, name: str) -> str:
     """The associated data binding a sealed value to one agent and one key name."""
     return f"{agent_id}:{name}"
@@ -701,8 +737,10 @@ __all__ = [
     "can_transition",
     "check_config_changes",
     "check_operation",
+    "check_rendered_environment",
     "decode_b64",
     "generate_keypair",
+    "key_identifier",
     "open_sealed",
     "seal",
     "sealed_purpose",

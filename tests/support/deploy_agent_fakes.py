@@ -35,6 +35,19 @@ class FakeMachine:
     missing_images: set[str] = field(default_factory=set)
     kata_install_exit: int = 0
     kata_check_exit: int = 0
+    #: Programs run for real (the PostgreSQL clients a database test needs).
+    passthrough: tuple[str, ...] = ("psql", "pg_dump", "pg_restore")
+
+    def _real(self, argv) -> bool:
+        program = argv[argv.index("postgres:15") + 1] if "postgres:15" in argv else argv[0]
+        return program in self.passthrough
+
+    def stream(self, argv, *, cwd, env=None, **kwargs) -> CommandResult:
+        self.calls.append(list(argv))
+        self.envs.append(dict(env or {}))
+        from deploy.agent.system import SubprocessRunner
+
+        return SubprocessRunner().stream(argv, cwd=cwd, env=env, **kwargs)
 
     def _env(self) -> dict[str, str]:
         try:
@@ -45,6 +58,10 @@ class FakeMachine:
     def run(self, argv, *, cwd, env=None, timeout=600.0) -> CommandResult:
         self.calls.append(list(argv))
         self.envs.append(dict(env or {}))
+        if self._real(argv):
+            from deploy.agent.system import SubprocessRunner
+
+            return SubprocessRunner().run(argv, cwd=cwd, env=env, timeout=timeout)
         if argv[:2] == ["docker", "compose"] and "ps" in argv:
             services = argv[argv.index("json") + 1 :]
             current = self._env()

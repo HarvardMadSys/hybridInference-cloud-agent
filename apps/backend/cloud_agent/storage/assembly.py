@@ -63,17 +63,21 @@ from cloud_agent.storage.repositories import (
     PostgresWebSearchRepository,
     PostgresWorkInsightsRepository,
 )
+from cloud_agent.storage.repositories.admin_credentials import PostgresAdminCredentialRepository
+from cloud_agent.storage.repositories.database_probes import PostgresDatabaseProbes
 from cloud_agent.storage.repositories.deployments import PostgresDeploymentAgentRepository
 from cloud_agent.storage.repositories.environment_snapshots import (
     PostgresEnvironmentSnapshotRepository,
 )
 from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 from cloud_agent.storage.repositories.instances import InstanceRepository
+from cloud_agent.storage.repositories.key_rotation import PostgresRootKeyFamilies
 
 if TYPE_CHECKING:
     import asyncpg
 
     from cloud_agent.ports import (
+        AdminCredentialRepository,
         AgentMemoryRepository,
         AttachmentRepository,
         AttemptCommands,
@@ -83,6 +87,7 @@ if TYPE_CHECKING:
         ConversationCommands,
         ConversationQueries,
         CredentialQueries,
+        DatabaseProbes,
         DeploymentAgentRepository,
         ExecutionQueries,
         GoalRepository,
@@ -102,6 +107,7 @@ if TYPE_CHECKING:
         PendingMessageRepository,
         ProfilingControl,
         ResidencyRepository,
+        RootKeyFamilies,
         SandboxRepository,
         SessionForkRepository,
         SettingsRepository,
@@ -122,6 +128,14 @@ if TYPE_CHECKING:
 class Storage:
     """Every persistence capability this service has, assembled over one pool."""
 
+    def _install_management(self, pool: asyncpg.Pool) -> None:
+        """The configuration-management capabilities: instance reports, agents, credentials."""
+        self.instances: InstanceReports = InstanceRepository(pool)
+        self.deployments: DeploymentAgentRepository = PostgresDeploymentAgentRepository(pool)
+        self.admin_credentials: AdminCredentialRepository = PostgresAdminCredentialRepository(pool)
+        self.root_key_families: RootKeyFamilies = PostgresRootKeyFamilies(pool)
+        self.database_probes: DatabaseProbes = PostgresDatabaseProbes(pool)
+
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Build one implementation per capability against the caller's pool."""
         #: Admin read models. Still concrete: they are bounded projections for
@@ -129,8 +143,7 @@ class Storage:
         #: have no port yet. Named here so that the routes which need them
         #: stop reaching into another object's pool to build one.
         self.admin_conversations = AdminConversationQueries(pool)
-        self.instances: InstanceReports = InstanceRepository(pool)
-        self.deployments: DeploymentAgentRepository = PostgresDeploymentAgentRepository(pool)
+        self._install_management(pool)
         self.admin_database = AdminDatabaseQueries(pool)
         self.admin_runs = AdminRunQueries(pool)
         self.admin_sandboxes = AdminSandboxQueries(pool)

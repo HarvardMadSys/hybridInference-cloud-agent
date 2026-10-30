@@ -56,6 +56,50 @@ class CommandRunner(Protocol):
 class SubprocessRunner:
     """The production runner: ``subprocess.run`` with ``shell=False``."""
 
+    def stream(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        stdin_path: Path | None = None,
+        stdin_data: bytes | None = None,
+        stdout_path: Path | None = None,
+        timeout: float = 3600.0,
+    ) -> CommandResult:
+        """Run ``argv`` with binary stdin/stdout from files or memory; stderr is kept."""
+        merged = {**os.environ, **(env or {})}
+        stdin = (
+            stdin_path.open("rb")
+            if stdin_path
+            else (subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL)
+        )
+        stdout = stdout_path.open("wb") if stdout_path else subprocess.PIPE
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                env=merged,
+                input=stdin_data,
+                stdin=None if stdin_data is not None else stdin,
+                stdout=stdout,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return CommandResult(127, type(exc).__name__)
+        finally:
+            for handle in (stdin, stdout):
+                if hasattr(handle, "close"):
+                    handle.close()
+        out = (
+            completed.stdout.decode(errors="replace") if isinstance(completed.stdout, bytes) else ""
+        )
+        return CommandResult(
+            completed.returncode, (out + completed.stderr.decode(errors="replace"))[-OUTPUT_TAIL:]
+        )
+
     def run(
         self,
         argv: list[str],

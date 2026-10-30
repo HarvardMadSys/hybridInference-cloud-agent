@@ -15,14 +15,14 @@ Neither is ever counted as adopted or as supporting a capability.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import os
 import socket
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+from cloud_agent_shared.deployment_contract import key_identifier
 
 if TYPE_CHECKING:
     from cloud_agent.ports import InstanceReports as InstanceRepository
@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 CONTROL_PLANE_CAPABILITIES: tuple[str, ...] = (
     "instance-report-v1",
     "model-connections-v1",
+    # Decrypts with AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS during a root key
+    # rotation and reports both keys' identifiers.
+    "settings-key-rotation-v1",
 )
 
 #: Saved settings a process reads only when it builds a component, by the
@@ -44,18 +47,6 @@ RESTART_ROLES: dict[str, frozenset[str]] = {
 }
 
 REPORT_INTERVAL_S = 5.0
-_KEY_ID_LABEL = b"cloud-agent key identifier v1"
-
-
-def key_identifier(secret: str) -> str:
-    """A one-way identifier for a key: equal keys have equal identifiers.
-
-    HMAC with a fixed label, truncated; it names which key a process holds
-    without revealing anything usable about it.
-    """
-    if not secret:
-        return ""
-    return hmac.new(secret.encode(), _KEY_ID_LABEL, hashlib.sha256).hexdigest()[:16]
 
 
 def root_key_state() -> dict[str, str]:
@@ -128,8 +119,12 @@ class RestartTracker:
 
 
 def report_details() -> dict[str, Any]:
-    """Evidence beside the revision: the root key in use and active fences."""
-    return {**root_key_state()}
+    """Evidence beside the revision: one-way identifiers of the keys this process holds."""
+    return {
+        **root_key_state(),
+        "admin_token_id": key_identifier((os.environ.get("ADMIN_TOKEN") or "").strip()),
+        "database_url_id": key_identifier(os.environ.get("AGENT_DATABASE_URL") or ""),
+    }
 
 
 async def report_forever(repository: InstanceRepository, role: str) -> None:

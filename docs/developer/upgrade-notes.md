@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0109_deployment_agents`. The supported deployment scripts run migrations
+`0111_database_probes`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -54,6 +54,8 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0111_database_probes` | Adds `agent_database_probes`: the token a database connection change writes over the control plane's connection and the replies deployment agents write over the candidate connection, which prove both reach the same live database. |
+| `0110_admin_credentials` | Adds `agent_admin_credentials` for named, revocable administrator API credentials, stored as SHA-256 verifiers. `ADMIN_TOKEN` is unchanged. |
 | `0109_deployment_agents` | Adds `agent_deploy_agents`, `agent_deploy_enroll_tokens`, `agent_deploy_intents` and `agent_deploy_workflows` for deployment agents (`deploy/agent/`). Nothing uses them until an administrator enrolls an agent; credentials and tokens are stored as SHA-256 digests, and sealed values are ciphertext only the agent opens, cleared when an intent finishes. |
 | `0108_control_plane_instances` | Adds `agent_control_plane_instances`: every API and MCP listener process reports its build, capabilities, adopted settings revision and restart-required settings every few seconds. Nothing reads it to schedule work; the Admin pages use it to show whether a saved change is adopted, and switching on owners' model connections is refused until every process reports that it supports them. |
 | `0107_host_late_settings` | Adds `settings_late_imported` and `config_reports` to `agent_runner_hosts`. A host imports a setting registered after its first import (the runner lease, `AGENT_LEASE_TTL`) once from its next report; `config_reports` keeps the npm registry each host says it downloads from. |

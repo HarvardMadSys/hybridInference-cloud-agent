@@ -15,7 +15,9 @@ import httpx
 import pytest
 from deploy.agent import releases
 from deploy.agent.cli import main
+from deploy.agent.database import register as register_database
 from deploy.agent.operations import Executor
+from deploy.agent.rotation import register as register_rotation
 from deploy.agent.store import AgentStore, parse_env, write_json
 from fastapi import FastAPI
 from tests.integration.storage.test_schema_upgrade import _db_config, store as store
@@ -56,6 +58,8 @@ def _machine(tmp_path: Path, role: str) -> tuple[AgentStore, Executor, FakeMachi
     machine = FakeMachine(root)
     executor = Executor(agent_store, machine, health_timeout=0.05, health_interval=0.01)
     executor.http_check = lambda url: True
+    register_database(executor)
+    register_rotation(executor)
     return agent_store, executor, machine
 
 

@@ -90,6 +90,10 @@ _HOST_ENV_WRITERS = (
     # covers, so the page can say which deployment inputs it manages. It
     # reads none of them; each still needs its row in ENVIRONMENT.md.
     "apps/backend/cloud_agent/management_catalog.py",
+    # Rotation workflows name the host and control-plane variables they ask
+    # deployment agents to write; the control plane reads none of them.
+    "apps/backend/cloud_agent/application/key_rotation.py",
+    "apps/backend/cloud_agent/application/database_workflows.py",
 )
 
 #: An actual read: `os.environ.get(...)`, `os.environ[...]`, `getenv(...)` or

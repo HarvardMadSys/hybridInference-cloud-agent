@@ -22,12 +22,15 @@ from cloud_agent.api.deps import (
     verify_admin_access,
 )
 from cloud_agent.application import deployments, workflows
+from cloud_agent.application.key_rotation import register_advancers
 from cloud_agent_shared.deployment_contract import CONFIG_KEYS_BY_ROLE, OPERATIONS, SERVICES
 
 
 def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
+
+register_advancers()
 
 router = APIRouter(
     prefix="/admin/agent/deployments",
@@ -95,7 +98,10 @@ async def overview(store: Any = Depends(get_storage)) -> dict[str, Any]:
     return {
         "agents": [deployments.agent_view(agent) for agent in agents],
         "intents": [_intent_view(i) for i in await storage.deployments.list_intents(limit=100)],
-        "workflows": await storage.deployments.list_workflows(limit=30),
+        "workflows": [
+            {k: v for k, v in workflow.items() if k != "data"}
+            for workflow in await storage.deployments.list_workflows(limit=30)
+        ],
         "contract": {
             "operations": {
                 name: {
@@ -285,9 +291,106 @@ async def read_workflow(workflow_id: str, store: Any = Depends(get_storage)) -> 
         raise HTTPException(status_code=404, detail="No such workflow.")
     await workflows.advance_workflow(storage, workflow)
     return {
-        **workflow,
+        **{k: v for k, v in workflow.items() if k != "data"},
+        "progress": {
+            k: v
+            for k, v in workflow["data"].items()
+            if k not in {"sealed_by_agent", "next_token", "next_secret", "probe_token"}
+        },
         "intents": [
             _intent_view(i)
             for i in await storage.deployments.list_intents(workflow_id=workflow_id, limit=500)
         ],
     }
+
+
+class WorkflowRequest(BaseModel):
+    """A key rotation or database workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+    kind: str = Field(
+        pattern=r"^(admin_token|root_key|sandbox_manager_token|control_signing|database_connection|database_migration)$"
+    )
+    params: dict[str, Any] = Field(default_factory=dict)
+    #: Each agent's sealed values, by agent id: only that agent can open them.
+    sealed_by_agent: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    #: A new secret the control plane itself must hold (the sandbox manager
+    #: credential or the signing key), kept encrypted at rest until used.
+    secret: str | None = Field(default=None, max_length=4096)
+    confirm: str = Field(max_length=64)
+
+
+@router.post("/workflows")
+async def start_workflow(
+    body: WorkflowRequest,
+    request: Request,
+    store: Any = Depends(get_storage),
+    admin_id: str = Depends(verify_admin_access),
+) -> dict[str, Any]:
+    """Start a rotation or database workflow (ADMIN_TOKEN or a signed-in administrator only)."""
+    from cloud_agent.api.admin_credentials import require_full_authority
+    from cloud_agent.application.database_workflows import start_database_workflow
+    from cloud_agent.application.key_rotation import start_rotation
+
+    require_full_authority(admin_id)
+    if body.confirm != body.kind:
+        raise HTTPException(status_code=422, detail=f"Confirm by repeating: {body.kind}")
+    storage = require_store(store)
+    try:
+        if body.kind.startswith("database_"):
+            workflow = await start_database_workflow(
+                storage,
+                kind=body.kind,
+                params=body.params,
+                sealed_by_agent=body.sealed_by_agent,
+                admin_id=admin_id,
+            )
+        else:
+            workflow = await start_rotation(
+                storage,
+                kind=body.kind,
+                params=body.params,
+                sealed_by_agent=body.sealed_by_agent,
+                secret=body.secret,
+                admin_id=admin_id,
+            )
+    except (workflows.WorkflowRefused, deployments.DeploymentRefused) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    await log_admin_action(
+        storage,
+        get_client_ip(request),
+        f"agent.deployment.workflow.{body.kind}",
+        details={"workflow_id": workflow["workflow_id"], "agents": sorted(body.sealed_by_agent)},
+        actor_id=admin_id,
+    )
+    return {k: v for k, v in workflow.items() if k != "data"}
+
+
+@router.post("/workflows/{workflow_id}/retire")
+async def retire_previous_signing_key(
+    workflow_id: str,
+    body: ConfirmRequest,
+    request: Request,
+    store: Any = Depends(get_storage),
+    admin_id: str = Depends(verify_admin_access),
+) -> dict[str, Any]:
+    """Stop verifying with the previous signing key after hosts re-enrolled."""
+    from cloud_agent.api.admin_credentials import require_full_authority
+    from cloud_agent.application.key_rotation import retire_control_signing
+
+    require_full_authority(admin_id)
+    if body.confirm != "retire":
+        raise HTTPException(status_code=422, detail="Confirm by typing: retire")
+    storage = require_store(store)
+    try:
+        workflow = await retire_control_signing(storage, workflow_id)
+    except workflows.WorkflowRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    await log_admin_action(
+        storage,
+        get_client_ip(request),
+        "agent.deployment.workflow.control_signing.retire",
+        details={"workflow_id": workflow_id},
+        actor_id=admin_id,
+    )
+    return {k: v for k, v in workflow.items() if k != "data"}

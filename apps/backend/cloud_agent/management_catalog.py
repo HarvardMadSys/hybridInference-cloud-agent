@@ -643,6 +643,7 @@ _WORKFLOW_ITEMS = (
         method="workflow",
         sources=(Source("settings", "control plane", "saved keys"),),
         owner="workflow:key_rotation",
+        env_names=("AGENT_SANDBOX_MANAGER_TOKEN_NEXT",),
         description=(
             "Host signing key (two keys during the switch), sandbox manager credential (two "
             "accepted during the switch) and the two credential encryption keys (re-encrypt "

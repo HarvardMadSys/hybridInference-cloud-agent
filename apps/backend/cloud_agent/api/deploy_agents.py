@@ -14,7 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.api.deps import bearer_token, get_storage, require_store
 from cloud_agent.application import deployments
+from cloud_agent.application.key_rotation import register_advancers
 from cloud_agent.application.workflows import advance_after_agent_update
+
+register_advancers()
 
 router = APIRouter(prefix="/v1/agent/deploy", tags=["deployment-agents"])
 

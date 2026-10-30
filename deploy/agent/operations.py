@@ -116,6 +116,10 @@ class Executor:
             "state": "running",
             "created_at": time.time(),
         }
+        existing = self.store.operation(record_id)
+        if existing and "migration" in existing:
+            # A resumed migration keeps its journal of completed steps.
+            record["migration"] = existing["migration"]
         try:
             current = parse_env(self.store.current_env())
             check_operation(
@@ -134,6 +138,10 @@ class Executor:
             outcome = self._dispatch(operation, params, sealed or {}, record_id)
         except (OperationFailed, releases.ReleaseError, StoreError, ContractError) as exc:
             outcome = Outcome("failed", str(exc))
+        latest = self.store.operation(record_id)
+        if latest and "migration" in latest:
+            # The handler journaled its steps on the same record.
+            record["migration"] = latest["migration"]
         record.update(state=outcome.state, detail=outcome.detail, evidence=outcome.evidence)
         self.store.save_operation(record)
         return outcome
@@ -361,7 +369,14 @@ class Executor:
                 "has_database_tools": bool(policy.get("database_tools")),
             },
             "last_seq": state.get("last_seq", 0),
+            "secret_ids": _secret_ids(self.store.current_env()),
         }
+
+
+def _secret_ids(env_text: str) -> dict[str, str]:
+    from deploy.agent.rotation import secret_ids
+
+    return secret_ids(env_text)
 
 
 __all__ = ["LEGACY_NAMES", "Executor", "OperationFailed", "Outcome"]

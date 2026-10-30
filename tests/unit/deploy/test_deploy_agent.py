@@ -343,3 +343,73 @@ def test_a_keypair_seals_and_opens() -> None:
     other_pem, _ = generate_keypair()
     with pytest.raises(ContractError):
         open_sealed(other_pem, box, "agent:KEY")
+
+
+def test_a_sandbox_manager_credential_rotation_stages_then_promotes(tmp_path) -> None:
+    from deploy.agent.rotation import register
+
+    host, _ = _agent(
+        tmp_path,
+        role="host",
+        env="AGENT_SANDBOX_MANAGER_TOKEN=old-credential-of-thirty-two-bytes!!\n",
+    )
+    register(host)
+    new = "new-credential-of-thirty-two-bytes!!"
+    box = seal(
+        host.store.identity()["public_key"],
+        new,
+        sealed_purpose(host.agent_id, "AGENT_SANDBOX_MANAGER_TOKEN_NEXT"),
+    )
+    params = {"workflow": "sandbox_manager_token", "operation_id": "3" * 32, "step": "stage"}
+    staged = host.execute("rotation_step", params, {"AGENT_SANDBOX_MANAGER_TOKEN_NEXT": box})
+    assert staged.state == "succeeded", staged.detail
+    env = parse_env(host.store.current_env())
+    assert env["AGENT_SANDBOX_MANAGER_TOKEN"].startswith("old-")
+    assert env["AGENT_SANDBOX_MANAGER_TOKEN_NEXT"] == new
+    from deploy.agent.deployment_contract import key_identifier
+
+    assert host.observed()["secret_ids"]["AGENT_SANDBOX_MANAGER_TOKEN_NEXT"] == key_identifier(new)
+    promoted = host.execute("rotation_step", {**params, "step": "promote"})
+    assert promoted.state == "succeeded", promoted.detail
+    env = parse_env(host.store.current_env())
+    assert env["AGENT_SANDBOX_MANAGER_TOKEN"] == new
+    assert "AGENT_SANDBOX_MANAGER_TOKEN_NEXT" not in env
+    assert new not in json.dumps(host.store.operations())
+
+
+def test_the_sandbox_manager_accepts_the_next_credential_during_a_rotation(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    from tests.unit.test_agent_sandbox_manager import _SharedSupervisor
+
+    from cloud_agent_host import sandbox_manager
+    from cloud_agent_host.sandbox import ProcessBackend
+
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN_NEXT", "next-credential-of-thirty-two-bytes!")
+    client = TestClient(
+        sandbox_manager.create_app(
+            backend=ProcessBackend(acknowledged_unsafe=True),
+            token="current-credential-thirty-two-bytes!",
+            shared_session_supervisor=_SharedSupervisor(),  # type: ignore[arg-type]
+        )
+    )
+    for token, status in (
+        ("current-credential-thirty-two-bytes!", 200),
+        ("next-credential-of-thirty-two-bytes!", 200),
+        ("someone-elses-credential-32-bytes!!!", 401),
+    ):
+        answer = client.post(
+            "/profiling-policy", json={}, headers={"X-Agent-Workspace-Token": token}
+        )
+        assert (answer.status_code == 401) == (status == 401), (token, answer.status_code)
+
+
+def test_a_managed_server_environment_follows_the_same_key_rules() -> None:
+    from deploy.agent.deployment_contract import check_rendered_environment
+
+    check_rendered_environment(
+        "host", {"AGENT_SANDBOX_IMAGE_PULL": "true", "AGENT_EGRESS_DNS_SERVER": "10.0.0.53"}
+    )
+    with pytest.raises(ContractError):
+        check_rendered_environment("host", {"AGENT_SANDBOX_IMAGE_PULL": "always"})
+    with pytest.raises(ContractError):
+        check_rendered_environment("host", {"AGENT_SANDBOX_ALLOW_UNISOLATED": "1"})

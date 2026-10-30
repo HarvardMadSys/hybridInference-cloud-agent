@@ -79,7 +79,9 @@ def parse_env(text: str) -> dict[str, str]:
     return values
 
 
-def render_env(previous_text: str, changes: dict[str, str]) -> str:
+def render_env(
+    previous_text: str, changes: dict[str, str], remove: frozenset[str] = frozenset()
+) -> str:
     """``previous_text`` with ``changes`` applied, every other line kept byte for byte.
 
     A changed key keeps its position; a new key is appended. Values are
@@ -91,6 +93,8 @@ def render_env(previous_text: str, changes: dict[str, str]) -> str:
     out: list[str] = []
     for line in lines:
         match = _ENV_LINE.match(line.strip())
+        if match and match.group(1) in remove:
+            continue
         if match and match.group(1) in pending:
             name = match.group(1)
             out.append(f"{name}={pending.pop(name)}")

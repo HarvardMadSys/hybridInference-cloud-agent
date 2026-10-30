@@ -612,6 +612,34 @@ async def get_current_user(
     return {"user_id": user_id, "authenticated": True}
 
 
+#: Named administrator API credentials (``agent_admin_credentials``) look like
+#: ``caa_<id>_<secret>``; only their SHA-256 is stored.
+ADMIN_CREDENTIAL_PREFIX = "caa_"
+
+
+async def _verify_admin_credential(request: Request, presented: str) -> str:
+    """A named credential, checked against the database on every request.
+
+    No cache: a revocation takes effect on the next request, on every process.
+    When the database cannot be read the credential fails closed;
+    ``ADMIN_TOKEN``, checked first, never depends on it.
+    """
+    import hashlib
+
+    store = get_storage(request)
+    repository = getattr(store, "admin_credentials", None)
+    if repository is None:
+        raise HTTPException(status_code=401, detail="Invalid authentication token.")
+    try:
+        row = await repository.verify_credential(hashlib.sha256(presented.encode()).hexdigest())
+    except Exception:
+        raise HTTPException(status_code=503, detail="Credentials cannot be checked now.") from None
+    if row is None or "admin" not in row["scopes"]:
+        raise HTTPException(status_code=401, detail="Invalid authentication token.")
+    request.state.admin_credential_scopes = frozenset(row["scopes"])
+    return f"admin-credential:{row['credential_id']}"
+
+
 async def verify_admin_access(
     request: Request,
     authorization: str | None = Header(None),
@@ -629,6 +657,9 @@ async def verify_admin_access(
     # header value is whatever latin-1 the caller sent. A refusal, not a 500.
     if configured and presented and hmac.compare_digest(presented.encode(), configured.encode()):
         return "admin-token"
+
+    if presented and presented.startswith(ADMIN_CREDENTIAL_PREFIX):
+        return await _verify_admin_credential(request, presented)
 
     token = session_token(request, authorization)
     if token:

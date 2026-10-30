@@ -10588,6 +10588,43 @@
         "title": "CreateConnectionRequest",
         "type": "object"
       },
+      "CreateCredentialRequest": {
+        "additionalProperties": false,
+        "description": "A new named credential.",
+        "properties": {
+          "deployment": {
+            "default": false,
+            "title": "Deployment",
+            "type": "boolean"
+          },
+          "expires_in_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 90,
+            "title": "Expires In Days"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]*$",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateCredentialRequest",
+        "type": "object"
+      },
       "CreateGitHubRepositoryRequest": {
         "additionalProperties": false,
         "description": "Create a personal GitHub repository without starting a conversation.",
@@ -23041,6 +23078,53 @@
         ],
         "title": "WorkerWaitResponse",
         "type": "object"
+      },
+      "WorkflowRequest": {
+        "additionalProperties": false,
+        "description": "A key rotation or database workflow.",
+        "properties": {
+          "confirm": {
+            "maxLength": 64,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "kind": {
+            "pattern": "^(admin_token|root_key|sandbox_manager_token|control_signing|database_connection|database_migration)$",
+            "title": "Kind",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          },
+          "sealed_by_agent": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Sealed By Agent",
+            "type": "object"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          }
+        },
+        "required": [
+          "kind",
+          "confirm"
+        ],
+        "title": "WorkflowRequest",
+        "type": "object"
       }
     }
   },
@@ -25080,6 +25164,170 @@
         "summary": "Get Admin Conversation"
       }
     },
+    "/admin/agent/credentials": {
+      "get": {
+        "description": "Every named credential, without any secret.",
+        "operationId": "list_credentials_admin_agent_credentials_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Credentials Admin Agent Credentials Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Credentials"
+      },
+      "post": {
+        "description": "Create a credential; its secret is in this answer and nowhere else.",
+        "operationId": "create_credential_admin_agent_credentials_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Credential Admin Agent Credentials Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Credential"
+      }
+    },
+    "/admin/agent/credentials/{credential_id}/revoke": {
+      "post": {
+        "description": "Revoke a credential; every process refuses it from the next request.",
+        "operationId": "revoke_credential_admin_agent_credentials__credential_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "title": "Credential Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Revoke Credential Admin Agent Credentials  Credential Id  Revoke Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Credential"
+      }
+    },
     "/admin/agent/database-tools": {
       "get": {
         "description": "Show a launch link only while the private service answers its health ping.",
@@ -25661,6 +25909,65 @@
         "summary": "Start Rollout"
       }
     },
+    "/admin/agent/deployments/workflows": {
+      "post": {
+        "description": "Start a rotation or database workflow (ADMIN_TOKEN or a signed-in administrator only).",
+        "operationId": "start_workflow_admin_agent_deployments_workflows_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Workflow Admin Agent Deployments Workflows Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Workflow"
+      }
+    },
     "/admin/agent/deployments/workflows/{workflow_id}": {
       "get": {
         "description": "One workflow and its intents.",
@@ -25717,6 +26024,74 @@
           }
         },
         "summary": "Read Workflow"
+      }
+    },
+    "/admin/agent/deployments/workflows/{workflow_id}/retire": {
+      "post": {
+        "description": "Stop verifying with the previous signing key after hosts re-enrolled.",
+        "operationId": "retire_previous_signing_key_admin_agent_deployments_workflows__workflow_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retire Previous Signing Key Admin Agent Deployments Workflows  Workflow Id  Retire Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retire Previous Signing Key"
       }
     },
     "/admin/agent/host-settings": {

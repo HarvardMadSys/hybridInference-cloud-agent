@@ -195,6 +195,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         admin_audit,
         admin_compute,
         admin_conversations,
+        admin_credentials,
         admin_database,
         admin_database_browser,
         admin_deployments,
@@ -321,6 +322,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     app.include_router(admin_settings.router)
     app.include_router(admin_management.router)
     app.include_router(admin_deployments.router)
+    app.include_router(admin_credentials.router)
     app.include_router(deploy_agents.router)
     app.include_router(admin_usage.router)
     app.include_router(admin_measurements.router)

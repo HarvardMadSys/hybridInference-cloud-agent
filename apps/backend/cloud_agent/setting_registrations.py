@@ -10,6 +10,18 @@ from __future__ import annotations
 from cloud_agent.setting_definition import ApplyMode, Setting, _numeric
 
 LATER_MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
+    Setting(
+        "control_signing_secret_previous",
+        "Previous host and worker signing key",
+        "Security",
+        "",
+        secret=True,
+        description=(
+            "Set only by the signing key rotation: credentials signed with the previous key "
+            "keep verifying until the rotation retires it. Never used to sign."
+        ),
+        apply_mode="next_operation",
+    ),
     _numeric(
         "streams.max_per_user",
         "Live streams per account",

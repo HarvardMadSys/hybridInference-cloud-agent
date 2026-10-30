@@ -29,6 +29,7 @@ from cloud_agent.providers.compute.setup_tunnels import (
     tunnel_username,
 )
 from cloud_agent.settings import text_setting
+from cloud_agent_shared.deployment_contract import ContractError, check_rendered_environment
 from cloud_agent_shared.sandbox_manager_compat import manager_environment
 
 if TYPE_CHECKING:
@@ -415,6 +416,11 @@ class AutomaticComputeSetup:
                 "Host configuration values must be single-line dotenv data.",
                 status=422,
             )
+        # The same key rules a deployment agent applies to a self-managed server.
+        try:
+            check_rendered_environment("host", environment)
+        except ContractError as exc:
+            raise ComputeRefusal("invalid_configuration", str(exc), status=422) from None
         return {
             "environment": "".join(f"{name}='{value}'\n" for name, value in environment.items()),
             "files": files,

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.deployment_setup import BOOTSTRAP as BOOTSTRAP, bootstrap_snapshot
-from cloud_agent.domain_cipher import settings_root_key
+from cloud_agent.domain_cipher import decrypt_with_root, settings_root_key
 from cloud_agent.setting_definition import (
     MINIMUM_CREDENTIAL_BYTES as MINIMUM_CREDENTIAL_BYTES,
     Setting,
@@ -967,9 +967,13 @@ def _decode(
     for setting in SETTINGS:
         value = encoded.get(setting.storage_key, setting.default)
         if setting.secret and isinstance(value, dict) and set(value) == {"ciphertext"}:
-            cipher = _cipher(setting.storage_key)
             try:
-                value = cipher.decrypt(value["ciphertext"])
+                value = decrypt_with_root(
+                    lambda key, domain=setting.storage_key: CredentialCipher(
+                        key, domain=b"cloud-agent/admin-settings/v1/" + domain.encode()
+                    ),
+                    value["ciphertext"],
+                )
             except CredentialCipherError:
                 # Name the setting, never the value: the cipher's own message
                 # cannot say which of the stored secrets failed.

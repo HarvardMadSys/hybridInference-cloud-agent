@@ -329,6 +329,12 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "deployment",
+        "The next sandbox manager credential, accepted beside the current one only while "
+        "a rotation runs; written and removed by the host's deployment agent.",
+        names=("AGENT_SANDBOX_MANAGER_TOKEN_NEXT",),
+    ),
+    Family(
+        "deployment",
         "The control-plane machine's name in its processes' instance reports; the "
         "container's host name when unset. Stated by the deployment about itself.",
         names=("AGENT_CONTROL_PLANE_MACHINE",),

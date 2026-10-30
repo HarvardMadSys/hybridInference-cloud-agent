@@ -85,6 +85,31 @@ def _signing_key() -> bytes:
     return hashlib.sha256(_SIGNING_CONTEXT + secret).digest()
 
 
+def _verification_keys() -> list[bytes]:
+    """The signing key, then the previous one while a rotation keeps it for verifying.
+
+    ``control_signing_secret_previous`` is only ever verified with, never
+    signed with: a token signed before the rotation keeps working until it
+    expires or the rotation retires the previous key.
+    """
+    from cloud_agent.settings import text_setting
+
+    keys = [_signing_key()]
+    previous = (text_setting("control_signing_secret_previous") or "").encode()
+    if previous:
+        keys.append(hashlib.sha256(_SIGNING_CONTEXT + previous).digest())
+    return keys
+
+
+def _signature_matches(payload: bytes, signature: bytes) -> bool:
+    """Whether ``signature`` is any verification key's HMAC of ``payload``."""
+    matched = False
+    for key in _verification_keys():
+        expected = hmac.new(key, payload, hashlib.sha256).digest()
+        matched = hmac.compare_digest(signature, expected) or matched
+    return matched
+
+
 def _b64encode(raw: bytes) -> str:
     """URL-safe base64 without padding."""
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -179,8 +204,7 @@ def parse_worker_token(token: str) -> dict[str, Any]:
     except (ValueError, TypeError) as exc:
         raise InvalidAgentToken("undecodable token") from exc
 
-    expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
-    if not hmac.compare_digest(signature, expected):
+    if not _signature_matches(payload, signature):
         raise InvalidAgentToken("bad signature")
 
     try:
@@ -240,8 +264,7 @@ def parse_host_token(token: str) -> dict[str, Any]:
     except (ValueError, TypeError) as exc:
         raise InvalidHostToken("undecodable token") from exc
 
-    expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
-    if not hmac.compare_digest(signature, expected):
+    if not _signature_matches(payload, signature):
         raise InvalidHostToken("bad signature")
 
     try:
@@ -295,8 +318,7 @@ def parse_residency_mcp_token(token: str) -> dict[str, Any]:
     except (ValueError, TypeError) as exc:
         raise InvalidAgentToken("undecodable token") from exc
 
-    expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
-    if not hmac.compare_digest(signature, expected):
+    if not _signature_matches(payload, signature):
         raise InvalidAgentToken("bad signature")
 
     try:
