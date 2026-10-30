@@ -23,7 +23,6 @@ from tests.integration.servers.test_pending_message_queue import (
     _REPO,
     _claim_body,
     _Gateway,
-    _Grants,
     pool as pool,
 )
 from tests.support.owners import on_connection

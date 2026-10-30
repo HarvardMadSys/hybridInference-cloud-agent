@@ -123,12 +123,10 @@ def mid_turn_input_supported(job: dict[str, Any]) -> bool:
 
 def _job_response(
     job: dict[str, Any],
-    usage: dict[str, Any] | None = None,
     telemetry: dict[str, Any] | None = None,
     attempt_telemetry: list[dict[str, Any]] | None = None,
 ) -> AgentJobResponse:
     """Shape a store job row for the owner-facing API."""
-    usage = usage or {}
     metadata = dict(job.get("metadata") or {})
     base_ref = metadata.pop(BASE_REF_METADATA_KEY, None)
     if not isinstance(base_ref, str):
@@ -203,10 +201,6 @@ def _job_response(
         updated_at=_iso(job["updated_at"]),
         pinned_at=_iso(job.get("pinned_at")),
         archived_at=_iso(job.get("archived_at")),
-        spent_usd=usage.get("spent_usd"),
-        tokens_in=usage.get("tokens_in"),
-        tokens_out=usage.get("tokens_out"),
-        model_calls=usage.get("model_calls"),
         telemetry_attempt_id=(telemetry or {}).get("attempt_id"),
         continuity_mode=(telemetry or {}).get("continuity_mode"),
         context_status=(telemetry or {}).get("context_status"),

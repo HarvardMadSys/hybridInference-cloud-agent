@@ -127,7 +127,6 @@ def test_the_admin_prefix_has_routes():
         "/admin/agent/runner-hosts",
         "/admin/agent/audit-log",
         "/admin/agent/usage",
-        "/admin/agent/steps",
         "/admin/agent/conversations",
     ):
         assert expected in paths, f"{expected} is no longer served; the admin UI calls it"

@@ -19,8 +19,6 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-from cloud_agent.gateway import GatewayClient
-from cloud_agent.grants import GrantClient
 from tests.integration.storage.test_independent_accounts_acceptance import (
     _ADMIN as ADMIN_TOKEN,
     _mail_token,
@@ -32,7 +30,7 @@ from tests.unit.test_model_connection_compat_check import _KEY as PROVIDER_KEY, 
 from cloud_agent.app import create_app
 from cloud_agent.application import model_connection_check
 from cloud_agent.application.model_connections import model_connection_cipher
-from cloud_agent.bootstrap.identity import attach_local_identity, bind_identity_source
+from cloud_agent.bootstrap.identity import attach_owner_directory, bind_identity_source
 from cloud_agent.settings import reset_settings
 from cloud_agent.storage.assembly import Storage
 
@@ -110,13 +108,11 @@ async def byok(monkeypatch):
     monkeypatch.delenv("AGENT_EGRESS_PROTECTED_CIDRS", raising=False)
 
     async def forbidden_network(*args, **kwargs):
-        pytest.fail("Local-account/BYOK acceptance attempted Gateway or unmocked network I/O")
+        pytest.fail("Local-account/BYOK acceptance attempted unmocked network I/O")
 
     def forbidden_sync_network(*args, **kwargs):
         pytest.fail("Local-account/BYOK acceptance attempted synchronous network I/O")
 
-    monkeypatch.setattr(GatewayClient, "_get", forbidden_network)
-    monkeypatch.setattr(GrantClient, "_post", forbidden_network)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbidden_network)
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden_sync_network)
     provider = _Provider()
@@ -141,8 +137,8 @@ async def byok(monkeypatch):
         app.state.storage = Storage(pool)
         app.state.source_control = None
         app.state.account_mailer = SimpleNamespace(configured=True, send=capture_mail)
-        assert await bind_identity_source(app, pool) == "local"
-        attach_local_identity(app, app.state.storage, local=True)
+        await bind_identity_source(pool)
+        attach_owner_directory(app, app.state.storage)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url=_WEB
         ) as client:
@@ -163,7 +159,8 @@ async def _login(state, email: str = "byok-owner@example.edu", *, client=None) -
     assert verified.status_code == 200, verified.text
     response = await client.post("/v1/auth/login", json=credentials)
     assert response.status_code == 200, response.text
-    assert response.json()["auth_mode"] == "local"
+    # One account system: the session names no mode to choose between.
+    assert "auth_mode" not in response.json()
     assert "HttpOnly" in response.headers["set-cookie"]
     assert response.json()["agent_access"]["allowed"] is False
     return response.json()
@@ -228,8 +225,8 @@ async def _config(client):
     assert response.status_code == 200, response.text
     _write_only(response)
     body = response.json()
-    assert body["models"] == [], "Local accounts receive no platform/Gateway model catalog"
-    assert body["model_reasoning_efforts"] == {} and body["gateway_inference"] is False
+    # No platform model catalog: an account's models are its own connections'.
+    assert not {"models", "model_reasoning_efforts", "gateway_inference"} & body.keys()
     assert body["model_connections_enabled"] is True
     usable = any(
         runtimes
@@ -274,7 +271,7 @@ async def test_local_accounts_honor_an_explicitly_disabled_model_connection_gate
     response = await state.client.get(_CONFIG)
     assert response.status_code == 200, response.text
     config = response.json()
-    assert config["gateway_inference"] is False and config["models"] == []
+    assert not {"models", "model_reasoning_efforts", "gateway_inference"} & config.keys()
     assert config["model_connections_enabled"] is False
     assert config["model_connections"] == [] and config["model_connection_required"] is True
     assert config["default_model"] is None and config["default_model_connection_id"] is None

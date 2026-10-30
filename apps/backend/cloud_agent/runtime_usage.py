@@ -9,13 +9,19 @@ rollups into the totals the usage pages add up:
 - **input** (``tokens_in``) counts every input token, cached or not, and only
   where the agent's counters establish that sum. Claude Code and pi report
   uncached input, cache reads and cache writes as disjoint counters, so the
-  three are added; Codex input already includes cache hits. Any other agent's
-  convention is not verified, so its input stays unknown rather than guessed.
+  three are added; Codex's ``inputTokens`` already includes cached input. Any
+  other agent's convention is not verified, so its input stays unknown rather
+  than guessed.
 - **output**, **cache reads** and **cache writes** are as reported.
-- **reasoning** and **cost** are never in an agent's report: they stay unknown,
-  and each reporting attempt counts as a row that lacked them.
+- **reasoning** is reported by Codex alone, as ``reasoningOutputTokens``: a
+  part of output, shown beside it and never added to it. For every other agent
+  it stays unknown, and each of its reporting attempts counts as a row that
+  lacked it.
+- **cost** is never in an agent's report and is never estimated.
 
-An attempt that reported nothing is coverage, never zero usage.
+An attempt that reported nothing is coverage, never zero usage. Which of an
+agent's model calls a turn can be credited with is the runtime driver's call;
+see ``CodexAppServerSession._turn_usage`` for Codex's limits.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from cloud_agent.grant_usage import USAGE_METRICS, GrantUsageUnknownRows, UsageSums
+from cloud_agent.grant_usage import USAGE_METRICS, UsageSums, UsageUnknownRows
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -57,7 +63,7 @@ class RuntimeJobUsage(BaseModel):
     source: Literal["runtime_reported"] = RUNTIME_USAGE_SOURCE
     status: RuntimeUsageStatus
     totals: UsageSums | None = None
-    unknown_rows: GrantUsageUnknownRows | None = None
+    unknown_rows: UsageUnknownRows | None = None
     #: Agents report no estimate flag: nothing is counted as estimated.
     estimated_calls: int = 0
     queried_at: datetime | None = None
@@ -93,7 +99,7 @@ def _attempt_metrics(runtime: str | None, attempt: Mapping[str, Any]) -> dict[st
         "tokens_out": _count(attempt.get("output_tokens")),
         "cache_read": _count(attempt.get("cache_read_tokens")),
         "cache_write": _count(attempt.get("cache_write_tokens")),
-        "reasoning": None,
+        "reasoning": _count(attempt.get("reasoning_tokens")),
         "spent_usd": None,
     }
 
@@ -140,7 +146,7 @@ def summarize_runtime_job(job: Mapping[str, Any], *, terminal: bool) -> RuntimeJ
     return RuntimeJobUsage(
         status="partial" if missing else "available",
         totals=UsageSums(**sums),
-        unknown_rows=GrantUsageUnknownRows(**unknown),
+        unknown_rows=UsageUnknownRows(**unknown),
         missing_attempts=missing,
         attempts=attempts,
     )

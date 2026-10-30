@@ -32,11 +32,7 @@ from cloud_agent.domain.accounts import (
     AccountVersionConflict,
     permissions_for,
 )
-from cloud_agent.identity_namespace import (
-    IdentityNamespaceError,
-    ensure_gateway_namespace,
-    ensure_local_namespace,
-)
+from cloud_agent.identity_namespace import IdentityNamespaceError, ensure_local_namespace
 from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -559,15 +555,18 @@ async def test_counters_are_shared_by_separate_pools(storage):
 # ── The identity namespace ──────────────────────────────────────────────
 
 
-async def test_local_mode_binds_an_empty_database_and_gateway_mode_then_refuses(pool):
+async def test_an_empty_database_is_bound_to_accounts_once(pool):
     await ensure_local_namespace(pool)
     await ensure_local_namespace(pool)
-    with pytest.raises(IdentityNamespaceError):
-        await ensure_gateway_namespace(pool, "https://gateway.example")
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM agent_local_identity_namespace") == 1
 
 
-async def test_a_gateway_bound_database_refuses_local_mode(pool):
-    await ensure_gateway_namespace(pool, "https://gateway.example")
+async def test_a_gateway_bound_database_is_refused(pool):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_identity_namespace (gateway_issuer) VALUES ('https://gateway.example')"
+        )
     with pytest.raises(IdentityNamespaceError):
         await ensure_local_namespace(pool)
 
@@ -582,20 +581,8 @@ async def test_owner_data_without_a_binding_refuses_local_mode(pool):
         await ensure_local_namespace(pool)
 
 
-async def test_concurrent_mixed_mode_startups_bind_exactly_one_namespace(pool):
-    results = await asyncio.gather(
-        *(
-            ensure_local_namespace(pool)
-            if index % 2
-            else ensure_gateway_namespace(pool, "https://gateway.example")
-            for index in range(8)
-        ),
-        return_exceptions=True,
-    )
+async def test_concurrent_startups_bind_exactly_one_namespace(pool):
+    await asyncio.gather(*(ensure_local_namespace(pool) for _ in range(8)))
     async with pool.acquire() as conn:
-        gateway = await conn.fetchval("SELECT count(*) FROM agent_identity_namespace")
-        local = await conn.fetchval("SELECT count(*) FROM agent_local_identity_namespace")
-    assert gateway + local == 1
-    failures = [result for result in results if isinstance(result, Exception)]
-    assert all(isinstance(failure, IdentityNamespaceError) for failure in failures)
-    assert len(failures) == 4
+        assert await conn.fetchval("SELECT count(*) FROM agent_identity_namespace") == 0
+        assert await conn.fetchval("SELECT count(*) FROM agent_local_identity_namespace") == 1

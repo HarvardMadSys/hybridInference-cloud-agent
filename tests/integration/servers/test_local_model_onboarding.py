@@ -26,8 +26,6 @@ import asyncpg
 import httpx
 import pytest
 import pytest_asyncio
-from cloud_agent.gateway import GatewayClient
-from cloud_agent.grants import GrantClient
 from httpx import ASGITransport, AsyncClient
 from tests.integration.servers.test_pending_message_queue import _claim_body as _shared_claim
 from tests.support.db import reset_agent_tables
@@ -39,7 +37,7 @@ from cloud_agent.api import worker
 from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application import model_connection_check
-from cloud_agent.bootstrap.identity import attach_local_identity, bind_identity_source
+from cloud_agent.bootstrap.identity import attach_owner_directory, bind_identity_source
 from cloud_agent.settings import reset_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_CAPABILITY
@@ -134,15 +132,10 @@ async def env(monkeypatch):
         monkeypatch.setenv(key, value)
 
     async def forbidden(*_args: Any, **_kwargs: Any) -> Any:
-        pytest.fail("a local account reached a Gateway client")
+        pytest.fail("onboarding reached the network outside the provider stand-in")
 
-    for client, method in (
-        (GatewayClient, "_get"),
-        (GatewayClient, "exchange_authorization_code"),
-        (GrantClient, "_post"),
-        (GrantClient, "usage_requests"),
-    ):
-        monkeypatch.setattr(client, method, forbidden)
+    # The provider is reached only through the pinned stand-in transport.
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbidden)
     provider = _ChatOnlyProvider()
     transport = httpx.MockTransport(provider)
     monkeypatch.setattr(model_connection_check, "_system_resolve", _public_address)
@@ -164,8 +157,8 @@ async def env(monkeypatch):
     storage = Storage(pool)
     app.state.storage = storage
     app.state.account_mailer = SimpleNamespace(configured=True, send=record_mail)
-    assert await bind_identity_source(app, pool) == "local"
-    attach_local_identity(app, storage, local=True)
+    await bind_identity_source(pool)
+    attach_owner_directory(app, storage)
     await storage.host_pool.register_host(
         host=_HOST, credential_hash="h", capabilities=[SHARED_SANDBOX_CAPABILITY], slots_total=2
     )
@@ -230,8 +223,8 @@ async def test_an_approved_account_sets_up_its_own_model_and_runs_a_task_on_it(e
 
     # Approval is not model readiness: nothing is offered and setup is asked for.
     config = (await client.get("/v1/agent/config")).json()
-    assert config["gateway_inference"] is False
-    assert config["models"] == [] and config["model_connections"] == []
+    assert not {"models", "model_reasoning_efforts", "gateway_inference"} & config.keys()
+    assert config["model_connections"] == []
     assert config["model_connections_enabled"] is True
     assert config["model_connection_required"] is True
     assert config["default_model"] is None and config["default_model_connection_id"] is None
@@ -243,14 +236,13 @@ async def test_an_approved_account_sets_up_its_own_model_and_runs_a_task_on_it(e
     )
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["type"] == "model_connection_required"
-    # Gateway-only features say so without asking any Gateway.
+    # The Gateway's features are gone, not answered for it.
     pin = await client.get("/v1/agent/model-preference")
-    assert pin.status_code == 409
+    assert pin.status_code == 404
     rewrite = await client.post(
         "/v1/agent/prompts/rewrite", json={"prompt": "fix it", "model": _MODEL}
     )
-    assert rewrite.status_code == 503
-    assert rewrite.json()["detail"]["error"]["type"] == "gateway_feature_unavailable"
+    assert rewrite.status_code == 404
 
     created = await client.post(
         "/v1/agent/model-connections",

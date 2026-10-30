@@ -2,11 +2,11 @@
 
 The application is the real one with the local identity stand-ins the
 lifespan installs. Mail goes to a recorder and text messages to a fake
-provider; no message leaves the process and no Gateway is reachable. Each
+provider; no message leaves the process and no outside service is reached. Each
 test is one path a person or an administrator takes through the account
 features: login names and first-run setup, several accounts in one browser,
 changing the password or the email, deleting the account, phone codes, the
-sign-up policy, administrator mail, and Gateway mode refusing all of it.
+sign-up policy and administrator mail.
 """
 
 from __future__ import annotations
@@ -23,8 +23,6 @@ from tests.support.local_accounts import LOCAL_SECRET, PASSWORD, close_pool, mak
 from cloud_agent.accounts import config
 from cloud_agent.accounts.bootstrap_admin import create_account
 from cloud_agent.accounts.directory import (
-    LocalModeGateway,
-    LocalModeGrantClient,
     LocalOwnerDirectory,
 )
 from cloud_agent.api import _owner_auth
@@ -83,7 +81,6 @@ async def pool():
 
 @pytest_asyncio.fixture
 async def env(pool, monkeypatch):
-    monkeypatch.setenv(config.ENV_AUTH_MODE, "local")
     monkeypatch.setenv(config.ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
     monkeypatch.setenv(config.ENV_WEB_BASE_URL, _WEB)
     monkeypatch.setenv("ADMIN_TOKEN", _ADMIN_TOKEN)
@@ -94,8 +91,7 @@ async def env(pool, monkeypatch):
     app = create_app()
     storage = Storage(pool)
     app.state.storage = storage
-    app.state.owners = LocalModeGateway(LocalOwnerDirectory(storage.local_accounts))
-    app.state.grants = LocalModeGrantClient()
+    app.state.owners = LocalOwnerDirectory(storage.local_accounts)
     app.state.account_mailer = _Mailer()
     app.state.sms_sender = _Texts()
     yield app
@@ -338,7 +334,7 @@ async def test_deleting_the_account_stops_everything_and_an_administrator_can_re
         again = await _login(http, "leaving@example.edu")
         assert again.json()["detail"]["error"]["type"] == "account_deleted"
         assert env.state.account_mailer.last("account_deleted").to == "leaving@example.edu"
-        await enforce_ended_access(storage, LocalModeGrantClient())
+        await enforce_ended_access(storage)
         resumed = await _admin(http, env, account_id, "resume")
         assert resumed.status_code == 200, resumed.text
         assert (resumed.json()["status"], resumed.json()["waitlist"]["status"]) == (
@@ -592,7 +588,7 @@ async def test_administrators_search_annotate_mail_outcomes_and_erase(env):
         )
         assert purged.json()["deleted"] >= 1
         await _admin(http, env, applicant, "delete")
-        await enforce_ended_access(storage, LocalModeGrantClient())
+        await enforce_ended_access(storage)
         mismatch = await http.post(
             f"/v1/admin/accounts/{applicant}/erase", json={"confirm": "wrong"}, headers=_ADMIN
         )
@@ -659,7 +655,7 @@ async def test_teams_of_a_deleted_owner_are_handed_over_before_it_is_erased(env,
         )
     async with _client(env) as http:
         assert (await _admin(http, env, owner, "delete")).status_code == 200
-        await enforce_ended_access(storage, LocalModeGrantClient())
+        await enforce_ended_access(storage)
         blocked = await http.post(
             f"/v1/admin/accounts/{owner}/erase", json={"confirm": owner}, headers=_ADMIN
         )
@@ -737,29 +733,3 @@ async def test_the_interface_language_follows_the_account(env):
         )
         assert older.json()["locale"] == "zh-CN"
         assert (await http.get("/v1/session/me")).json()["identity"]["locale"] == "zh-CN"
-
-
-# ── Gateway mode ─────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [
-        ("GET", "/v1/auth/options"),
-        ("POST", "/v1/auth/phone/code"),
-        ("GET", "/v1/auth/accounts"),
-        ("POST", "/v1/auth/switch"),
-        ("POST", "/v1/auth/logout-all"),
-        ("POST", "/v1/auth/account/password"),
-        ("POST", "/v1/auth/account/delete"),
-        ("PUT", "/v1/auth/account/locale"),
-        ("POST", "/v1/auth/setup/admin"),
-        ("GET", "/v1/admin/accounts/signup-domains"),
-        ("GET", "/v1/admin/account-mail"),
-    ],
-)
-async def test_gateway_mode_serves_none_of_the_local_account_routes(env, monkeypatch, method, path):
-    monkeypatch.setenv(config.ENV_AUTH_MODE, "gateway")
-    async with _client(env) as http:
-        response = await http.request(method, path, json={}, headers={"origin": "https://test"})
-        assert response.status_code == 404

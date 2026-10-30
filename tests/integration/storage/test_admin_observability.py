@@ -32,7 +32,7 @@ async def store(db):
     return Storage(db)
 
 
-from tests.unit.test_ledger_snapshots import END, START
+from tests.support.usage import END, START
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

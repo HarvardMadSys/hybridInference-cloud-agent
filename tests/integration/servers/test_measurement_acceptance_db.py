@@ -50,12 +50,14 @@ import asyncpg
 import httpx
 import pytest
 import pytest_asyncio
-from cloud_agent.identity import SESSION_COOKIE, mint_session
 from tests.support.db import reset_agent_tables
+from tests.support.local_accounts import LOCAL_SECRET, PASSWORD, make_account
 from tests.support.migrations import apply_migrations
 
 from cloud_agent import measurement_writer, operation_measurement, sandbox_manager_routing
-from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
+from cloud_agent.accounts.config import ENV_LOCAL_SESSION_SECRET
+from cloud_agent.accounts.session_cookie import LOCAL_SESSION_COOKIE, LOCAL_SESSION_COOKIE_INSECURE
+from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.app import create_app
 from cloud_agent.operation_measurement import INTERACTION_HEADER
 from cloud_agent.sandbox_manager_client import SandboxManagerError, SandboxManagerStream
@@ -87,7 +89,9 @@ _ALLOWED_TEST_DB_PATTERN = "_test_"
 
 #: Every request in this module is made by one real owner and read by one real
 #: administrator, both authenticated the way the deployment authenticates them.
-USER_ID = "user-acceptance"
+#: The owner: a real account, signed in through the real sign-in route.
+USER_ID = "01JACCEPTANCE0000000000000"
+OWNER_EMAIL = "owner@acceptance.example"
 ADMIN = {"Authorization": "Bearer acceptance-admin-token"}
 REPO = "acceptance/repo"
 HOST = "acceptance-host"
@@ -145,12 +149,19 @@ async def _reset(pool: Any) -> None:
         await reset_agent_tables(conn)
 
 
-class _Gateway:
-    """The one Gateway answer the owner guard needs, and nothing else."""
-
-    async def agent_access(self, user_id: str) -> dict[str, Any]:
-        """Admit this owner with the permission the routes require."""
-        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
+async def _signed_in_owner(store: Storage, base_url: str) -> dict[str, str]:
+    """Create the owner's approved account and sign it in: the cookie its sign-in set."""
+    await make_account(store, OWNER_EMAIL, admission="approved", account_id=USER_ID)
+    async with httpx.AsyncClient(base_url=base_url) as client:
+        response = await client.post(
+            "/v1/auth/login", json={"email": OWNER_EMAIL, "password": PASSWORD}
+        )
+    assert response.status_code == 200, response.text
+    for header in response.headers.get_list("set-cookie"):
+        name, _, rest = header.partition("=")
+        if name in {LOCAL_SESSION_COOKIE, LOCAL_SESSION_COOKIE_INSECURE}:
+            return {name: rest.split(";", 1)[0]}
+    raise AssertionError("sign-in set no account session cookie")
 
 
 class _UnusedClient:
@@ -303,6 +314,7 @@ class _Chain:
     claim: dict[str, Any]
     sandbox: dict[str, Any]
     sink: Any
+    owner_cookies: dict[str, str]
 
     @property
     def job_id(self) -> str:
@@ -325,8 +337,8 @@ class _Chain:
         return int(self.claim["lease_generation"])
 
     def session_cookie(self) -> dict[str, str]:
-        """A real minted owner session, as the browser would present it."""
-        return {SESSION_COOKIE: mint_session(user_id=USER_ID)}
+        """The owner's real account session, as the browser would present it."""
+        return dict(self.owner_cookies)
 
     def worker_token(self) -> str:
         """A real full-scope credential for this attempt, as the runner holds."""
@@ -470,8 +482,7 @@ async def _running_chain(
     monkeypatch.setenv("AGENT_DATABASE_URL", _dsn(config))
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "acceptance-control-secret-of-32-bytes")
     monkeypatch.setenv("ADMIN_TOKEN", "acceptance-admin-token")
-    monkeypatch.setenv("AGENT_SESSION_SECRET", "acceptance-session-secret-32-bytes!")
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
+    monkeypatch.setenv(ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "acceptance-sandbox-manager-token")
     sink = tmp_path / STARTUP_SINK_NAME
@@ -505,13 +516,13 @@ async def _running_chain(
     sandbox_manager = _SandboxManager()
     monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = create_app()
-    # Only the two external collaborators are replaced. Storage is deliberately
-    # not overridden: every route below reads and writes the real repository
-    # over the application's own pool.
-    app.dependency_overrides[get_owner_directory] = _Gateway
+    # Only the app credentials are replaced. Storage and the account directory
+    # are deliberately not overridden: every route below reads and writes the
+    # real repositories over the application's own pool.
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     server, task, base_url = await _serve(app)
     store = Storage(pool)
+    owner_cookies = await _signed_in_owner(store, base_url)
     job, claim, sandbox = await _arrange_chain(store)
     chain = _Chain(
         pool=pool,
@@ -522,6 +533,7 @@ async def _running_chain(
         claim=claim,
         sandbox=sandbox,
         sink=sink,
+        owner_cookies=owner_cookies,
     )
     try:
         yield chain

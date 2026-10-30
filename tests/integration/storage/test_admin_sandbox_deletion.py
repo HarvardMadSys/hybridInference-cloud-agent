@@ -15,7 +15,7 @@ from tests.integration.storage.test_sandbox_restore_store import _RESTORE_HOST, 
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations, downgrade_to
-from tests.unit.test_ledger_snapshots import START
+from tests.support.usage import START
 
 from cloud_agent.storage.repositories.sandbox import _DELETION_RETRY_EXHAUSTION_BATCH
 from cloud_agent.workers import sandbox_deletion

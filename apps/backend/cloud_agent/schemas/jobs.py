@@ -370,13 +370,6 @@ class AgentJobResponse(BaseModel):
     updated_at: str | None = None
     pinned_at: str | None = None
     archived_at: str | None = None
-    # Read from the billing ledger, never from anything the agent reports
-    # about itself. Attribution only: there is no per-task cap to compare it
-    # against, and the account's daily quota is what actually governs spend.
-    spent_usd: float | None = None
-    tokens_in: int | None = None
-    tokens_out: int | None = None
-    model_calls: int | None = None
     # Attempt continuity telemetry. Current retained follow-ups report hot or
     # warm-native; a first NEW turn has no continuity rung, while cold/replay
     # remain readable for historical rows.

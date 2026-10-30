@@ -7,7 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_admin_runs import ADMIN, _admin_run_row, setup as run_setup  # noqa: F401
 from tests.support.owners import SESSIONS
-from tests.unit.test_ledger_snapshots import END, START
+from tests.support.usage import END, START
 
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.admin_conversations import ConversationCursor, ConversationTurnsCursor

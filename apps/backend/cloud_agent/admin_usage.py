@@ -19,8 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from cloud_agent.grant_usage import (
     DERIVED_AMOUNT_CHARS,
     USAGE_METRICS,
-    GrantUsageUnknownRows,
     UsageSums,
+    UsageUnknownRows,
 )
 from cloud_agent.runtime_usage import RuntimeJobUsage, summarize_runtime_job
 
@@ -71,7 +71,7 @@ class AdminUsageAggregate(BaseModel):
     run_count: int = Field(ge=0)
     attempt_count: int = Field(ge=0)
     totals: AdminUsageTotals | None = None
-    unknown_rows: GrantUsageUnknownRows | None = None
+    unknown_rows: UsageUnknownRows | None = None
     estimated_calls: int = Field(default=0, ge=0)
     oldest_queried_at: datetime | None = None
     #: Runs whose agent reported any usage.
@@ -216,10 +216,10 @@ def day_key(created_at: datetime) -> str:
     return created_at.astimezone(UTC).date().isoformat()
 
 
-def _unknown_rows(rows: list[GrantUsageUnknownRows]) -> GrantUsageUnknownRows | None:
+def _unknown_rows(rows: list[UsageUnknownRows]) -> UsageUnknownRows | None:
     if not rows:
         return None
-    return GrantUsageUnknownRows(
+    return UsageUnknownRows(
         **{name: sum(getattr(row, name) for row in rows) for name in USAGE_METRICS}
     )
 
@@ -270,7 +270,7 @@ class _Cohort:
     def __init__(self) -> None:
         self.usage = AdminUsageAggregate(run_count=0, attempt_count=0)
         self._totals: list[UsageSums] = []
-        self._unknown: list[GrantUsageUnknownRows] = []
+        self._unknown: list[UsageUnknownRows] = []
 
     def add(self, summary: RuntimeJobUsage, *, active: bool) -> None:
         """Account for one job exactly once in this cohort."""

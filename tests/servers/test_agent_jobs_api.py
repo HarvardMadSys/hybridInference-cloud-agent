@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -371,10 +371,6 @@ class FakeGoals:
 class FakeStorage(EmptySkillLibrary, EmptyAttachments, NoAccounts, AllCapabilities):
     """In-memory stand-in exposing the storage surface the router uses."""
 
-    async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
-        """The stored snapshots for one job, empty before the first collection."""
-        return [row for row in self.ledger_rows if row["job_id"] == job_id]
-
     def __init__(self) -> None:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
@@ -402,9 +398,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, NoAccounts, AllCapabiliti
         self.terminal_readiness: dict[int, bool] = {}
         self.thread_workspace_readiness: dict[str, bool] = {}
         self.workspace_start_fences: list[str] = []
-        #: Grant-ledger rows a single-job read sums into the usage fields.
-        #: Empty by default: no snapshot stored yet, so the fields stay None.
-        self.ledger_rows: list[dict[str, Any]] = []
         self.sandbox_processes: list[dict[str, Any]] = []
         self.sandbox_admissions: list[dict[str, Any]] = []
         self.sandbox_settlements: list[dict[str, Any]] = []
@@ -6028,64 +6021,19 @@ async def test_a_definitively_unentitled_oldest_job_does_not_block_the_next_job(
     assert accepted.json()["job_id"] == ready["id"]
 
 
-async def test_spend_and_usage_come_from_the_grant_ledger_not_the_agent(store: FakeStorage):
-    """A job's numbers must not depend on what the agent says about itself.
+async def test_a_job_carries_no_cost_or_billed_usage_of_its_own(store: FakeStorage):
+    """The owner's provider bills a turn; the job never claims a cost or a billed count.
 
-    Models do misreport their own usage — this session watched one claim it had
-    edited a file it never touched — so the owner-facing totals read the grant
-    ledger, the same accounting the usage and admin surfaces use (#823).
+    What the agent reported is the job's usage read (``/jobs/{id}/usage``), named
+    as the agent's report, never folded into the job as if it were billing.
     """
-
-    from tests.unit.test_ledger_snapshots import END, ledger_row
-
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
-        await client.post(f"/v1/agent/jobs/{job_id}/cancel")
-        # One attempt's snapshot with known totals; a second, newer one for
-        # the retry that superseded it — summed, not replaced.
-        store.ledger_rows = [
-            {**ledger_row(), "job_id": job_id},
-            {
-                **ledger_row(
-                    id=2,
-                    attempt_id=11,
-                    attempt_no=2,
-                    queried_at=END + timedelta(seconds=30),
-                ),
-                "job_id": job_id,
-            },
-        ]
-        got = await client.get(f"/v1/agent/jobs/{job_id}")
+        body = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
 
-    body = got.json()
-    assert body["tokens_in"] == 240
-    assert body["tokens_out"] == 40
-    assert body["model_calls"] == 2
-    assert body["spent_usd"] == float("0.00024690")
-
-
-async def test_a_job_with_no_ledger_snapshot_reports_absent_not_zero(store: FakeStorage):
-    """A snapshot that has not answered must not look like a job that spent nothing.
-
-    The ledger rows exist only once the usage collector has stored a snapshot
-    for the job's grants. Before that, ``summarize_job_ledger`` has no totals,
-    and the response's fields stay ``None`` — the same absent-not-zero rule
-    the old log-store path kept, now against the real source.
-    """
-    store.ledger_rows = []
-    app = _build_app(store)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        job_id = await _create_job(client)
-        got = await client.get(f"/v1/agent/jobs/{job_id}")
-
-    body = got.json()
-    assert body["spent_usd"] is None
-    assert body["tokens_in"] is None
-    assert body["tokens_out"] is None
-    assert body["model_calls"] is None
+    assert not {"spent_usd", "tokens_in", "tokens_out", "model_calls"} & body.keys()
 
 
 async def test_a_job_reports_no_network_mode(client: AsyncClient):

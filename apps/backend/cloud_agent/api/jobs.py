@@ -5,7 +5,7 @@ Ten endpoints behind the session credential. Everything is scoped to
 account can never read or mutate another's job, and a job that belongs to
 somebody else is a 404 rather than a 403 so ids cannot be probed for existence.
 
-``_job_usage``, ``_set_agent_thread_archived`` and ``_set_agent_thread_pinned``
+``_set_agent_thread_archived`` and ``_set_agent_thread_pinned``
 travel with it: each has callers only here, and a helper whose only caller moves
 has to move with it.
 """
@@ -38,7 +38,6 @@ from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.goals.models import GoalConflict
-from cloud_agent.ledger import JobLedgerSummary, summarize_job_ledger
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     MAX_TRAJECTORY_TIMING_ATTEMPTS,
@@ -75,7 +74,6 @@ if TYPE_CHECKING:
         ExecutionQueries,
         GoalRepository,
         HostPoolRepository,
-        LedgerRepository,
         McpConnectionRepository,
         ModelConnectionRepository,
         PendingMessageRepository,
@@ -121,7 +119,6 @@ class _JobsStorage(Protocol):
     execution_queries: ExecutionQueries
     goals: GoalRepository
     host_pool: HostPoolRepository
-    ledger: LedgerRepository
     mcp: McpConnectionRepository
     model_connections: ModelConnectionRepository
     pending_messages: PendingMessageRepository
@@ -139,31 +136,6 @@ class _JobsStorage(Protocol):
 def _require_store(store: _JobsStorage | None) -> _JobsStorage:
     """Return the store or fail with a clear 503 when the DB is absent."""
     return require_store(store)
-
-
-def _job_usage_fields(summary: JobLedgerSummary) -> dict[str, Any]:
-    """Map one job's ledger summary onto the response's flat usage fields.
-
-    Deliberately the grant ledger and not the agent's own report: a run that
-    misstates its usage — which is a thing models do — cannot change what the
-    owner is shown. The same accounting the usage and admin surfaces use, so a
-    job means the same thing everywhere.
-
-    A snapshot that has not answered (``pending``, ``unavailable``) has no
-    totals, and the fields then stay ``None``: absent rather than a
-    fabricated zero that would read as "this job was free".
-    """
-    totals = summary.totals
-    if totals is None:
-        return {}
-    usage: dict[str, Any] = {
-        "tokens_in": totals.tokens_in,
-        "tokens_out": totals.tokens_out,
-        "model_calls": totals.calls,
-    }
-    if totals.spent_usd is not None:
-        usage["spent_usd"] = float(totals.spent_usd)
-    return usage
 
 
 async def create_agent_job(
@@ -275,13 +247,8 @@ async def get_agent_job(
         telemetry = await job_store.execution_queries.job_turn_telemetry(
             job_id=job_id, attempt_id=attempt_telemetry[-1]["attempt_id"]
         )
-    summary = summarize_job_ledger(
-        ledger_rows=await job_store.ledger.ledger_rows_for_job(job_id=job_id),
-        terminal=job.get("state") in TERMINAL_STATES,
-    )
     return _job_response(
         job,
-        _job_usage_fields(summary),
         telemetry,
         attempt_telemetry,
     )

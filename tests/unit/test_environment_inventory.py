@@ -39,6 +39,8 @@ from pathlib import Path
 
 import yaml
 
+from cloud_agent.accounts.config import RETIRED_GATEWAY_VARIABLES
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy" / "control-plane" / "docker-compose.yml"
 WEB_DOCKERFILE = REPO_ROOT / "deploy" / "control-plane" / "Dockerfile.web"
@@ -85,7 +87,6 @@ _PYTHON_SOURCES = (
 _HOST_ENV_WRITERS = (
     "apps/backend/cloud_agent/application/compute_setup.py",
     "apps/backend/cloud_agent/providers/compute/host_bootstrap.py",
-    "apps/backend/cloud_agent/providers/compute/host_inference.py",
 )
 
 #: An actual read: `os.environ.get(...)`, `os.environ[...]`, `getenv(...)` or
@@ -174,6 +175,9 @@ def test_control_plane_variables_are_wired_into_compose() -> None:
     ) - _NOT_VARIABLES
     assert read, "no variable reads found under apps/backend/cloud_agent/ — regex drift?"
     read -= _COMPOSE_EXEMPT
+    # Named only to refuse a stale deployment at startup: offering them on the
+    # stack would invite exactly the configuration that is refused.
+    read -= set(RETIRED_GATEWAY_VARIABLES)
     unreachable = sorted(read - _compose_environment_keys())
     assert not unreachable, (
         "the control plane reads these, but they are not keys under "

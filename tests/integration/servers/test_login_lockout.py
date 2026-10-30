@@ -14,8 +14,6 @@ from tests.support.local_accounts import LOCAL_SECRET, PASSWORD, close_pool, mak
 
 from cloud_agent.accounts import config
 from cloud_agent.accounts.directory import (
-    LocalModeGateway,
-    LocalModeGrantClient,
     LocalOwnerDirectory,
 )
 from cloud_agent.accounts.tokens import rate_limit_key
@@ -40,7 +38,6 @@ async def pool():
 
 @pytest_asyncio.fixture
 async def http(pool, monkeypatch):
-    monkeypatch.setenv(config.ENV_AUTH_MODE, "local")
     monkeypatch.setenv(config.ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
     monkeypatch.setenv(ENV_TRUST_PROXY_HEADERS, "1")
     monkeypatch.delenv("AGENT_SESSION_SECRET", raising=False)
@@ -49,8 +46,7 @@ async def http(pool, monkeypatch):
     app = create_app()
     storage = Storage(pool)
     app.state.storage = storage
-    app.state.owners = LocalModeGateway(LocalOwnerDirectory(storage.local_accounts))
-    app.state.grants = LocalModeGrantClient()
+    app.state.owners = LocalOwnerDirectory(storage.local_accounts)
     await make_account(storage, _EMAIL)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False

@@ -84,6 +84,9 @@ RETIRED_GATEWAY_VARIABLES = (
     "AGENT_GATEWAY_URL",
     "AGENT_SESSION_REDIRECT_URI",
     "AGENT_WEB_GATEWAY_URL",
+    # The documentation assistant the Gateway served; the web app has no
+    # switch for it any more.
+    "AGENT_WEB_FEATURE_RAG",
     "GATEWAY_AUTHORIZE_URL",
     "GATEWAY_BASE_URL",
     "GATEWAY_GRANT_BASE_PATH",

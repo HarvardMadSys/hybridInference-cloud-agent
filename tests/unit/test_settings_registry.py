@@ -582,7 +582,6 @@ async def test_public_site_settings_expose_only_display_allowlist():
     assert view["branding"]["appName"] == "Configured app"
     assert view["branding"]["docsUrl"] == "https://docs.example.com/agents/"
     assert view["branding"]["contactUrl"] == "mailto:support@example.com"
-    assert view["features"] == {"rag": True}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_mcp_app()), base_url="http://relay"
     ) as client:

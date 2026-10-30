@@ -21,6 +21,7 @@ from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db
 from tests.support.follow_ups import append_follow_up
 from tests.support.owners import CONNECTION_ID, use_session_secret
+from tests.unit.test_codex_usage import _completed, _run, _session, _spawn, _usage
 
 from cloud_agent.admin_usage import MAX_USAGE_ATTEMPTS, MAX_USAGE_RUNS
 from cloud_agent.api import admin_usage, owner_usage
@@ -179,7 +180,7 @@ async def test_a_finished_connection_turn_shows_its_agents_tokens(db, store, adm
     assert totals["tokens_out"] == 10 + 9 + 1
     assert totals["cache_read"] == 80 + 100 + 80
     assert totals["cache_write"] == 20
-    # The provider bills the turn; reasoning is not in an agent's report.
+    # The provider bills the turn; Claude Code does not report reasoning.
     assert (totals["spent_usd"], totals["reasoning"], totals["calls"]) == (None, None, None)
     assert body["summary"]["run_count"] == 2
     assert body["summary"]["attempt_count"] == 2
@@ -193,6 +194,65 @@ async def test_a_finished_connection_turn_shows_its_agents_tokens(db, store, adm
     assert stats["stats"].output_tokens == 20
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_attempt_thread_stats") == 2
+
+
+async def test_codex_turns_show_what_the_app_server_reported_once_each(
+    db, store, admin_token, tmp_path
+):
+    """Codex's ``thread/tokenUsage/updated``, as its driver stores it, reaches the Usage page.
+
+    Two turns run on one resident thread; the first spawns a subagent and one
+    notification repeats. Each model call counts once, in the turn it ran in,
+    and the reasoning Codex reports is shown as part of output.
+    """
+    process, session = _session(tmp_path)
+    first_events = _run(
+        process,
+        session,
+        "turn-a",
+        _usage("thread-a", "turn-a", last=(1000, 800, 50, 20), total=(1000, 800, 50, 20)),
+        _usage("thread-a", "turn-a", last=(1000, 800, 50, 20), total=(1000, 800, 50, 20)),
+        _spawn("thread-a", "child-t"),
+        _usage("child-t", "child-turn", last=(300, 0, 40, 10), total=(300, 0, 40, 10)),
+        _completed("thread-a", "turn-a"),
+    )
+    second_events = _run(
+        process,
+        session,
+        "turn-b",
+        _usage("thread-a", "turn-b", last=(1500, 1400, 70, 30), total=(2500, 2200, 120, 50)),
+        _completed("thread-a", "turn-b"),
+    )
+    first = await _create_job(
+        store, user_id="owner-one", runtime="codex", model_connection_id=CONNECTION_ID
+    )
+    await _attempt(db, first, events=[(e.event_type, e.payload) for e in first_events])
+    follow_up = await append_follow_up(
+        db, parent_job_id=first["id"], user_id="owner-one", prompt="and the docs"
+    )
+    assert follow_up is not None and "error" not in follow_up
+    await _attempt(db, follow_up, events=[(e.event_type, e.payload) for e in second_events])
+    await _settle(db, [first["id"], follow_up["id"]], START)
+
+    async with _client(store, owner="owner-one") as client:
+        mine = await client.get("/v1/agent/usage/tokens", params={"all": "true"})
+        admin = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
+    assert mine.status_code == 200, mine.text
+    body = mine.json()
+    assert body["source"] == "runtime_reported"
+    totals = body["summary"]["totals"]
+    # Codex input already includes cached input.
+    assert totals["tokens_in"] == 1000 + 300 + 1500
+    assert totals["tokens_out"] == 50 + 40 + 70
+    assert totals["cache_read"] == 800 + 0 + 1400
+    assert totals["cache_write"] == 0
+    assert totals["reasoning"] == 20 + 10 + 30
+    assert (totals["spent_usd"], totals["calls"]) == (None, None)
+    assert body["summary"]["runs_with_snapshot"] == 2
+    assert body["summary"]["unknown_rows"]["reasoning"] == 0
+    assert admin.json()["summary"]["totals"] == totals
+    stats = await store.execution_queries.thread_stats(job_id=first["id"], user_id="owner-one")
+    assert stats is not None and stats["stats"].output_tokens == 160
 
 
 async def test_another_owners_turns_are_not_in_mine(db, store, admin_token):

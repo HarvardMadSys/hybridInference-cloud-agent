@@ -7,6 +7,7 @@ branch semantics form an independently schedulable test module.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
@@ -27,7 +28,6 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     datetime,
     pytest,
     store,
-    timedelta,
 )
 from tests.support.owners import connection_claim, on_connection
 

@@ -1,4 +1,4 @@
-"""Owner scoping and cached ledger/runtime reads over the real API routes."""
+"""Owner scoping and the agent-reported usage of one job, over the real API routes."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import OneFake
-from tests.unit.test_ledger_snapshots import END, START, ledger_row
+from tests.support.usage import END, START
 
 from cloud_agent.api import usage
 from cloud_agent.api._owner_auth import require_agent_owner
@@ -39,8 +39,6 @@ def store():
     ]
     fake = SimpleNamespace(
         get_job=AsyncMock(return_value={"id": "ajob_1", "user_id": "owner"}),
-        ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
-        ledger_rows_for_conversation=AsyncMock(return_value=[ledger_row(job_id="ajob_1")]),
         job_usage_inputs=AsyncMock(
             return_value={
                 "job_ids": ["ajob_1"],
@@ -63,8 +61,6 @@ def store():
             return None
         return {
             "job": job,
-            "ledger_rows": fake.ledger_rows_for_job.return_value,
-            "conversation_rows": fake.ledger_rows_for_conversation.return_value,
             "inputs": fake.job_usage_inputs.return_value,
             "version": VERSION,
         }
@@ -83,25 +79,27 @@ def app(store):
 
 
 @pytest.mark.asyncio
-async def test_usage_keeps_runtime_and_ledger_counts_in_separate_same_job_fields(app, store):
+async def test_usage_is_what_the_agent_reported_and_nothing_else(app, store):
+    """Each attempt's report counts once; there is no cost, ledger or conversation total."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/v1/agent/jobs/ajob_1/usage")
     assert response.status_code == 200
     body = response.json()
-    assert body["ledger"]["totals"]["tokens_in"] == 120
-    assert body["ledger"]["totals"]["calls"] == 1
-    assert body["ledger"]["finalized"] is False
-    assert body["runtime"] == {
-        "source": "runtime",
-        "input_tokens": 200,
-        "output_tokens": 20,
-        "cache_read_tokens": 160,
-        "normalized_input_tokens": None,
+    assert body == {
+        "runtime": {
+            "source": "runtime",
+            "input_tokens": 200,
+            "output_tokens": 20,
+            "cache_read_tokens": 160,
+            # Not reported, so unknown rather than zero.
+            "cache_write_tokens": None,
+            "reasoning_tokens": None,
+            "normalized_input_tokens": None,
+        },
+        "external_provider": False,
+        "version": VERSION,
     }
-    assert body["version"] == VERSION
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
-    assert "grant_id" not in response.text
-    assert "binding_id" not in response.text
 
 
 @pytest.mark.asyncio
@@ -120,7 +118,6 @@ async def test_another_owner_cannot_read_usage(app, store):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/v1/agent/jobs/ajob_other/usage")
     assert response.status_code == 404
-    store.ledger_rows_for_job.assert_not_awaited()
     # The read itself is owner-scoped: it refuses by answering None.
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_other", user_id="owner")
 
@@ -147,41 +144,54 @@ async def test_a_job_deleted_between_the_check_and_the_read_is_not_found(app, st
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "state,expected",
-    [
-        ("cancelled", "unavailable"),
-        ("failed", "unavailable"),
-        ("succeeded", "unavailable"),
-        ("queued", "pending"),
-    ],
-)
-async def test_jobs_without_attempts_only_wait_for_usage_while_still_runnable(
-    app, store, state, expected
-):
-    """An unexecuted terminal job cannot wait forever for a nonexistent collector row."""
+@pytest.mark.parametrize("state", ["cancelled", "failed", "succeeded", "queued"])
+async def test_a_job_whose_agent_reported_nothing_has_no_counts(app, store, state):
+    """No report is unknown in every state: never zero, never a promise of one."""
     store.get_job.return_value = {"id": "ajob_1", "user_id": "owner", "state": state}
-    store.ledger_rows_for_job.return_value = []
     store.job_usage_inputs.return_value = {"job_ids": ["ajob_1"], "attempts": [], "events": []}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/v1/agent/jobs/ajob_1/usage")
     assert response.status_code == 200
     body = response.json()
-    assert body["ledger"]["status"] == expected
-    assert body["ledger"]["attempts"] == []
-    assert body["ledger"]["totals"] is None
-    assert body["ledger"]["refreshing"] is False
-    assert body["ledger"]["next_refresh_at"] is None
     assert body["runtime"] == {
         "source": "runtime",
         "input_tokens": None,
         "output_tokens": None,
         "cache_read_tokens": None,
+        "cache_write_tokens": None,
+        "reasoning_tokens": None,
         "normalized_input_tokens": None,
     }
     # The read answers from the owner-scoped snapshot alone.
     store.get_job.assert_not_awaited()
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
+
+
+@pytest.mark.asyncio
+async def test_codex_reasoning_is_shown_beside_output_never_added(app, store):
+    store.get_job.return_value = {"id": "ajob_1", "user_id": "owner", "runtime": "codex"}
+    store.job_usage_inputs.return_value["events"] = [
+        {
+            "job_id": "ajob_1",
+            "attempt_id": 10,
+            "seq": 1,
+            "event_type": "usage",
+            "created_at": END,
+            "payload": {
+                "input_tokens": 400,
+                "output_tokens": 30,
+                "cache_read_tokens": 250,
+                "cache_write_tokens": 0,
+                "reasoning_output_tokens": 12,
+                "usage_id": "codex:thread-a:430",
+            },
+        }
+    ]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/v1/agent/jobs/ajob_1/usage")
+    runtime = response.json()["runtime"]
+    assert (runtime["output_tokens"], runtime["reasoning_tokens"]) == (30, 12)
+    assert runtime["normalized_input_tokens"] == 400
 
 
 def test_usage_routes_are_available_only_on_the_control_plane():
@@ -191,27 +201,6 @@ def test_usage_routes_are_available_only_on_the_control_plane():
     assert path in public_paths
     assert path not in relay_paths
     assert "/v1/agent/jobs/{job_id}/usage/refresh" not in public_paths
-
-
-@pytest.mark.asyncio
-async def test_conversation_totals_are_separate_from_the_selected_turn(app, store):
-    store.ledger_rows_for_conversation.return_value = [
-        ledger_row(job_id="ajob_1"),
-        ledger_row(job_id="ajob_2", attempt_id=11, id=2),
-        ledger_row(job_id="ajob_old", attempt_id=12, id=None, snapshot=None, queried_at=None),
-    ]
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/v1/agent/jobs/ajob_1/usage")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ledger"]["totals"]["calls"] == 1
-    conversation = body["conversation"]
-    assert conversation["totals"]["calls"] == 2
-    assert conversation["totals"]["spent_usd"] == "0.00024690"
-    assert conversation["turn_count"] == 3
-    assert conversation["incomplete"] is True
-    assert "attempts" not in conversation
-    assert "grant_id" not in response.text
 
 
 @pytest.mark.asyncio

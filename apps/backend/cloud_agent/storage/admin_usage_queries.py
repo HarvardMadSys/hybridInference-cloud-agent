@@ -327,6 +327,7 @@ def _attempt_rows(
                 "output_tokens": rollup.output_tokens if rollup else None,
                 "cache_read_tokens": rollup.cache_read_tokens if rollup else None,
                 "cache_write_tokens": rollup.cache_write_tokens if rollup else None,
+                "reasoning_tokens": rollup.reasoning_tokens if rollup else None,
             }
         )
     return rows

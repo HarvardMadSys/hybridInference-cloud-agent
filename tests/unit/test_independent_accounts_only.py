@@ -268,19 +268,15 @@ _REFUSES_RETIRED = {
     "deploy/control-plane/deploy.sh",
     "deploy/host/sandbox_host.sh",
 }
-_RETIRED_NAMES = re.compile(
-    r"\b(?:%s)\b"
-    % "|".join(
-        (
-            *config.RETIRED_GATEWAY_VARIABLES,
-            "AGENT_GATEWAY_HOSTNAME",
-            "AGENT_TUNNEL_SSH_DESTINATION",
-            "AGENT_TUNNEL_SSH_KEY",
-            "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
-            "AGENT_TUNNEL_LISTEN_PORT",
-        )
-    )
+_RETIRED_NAME_LIST = (
+    *config.RETIRED_GATEWAY_VARIABLES,
+    "AGENT_GATEWAY_HOSTNAME",
+    "AGENT_TUNNEL_SSH_DESTINATION",
+    "AGENT_TUNNEL_SSH_KEY",
+    "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
+    "AGENT_TUNNEL_LISTEN_PORT",
 )
+_RETIRED_NAMES = re.compile(rf"\b(?:{'|'.join(_RETIRED_NAME_LIST)})\b")
 _REMOVED_CODE = re.compile(
     r"\b(?:GatewayClient|GrantClient|LocalModeGateway|LocalModeGrantClient|get_gateway_client"
     r"|get_grant_client|local_mode\(\)|auth_mode\(\))|gateway-tunnel|agent-gateway-tunnel"

@@ -1,6 +1,6 @@
 """Revoking a local account stops its work: real Postgres, real claims and residencies.
 
-The owner is a local account, the Gateway stand-ins are the local ones, and
+The owner is an account, its directory is the real one over the store, and
 every turn runs on the owner's own verified model connection, as a local
 account's turns must. Each case drives the real worker and residency paths: a
 revocation must stop queued and running turns, release residencies (and the
@@ -20,7 +20,7 @@ import pytest_asyncio
 import tests.integration.servers.test_pending_message_queue as queue
 from fastapi import HTTPException
 from tests.integration.servers.test_pending_message_queue import (
-    _claim_body as _gateway_claim_body,
+    _claim_body as _queue_claim_body,
     api as api,
     pool as pool,
 )
@@ -35,8 +35,6 @@ from tests.support.owners import on_connection
 
 from cloud_agent.accounts import config
 from cloud_agent.accounts.directory import (
-    LocalModeGateway,
-    LocalModeGrantClient,
     LocalOwnerDirectory,
 )
 from cloud_agent.api._local_auth import terminal_open_fence
@@ -59,7 +57,7 @@ MODEL = "provider-model"
 
 def _claim_body(worker_id: str) -> dict[str, Any]:
     """The queue fixture's claim, from a host that runs members on owner connections."""
-    return with_connection_capability(_gateway_claim_body(worker_id))
+    return with_connection_capability(_queue_claim_body(worker_id))
 
 
 class _Manager:
@@ -107,7 +105,6 @@ class _Manager:
 @pytest_asyncio.fixture(autouse=True)
 async def _local_owner(api, monkeypatch):
     """Make the queue fixture's owner a local account whose turns run on its own connection."""
-    monkeypatch.setenv(config.ENV_AUTH_MODE, "local")
     monkeypatch.setenv(config.ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
     monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
     use_test_cipher(monkeypatch)
@@ -115,8 +112,8 @@ async def _local_owner(api, monkeypatch):
     monkeypatch.setattr(queue, "_OWNER", OWNER)
     monkeypatch.setattr(queue, "_claim_body", _claim_body)
     await make_account(api.store, "owner@example.org", admission="approved", account_id=OWNER)
-    local_gateway = LocalModeGateway(LocalOwnerDirectory(api.store.local_accounts))
-    api.app.dependency_overrides[get_owner_directory] = lambda: local_gateway
+    owners = LocalOwnerDirectory(api.store.local_accounts)
+    api.app.dependency_overrides[get_owner_directory] = lambda: owners
     connection = await verified_connection(api.store, OWNER, models=(MODEL,))
     api.connection = connection
     create = api.create
@@ -170,7 +167,7 @@ async def test_revocation_stops_a_running_turn_and_holds_reapproval_until_it_end
 
     revoked = await act(api.store, OWNER, "revoke")
     generation = revoked.account.version
-    complete = await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
+    complete = await terminate_owner_access(api.store, OWNER, generation)
 
     assert complete is False  # the turn has been asked to stop, not stopped yet
     assert await _job(api, job["id"]) == {"state": "running", "cancel_requested": True}
@@ -185,7 +182,7 @@ async def test_revocation_stops_a_running_turn_and_holds_reapproval_until_it_end
     assert refused.value.code == "access_cleanup_pending"
 
     await _end_turn(api, turn)
-    assert await enforce_ended_access(api.store, LocalModeGrantClient()) == 1
+    assert await enforce_ended_access(api.store) == 1
     assert await api.store.local_accounts.open_terminations(limit=10) == []
     approved = await act(api.store, OWNER, "approve")
     assert approved.account.admission_status == "approved"
@@ -255,9 +252,7 @@ async def test_a_queued_turn_is_refused_at_claim_and_cancelled_by_the_pass(api):
     assert response.status_code in (200, 403), response.text
     if response.status_code == 200:
         assert response.json() is None
-    assert await terminate_owner_access(
-        api.store, LocalModeGrantClient(), OWNER, revoked.account.version
-    )
+    assert await terminate_owner_access(api.store, OWNER, revoked.account.version)
     assert (await _job(api, job["id"]))["state"] in ("cancelled", "failed")
 
 
@@ -267,7 +262,7 @@ async def test_an_unacknowledged_terminal_cleanup_keeps_the_record_open(api):
     api.manager.fail_suspend = True
     revoked = await act(api.store, OWNER, "revoke")
     generation = revoked.account.version
-    assert not await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
+    assert not await terminate_owner_access(api.store, OWNER, generation)
     async with api.pool.acquire() as conn:
         outcome = await conn.fetchval(
             "SELECT last_outcome FROM agent_local_access_terminations WHERE account_id = $1",
@@ -277,7 +272,7 @@ async def test_an_unacknowledged_terminal_cleanup_keeps_the_record_open(api):
     assert not any(call[0] == "delete" for call in api.manager.calls)
     api.manager.fail_suspend = False
     await _end_turn(api, turn)
-    assert await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
+    assert await terminate_owner_access(api.store, OWNER, generation)
     assert await api.store.local_accounts.open_terminations(limit=10) == []
 
 
@@ -308,9 +303,7 @@ async def test_a_terminal_reopened_while_a_pass_finishes_keeps_the_record_open(a
         return await real_record(**kwargs)
 
     monkeypatch.setattr(accounts, "record_termination_attempt", paused_record)
-    pass_a = asyncio.create_task(
-        terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
-    )
+    pass_a = asyncio.create_task(terminate_owner_access(api.store, OWNER, generation))
     await asyncio.wait_for(reached.wait(), 10)
     # A has frozen, killed and released the group's terminals and found no turn.
     assert api.manager.terminals == []
@@ -339,7 +332,7 @@ async def test_a_terminal_reopened_while_a_pass_finishes_keeps_the_record_open(a
     # The next pass sees the open record, kills the late terminal and closes it.
     monkeypatch.setattr(accounts, "record_termination_attempt", real_record)
     api.manager.fail_delete = False
-    assert await enforce_ended_access(api.store, LocalModeGrantClient()) == 1
+    assert await enforce_ended_access(api.store) == 1
     assert api.manager.terminals == []
     assert ("delete", "late") in api.manager.calls
     assert (await _record_row(api))["completed_at"] is not None
@@ -353,20 +346,13 @@ async def test_a_pass_in_flight_excludes_other_passes_and_approval(api):
     revoked = await act(api.store, OWNER, "revoke")
     generation = revoked.account.version
     api.manager.hold = asyncio.Event()
-    pass_a = asyncio.create_task(
-        terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
-    )
+    pass_a = asyncio.create_task(terminate_owner_access(api.store, OWNER, generation))
     await asyncio.wait_for(api.manager.entered.wait(), 10)
     suspends = sum(call[0] == "suspend" for call in api.manager.calls)
 
     # Another pass, from the record or from the sweep, finds the lock taken.
     for other in (generation, None):
-        assert (
-            await asyncio.wait_for(
-                terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, other), 5
-            )
-            is False
-        )
+        assert await asyncio.wait_for(terminate_owner_access(api.store, OWNER, other), 5) is False
     assert sum(call[0] == "suspend" for call in api.manager.calls) == suspends
     # Approval cannot commit while A is in flight, even once the record looks done.
     with pytest.raises(AccountTransitionRefused) as refused:
@@ -396,7 +382,7 @@ async def test_a_pass_in_flight_excludes_other_passes_and_approval(api):
     turn = await api.start(second)
     suspends = sum(call[0] == "suspend" for call in api.manager.calls)
     # The old generation's pass runs late and must touch none of it.
-    assert await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
+    assert await terminate_owner_access(api.store, OWNER, generation)
     assert await _job(api, second["id"]) == {"state": "running", "cancel_requested": False}
     assert await _residency(api, turn["thread_id"]) != "none"
     assert sum(call[0] == "suspend" for call in api.manager.calls) == suspends
@@ -431,13 +417,13 @@ async def test_revocation_closes_a_member_running_on_the_owner_connection(api):
     )
 
     generation = revoked.account.version
-    assert not await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
+    assert not await terminate_owner_access(api.store, OWNER, generation)
     assert await _residency(api, job["thread_id"]) == "none"
     assert ("residency_lost", job["thread_id"]) in api.manager.calls
     assert await _job(api, job["id"]) == {"state": "running", "cancel_requested": True}
 
     await _end_turn(api, turn)
-    assert await enforce_ended_access(api.store, LocalModeGrantClient()) == 1
+    assert await enforce_ended_access(api.store) == 1
     await act(api.store, OWNER, "approve")
     # Approval resumes nothing: the stopped turn is not run again on the key.
     assert (await _job(api, job["id"]))["state"] == "cancelled"
@@ -445,8 +431,8 @@ async def test_revocation_closes_a_member_running_on_the_owner_connection(api):
     assert response.status_code == 200 and response.json() is None, response.text
 
 
-async def test_a_turn_without_a_connection_is_refused_and_never_reaches_a_gateway(api):
-    """A local account has no Gateway models: the source is never silently swapped."""
+async def test_a_turn_without_a_connection_is_refused_and_runs_only_on_the_owners_key(api):
+    """There is no platform model: the source is never silently swapped."""
     response = await api.client.post(
         "/v1/agent/jobs",
         json=on_connection(
@@ -458,7 +444,7 @@ async def test_a_turn_without_a_connection_is_refused_and_never_reaches_a_gatewa
 
     job = await api.create()
     claim = await api.claim(job["id"])
-    # The claim carries the owner's own key and no Gateway grant.
+    # The claim carries the owner's own key and no platform credential.
     assert claim["model_connection"]["api_key"] == TEST_API_KEY
     assert claim["model_connection"]["connection_id"] == api.connection["id"]
     assert not claim.get("sandbox_token")

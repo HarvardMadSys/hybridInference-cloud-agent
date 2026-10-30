@@ -7,6 +7,7 @@ telemetry and session lifecycle independently schedulable.
 from __future__ import annotations
 
 import hashlib
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import call
 
@@ -35,7 +36,6 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     pytest,
     sandbox_manager_routing,
     store,
-    timedelta,
     worker,
 )
 from tests.servers.test_agent_jobs_mcp_api import _binding, _job_body

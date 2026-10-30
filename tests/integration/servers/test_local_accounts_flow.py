@@ -1,7 +1,7 @@
 """Local accounts end to end over HTTP and real Postgres, with mail captured in memory.
 
 The application is the real one with the local identity stand-ins the
-lifespan installs; no Gateway is reachable, and a call to it would fail. The
+lifespan installs; no outside service is reached. The
 flow is the one a new user and an administrator take: sign up, verify, sign
 in while pending, apply, be approved, use Agent, be suspended, recover the
 password, be restored without access.
@@ -21,8 +21,6 @@ from tests.support.local_accounts import LOCAL_SECRET, close_pool, open_pool
 
 from cloud_agent.accounts import config
 from cloud_agent.accounts.directory import (
-    LocalModeGateway,
-    LocalModeGrantClient,
     LocalOwnerDirectory,
 )
 from cloud_agent.api import _owner_auth
@@ -66,7 +64,6 @@ async def pool():
 
 @pytest_asyncio.fixture
 async def env(pool, monkeypatch):
-    monkeypatch.setenv(config.ENV_AUTH_MODE, "local")
     monkeypatch.setenv(config.ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
     monkeypatch.setenv(config.ENV_WEB_BASE_URL, _WEB)
     monkeypatch.setenv("ADMIN_TOKEN", _ADMIN["authorization"].removeprefix("Bearer "))
@@ -76,8 +73,7 @@ async def env(pool, monkeypatch):
     app = create_app()
     storage = Storage(pool)
     app.state.storage = storage
-    app.state.owners = LocalModeGateway(LocalOwnerDirectory(storage.local_accounts))
-    app.state.grants = LocalModeGrantClient()
+    app.state.owners = LocalOwnerDirectory(storage.local_accounts)
     app.state.account_mailer = _Mailer()
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
@@ -165,7 +161,7 @@ async def test_the_whole_waiting_list_lifecycle(env):
     assert "HttpOnly" in cookie and "Secure" in cookie and "samesite=lax" in cookie.lower()
     assert "cals1." not in login.text
     account_id = body["id"]
-    assert body["auth_mode"] == "local" and body["email"] == "Flow.Person@example.edu"
+    assert "auth_mode" not in body and body["email"] == "Flow.Person@example.edu"
     assert body["agent_access"] == {"allowed": False, "permissions": []}
     assert body["waitlist"]["status"] == "not_applied"
 

@@ -1,4 +1,4 @@
-"""Owner-scoped reads of a job's usage: what its runtime reported, and its conversation."""
+"""Owner-scoped reads of a job's usage: what its agent reported."""
 
 from __future__ import annotations
 
@@ -8,12 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
-from cloud_agent.domain.execution import TERMINAL_STATES
-from cloud_agent.ledger import (
-    JobUsageResponse,
-    summarize_conversation,
-    summarize_job_usage,
-)
+from cloud_agent.ledger import JobUsageResponse, summarize_job_usage
 
 if TYPE_CHECKING:
     from cloud_agent.ports import ConversationQueries, LedgerRepository
@@ -52,11 +47,8 @@ async def job_usage_response(
         return None
     job = reads["job"]
     usage = summarize_job_usage(
-        ledger_rows=reads["ledger_rows"],
         runtime_inputs=reads["inputs"],
         runtime=job.get("runtime"),
-        terminal=job.get("state") in TERMINAL_STATES,
-        conversation=summarize_conversation(reads["conversation_rows"]),
         external_provider=bool(job.get("model_connection_id")),
     )
     usage.version = reads["version"]
@@ -69,7 +61,7 @@ async def get_job_usage(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _UsageStorage | None = Depends(get_storage),
 ) -> JobUsageResponse:
-    """Read the runtime usage and conversation statistics of one owned job."""
+    """Read what one owned job's agent reported about its model use."""
     job_store = _require_store(store)
     # The snapshot read is itself scoped to the caller's own, undeleted job:
     # None covers another owner's job, a missing one, and a deleted

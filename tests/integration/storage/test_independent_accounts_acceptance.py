@@ -13,16 +13,15 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import asyncpg
+import httpx
 import pytest
 import pytest_asyncio
-from cloud_agent.gateway import GatewayClient
-from cloud_agent.grants import GrantClient
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.app import create_app
-from cloud_agent.bootstrap.identity import attach_local_identity, bind_identity_source
+from cloud_agent.bootstrap.identity import attach_owner_directory, bind_identity_source
 from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -62,11 +61,10 @@ async def acceptance(monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
 
-    async def forbidden_gateway(*args, **kwargs):
-        pytest.fail("Independent account flow attempted Gateway HTTP")
+    async def forbidden_network(*args, **kwargs):
+        pytest.fail("Independent account flow attempted outbound HTTP")
 
-    monkeypatch.setattr(GatewayClient, "_get", forbidden_gateway)
-    monkeypatch.setattr(GrantClient, "_post", forbidden_gateway)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbidden_network)
     mails = []
 
     async def record_mail(mail):
@@ -76,8 +74,8 @@ async def acceptance(monkeypatch):
     app = create_app()
     app.state.storage = Storage(pool)
     app.state.account_mailer = SimpleNamespace(configured=True, send=record_mail)
-    assert await bind_identity_source(app, pool) == "local"
-    attach_local_identity(app, app.state.storage, local=True)
+    await bind_identity_source(pool)
+    attach_owner_directory(app, app.state.storage)
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="https://agents.example"
@@ -131,7 +129,7 @@ async def test_signup_waitlist_review_revocation_and_restore_are_independent(acc
     state = acceptance
     client = state.client
     user = await _verified_login(state)
-    assert user["auth_mode"] == "local"
+    assert "auth_mode" not in user
     assert user["waitlist"]["status"] == "not_applied"
     assert user["agent_access"]["allowed"] is False
     assert (await client.get("/v1/agent/jobs")).status_code == 403

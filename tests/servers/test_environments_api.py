@@ -6,9 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from tests.support.owners import SESSIONS, account_record
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import SESSIONS, account_record
 
 from cloud_agent.api import environments
 from cloud_agent.api._owner_auth import require_agent_owner

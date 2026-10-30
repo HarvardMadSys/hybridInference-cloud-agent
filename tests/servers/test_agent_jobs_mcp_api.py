@@ -6,6 +6,8 @@ module contains only the intact MCP-facing behavior cases.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fixtures
@@ -29,7 +31,6 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     json,
     pytest,
     store,
-    timedelta,
     worker,
 )
 from tests.support.owners import connection_claim, on_connection

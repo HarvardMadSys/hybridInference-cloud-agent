@@ -1,4 +1,4 @@
-"""The ledger's window, the refresh a model call asks for, and a job's usage reads.
+"""A job's usage reads: its reported usage events, and the push a model call sends.
 
 The reads take the caller's connection, so that an owner's usage can be read
 from one snapshot and given that snapshot's version.
@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.thread_stats import SUMMARY_PAYLOAD_KEYS
 
@@ -70,110 +69,17 @@ CASE WHEN e.usage_summary ->> '{_USAGE_SUMMARY_VERSION_KEY}' = '{USAGE_SUMMARY_V
 END
 """
 
-LEDGER_WINDOW_UNTIL_SQL = f"""
-LEAST(
-    COALESCE(a.finished_at, NOW()),
-    {NEXT_ATTEMPT_START_SQL}
-)
-"""
-
-#: The two columns :func:`cloud_agent.ledger.summarize_ledger` needs to tell
-#: what an attempt ``a`` with no ledger reference ``l`` is: still starting,
-#: ended before its agent called a model, or unattributed. A read that hands the
-#: reducer attempt rows without them makes every such attempt unattributed, so
-#: each one selects them from here. Only a finished attempt without a reference
-#: is asked whether it reported model usage, the way thread stats reads it.
-UNREFERENCED_ATTEMPT_SQL = """
-a.status AS attempt_status,
-CASE WHEN l.id IS NULL AND a.status <> 'running' THEN EXISTS (
-    SELECT 1 FROM agent_job_events e
-    WHERE e.attempt_id = a.id
-      AND (e.event_type = 'usage'
-           OR jsonb_typeof(e.payload->'usage') = 'object')
-) END AS model_usage_reported
-"""
-
-
-#: Ask for this attempt's usage to be read again, at once or as soon as the last
-#: read is five seconds old, and never later than a read already scheduled.
-#:
-#: Unlike an owner's refresh request, this one is recorded while a read is under
-#: way: that read may have started before the call it is asked for finished.
-#: The claim cleared ``next_refresh_at``, so a value there when the read
-#: completes can only be such a request, and completing keeps it.
-REQUEST_ATTEMPT_LEDGER_REFRESH_SQL = """
-UPDATE agent_attempt_ledger l
-SET next_refresh_at = GREATEST(clock_timestamp(), l.last_refresh_attempt_at + INTERVAL '5 seconds')
-WHERE l.attempt_id = $1
-  AND (l.next_refresh_at IS NULL OR l.next_refresh_at > GREATEST(
-      clock_timestamp(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
-  ))
+#: Tell the owner's change streams that job ``$1``'s usage changed. Sent
+#: (like every notification) when the transaction commits; the stream reads the
+#: usage itself, so nothing about it is in the notification.
+NOTIFY_JOB_USAGE_SQL = """
+SELECT agent_notify_owner(j.user_id, 'usage', j.id) FROM agent_jobs j WHERE j.id = $1
 """
 
 
 def carries_model_usage(event_type: str, payload: dict[str, object] | None) -> bool:
     """Whether a runtime event reports a model call's usage (as thread stats reads it)."""
     return event_type == "usage" or isinstance((payload or {}).get("usage"), dict)
-
-
-async def fetch_ledger_rows_for_job(conn: asyncpg.Connection, job_id: str) -> list[dict[str, Any]]:
-    """A job's attempts with their stored grant snapshots, in the caller's transaction."""
-    rows = await conn.fetch(
-        f"""
-        SELECT a.id AS attempt_id, a.job_id, a.attempt_no,
-               a.started_at, a.finished_at,
-               l.id, l.grant_id, l.residency_generation, l.binding_id,
-               l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
-               l.snapshot, l.queried_at, l.last_error_code, l.next_refresh_at,
-               l.last_refresh_attempt_at, l.refresh_generation,
-               l.refresh_lease_expires_at, l.terminal_refresh_count,
-               (l.id IS NOT NULL AND (
-                   l.refresh_lease_expires_at IS NOT NULL
-                   OR l.next_refresh_at <= NOW()
-                   OR (a.status <> 'running' AND l.terminal_refresh_count = 0
-                       AND l.next_refresh_at IS NULL)
-               )) IS TRUE AS refreshing,
-               {UNREFERENCED_ATTEMPT_SQL}
-        FROM agent_attempts a
-        JOIN agent_jobs j ON j.id = a.job_id
-        LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
-        WHERE a.job_id = $1
-        ORDER BY a.attempt_no, l.id
-        """,
-        job_id,
-    )
-    return [{**dict(row), "snapshot": load_json(row["snapshot"])} for row in rows]
-
-
-async def fetch_ledger_rows_for_conversation(
-    conn: asyncpg.Connection, job_id: str, user_id: str
-) -> list[dict[str, Any]]:
-    """The owner's conversation snapshots around a job, in the caller's transaction."""
-    rows = await conn.fetch(
-        f"""
-        SELECT j.id AS job_id, j.state AS job_state, j.model_connection_id,
-               a.id AS attempt_id, a.attempt_no,
-               l.id, l.grant_id, l.snapshot, l.queried_at,
-               l.last_error_code, l.next_refresh_at,
-               (l.id IS NOT NULL AND (
-                   l.refresh_lease_expires_at IS NOT NULL
-                   OR l.next_refresh_at <= NOW()
-                   OR (a.status <> 'running' AND l.terminal_refresh_count = 0
-                       AND l.next_refresh_at IS NULL)
-               )) IS TRUE AS refreshing,
-               {UNREFERENCED_ATTEMPT_SQL}
-        FROM agent_jobs anchor
-        JOIN agent_jobs j ON (j.thread_id = anchor.thread_id OR j.id = anchor.id)
-            AND j.user_id = $2
-        LEFT JOIN agent_attempts a ON a.job_id = j.id
-        LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
-        WHERE anchor.id = $1 AND anchor.user_id = $2
-        ORDER BY j.turn_no, a.attempt_no, l.id
-        """,
-        job_id,
-        user_id,
-    )
-    return [{**dict(row), "snapshot": load_json(row["snapshot"])} for row in rows]
 
 
 async def fetch_job_usage_inputs(conn: asyncpg.Connection, job_id: str) -> dict[str, Any]:

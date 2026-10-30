@@ -463,7 +463,7 @@ describe('UsageSettings', () => {
     expect(await screen.findByText('由服务商计费')).toBeInTheDocument();
     expect(await tile('缓存命中率')).toBe('0%');
     expect(await tile('推理 Token')).toBe('—');
-    expect(screen.getByText('智能体不上报此项')).toBeInTheDocument();
+    expect(screen.getByText('仅 Codex 上报此项')).toBeInTheDocument();
     expect(await screen.findByText(/^每天从 UTC 零点开始算/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '今天' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '全部' })).toBeInTheDocument();
