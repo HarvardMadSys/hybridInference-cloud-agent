@@ -110,8 +110,10 @@ Terminals and sandbox manager workspace operations always check, as does every c
 when the sandbox manager did not supply that proof.
 
 The turn child normally does not install and read back the host rules itself.
-The host service keeps the network guard its startup preflight verified. When
-it hands a turn over, it renews that verification if it is 45 seconds old. It
+The host service keeps the network guard its startup preflight verified, and
+renews that verification between claims once it is 35 seconds old, so handing a
+turn over does not wait for it; a verification still 45 seconds old at a
+handover, after a failed renewal say, is renewed then. It
 adds the verification time and its own helper image to the child's stdin
 payload, after stripping claim-supplied underscore keys, as it does for the
 qualification verdict. The child declines the turn, before accepting it, unless

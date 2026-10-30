@@ -2431,15 +2431,15 @@ def test_one_failed_check_is_retried_before_anything_is_stopped():
     assert manager.stop_count == 0
 
 
-def test_while_nothing_runs_the_sweep_starts_no_guard_helper():
-    """The running-container query proves that nothing remains behind the rules."""
+def test_while_nothing_runs_the_sweep_renews_the_rules_without_reading_them():
+    """An empty host keeps the guard's pass fresh, so the next start need not renew it."""
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
     for _ in range(120):
         assert supervisor.guard_network() == []
     assert manager.host_rule_checks == 0
-    assert manager.host_rule_renewals == 0
+    assert manager.host_rule_renewals == 120, "each pass asks; the guard renews at 45 s"
     assert manager.stop_count == 0
 
 

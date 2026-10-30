@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-23 04:09+0000\n"
+"POT-Creation-Date: 2026-10-30 13:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -243,9 +243,11 @@ msgstr ""
 msgid ""
 "The turn child normally does not install and read back the host rules "
 "itself. The host service keeps the network guard its startup preflight "
-"verified. When it hands a turn over, it renews that verification if it is"
-" 45 seconds old. It adds the verification time and its own helper image "
-"to the child's stdin payload, after stripping claim-supplied underscore "
+"verified, and renews that verification between claims once it is 35 "
+"seconds old, so handing a turn over does not wait for it; a verification "
+"still 45 seconds old at a handover, after a failed renewal say, is "
+"renewed then. It adds the verification time and its own helper image to "
+"the child's stdin payload, after stripping claim-supplied underscore "
 "keys, as it does for the qualification verdict. The child declines the "
 "turn, before accepting it, unless that verification is present, well "
 "formed and successful. It still checks the Docker version and the relay "
@@ -257,14 +259,15 @@ msgid ""
 "and accepts the turn only if that check passes. The sandbox manager still"
 " installs and reads back the rules before any group joins its bridge."
 msgstr ""
-"轮次子进程通常不再自己安装主机防火墙规则并读回确认。主机服务会一直留着启动预检时核实过的网络防护；交出一个轮次时，如果这次核实已满 45 "
-"秒，就先重新核实一次。主机先去掉认领数据里以下划线开头的键，再把核实时间和自己的辅助容器镜像放进子进程的 stdin "
-"数据里，和资格验证结论的做法一样。只有这次核实存在、格式正确、结果成功，子进程才会接这个轮次；否则在接任务之前就拒绝。它仍会自己检查"
-" Docker 版本和中继网络，但在接任务之前不会启动任何辅助容器。如果子进程启动得太慢，拿到核实时已经超出网络防护一分钟的有效期，它就完全不用这次核实：先记一条 "
-"`network_guard_verification_aged_out`，再和主机开始交出核实之前的子进程一样，自己安装规则并读回确认；只有这次检查通过，它才接这个轮次。sandbox manager "
-"仍会在任何沙箱组接入网桥之前，安装这些规则并读回确认。"
+"轮次子进程通常不再自己安装主机防火墙规则并读回确认。主机服务会一直留着启动预检时核实过的网络防护，并在两次认领之间、"
+"这次核实满 35 秒时就重新核实，所以交出轮次时不用等它；如果交出时核实仍满 45 秒（比如之前的重新核实失败了）"
+"，就在那时重新核实。主机先去掉认领数据里以下划线开头的键，再把核实时间和自己的辅助容器镜像放进子进程的 stdin 数据里，"
+"和资格验证结论的做法一样。只有这次核实存在、格式正确、结果成功，子进程才会接这个轮次；否则在接任务之前就拒绝。"
+"它仍会自己检查 Docker 版本和中继网络，但在接任务之前不会启动任何辅助容器。如果子进程启动得太慢，拿到核实时已经超出网络防护一分钟的有效期，"
+"它就完全不用这次核实：先记一条 `network_guard_verification_aged_out`，再和主机开始交出核实之前的子进程一样，自己安装规则并读回确认；"
+"只有这次检查通过，它才接这个轮次。sandbox manager 仍会在任何沙箱组接入网桥之前，安装这些规则并读回确认。"
 
-#: ../developer/deployment-reliability.md:127
+#: ../developer/deployment-reliability.md:129
 msgid ""
 "Network-rule reads share a disposable helper; route reads use a separate "
 "helper without capabilities. Reconciliation caches inspections only "
@@ -278,7 +281,7 @@ msgstr ""
 " 的 hosts 文件和 DNS "
 "解析配置没变时，就不再重写，但属主、权限和符号链接的检查照做。这些优化都不会放松网络策略，也不会降低对时效性的要求。"
 
-#: ../developer/deployment-reliability.md:134
+#: ../developer/deployment-reliability.md:136
 msgid ""
 "A new chat's repository is cloned, scrubbed and archived on the host "
 "while the container starts. Its `checkout` measurement includes the "
@@ -294,11 +297,11 @@ msgstr ""
 " `preflight` "
 "里，范围是从认领请求到发出提示词，不包括排队等待和模型回复的时间。拒绝了任务的子进程不会上报一次成功的启动。满负荷的主机每秒检查一次有没有子进程跑完。"
 
-#: ../developer/deployment-reliability.md:142
+#: ../developer/deployment-reliability.md:144
 msgid "Empty-queue waits and CI evidence"
 msgstr "队列为空时的等待，以及 CI 的证据"
 
-#: ../developer/deployment-reliability.md:144
+#: ../developer/deployment-reliability.md:146
 msgid ""
 "After an empty claim, the host calls `/v1/agent/worker/wait`. The control"
 " plane wakes waiting hosts when Postgres reports queued, requeued or "
@@ -313,13 +316,13 @@ msgstr ""
 "`0029`），控制平面会唤醒等待中的主机；最多等五秒也会唤醒。主机醒来后重新认领，等待接口本身从不分配工作。它有一个专用的数据库监听连接，断了会自己重连，连上或断开时都会唤醒所有等待者。所以触发器察觉不到的变化，比如放置固定换了主机、某次"
 " Fork 完成了，也照样能在常规的五秒间隔内被发现。"
 
-#: ../developer/deployment-reliability.md:152
+#: ../developer/deployment-reliability.md:154
 msgid ""
 "If the endpoint returns 404, the host resumes polling and retries the "
 "endpoint after five minutes. Hosts can deploy before the control plane."
 msgstr "如果这个接口返回 404，主机就退回到轮询，五分钟后再试这个接口。所以主机可以比控制平面先部署。"
 
-#: ../developer/deployment-reliability.md:155
+#: ../developer/deployment-reliability.md:157
 msgid ""
 "CI runs the candidate check on the real Kata host for reviewed `dev` "
 "commits before `CI Gate` permits release. It uses uniquely tagged images "
@@ -332,11 +335,11 @@ msgstr ""
 "主机上跑候选检查。它用带唯一标签的镜像，从不对已部署的服务执行 Compose。这个任务不会把 PR 的代码送到那台机器上；跨产物的静态检查在 "
 "PR 上也会跑。本地 Docker 测试过了，不代表真实 Kata 主机上的检查也过了：要以那个 CI 任务的结果为准。"
 
-#: ../developer/deployment-reliability.md:162
+#: ../developer/deployment-reliability.md:164
 msgid "Old process, candidate schema"
 msgstr "旧进程对新 schema"
 
-#: ../developer/deployment-reliability.md:164
+#: ../developer/deployment-reliability.md:166
 msgid ""
 "The Postgres CI job finds the latest `agent-*` release tag reachable from"
 " the change's base and runs "
@@ -358,24 +361,24 @@ msgstr ""
 " runner 跑一个轮次时通过 worker "
 "路由产生的写入，包括主机心跳、认领、租约心跳、一个事件、沙箱预留、residency、准入和结算，以及转入终态；新对话和保留对话里的后续消息各走一遍。在旧进程还活着的时候，它执行候选版本的迁移，并在同一个数据库上把这些操作再做一遍。它还会测试迁移重试是否幂等，最后删掉数据库和归档的源码。"
 
-#: ../developer/deployment-reliability.md:176
+#: ../developer/deployment-reliability.md:178
 msgid ""
 "Run it against disposable local Postgres. Replace the quoted placeholder "
 "with an existing prior `agent-*` release tag:"
 msgstr "用一个可以随时丢弃的本地 Postgres 来跑。把引号里的占位符换成一个真实存在的旧 `agent-*` 发布标签："
 
-#: ../developer/deployment-reliability.md:185
+#: ../developer/deployment-reliability.md:187
 msgid ""
 "This checks common storage paths against the previous release. "
 "Authenticated browser flows and compatibility with every historical "
 "release need separate evidence."
 msgstr "这只能针对上一个发布检查常用的存储路径。需要登录的浏览器流程，以及和每一个历史发布的兼容性，还需要另外的证据。"
 
-#: ../developer/deployment-reliability.md:189
+#: ../developer/deployment-reliability.md:191
 msgid "Detection after deployment"
 msgstr "部署之后的检测"
 
-#: ../developer/deployment-reliability.md:191
+#: ../developer/deployment-reliability.md:193
 msgid ""
 "The main API runs one queue monitor; the MCP listener runs none. After "
 "two consecutive observations one minute apart, it reports queue heads at "
@@ -430,7 +433,7 @@ msgstr ""
 msgid "A reported problem cleared."
 msgstr "之前报告的问题已经消失。"
 
-#: ../developer/deployment-reliability.md:202
+#: ../developer/deployment-reliability.md:204
 msgid ""
 "Follow-ups waiting behind an earlier turn are excluded. Occupied slots "
 "with running work are normal backpressure. The monitor reports state; it "
@@ -444,7 +447,7 @@ msgstr ""
 " compute worker 的升级操作跟上新的控制平面 commit，这个操作会走主机 recipe 里的排空流程。外部的进程和 HTTP "
 "监控仍然不可少，因为 API 自己挂了，是没法监控自己的。"
 
-#: ../developer/deployment-reliability.md:209
+#: ../developer/deployment-reliability.md:211
 msgid ""
 "Events are logged even without external delivery. To enable "
 "notifications, set `AGENT_ALERT_WEBHOOK_URL` in the control-plane `.env` "
@@ -457,7 +460,7 @@ msgstr ""
 "设为运维人员自己的接收端。队列告警发送的 JSON 包含 `text`、`event`、`deployment_sha`，以及汇总的 "
 "`queue` 计数。接收端必须能处理这个格式；聊天工具可能需要加一层适配。部署工作流本身的告警，由下游发行版负责。"
 
-#: ../developer/deployment-reliability.md:216
+#: ../developer/deployment-reliability.md:218
 msgid ""
 "Queue notifications contain no prompts, repository names, job IDs, host "
 "credentials or log dumps. Redirects are refused. Delivery failures are "
@@ -471,11 +474,11 @@ msgstr ""
 "URL），但不影响请求，也不影响 reaper。通知只在状态变化时发送；状态不变时，最多每 30 "
 "分钟重复一次；投递失败会在下一分钟重试。只有部署负责人配置好接收端和它的凭据之后，外部告警才会真正生效。"
 
-#: ../developer/deployment-reliability.md:223
+#: ../developer/deployment-reliability.md:225
 msgid "Recovery boundaries"
 msgstr "恢复的边界"
 
-#: ../developer/deployment-reliability.md:225
+#: ../developer/deployment-reliability.md:227
 msgid ""
 "The [backup and recovery runbook](disaster-recovery.md) defines initial "
 "retention and recovery targets, coordinated database/host recovery sets, "
@@ -485,7 +488,7 @@ msgstr ""
 "初始的保留期和恢复目标、彼此对应的数据库与主机恢复集、加密密钥的保存、恢复演练的验收标准，以及如何退回上一个产物发布，都写在[备份与恢复手册"
 "](disaster-recovery.md)里。"
 
-#: ../developer/deployment-reliability.md:229
+#: ../developer/deployment-reliability.md:231
 msgid ""
 "Inspect both machines' deployment markers and the failure reason, then "
 "retry the same verified target. A failed host rollout remains a failed "
@@ -494,7 +497,7 @@ msgid ""
 "database downgrade."
 msgstr "先看两台机器上的部署标记和失败原因，然后对同一个已核实的目标重试。主机上线失败了，就算已经恢复到记录的那一代，也仍然算一次失败的上线。控制平面失败时，兼容的迁移会保留下来；数据库不会自动降级。"
 
-#: ../developer/deployment-reliability.md:234
+#: ../developer/deployment-reliability.md:236
 msgid ""
 "A hard-cancelled host activation may leave the readiness marker pending "
 "while Docker Engine continues the unbounded graceful runner stop. Running"
@@ -507,7 +510,7 @@ msgstr ""
 "优雅停止。正在跑的轮次仍会自然结束，部署信号不会传到它们的子进程。runner "
 "退出后，这台主机会一直不可用，直到对同一个已核实的目标重新执行激活。不要手动发布就绪状态。"
 
-#: ../developer/deployment-reliability.md:240
+#: ../developer/deployment-reliability.md:242
 msgid ""
 "If the host succeeds before the control plane fails, the exact-SHA gate "
 "can keep new work queued until the retry succeeds. The queue monitor "
@@ -519,11 +522,11 @@ msgstr ""
 "的门槛会让新工作一直排队，直到重试成功为止。队列监控器能发现这种情况。这些检查能防止部署中断造成破坏，并把问题暴露出来；但激活本身仍然横跨两台机器和"
 " PostgreSQL，不是在一个事务里完成的。"
 
-#: ../developer/deployment-reliability.md:245
+#: ../developer/deployment-reliability.md:247
 msgid "Snapshot publication failures"
 msgstr "快照发布失败"
 
-#: ../developer/deployment-reliability.md:247
+#: ../developer/deployment-reliability.md:249
 msgid ""
 "A publication that fails — a refused patch, an unavailable GitHub "
 "credential, a failed Git or PR request — leaves its snapshot `failed` "
@@ -546,7 +549,7 @@ msgstr ""
 "拒绝，都会自动重试。完整规则见 [Resume、Fork 与发布](operations.md#resume-fork-and-"
 "publication)。"
 
-#: ../developer/deployment-reliability.md:259
+#: ../developer/deployment-reliability.md:261
 msgid ""
 "To investigate one, read the snapshot's `last_error`, the anchor job's "
 "event whose phase is `shared_snapshot_publish_rejected`, and GitHub's "
