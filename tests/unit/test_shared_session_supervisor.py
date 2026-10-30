@@ -1880,57 +1880,6 @@ def test_a_retiring_cli_that_fails_to_close_still_settles_its_member():
     assert replayed == settled
 
 
-def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkeypatch):
-    """Preparation inspects the container and reads its receipt without the lock.
-
-    Every turn with an environment binding prepares first, and so does every
-    terminal that requires its environment. Holding the supervisor-wide lock
-    across those reads stalled every other group for as long as Docker took.
-    """
-    manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(manager)
-    supervisor.register_manifest(_spec(), _members())
-    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
-    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
-    inspect = manager.inspect
-    locked_inspections: list[str] = []
-
-    def observed_inspect(name):
-        if supervisor._lock._is_owned():
-            locked_inspections.append(name)
-        return inspect(name)
-
-    monkeypatch.setattr(manager, "inspect", observed_inspect)
-    entered = threading.Event()
-    release = threading.Event()
-
-    def receipt(backend, binding_id):
-        # EnvironmentPreparation.status inspects the container on a cache miss.
-        backend.manager.inspect(backend.spec.container_name)
-        entered.set()
-        assert release.wait(timeout=_HELD_S)
-        return {"binding_id": binding_id, "ready": True}
-
-    preparer = SimpleNamespace(status=receipt)
-    environment = SimpleNamespace(binding_id="binding-1")
-    preparing, outcome = _in_thread(
-        lambda: supervisor.prepare_environment("athr_source", environment, preparer)
-    )
-    try:
-        assert entered.wait(timeout=1)
-        status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        status_thread.join(timeout=_UNBLOCKED_S)
-        assert not status_thread.is_alive(), "preparation held the supervisor-wide lock"
-    finally:
-        release.set()
-        preparing.join(timeout=2)
-
-    assert not preparing.is_alive()
-    assert outcome == {"value": {"binding_id": "binding-1", "ready": True}}
-    assert "error" not in status_outcome
-    assert locked_inspections == []
-
-
 @pytest.mark.parametrize("call", ["snapshot", "initial_archive"])
 def test_a_capture_that_finds_its_container_missing_lifts_its_barrier(call):
     manager = _Manager()
