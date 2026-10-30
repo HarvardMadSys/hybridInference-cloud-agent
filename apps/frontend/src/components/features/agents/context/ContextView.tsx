@@ -14,9 +14,10 @@
 import { useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { AgentJob } from '../types';
+import type { ThreadContextApi } from '@/lib/api/agents';
 import { ContextEvents } from './ContextEvents';
 import { ContextGrowthChart } from './ContextGrowthChart';
-import { RequestComposition } from './RequestComposition';
+import { ContextDashboard } from './dashboard/ContextDashboard';
 import {
   Capabilities,
   Compactions,
@@ -80,40 +81,70 @@ function ContextViewBody({
   const point =
     points.find((candidate) => candidate.index === selected) ?? points[points.length - 1] ?? null;
   return (
-    <div className={panel ? 'w-full pb-6' : 'mx-auto w-full max-w-5xl pb-8'}>
+    <div className={panel ? 'w-full pb-6' : 'mx-auto w-full max-w-6xl pb-8'}>
       {panel && onOpenFull ? <OpenFull onOpenFull={onOpenFull} /> : null}
-      <ContextSummary view={view} nowMs={nowMs} />
-      {points.length > 0 ? (
-        <Section title={t('context.growth')}>
-          <ContextGrowthChart
-            points={points}
-            turns={view.turns}
-            selected={point?.index ?? null}
-            onSelect={setSelected}
-          />
-          {point ? (
-            <PointDetail point={point} onOpenPoint={onOpenPoint} onOpenTurn={onOpenTurn} />
-          ) : null}
-          {point ? (
-            <RequestComposition
-              jobId={job.id}
-              point={point}
-              onOpenPoint={onOpenPoint}
-              onOpenTurn={onOpenTurn}
-            />
-          ) : null}
+      <ContextDashboard
+        jobId={job.id}
+        conversationKey={key}
+        view={view}
+        nowMs={nowMs}
+        selected={point?.index ?? null}
+        onSelect={setSelected}
+        onOpenPoint={onOpenPoint}
+        onOpenTurn={onOpenTurn}
+      />
+      {point ? (
+        <Section title={t('dashboard.selected')}>
+          <PointDetail point={point} onOpenPoint={onOpenPoint} onOpenTurn={onOpenTurn} />
         </Section>
-      ) : (
-        <p className="mt-6 rounded-lg border border-border px-3 py-2 text-sm text-muted">
-          {t('context.empty')}
-        </p>
-      )}
+      ) : null}
       <ContextEvents key={key} view={view} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <LargestChanges changes={view.largest_changes} points={points} onSelect={setSelected} />
-      {panel ? null : <Turns turns={view.turns} onOpenTurn={onOpenTurn} />}
-      {panel ? null : <Capabilities view={view} />}
+      {panel ? null : (
+        <FullOnly
+          view={view}
+          nowMs={nowMs}
+          selected={point?.index ?? null}
+          onSelect={setSelected}
+          onOpenTurn={onOpenTurn}
+        />
+      )}
     </div>
+  );
+}
+
+/** The full page's reference sections: totals, the raw chart, turns, capabilities. */
+function FullOnly({
+  view,
+  nowMs,
+  selected,
+  onSelect,
+  onOpenTurn,
+}: {
+  view: ThreadContextApi;
+  nowMs: number;
+  selected: number | null;
+  onSelect: (index: number) => void;
+  onOpenTurn: OpenTurn;
+}) {
+  const { t } = useLocale();
+  return (
+    <>
+      <ContextSummary view={view} nowMs={nowMs} />
+      {view.requests.length > 0 ? (
+        <Section title={t('dashboard.raw')}>
+          <ContextGrowthChart
+            points={view.requests}
+            turns={view.turns}
+            selected={selected}
+            onSelect={onSelect}
+          />
+        </Section>
+      ) : null}
+      <Turns turns={view.turns} onOpenTurn={onOpenTurn} />
+      <Capabilities view={view} />
+    </>
   );
 }
 

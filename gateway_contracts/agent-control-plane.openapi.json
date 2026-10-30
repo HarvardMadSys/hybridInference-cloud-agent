@@ -11181,6 +11181,20 @@
             ],
             "title": "Cache Write Tokens"
           },
+          "categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Categories"
+          },
           "context_window": {
             "anyOf": [
               {
@@ -11254,6 +11268,17 @@
             "title": "Seq",
             "type": "integer"
           },
+          "step_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Ms"
+          },
           "turn_no": {
             "title": "Turn No",
             "type": "integer"
@@ -11268,6 +11293,17 @@
               }
             ],
             "title": "Uncached Input Tokens"
+          },
+          "usage_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage Id"
           }
         },
         "required": [
@@ -12541,6 +12577,88 @@
           "models"
         ],
         "title": "DiscoveredModels",
+        "type": "object"
+      },
+      "DnaBands": {
+        "additionalProperties": false,
+        "description": "DNA bands for a window of requests; recorded estimates throughout.",
+        "properties": {
+          "basis": {
+            "default": "stored_events_transcript_order",
+            "title": "Basis",
+            "type": "string"
+          },
+          "events_capped": {
+            "default": false,
+            "title": "Events Capped",
+            "type": "boolean"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/DnaRequest"
+            },
+            "title": "Requests",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requests"
+        ],
+        "title": "DnaBands",
+        "type": "object"
+      },
+      "DnaRequest": {
+        "additionalProperties": false,
+        "description": "One request's items, in transcript order: ``[key, category, tokens]``.",
+        "properties": {
+          "event_id": {
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "folded_items": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Folded Items",
+            "type": "integer"
+          },
+          "folded_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Folded Tokens",
+            "type": "integer"
+          },
+          "index": {
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "maxItems": 3,
+              "minItems": 3,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "index",
+          "event_id",
+          "items"
+        ],
+        "title": "DnaRequest",
         "type": "object"
       },
       "EnableConnectionRequest": {
@@ -17429,6 +17547,81 @@
         "title": "ProtocolResultView",
         "type": "object"
       },
+      "ProviderTokens": {
+        "additionalProperties": false,
+        "description": "What the providers reported, summed over every request (exact).",
+        "properties": {
+          "cache_hit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit"
+          },
+          "cache_read_tokens": {
+            "minimum": 0.0,
+            "title": "Cache Read Tokens",
+            "type": "integer"
+          },
+          "cache_write_tokens": {
+            "minimum": 0.0,
+            "title": "Cache Write Tokens",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "output_unreported": {
+            "minimum": 0.0,
+            "title": "Output Unreported",
+            "type": "integer"
+          },
+          "requests": {
+            "minimum": 0.0,
+            "title": "Requests",
+            "type": "integer"
+          },
+          "subagent_input_tokens": {
+            "minimum": 0.0,
+            "title": "Subagent Input Tokens",
+            "type": "integer"
+          },
+          "subagent_output_tokens": {
+            "minimum": 0.0,
+            "title": "Subagent Output Tokens",
+            "type": "integer"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "input_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "output_tokens",
+          "output_unreported",
+          "subagent_requests",
+          "subagent_input_tokens",
+          "subagent_output_tokens"
+        ],
+        "title": "ProviderTokens",
+        "type": "object"
+      },
       "ProviderTotals": {
         "additionalProperties": false,
         "description": "Every request's size as the provider reported it (via the CLI), summed.\n\nEach request resends what the conversation kept, so this is per-request\nexposure: retained text counts once for every request that carried it.\nCache reads and writes are parts of ``prompt_tokens``, not additions.",
@@ -17659,7 +17852,8 @@
               "tool_calls",
               "tool_results",
               "compaction_summary",
-              "injected"
+              "injected",
+              "skills"
             ],
             "title": "Key",
             "type": "string"
@@ -17934,6 +18128,43 @@
           "version"
         ],
         "title": "RequestRuntimeUpgradeRequest",
+        "type": "object"
+      },
+      "RequestTiming": {
+        "additionalProperties": false,
+        "description": "One model request the Gateway timed, by the id the CLI reported for it.",
+        "properties": {
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "response_id": {
+            "title": "Response Id",
+            "type": "string"
+          },
+          "ttft_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttft Ms"
+          }
+        },
+        "required": [
+          "response_id"
+        ],
+        "title": "RequestTiming",
         "type": "object"
       },
       "ResidencyBeat": {
@@ -19421,6 +19652,33 @@
         "title": "SelectedSkill",
         "type": "object"
       },
+      "SessionCategoryShare": {
+        "additionalProperties": false,
+        "description": "One category of recorded content, estimated.",
+        "properties": {
+          "items": {
+            "minimum": 0.0,
+            "title": "Items",
+            "type": "integer"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "tokens",
+          "items"
+        ],
+        "title": "SessionCategoryShare",
+        "type": "object"
+      },
       "SessionStatistics": {
         "description": "Run performance estimates, with unavailable measurements left absent.",
         "properties": {
@@ -19480,6 +19738,69 @@
           }
         },
         "title": "SessionStatistics",
+        "type": "object"
+      },
+      "SessionTokens": {
+        "additionalProperties": false,
+        "description": "The conversation's tokens two ways that are never added together.",
+        "properties": {
+          "basis": {
+            "default": "chars_cjk_v1",
+            "title": "Basis",
+            "type": "string"
+          },
+          "not_recorded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Not Recorded",
+            "type": "array"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/ProviderTokens"
+          },
+          "recorded": {
+            "items": {
+              "$ref": "#/components/schemas/SessionCategoryShare"
+            },
+            "title": "Recorded",
+            "type": "array"
+          },
+          "recorded_total": {
+            "minimum": 0.0,
+            "title": "Recorded Total",
+            "type": "integer"
+          },
+          "reported_by": {
+            "const": "cli_relayed_provider_usage",
+            "default": "cli_relayed_provider_usage",
+            "title": "Reported By",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "turns_read": {
+            "minimum": 0.0,
+            "title": "Turns Read",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recorded",
+          "recorded_total",
+          "turns_read",
+          "turns",
+          "provider"
+        ],
+        "title": "SessionTokens",
         "type": "object"
       },
       "SessionUserResponse": {
@@ -21375,6 +21696,13 @@
             "title": "Capabilities",
             "type": "array"
           },
+          "category_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Category Keys",
+            "type": "array"
+          },
           "compactions": {
             "items": {
               "$ref": "#/components/schemas/ContextCompaction"
@@ -21455,6 +21783,16 @@
             "title": "Thread Id",
             "type": "string"
           },
+          "tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionTokens"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "turns": {
             "items": {
               "$ref": "#/components/schemas/ContextTurn"
@@ -21474,6 +21812,167 @@
           "coverage"
         ],
         "title": "ThreadContextView",
+        "type": "object"
+      },
+      "ThreadTiming": {
+        "additionalProperties": false,
+        "description": "Where the executions' time went, and how much of it could be split.",
+        "properties": {
+          "active_ms": {
+            "minimum": 0.0,
+            "title": "Active Ms",
+            "type": "integer"
+          },
+          "blocks": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Blocks",
+            "type": "object"
+          },
+          "executions": {
+            "minimum": 0.0,
+            "title": "Executions",
+            "type": "integer"
+          },
+          "executions_split": {
+            "minimum": 0.0,
+            "title": "Executions Split",
+            "type": "integer"
+          },
+          "gateway": {
+            "enum": [
+              "available",
+              "partial",
+              "unavailable",
+              "not_recorded"
+            ],
+            "title": "Gateway",
+            "type": "string"
+          },
+          "gateway_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Reason"
+          },
+          "model_requests": {
+            "minimum": 0.0,
+            "title": "Model Requests",
+            "type": "integer"
+          },
+          "output_tps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tps"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/RequestTiming"
+            },
+            "title": "Requests",
+            "type": "array"
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/TimingSegment"
+            },
+            "title": "Segments",
+            "type": "array"
+          },
+          "segments_merged": {
+            "default": false,
+            "title": "Segments Merged",
+            "type": "boolean"
+          },
+          "tool_calls": {
+            "minimum": 0.0,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "tool_calls_unpaired": {
+            "minimum": 0.0,
+            "title": "Tool Calls Unpaired",
+            "type": "integer"
+          },
+          "totals": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "ttft",
+                "reasoning",
+                "text",
+                "toolarg",
+                "gen",
+                "tools",
+                "unsplit",
+                "other"
+              ]
+            },
+            "title": "Totals",
+            "type": "object"
+          }
+        },
+        "required": [
+          "active_ms",
+          "totals",
+          "executions",
+          "executions_split",
+          "model_requests",
+          "tool_calls",
+          "tool_calls_unpaired",
+          "gateway",
+          "segments"
+        ],
+        "title": "ThreadTiming",
+        "type": "object"
+      },
+      "TimingSegment": {
+        "additionalProperties": false,
+        "description": "One stretch of an execution with a single label (the strip).",
+        "properties": {
+          "end_ms": {
+            "title": "End Ms",
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "ttft",
+              "reasoning",
+              "text",
+              "toolarg",
+              "gen",
+              "tools",
+              "unsplit",
+              "other"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "start_ms": {
+            "title": "Start Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "start_ms",
+          "end_ms"
+        ],
+        "title": "TimingSegment",
         "type": "object"
       },
       "ToolCallResources": {
@@ -35737,6 +36236,85 @@
         ]
       }
     },
+    "/v1/agent/jobs/{job_id}/thread/context/dna": {
+      "get": {
+        "description": "The items each request in ``from``..``to`` carried (recorded estimates).\n\nAt most ``MAX_DNA_REQUESTS`` requests per read: the trend asks for the\nbars it shows, never the whole history.",
+        "operationId": "get_thread_context_dna_v1_agent_jobs__job_id__thread_context_dna_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "title": "From",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "title": "To",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DnaBands"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Context Dna",
+        "tags": [
+          "context"
+        ]
+      }
+    },
     "/v1/agent/jobs/{job_id}/thread/context/requests/{event_id}": {
       "get": {
         "description": "What one request of the caller's conversation carried, labelled by kind.",
@@ -35801,6 +36379,65 @@
           }
         },
         "summary": "Get Request Composition",
+        "tags": [
+          "context"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/context/timing": {
+      "get": {
+        "description": "Where the caller's conversation's execution time went.\n\nRead when the dashboard asks, never at settlement: the attempts' recorded\nspans and tool windows, and the Gateway's own request log for the newest\nexecutions (TTFT and latency per request). Nothing is asked of a CLI.",
+        "operationId": "get_thread_context_timing_v1_agent_jobs__job_id__thread_context_timing_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadTiming"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Context Timing",
         "tags": [
           "context"
         ]

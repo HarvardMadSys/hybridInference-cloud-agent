@@ -1,15 +1,14 @@
 'use client';
 
-// What the selected request carried. Follows the request picked on the growth
-// chart; the newest observed request is the default, and none of it is called
-// the live window. Each stored item opens its trajectory step, or its turn,
-// and expands into the text the platform stored.
+// Parts of the Context Browser (`dashboard/ContextBrowser.tsx`): the provider's
+// input, the CLI's own account, and the reconstructed items. None of it is
+// called the live window. Each stored item opens its trajectory step, or its
+// turn, and expands into the text the platform stored.
 
 import { useEffect, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import {
   getEventContent,
-  getRequestComposition,
   type CompositionEntryApi,
   type ContextPointApi,
   type EventContentApi,
@@ -25,106 +24,14 @@ import {
   EXCLUDED_REASONS,
   barSegments,
   categoryLabel,
-  filterEntries,
   type EntryOrder,
   nativeCategories,
   nativeState,
   type BarSegment,
 } from './requestPresent';
 
-export function RequestComposition({
-  jobId,
-  point,
-  onOpenPoint,
-  onOpenTurn,
-}: {
-  jobId: string;
-  point: ContextPointApi;
-  onOpenPoint: OpenPoint;
-  onOpenTurn: OpenTurn;
-}) {
-  const { t } = useLocale();
-  const eventId = point.event_id;
-  const [state, setState] = useState<{
-    eventId: number;
-    composition: RequestCompositionApi | null;
-    error: boolean;
-  } | null>(null);
-  useEffect(() => {
-    if (eventId === null) return undefined;
-    const controller = new AbortController();
-    getRequestComposition(jobId, eventId, controller.signal).then(
-      (composition) => setState({ eventId, composition, error: false }),
-      () => {
-        if (!controller.signal.aborted) setState({ eventId, composition: null, error: true });
-      },
-    );
-    return () => controller.abort();
-  }, [jobId, eventId]);
-
-  let body: React.ReactNode;
-  if (eventId === null) body = <Note>{t('contextRequest.noEvent')}</Note>;
-  else if (!state || state.eventId !== eventId) body = <Note>{t('contextRequest.loading')}</Note>;
-  else if (state.error || !state.composition) body = <Note>{t('contextRequest.error')}</Note>;
-  else
-    body = (
-      <CompositionBody
-        composition={state.composition}
-        jobId={jobId}
-        onOpenPoint={onOpenPoint}
-        onOpenTurn={onOpenTurn}
-      />
-    );
-  return (
-    <section className="mt-6" aria-labelledby="context-request-title">
-      <h3 id="context-request-title" className="text-sm font-semibold text-foreground">
-        {t('contextRequest.title')}
-      </h3>
-      {body}
-    </section>
-  );
-}
-
-function Note({ children }: { children: React.ReactNode }) {
+export function Note({ children }: { children: React.ReactNode }) {
   return <p className="mt-2 text-xs text-muted">{children}</p>;
-}
-
-function CompositionBody({
-  composition,
-  jobId,
-  onOpenPoint,
-  onOpenTurn,
-}: {
-  composition: RequestCompositionApi;
-  jobId: string;
-  onOpenPoint: OpenPoint;
-  onOpenTurn: OpenTurn;
-}) {
-  const { t } = useLocale();
-  const request = composition.request;
-  return (
-    <>
-      <div className="mt-2 rounded-lg border border-border px-3 py-2 text-xs">
-        <p className="font-medium text-foreground">
-          {t('contextRequest.provider')}: {compactCount(request.prompt_tokens)}
-        </p>
-        <p className="tabular-nums text-muted">
-          {t('contextRequest.providerDetail', {
-            read: compactCount(request.cache_read_tokens),
-            write: compactCount(request.cache_write_tokens),
-            uncached: compactCount(request.uncached_input_tokens),
-          })}
-        </p>
-      </div>
-      <NativeSection composition={composition} />
-      <Reconstructed
-        rebuilt={composition.reconstructed}
-        jobId={jobId}
-        onOpenPoint={onOpenPoint}
-        onOpenTurn={onOpenTurn}
-      />
-    </>
-  );
 }
 
 function Bar({ segments, label }: { segments: BarSegment[]; label: string }) {
@@ -148,7 +55,26 @@ function Bar({ segments, label }: { segments: BarSegment[]; label: string }) {
   );
 }
 
-function NativeSection({ composition }: { composition: RequestCompositionApi }) {
+/** The request's input as the provider reported it, and how it was billed. */
+export function ProviderInput({ request }: { request: ContextPointApi }) {
+  const { t } = useLocale();
+  return (
+    <div className="mt-2 rounded-lg border border-border px-3 py-2 text-xs">
+      <p className="font-medium text-foreground">
+        {t('contextRequest.provider')}: {compactCount(request.prompt_tokens)}
+      </p>
+      <p className="tabular-nums text-muted">
+        {t('contextRequest.providerDetail', {
+          read: compactCount(request.cache_read_tokens),
+          write: compactCount(request.cache_write_tokens),
+          uncached: compactCount(request.uncached_input_tokens),
+        })}
+      </p>
+    </div>
+  );
+}
+
+export function NativeSection({ composition }: { composition: RequestCompositionApi }) {
   const { t } = useLocale();
   const state = nativeState(composition);
   let body: React.ReactNode;
@@ -295,73 +221,8 @@ function NativeEntries({ snapshot }: { snapshot: NativeSnapshotApi }) {
   );
 }
 
-function Reconstructed({
-  rebuilt,
-  jobId,
-  onOpenPoint,
-  onOpenTurn,
-}: {
-  rebuilt: ReconstructedCompositionApi;
-  jobId: string;
-  onOpenPoint: OpenPoint;
-  onOpenTurn: OpenTurn;
-}) {
-  const { t, locale } = useLocale();
-  const [category, setCategory] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
-  const [order, setOrder] = useState<EntryOrder>('largest');
-  const entries = filterEntries(rebuilt.entries, category, query, order);
-  return (
-    <div className="mt-4">
-      <h4 className="text-xs font-semibold text-foreground">{t('contextRequest.reconstructed')}</h4>
-      <Note>{t('contextRequest.reconstructed.note')}</Note>
-      <BoundaryNote rebuilt={rebuilt} />
-      <p className="mt-1 text-xs tabular-nums text-foreground">
-        {t('contextRequest.reconstructed.total', {
-          tokens: compactCount(rebuilt.estimated_tokens),
-        })}
-      </p>
-      <Bar segments={barSegments(rebuilt.categories)} label={t('contextRequest.reconstructed')} />
-      <div
-        role="group"
-        aria-label={t('contextRequest.filter')}
-        className="mt-2 flex flex-wrap gap-1 text-xs"
-      >
-        <FilterChip active={category === null} onClick={() => setCategory(null)}>
-          {t('contextRequest.filter.all')} {rebuilt.entries_total.toLocaleString(locale)}
-        </FilterChip>
-        {rebuilt.categories.map((item) => (
-          <FilterChip
-            key={item.key}
-            active={category === item.key}
-            onClick={() => setCategory(item.key)}
-          >
-            {t(categoryLabel(item.key))} ≈{compactCount(item.tokens)} · {item.entries}
-          </FilterChip>
-        ))}
-      </div>
-      <EntryControls query={query} onQuery={setQuery} order={order} onOrder={setOrder} />
-      <ul className="mt-2 divide-y divide-border rounded-lg border border-border text-xs">
-        {entries.map((entry) => (
-          <EntryRow
-            key={`${entry.event_id ?? `prompt-${entry.job_id}`}`}
-            entry={entry}
-            jobId={jobId}
-            onOpenPoint={onOpenPoint}
-            onOpenTurn={onOpenTurn}
-          />
-        ))}
-      </ul>
-      {rebuilt.entries_omitted > 0 ? (
-        <Note>{t('contextRequest.native.omitted', { count: rebuilt.entries_omitted })}</Note>
-      ) : null}
-      <Excluded rebuilt={rebuilt} />
-    </div>
-  );
-}
-
 /** Search the listed entries' names and previews, and choose their order. */
-function EntryControls({
+export function EntryControls({
   query,
   onQuery,
   order,
@@ -398,7 +259,7 @@ function EntryControls({
   );
 }
 
-function BoundaryNote({ rebuilt }: { rebuilt: ReconstructedCompositionApi }) {
+export function BoundaryNote({ rebuilt }: { rebuilt: ReconstructedCompositionApi }) {
   const { t } = useLocale();
   const boundary = rebuilt.boundary;
   if (!boundary) return null;
@@ -435,16 +296,19 @@ function FilterChip({
   );
 }
 
-function EntryRow({
+export function EntryRow({
   entry,
   jobId,
   onOpenPoint,
   onOpenTurn,
+  isNew = false,
 }: {
   entry: CompositionEntryApi;
   jobId: string;
   onOpenPoint: OpenPoint;
   onOpenTurn: OpenTurn;
+  /** Not carried by the request it is compared with (by item identity). */
+  isNew?: boolean;
 }) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
@@ -465,6 +329,11 @@ function EntryRow({
           {entry.truncated ? (
             <span className="ml-1 rounded border border-border px-1 text-[10px] text-muted">
               {t('contextRequest.entry.clipped')}
+            </span>
+          ) : null}
+          {isNew ? (
+            <span className="ml-1 rounded bg-accent-subtle px-1 text-[10px] text-accent">
+              {t('dashboard.browser.new')}
             </span>
           ) : null}
         </span>
@@ -558,7 +427,7 @@ function EntryContent({ jobId, eventId }: { jobId: string; eventId: number }) {
   );
 }
 
-function Excluded({ rebuilt }: { rebuilt: ReconstructedCompositionApi }) {
+export function Excluded({ rebuilt }: { rebuilt: ReconstructedCompositionApi }) {
   const { t, locale } = useLocale();
   const lines: string[] = [];
   for (const reason of EXCLUDED_REASONS) {

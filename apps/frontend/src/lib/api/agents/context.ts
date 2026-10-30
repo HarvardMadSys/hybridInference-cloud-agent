@@ -44,6 +44,12 @@ export interface ContextPointApi {
   model: string | null;
   delta_tokens: number | null;
   after_compaction: boolean;
+  /** Recorded content before this request by `category_keys` (estimate); null when not kept. */
+  categories?: number[] | null;
+  /** Event-derived step time inside its attempt, ms. */
+  step_ms?: number | null;
+  /** The provider's response id where the CLI reported it (Claude Code). */
+  usage_id?: string | null;
 }
 
 export interface LatestContextApi {
@@ -155,6 +161,71 @@ export interface EventCapabilityApi {
   reason: string | null;
 }
 
+/** The conversation's tokens two ways, never added together. */
+export interface SessionTokensApi {
+  basis: string;
+  recorded: { key: string; tokens: number; items: number }[];
+  recorded_total: number;
+  not_recorded: string[];
+  turns_read: number;
+  turns: number;
+  truncated: boolean;
+  provider: {
+    requests: number;
+    input_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    output_tokens: number;
+    output_unreported: number;
+    subagent_requests: number;
+    subagent_input_tokens: number;
+    subagent_output_tokens: number;
+    cache_hit: number | null;
+  };
+  reported_by: string;
+}
+
+export type TimingKind =
+  | 'ttft'
+  | 'reasoning'
+  | 'text'
+  | 'toolarg'
+  | 'gen'
+  | 'tools'
+  | 'unsplit'
+  | 'other';
+
+/** Where the executions' time went (GET …/thread/context/timing). */
+export interface ThreadTimingApi {
+  active_ms: number;
+  totals: Record<TimingKind, number>;
+  executions: number;
+  executions_split: number;
+  model_requests: number;
+  tool_calls: number;
+  tool_calls_unpaired: number;
+  blocks: Record<string, number>;
+  output_tps: number | null;
+  gateway: 'available' | 'partial' | 'unavailable' | 'not_recorded';
+  gateway_reason: string | null;
+  segments: { kind: TimingKind; start_ms: number; end_ms: number }[];
+  segments_merged: boolean;
+  requests: { response_id: string; ttft_ms: number | null; latency_ms: number | null }[];
+}
+
+/** The items requests carried, keyed by stored event (GET …/thread/context/dna). */
+export interface DnaBandsApi {
+  basis: string;
+  requests: {
+    index: number;
+    event_id: number;
+    items: [string, string, number][];
+    folded_items: number;
+    folded_tokens: number;
+  }[];
+  events_capped: boolean;
+}
+
 export interface ThreadContextApi {
   thread_id: string;
   generated_at: string;
@@ -166,6 +237,9 @@ export interface ThreadContextApi {
   compactions: ContextCompactionApi[];
   largest_changes: ContextChangeApi[];
   coverage: ContextCoverageApi;
+  /** Order of every point's `categories`. */
+  category_keys?: string[];
+  tokens?: SessionTokensApi | null;
   events: ContextEventApi[];
   event_counts: Partial<Record<ContextEventKind, number>>;
   events_omitted: number;
@@ -329,4 +403,34 @@ export async function getEventContent(
   );
   if (resp.status === 404) return null;
   return jsonOrThrow<EventContentApi>(resp);
+}
+
+/** Where the conversation's execution time went; null when it is not the caller's. */
+export async function getThreadContextTiming(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<ThreadTimingApi | null> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/context/timing`,
+    { signal, cache: 'no-store' },
+  );
+  if (resp.status === 404) return null;
+  return jsonOrThrow<ThreadTimingApi>(resp);
+}
+
+/** The items of view requests `from`..`to` (at most 60). */
+export async function getThreadContextDna(
+  jobId: string,
+  from: number,
+  to: number,
+  signal?: AbortSignal,
+): Promise<DnaBandsApi | null> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/context/dna?from=${from}&to=${to}`,
+    { signal, cache: 'no-store' },
+  );
+  if (resp.status === 404) return null;
+  return jsonOrThrow<DnaBandsApi>(resp);
 }

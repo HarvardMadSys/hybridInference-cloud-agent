@@ -30,6 +30,8 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentThreadModelTtft: vi.fn().mockResolvedValue(null),
   getAgentThreadContext: vi.fn(),
   getRequestComposition: vi.fn().mockResolvedValue(null),
+  getThreadContextTiming: vi.fn().mockResolvedValue(null),
+  getThreadContextDna: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => ({

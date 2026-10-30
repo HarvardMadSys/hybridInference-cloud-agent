@@ -1,0 +1,388 @@
+// @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { useState } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { LocaleProvider } from '@/components/providers/LocaleProvider';
+import {
+  getRequestComposition,
+  getThreadContextDna,
+  getThreadContextTiming,
+  type ContextPointApi,
+  type RequestCompositionApi,
+  type ThreadContextApi,
+  type ThreadTimingApi,
+} from '@/lib/api/agents';
+import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
+import { ContextDashboard } from './ContextDashboard';
+
+vi.mock('@/lib/api/agents', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/agents')>()),
+  getRequestComposition: vi.fn(),
+  getThreadContextTiming: vi.fn(),
+  getThreadContextDna: vi.fn(),
+}));
+
+const KEYS = ['user', 'tool_results'];
+
+function point(index: number, overrides: Partial<ContextPointApi> = {}): ContextPointApi {
+  return {
+    index,
+    job_id: 'j',
+    turn_no: index < 2 ? 1 : 2,
+    attempt_id: index < 2 ? 1 : 2,
+    seq: index + 1,
+    event_id: 100 + index,
+    at: null,
+    prompt_tokens: 1000 * (index + 1),
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    uncached_input_tokens: 0,
+    output_tokens: 10,
+    context_window: index === 3 ? 200_000 : null,
+    model: null,
+    delta_tokens: null,
+    after_compaction: false,
+    categories: [100 * (index + 1), 200 * (index + 1)],
+    step_ms: 1000,
+    usage_id: `r${index}`,
+    ...overrides,
+  };
+}
+
+function view(): ThreadContextApi {
+  const requests = [0, 1, 2, 3].map((i) => point(i));
+  return {
+    thread_id: 't',
+    generated_at: '2026-10-29T12:00:00Z',
+    capabilities: [],
+    latest: { point: requests[3], window_share: 0.02, compacted_after: false, turn_active: false },
+    peak: requests[3],
+    turns: [],
+    requests,
+    compactions: [],
+    largest_changes: [],
+    coverage: {
+      turns: 2,
+      attempts: 2,
+      attempts_observed: 2,
+      main_requests: 4,
+      subagent_requests: 0,
+      compactions: 0,
+      compactions_unknown_outcome: 0,
+      points_omitted: 0,
+      unparsed_raw: 0,
+    },
+    events: [],
+    event_counts: {},
+    events_omitted: 0,
+    event_capabilities: [],
+    category_keys: KEYS,
+    tokens: {
+      basis: 'chars_cjk_v1',
+      recorded: [
+        { key: 'user', tokens: 400, items: 2 },
+        { key: 'tool_results', tokens: 800, items: 3 },
+      ],
+      recorded_total: 1200,
+      not_recorded: ['system_prompt', 'tool_schemas'],
+      turns_read: 2,
+      turns: 2,
+      truncated: false,
+      provider: {
+        requests: 4,
+        input_tokens: 10_000,
+        cache_read_tokens: 6_000,
+        cache_write_tokens: 1_000,
+        output_tokens: 40,
+        output_unreported: 0,
+        subagent_requests: 0,
+        subagent_input_tokens: 0,
+        subagent_output_tokens: 0,
+        cache_hit: 0.6,
+      },
+      reported_by: 'provider',
+    },
+  };
+}
+
+const TIMING: ThreadTimingApi = {
+  active_ms: 10_000,
+  totals: {
+    ttft: 1000,
+    reasoning: 0,
+    text: 0,
+    toolarg: 0,
+    gen: 3000,
+    tools: 4000,
+    unsplit: 0,
+    other: 2000,
+  },
+  executions: 2,
+  executions_split: 2,
+  model_requests: 4,
+  tool_calls: 3,
+  tool_calls_unpaired: 1,
+  blocks: {},
+  output_tps: 13.3,
+  gateway: 'available',
+  gateway_reason: null,
+  segments: [
+    { kind: 'ttft', start_ms: 0, end_ms: 1000 },
+    { kind: 'gen', start_ms: 1000, end_ms: 4000 },
+    { kind: 'tools', start_ms: 4000, end_ms: 8000 },
+    { kind: 'other', start_ms: 8000, end_ms: 10_000 },
+  ],
+  segments_merged: false,
+  requests: [{ response_id: 'r3', ttft_ms: 200, latency_ms: 900 }],
+};
+
+function composition(eventId: number): RequestCompositionApi {
+  const request = view().requests.find((p) => p.event_id === eventId)!;
+  const n = request.index + 1;
+  return {
+    thread_id: 't',
+    request,
+    runtime: 'codex',
+    native: null,
+    native_relation: null,
+    native_status: 'not_offered',
+    reconstructed: {
+      basis: 'stored_events_transcript_order',
+      token_basis: 'chars_cjk_v1',
+      categories: [
+        { key: 'user_messages', entries: 1, chars: 8, tokens: 6, truncated_entries: 0 },
+        { key: 'tool_results', entries: n, chars: 400 * n, tokens: 100 * n, truncated_entries: 0 },
+      ],
+      entries: [
+        {
+          category: 'user_messages',
+          label: 'prompt',
+          event_id: null,
+          job_id: 'j',
+          turn_no: 1,
+          chars: 8,
+          tokens: 6,
+          preview: 'hello',
+          truncated: false,
+        },
+        ...Array.from({ length: n }, (_, i) => ({
+          category: 'tool_results',
+          label: `Read ${i}`,
+          event_id: 900 + i,
+          job_id: 'j',
+          turn_no: 1,
+          chars: 400,
+          tokens: 100,
+          preview: `result ${i}`,
+          truncated: false,
+        })),
+      ],
+      entries_total: n + 1,
+      entries_omitted: 0,
+      estimated_tokens: 6 + 100 * n,
+      boundary: null,
+      excluded: {
+        compacted: { entries: 0, chars: 0 },
+        superseded_attempts: { entries: 0, chars: 0 },
+        subagent: { entries: 0, chars: 0 },
+        this_request_output: { entries: 0, chars: 0 },
+      },
+      copied_turns: 0,
+      events_capped: false,
+    },
+  };
+}
+
+function Harness({
+  jobId = 'j',
+  conversationKey = 'k',
+}: {
+  jobId?: string;
+  conversationKey?: string;
+}) {
+  // The selection is held as ContextView holds it.
+  const [selected, setSelected] = useState<number | null>(null);
+  return (
+    <ContextDashboard
+      jobId={jobId}
+      conversationKey={conversationKey}
+      view={view()}
+      nowMs={Date.parse('2026-10-29T12:00:00Z')}
+      selected={selected}
+      onSelect={setSelected}
+      onOpenPoint={vi.fn()}
+      onOpenTurn={vi.fn()}
+    />
+  );
+}
+
+function show(props: Parameters<typeof Harness>[0] = {}) {
+  return render(
+    <LocaleProvider>
+      <Harness {...props} />
+    </LocaleProvider>,
+  );
+}
+
+function card(title: string): HTMLElement {
+  return screen.getByRole('heading', { name: title }).closest('section')!;
+}
+
+beforeEach(() => {
+  vi.mocked(getThreadContextTiming).mockResolvedValue(TIMING);
+  vi.mocked(getThreadContextDna).mockImplementation(async (_job, from, to) => ({
+    basis: 'chars_cjk_v1',
+    requests: Array.from({ length: to - from + 1 }, (_, i) => ({
+      index: from + i,
+      event_id: 100 + from + i,
+      items: [
+        ['p1', 'user', 100],
+        ...Array.from(
+          { length: from + i + 1 },
+          (_, k) => [`e${k}`, 'tool_results', 200] as [string, string, number],
+        ),
+      ],
+      folded_items: 0,
+      folded_tokens: 0,
+    })),
+    events_capped: false,
+  }));
+  vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
+    composition(eventId),
+  );
+});
+
+afterEach(() => {
+  cleanup();
+  vi.resetAllMocks();
+  window.localStorage.clear();
+});
+
+describe('ContextDashboard', () => {
+  it('reads timing once, and shows its measured parts with TPS', async () => {
+    show();
+    const timing = card('Timing Stats');
+    expect(await within(timing).findByText('13 tok/s')).toBeInTheDocument();
+    expect(within(timing).getByText('Not attributed')).toBeInTheDocument();
+    expect(getThreadContextTiming).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a timing reply for the conversation it no longer shows', async () => {
+    let resolveFirst: (value: ThreadTimingApi) => void = () => undefined;
+    vi.mocked(getThreadContextTiming)
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)))
+      .mockResolvedValueOnce(null);
+    const { rerender } = show({ jobId: 'a', conversationKey: 'a' });
+    rerender(
+      <LocaleProvider>
+        <Harness jobId="b" conversationKey="b" />
+      </LocaleProvider>,
+    );
+    await act(async () => resolveFirst(TIMING));
+    expect(screen.queryByText('13 tok/s')).not.toBeInTheDocument();
+  });
+
+  it('switches the token basis between recorded estimates and reported usage', async () => {
+    show();
+    const tokens = card('Token Stats');
+    fireEvent.click(within(tokens).getByRole('button', { name: 'Reported' }));
+    expect(within(tokens).getByRole('button', { name: 'Reported' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(tokens).getAllByText('6,000').length).toBeGreaterThan(0);
+  });
+
+  it('aggregates by turn, and offers DNA only per step', async () => {
+    show();
+    const trend = card('Context Trend');
+    expect(within(trend).getByRole('group', { name: /Context of 4 columns/ })).toBeInTheDocument();
+    fireEvent.click(within(trend).getByRole('button', { name: 'Turn' }));
+    expect(within(trend).getByRole('group', { name: /Context of 2 columns/ })).toBeInTheDocument();
+    expect(within(trend).getByRole('button', { name: 'DNA' })).toBeDisabled();
+  });
+
+  it('reads DNA for the visible requests only when it is shown', async () => {
+    show();
+    const trend = card('Context Trend');
+    expect(getThreadContextDna).not.toHaveBeenCalled();
+    fireEvent.click(within(trend).getByRole('button', { name: 'DNA' }));
+    await vi.waitFor(() =>
+      expect(getThreadContextDna).toHaveBeenCalledWith('j', 0, 3, expect.anything()),
+    );
+    expect(getThreadContextDna).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers duration once a request joins a measured latency', async () => {
+    show();
+    const trend = card('Context Trend');
+    const duration = within(trend).getByRole('button', { name: 'Duration' });
+    await vi.waitFor(() => expect(duration).toBeEnabled());
+    fireEvent.click(duration);
+    expect(duration).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('moves the selection with the keyboard, and the browser follows it', async () => {
+    show();
+    const browser = card('Context Browser');
+    expect(await within(browser).findByText('Request 4 · turn 2')).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('group', { name: /Context of 4 columns/ }), {
+      key: 'ArrowLeft',
+    });
+    expect(await within(browser).findByText('Request 3 · turn 2')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Selected request' })).toBeInTheDocument();
+    fireEvent.click(within(browser).getByRole('button', { name: 'Previous request' }));
+    expect(await within(browser).findByText('Request 2 · turn 1')).toBeInTheDocument();
+  });
+
+  it('marks items new since the compared request, by identity', async () => {
+    show();
+    const browser = card('Context Browser');
+    const row = await within(browser).findByRole('button', { name: /Tool results/ });
+    await vi.waitFor(() => expect(row).toHaveTextContent('+1'));
+    fireEvent.click(row);
+    expect(within(browser).getByText('1 new since the compared request')).toBeInTheDocument();
+    expect(within(browser).getAllByText('new')).toHaveLength(1);
+  });
+
+  it('drops a composition reply for a request no longer selected', async () => {
+    const pending = new Map<number, (value: RequestCompositionApi) => void>();
+    vi.mocked(getRequestComposition).mockImplementation(
+      (_job, eventId) => new Promise((resolve) => pending.set(eventId, resolve)),
+    );
+    show();
+    const browser = card('Context Browser');
+    fireEvent.keyDown(screen.getByRole('group', { name: /Context of 4 columns/ }), {
+      key: 'ArrowLeft',
+    });
+    await vi.waitFor(() => expect(pending.has(102)).toBe(true));
+    await act(async () => pending.get(103)?.(composition(103)));
+    // Request 4's reply arrives after request 3 was chosen: not shown.
+    expect(within(browser).queryByText(/Observed 4,000/)).not.toBeInTheDocument();
+    await act(async () => pending.get(102)?.(composition(102)));
+    expect(within(browser).queryByText(/Observed 3,000/)).toBeInTheDocument();
+  });
+
+  it('shows the window share only for a reported window', async () => {
+    show();
+    const latest = card('Latest observed request');
+    expect(within(latest).getByText('2.0%')).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('group', { name: /Context of 4 columns/ }), {
+      key: 'ArrowLeft',
+    });
+    const selected = card('Selected request');
+    expect(within(selected).queryByText(/^\d+\.\d%$/)).toBeNull();
+    expect(
+      within(selected).getByText('The window size was not reported, so no share is shown.'),
+    ).toBeInTheDocument();
+  });
+
+  it('answers in Chinese', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    show();
+    expect(await screen.findByRole('heading', { name: '上下文趋势' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '上下文浏览器' })).toBeInTheDocument();
+  });
+});

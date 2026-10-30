@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from cloud_agent import identity
 from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.api import context
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_gateway_client, get_grant_client, get_storage
 from cloud_agent.context_insights import ContextInsightsCursor, context_cursor_scope
 
 NOW = datetime(2026, 10, 15, 12, tzinfo=UTC)
@@ -88,10 +88,14 @@ def app(monkeypatch):
         "permissions": ["agent.use"],
     }
     application.dependency_overrides[get_gateway_client] = lambda: gateway
+    ledger = AsyncMock()
+    ledger.thread_request_sources.return_value = ([], False)
+    application.dependency_overrides[get_grant_client] = lambda: SimpleNamespace(binding_id="b1")
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        context_queries=queries, owner_usage=owner_usage, admin_usage=usage
+        context_queries=queries, ledger=ledger, owner_usage=owner_usage, admin_usage=usage
     )
     application.state.queries = queries
+    application.state.ledger = ledger
     application.state.usage = usage
     return application
 
@@ -338,3 +342,56 @@ async def test_a_bad_filter_is_refused_before_the_list_is_read(app, params):
     response = await _get(app, "/v1/agent/usage/context", range="7d", **params)
     assert response.status_code == 422
     app.state.queries.insights_page.assert_not_awaited()
+
+
+async def test_timing_is_the_owners_and_reads_a_bounded_number_of_executions(app):
+    assert (
+        await _get(app, "/v1/agent/jobs/j1/thread/context/timing", owner=None)
+    ).status_code == 401
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/timing")
+    assert response.status_code == 404
+    app.state.queries.thread_context.return_value = {"thread_id": "t", "jobs": [], "attempts": []}
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/timing")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["active_ms"] == 0
+    assert body["segments"] == []
+    app.state.ledger.thread_request_sources.assert_awaited_with(
+        job_id="j1", user_id="owner-1", limit=context.THREAD_TIMING_SOURCES
+    )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"from": 5, "to": 4}, {"from": 0, "to": 60}, {"from": -1, "to": 3}, {"from": 0}],
+)
+async def test_dna_refuses_a_range_it_would_not_bound_before_any_read(app, params):
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/dna", **params)
+    assert response.status_code == 422
+    app.state.queries.dna_bands.assert_not_awaited()
+
+
+async def test_dna_reads_the_owners_requests_in_one_window(app):
+    app.state.queries.dna_bands.return_value = None
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/dna", **{"from": 0, "to": 59})
+    assert response.status_code == 404
+    app.state.queries.dna_bands.return_value = {
+        "basis": "chars_cjk_v1",
+        "requests": [
+            {
+                "index": 0,
+                "event_id": 9,
+                "items": [["e1", "user", 12]],
+                "folded_items": 0,
+                "folded_tokens": 0,
+            }
+        ],
+        "events_capped": False,
+    }
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/dna", **{"from": 0, "to": 59})
+    assert response.status_code == 200
+    assert response.json()["requests"][0]["items"] == [["e1", "user", 12]]
+    app.state.queries.dna_bands.assert_awaited_with(
+        job_id="j1", user_id="owner-1", first=0, last=59
+    )

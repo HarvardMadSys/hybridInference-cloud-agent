@@ -114,7 +114,7 @@ class CategoryCarry:
         self.carried = local if tail.get("compacted") else _add(base, local)
 
 
-class RecordedShare(BaseModel):
+class SessionCategoryShare(BaseModel):
     """One category of recorded content, estimated."""
 
     model_config = ConfigDict(extra="forbid")
@@ -151,7 +151,7 @@ class SessionTokens(BaseModel):
     #: Each stored item once: turn prompts, what the platform and the CLI
     #: injected (skills apart), compaction summaries, answers, reasoning,
     #: tool calls and results. The kept attempt of each turn only.
-    recorded: list[RecordedShare]
+    recorded: list[SessionCategoryShare]
     recorded_total: int = Field(ge=0)
     #: Every request carries these, but no stored record sizes them.
     not_recorded: list[str] = Field(default_factory=lambda: list(NOT_RECORDED))
@@ -212,7 +212,7 @@ def session_tokens(
     input_tokens = sums["prompt_tokens"]
     return SessionTokens(
         recorded=[
-            RecordedShare(key=key, tokens=tokens[key], items=items[key])
+            SessionCategoryShare(key=key, tokens=tokens[key], items=items[key])
             for key in POINT_CATEGORIES
             if tokens[key]
         ],

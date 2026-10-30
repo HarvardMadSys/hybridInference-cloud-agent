@@ -78,7 +78,12 @@ export type {
   ContextEventApi,
   ContextEventKind,
   ContextPointApi,
+  LatestContextApi,
   EventCapabilityApi,
+  DnaBandsApi,
+  SessionTokensApi,
+  ThreadTimingApi,
+  TimingKind,
   EventContentApi,
   NativeSnapshotApi,
   NativeSnapshotCategoryApi,
@@ -96,6 +101,8 @@ export {
   getAgentThreadContext,
   getEventContent,
   getRequestComposition,
+  getThreadContextDna,
+  getThreadContextTiming,
 } from './agents/context';
 
 export type {

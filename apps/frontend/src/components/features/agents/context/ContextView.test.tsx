@@ -8,6 +8,8 @@ import {
   getAgentThreadContext,
   getEventContent,
   getRequestComposition,
+  getThreadContextDna,
+  getThreadContextTiming,
   type ContextPointApi,
   type RequestCompositionApi,
   type ThreadContextApi,
@@ -21,6 +23,8 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentThreadContext: vi.fn(),
   getRequestComposition: vi.fn(),
   getEventContent: vi.fn(),
+  getThreadContextTiming: vi.fn(),
+  getThreadContextDna: vi.fn(),
 }));
 
 function point(
@@ -285,6 +289,8 @@ function composition(
 
 beforeEach(() => {
   vi.mocked(getAgentThreadContext).mockResolvedValue(view());
+  vi.mocked(getThreadContextTiming).mockResolvedValue(null);
+  vi.mocked(getThreadContextDna).mockResolvedValue(null);
   vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
     composition(eventId),
   );
@@ -329,7 +335,8 @@ describe('ContextView', () => {
     data.latest = { ...data.latest!, compacted_after: true };
     vi.mocked(getAgentThreadContext).mockResolvedValue(data);
     show();
-    expect(await screen.findByText(/compacted the context after this request/)).toBeInTheDocument();
+    // On the window card and in the summary, both about the observed request.
+    expect(await screen.findAllByText(/compacted the context after this request/)).toHaveLength(2);
   });
 
   it('marks only reported compactions, and calls a later drop a drop', async () => {
@@ -395,8 +402,11 @@ describe('ContextView', () => {
     );
     show();
     expect(
-      await screen.findByText('No model request sizes are recorded for this conversation.'),
-    ).toBeInTheDocument();
+      (await screen.findAllByText('No model request sizes are recorded for this conversation.'))
+        .length,
+    ).toBeGreaterThan(0);
+    // No request: no donut, no strip, no window share.
+    expect(screen.queryByText(/%/, { selector: 'b' })).not.toBeInTheDocument();
     expect(within(await fact('Latest observed context')).getByText('—')).toBeInTheDocument();
     // Nothing observed: the counts are unknown, not zero.
     expect(within(await fact('Model requests')).getByText('—')).toBeInTheDocument();
@@ -420,12 +430,15 @@ describe('ContextView', () => {
 
   it('reads the composition of the selected request, the newest by default', async () => {
     show();
-    expect(await screen.findByText('What this request carried')).toBeInTheDocument();
-    expect(getRequestComposition).toHaveBeenLastCalledWith('j2', 503, expect.anything());
+    expect(await screen.findByText('Context Browser')).toBeInTheDocument();
+    expect(await screen.findByText('Request 4 · turn 2')).toBeInTheDocument();
+    // The newest request, and the one before it for the change by item.
+    expect(getRequestComposition).toHaveBeenCalledWith('j2', 503, expect.anything());
+    expect(getRequestComposition).toHaveBeenCalledWith('j2', 502, expect.anything());
     const svg = screen.getByRole('img', { name: 'Input tokens of each model request' });
     fireEvent.keyDown(svg, { key: 'Home' });
     await vi.waitFor(() =>
-      expect(getRequestComposition).toHaveBeenLastCalledWith('j2', 500, expect.anything()),
+      expect(getRequestComposition).toHaveBeenCalledWith('j2', 500, expect.anything()),
     );
   });
 
@@ -441,7 +454,8 @@ describe('ContextView', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('MCP servers: github (connected)')).toBeInTheDocument();
     expect(screen.getByText('2 named')).toBeInTheDocument();
-    expect(screen.getByText('System prompt')).toBeInTheDocument();
+    // Named by the CLI as not exposed, and listed by the browser as not recorded.
+    expect(screen.getAllByText('System prompt')).toHaveLength(2);
     expect(screen.getByText('Not exposed by this CLI')).toBeInTheDocument();
     expect(screen.queryByText(/in context, per the CLI/)).not.toBeInTheDocument();
     expect(screen.getByText(/It is not the assembled request/)).toBeInTheDocument();
@@ -452,7 +466,8 @@ describe('ContextView', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('Before the compaction: 6')).toBeInTheDocument();
     expect(screen.getByText('In subagents’ own contexts: 1')).toBeInTheDocument();
-    expect(screen.getByText('clipped')).toBeInTheDocument();
+    // A clipped item is flagged on its category's row before it is opened.
+    expect(screen.getByRole('button', { name: /Tool results/ })).toHaveTextContent('1 clipped');
   });
 
   it('expands an item into its stored text and opens its step or turn', async () => {
@@ -467,6 +482,7 @@ describe('ContextView', () => {
       next_offset: null,
     });
     const { onOpenPoint, onOpenTurn } = show();
+    fireEvent.click(await screen.findByRole('button', { name: /Tool results/, expanded: false }));
     fireEvent.click(await screen.findByRole('button', { name: 'Show content' }));
     expect(await screen.findByText('中文 output')).toBeInTheDocument();
     expect(getEventContent).toHaveBeenCalledWith('j2', 777, 0);
@@ -567,8 +583,13 @@ describe('ContextView', () => {
 
   it('filters the reconstruction by category', async () => {
     show();
-    fireEvent.click(await screen.findByRole('button', { name: /^Tool results ≈1,000 · 1$/ }));
+    const row = await screen.findByRole('button', { name: /Tool results/, expanded: false });
+    expect(row).toHaveTextContent('≈1,000');
+    expect(screen.queryByText('line line line')).not.toBeInTheDocument();
+    fireEvent.click(row);
     expect(screen.queryByText('继续 continue')).not.toBeInTheDocument();
     expect(screen.getByText('line line line')).toBeInTheDocument();
+    // System prompt and tool schemas are never recorded: said so, never 0.
+    expect(screen.getAllByText('not recorded').length).toBeGreaterThan(0);
   });
 });
