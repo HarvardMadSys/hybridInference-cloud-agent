@@ -238,8 +238,8 @@ def stopped_helper(tmp_path: Path) -> Iterator[_LocalObserver]:
 def test_a_warmed_guest_is_fenced_with_nothing_left_to_start(stopped_helper, monkeypatch):
     """The start runs the real controller's own path; the prompt finds it running.
 
-    The prompt's fence is then only its two reads, the opening one and the
-    fence after it, with no start between them.
+    The prompt's fence is then only its one exec, the opening read and the
+    fence after it, with no start before it.
     """
     manager = _proven_manager()
     monkeypatch.setattr(
@@ -264,7 +264,7 @@ def test_a_warmed_guest_is_fenced_with_nothing_left_to_start(stopped_helper, mon
 
     assert privileged[-1] == [GUEST_OBSERVER_BINARY]
     assert cursor.available, cursor.detail
-    assert len(stopped_helper.execs) == 2
+    assert len(stopped_helper.execs) == 1
     assert len(privileged) == started
 
 

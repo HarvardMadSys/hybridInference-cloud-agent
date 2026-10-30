@@ -49,20 +49,33 @@ STATUS_READER = (
     "    return {'status': status, 'journal_size': size, 'guest_mono_ns': time.monotonic_ns()}\n"
 )
 
-#: One status read. A path after the wait names the guest's boot identifier,
-#: which is then read in the same exec: an unreadable one is reported empty
-#: rather than invented, and does not fail the read.
+#: One status read.
 SNAPSHOT_SCRIPT = STATUS_READER + (
     "status_path, events_path, expected_binary = sys.argv[1:4]\n"
     "snapshot = published(status_path, events_path, expected_binary, "
     "int(sys.argv[4]), float(sys.argv[5]))\n"
-    "if len(sys.argv) > 6:\n"
-    "    try:\n"
-    "        with open(sys.argv[6], encoding='utf-8') as handle:\n"
-    "            snapshot['boot_id'] = handle.read(256).strip()\n"
-    "    except (OSError, ValueError):\n"
-    "        snapshot['boot_id'] = ''\n"
     "print(json.dumps(snapshot, separators=(',', ':')))\n"
+)
+
+#: A turn's whole begin in one exec: the opening publication and the guest's
+#: boot identifier, then a wait until the helper has published two polls after
+#: that publication, and the fence read then. An unreadable boot identifier is
+#: reported empty rather than invented, and does not fail the read. Each
+#: publication is printed on its own line, the opening one before the wait, so
+#: the host can tell an opening read that failed, which a restart answers, from
+#: a fence that failed after it, which a restart would not.
+BEGIN_SCRIPT = STATUS_READER + (
+    "status_path, events_path, expected_binary = sys.argv[1:4]\n"
+    "opening = published(status_path, events_path, expected_binary, -1, float(sys.argv[4]))\n"
+    "try:\n"
+    "    with open(sys.argv[6], encoding='utf-8') as handle:\n"
+    "        opening['boot_id'] = handle.read(256).strip()\n"
+    "except (OSError, ValueError):\n"
+    "    opening['boot_id'] = ''\n"
+    "print(json.dumps(opening, separators=(',', ':')), flush=True)\n"
+    "fence = published(status_path, events_path, expected_binary, "
+    "int(opening['status'].get('poll_seq', -1)) + 1, float(sys.argv[5]))\n"
+    "print(json.dumps(fence, separators=(',', ':')))\n"
 )
 
 #: A member window's unread journal bytes: everything from the window's offset
@@ -112,4 +125,49 @@ DRAIN_SCRIPT = STATUS_READER + (
     "sys.stdout.buffer.write(header.encode() + b'\\n' + payload)\n"
 )
 
-__all__ = ["DRAIN_SCRIPT", "SNAPSHOT_SCRIPT", "STATUS_READER", "WINDOW_DELTA_SCRIPT"]
+#: Stop a stale helper and remove what it published. Only a live process
+#: running the trusted binary is signalled, SIGTERM first and then SIGKILL,
+#: and the status and journal are removed only once it has exited.
+CLEANUP_SCRIPT = (
+    "import json, os, signal, sys, time\n"
+    "status, events, expected_binary = sys.argv[1:4]\n"
+    "pid = 0\n"
+    "def is_expected_process():\n"
+    "    if pid <= 1:\n"
+    "        return False\n"
+    "    try:\n"
+    "        return os.path.samefile(f'/proc/{pid}/exe', expected_binary)\n"
+    "    except OSError:\n"
+    "        return False\n"
+    "try:\n"
+    "    with open(status, encoding='utf-8') as handle:\n"
+    "        pid = int(json.load(handle).get('pid', 0))\n"
+    "    if is_expected_process():\n"
+    "        os.kill(pid, signal.SIGTERM)\n"
+    "except (OSError, ValueError, TypeError, json.JSONDecodeError):\n"
+    "    pass\n"
+    "deadline = time.monotonic() + 1.0\n"
+    "while is_expected_process() and time.monotonic() < deadline:\n"
+    "    time.sleep(0.01)\n"
+    "if is_expected_process():\n"
+    "    os.kill(pid, signal.SIGKILL)\n"
+    "    deadline = time.monotonic() + 1.0\n"
+    "    while is_expected_process() and time.monotonic() < deadline:\n"
+    "        time.sleep(0.01)\n"
+    "if is_expected_process():\n"
+    "    raise RuntimeError('stale guest observer did not exit')\n"
+    "for item in (status, events):\n"
+    "    try:\n"
+    "        os.unlink(item)\n"
+    "    except FileNotFoundError:\n"
+    "        pass\n"
+)
+
+__all__ = [
+    "BEGIN_SCRIPT",
+    "CLEANUP_SCRIPT",
+    "DRAIN_SCRIPT",
+    "SNAPSHOT_SCRIPT",
+    "STATUS_READER",
+    "WINDOW_DELTA_SCRIPT",
+]
