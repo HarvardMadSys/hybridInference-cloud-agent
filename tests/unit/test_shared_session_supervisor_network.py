@@ -118,7 +118,8 @@ def test_a_request_after_a_failed_start_completion_is_proved_exactly_once(entryp
         )
         assert lease.network_verified is True, "the runner's commands stand on this proof"
     elif entrypoint == "environment":
-        preparer = SimpleNamespace(status=lambda _backend, _binding_id: {"ready": True})
+        ready = {"ready": True, "container_id": "container-shared", "boot_id": ""}
+        preparer = SimpleNamespace(status=lambda _backend, _binding_id: ready)
         supervisor.prepare_environment(
             "athr_source", SimpleNamespace(binding_id="binding"), preparer
         )

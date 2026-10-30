@@ -100,7 +100,9 @@ def _hot_kata_workspace(monkeypatch, *, stopped_groups: int = 0):
 
     monkeypatch.setattr(subprocess, "run", exec_run)
     monkeypatch.setattr(subprocess, "Popen", exec_popen)
-    monkeypatch.setattr(EnvironmentPreparation, "status", lambda *_args: {"ready": True})
+    # Ready for the running boot, which this Docker model starts without a StartedAt.
+    ready = {"ready": True, "container_id": "sandbox-container", "boot_id": ""}
+    monkeypatch.setattr(EnvironmentPreparation, "status", lambda *_args: ready)
 
     spec = ChatSandboxSpec(
         thread_id="athr_01",

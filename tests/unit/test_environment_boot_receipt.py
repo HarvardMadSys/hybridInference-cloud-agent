@@ -119,7 +119,7 @@ def test_a_receipt_of_the_running_boot_is_still_answered_without_preparing(tmp_p
         pytest.param({}, {"running": False}, False, id="stopped"),
         pytest.param({}, {"started_at": "boot-two"}, False, id="a-later-boot"),
         pytest.param({}, {"container_id": "container-new"}, False, id="another-container"),
-        pytest.param({"boot_id": ""}, {"started_at": ""}, False, id="no-boot-identity"),
+        pytest.param({"boot_id": None}, {}, False, id="no-boot-recorded"),
     ],
 )
 def test_a_receipt_prepares_only_the_running_boot_it_names(receipt, inspection, expected):
