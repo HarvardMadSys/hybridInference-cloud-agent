@@ -12,7 +12,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from cloud_agent.context_dashboard import session_tokens, step_durations
+from cloud_agent.context_dna import bands_for, item_key, prepare_rows
 from cloud_agent.context_profile import ContextProfileAccumulator
+from cloud_agent.context_request import RequestScope, walk_composition
 from cloud_agent.context_running import POINT_CATEGORIES, bound_intervals, merge_intervals
 from cloud_agent.context_timing import assemble_timing
 from cloud_agent.context_view import assemble_thread_context
@@ -330,3 +332,78 @@ def test_an_execution_the_gateway_did_not_cover_stays_unsplit():
     # The retry's wait between 10 s and 100 s is no one's.
     assert timing.active_ms == 40_000
     assert timing.totals["other"] == 10_000 and timing.totals["unsplit"] == 30_000
+
+
+def test_dna_bands_select_exactly_what_the_composition_walk_carries():
+    """DNA prepares rows once per window; its items must equal the walk's entries."""
+    point = SimpleNamespace(index=3, event_id=209, attempt_id=2, seq=9, usage_id="msg_b")
+
+    def row(event_id: int, attempt: int, seq: int, kind: str, **extra: Any) -> dict[str, Any]:
+        return {
+            "id": event_id,
+            "attempt_id": attempt,
+            "seq": seq,
+            "event_type": kind,
+            "ascii": 40 * seq,
+            "cjk": seq,
+            "other": 0,
+            "chars": 41 * seq,
+            **extra,
+        }
+
+    events = [
+        row(101, 1, 1, "tool_result"),  # before the compaction: compacted
+        row(102, 1, 5, "message", usage_id="msg_a"),
+        row(103, 1, 6, "tool_result"),
+        row(201, 2, 2, "tool_result"),
+        row(202, 2, 3, "message", subagent=True),  # a subagent's own context
+        row(203, 2, 4, "thinking", usage_id="msg_b"),  # this request's own output
+        row(204, 2, 5, "tool_use", name="Read"),
+        row(205, 2, 12, "tool_result"),  # after this request
+        row(301, 9, 1, "tool_result"),  # an attempt this request does not carry
+        row(206, 2, 6, "lifecycle", phase="started"),  # no content
+    ]
+    prompts = [
+        {"job_id": "j1", "turn_no": 1, "ascii": 30, "cjk": 4, "other": 0, "chars": 34},
+        {"job_id": "j2", "turn_no": 2, "ascii": 12, "cjk": 0, "other": 0, "chars": 12},
+    ]
+    located = SimpleNamespace(
+        point=point,
+        carried_attempts={1: ("j1", 1, 0), 2: ("j2", 2, 0)},
+        carried_jobs=["j1", "j2"],
+        previous_report_seq=0,
+        report_after_response=False,
+        boundary_key=(1, 0, 3),
+    )
+    bands = bands_for(located, prompts=prompts, rows=prepare_rows(events))
+
+    annotated = sorted(
+        (
+            {
+                **e,
+                "job_id": located.carried_attempts[e["attempt_id"]][0],
+                "turn_no": located.carried_attempts[e["attempt_id"]][1],
+                "attempt_rank": 0,
+            }
+            for e in events
+            if e["attempt_id"] in located.carried_attempts
+            and not (e["attempt_id"] == point.attempt_id and e["seq"] > point.seq)
+        ),
+        key=lambda e: (e["turn_no"], e["attempt_rank"], e["seq"]),
+    )
+    scope = RequestScope(
+        attempt_id=2,
+        seq=9,
+        usage_id="msg_b",
+        previous_report_seq=0,
+        report_after_response=False,
+        boundary_key=(1, 0, 3),
+    )
+    walk = walk_composition(
+        scope=scope, turns=prompts, events=annotated, superseded={}, tool_names={}
+    )
+    expected = [(item_key(e), e.category, e.tokens) for e in walk.entries]
+
+    assert [tuple(item) for item in bands.items] == expected
+    assert [key for key, _, _ in expected] == ["pj2", "e102", "e103", "e201", "e204"]
+    assert bands.folded_items == 0

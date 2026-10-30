@@ -209,7 +209,8 @@ class _Walk:
     )
 
 
-def _tokens(row: Mapping[str, Any]) -> int:
+def row_tokens(row: Mapping[str, Any]) -> int:
+    """A projected row's recorded size, estimated in tokens."""
     return estimate_from_counts(
         int(row.get("ascii") or 0), int(row.get("cjk") or 0), int(row.get("other") or 0)
     )
@@ -228,13 +229,14 @@ def _entry(
         job_id=job_id,
         turn_no=turn_no,
         chars=chars,
-        tokens=_tokens(row),
+        tokens=row_tokens(row),
         truncated=truncated,
         preview=" ".join(str(row.get("preview") or "").split())[:200],
     )
 
 
-def _event_category(row: Mapping[str, Any]) -> str | None:
+def event_category(row: Mapping[str, Any]) -> str | None:
+    """The composition category of a projected row, or None when it is no content."""
     kind = str(row.get("event_type") or "")
     if kind == "lifecycle":
         phase = row.get("phase")
@@ -263,7 +265,7 @@ class RequestScope:
     boundary_key: tuple[int, int, int] | None
 
 
-def _row_reason(
+def row_reason(
     row: Mapping[str, Any], key: tuple[int, int, int], scope: RequestScope
 ) -> str | None:
     """Why stored content is not counted as carried, or None when it is."""
@@ -306,11 +308,11 @@ def walk_composition(
             _entry(row, "user_messages", "prompt", str(turn["job_id"]), int(turn["turn_no"]))
         )
     for event in events:
-        category = _event_category(event)
+        category = event_category(event)
         if category is None:
             continue
         key = (int(event["turn_no"]), int(event["attempt_rank"]), int(event.get("seq") or 0))
-        reason = _row_reason(event, key, scope)
+        reason = row_reason(event, key, scope)
         if reason is not None:
             walk.excluded[reason].add(int(event.get("chars") or 0))
             continue

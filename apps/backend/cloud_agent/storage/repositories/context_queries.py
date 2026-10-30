@@ -15,7 +15,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.context_dna import MAX_DNA_REQUESTS, DnaBands, bands_for
+from cloud_agent.context_dna import MAX_DNA_REQUESTS, DnaBands, bands_for, prepare_rows
 from cloud_agent.context_insights import InsightsFilters
 from cloud_agent.context_profile import (
     CONTENT_CATEGORIES,
@@ -827,8 +827,9 @@ class PostgresContextQueries:
                 )
             ]
             prompts = [dict(row) for row in await conn.fetch(_REQUEST_PROMPTS_SQL, jobs)]
+        rows = prepare_rows(events)
         return DnaBands(
-            requests=[bands_for(item, prompts=prompts, events=events) for item in located],
+            requests=[bands_for(item, prompts=prompts, rows=rows) for item in located],
             events_capped=len(events) >= MAX_REQUEST_EVENTS,
         )
 
