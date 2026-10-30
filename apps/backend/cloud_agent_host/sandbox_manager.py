@@ -1453,6 +1453,9 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     sandbox = backend or build_backend_from_env()
     environment_preparation = EnvironmentPreparation()
     expected_token = token if token is not None else manager_env("AGENT_SANDBOX_MANAGER_TOKEN", "")
+    # During a credential rotation the next credential is accepted beside the
+    # current one, so the control plane can switch before the hosts promote it.
+    next_token = os.environ.get("AGENT_SANDBOX_MANAGER_TOKEN_NEXT", "")
     idle_ttl_s = (
         terminal_idle_ttl_s
         if terminal_idle_ttl_s is not None
@@ -1783,11 +1786,14 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     def authenticate(x_agent_workspace_token: str | None = Header(None)) -> None:
         # Bytes, not str: compare_digest raises TypeError for a non-ASCII str,
         # so any caller could turn this refusal into a 500.
-        if (
-            not expected_token
-            or not x_agent_workspace_token
-            or not secrets.compare_digest(expected_token.encode(), x_agent_workspace_token.encode())
-        ):
+        presented = (x_agent_workspace_token or "").encode()
+        accepted = [value.encode() for value in (expected_token, next_token) if value]
+        if not presented or not accepted:
+            raise HTTPException(status_code=401, detail="invalid sandbox manager credential")
+        matched = False
+        for value in accepted:
+            matched = secrets.compare_digest(value, presented) or matched
+        if not matched:
             raise HTTPException(status_code=401, detail="invalid sandbox manager credential")
 
     @app.post("/profiling-policy")

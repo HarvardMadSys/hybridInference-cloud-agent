@@ -344,6 +344,7 @@ class GitLabOAuthLoad:
     def __init__(self, env: Mapping[str, str] | None = None) -> None:
         self._dynamic = env is None
         self._env = dict(env) if env is not None else settings_environment()
+        self._ring = self._key_ring()
         self._lock = threading.Lock()
         self._client: GitLabOAuthClient | None = None
         self._load_status: LoadStatus = "unconfigured"
@@ -361,17 +362,32 @@ class GitLabOAuthLoad:
         self._refresh_settings()
         return self._load_status
 
+    def _key_ring(self) -> tuple[str, bool]:
+        """The previous key and index choice a key rotation keeps beside the key."""
+        if not self._dynamic:
+            return ("", False)
+        from cloud_agent.credential_cipher import user_key_ring
+
+        _current, previous, index_previous = user_key_ring()
+        return (previous, index_previous)
+
+    def _unchanged(self, env: Mapping[str, str]) -> bool:
+        return (
+            all(env.get(key) == self._env.get(key) for key in _GITLAB_ENV_KEYS)
+            and self._key_ring() == self._ring
+        )
+
     def _refresh_settings(self) -> None:
         if not self._dynamic:
             return
-        env = settings_environment()
-        if all(env.get(key) == self._env.get(key) for key in _GITLAB_ENV_KEYS):
+        if self._unchanged(settings_environment()):
             return
         with self._lock:
             env = settings_environment()
-            if all(env.get(key) == self._env.get(key) for key in _GITLAB_ENV_KEYS):
+            if self._unchanged(env):
                 return
             self._env = env
+            self._ring = self._key_ring()
             self._load(env)
 
     def _load(self, env: Mapping[str, str]) -> None:
@@ -382,7 +398,12 @@ class GitLabOAuthLoad:
             if config is None:
                 return
             self._client = GitLabOAuthClient(
-                config, cipher=SourceControlCipher(env.get(ENV_ENCRYPTION_KEY, ""))
+                config,
+                cipher=SourceControlCipher(
+                    env.get(ENV_ENCRYPTION_KEY, ""),
+                    previous=self._ring[0],
+                    index_previous=self._ring[1],
+                ),
             )
             self._load_status = "ready"
         except Exception as exc:

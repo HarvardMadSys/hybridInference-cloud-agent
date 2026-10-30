@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSyncExternalStore } from 'react';
@@ -46,6 +45,7 @@ vi.mock('@/lib/api/admin', () => ({
   setAgentRuntimeVersion: vi.fn(),
   HOST_SETTINGS_CAPABILITY: 'host-settings-v1',
 }));
+vi.mock('@/lib/api/adminManagement', () => import('./settingsTestFixtures').then((f) => f.noApi));
 vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: vi.fn(),
   setAgentAdminSettings: vi.fn(),

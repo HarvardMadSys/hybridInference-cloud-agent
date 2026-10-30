@@ -334,7 +334,11 @@ async def verify_claiming_host(
                         }
                     },
                 )
-            return {"host": host["host"], "credential_hash": credential_hash}
+            # The current digest: a renewal presented first here was just promoted.
+            return {
+                "host": host["host"],
+                "credential_hash": host.get("credential_hash") or credential_hash,
+            }
     raise HTTPException(
         status_code=401,
         detail={

@@ -203,6 +203,63 @@ class SshTunnelSetup:
             },
         )
 
+    async def rotate_gateway(
+        self,
+        connection: SshConnection,
+        *,
+        old_key: str,
+        new_key: str,
+        port: int,
+        setup_id: str,
+        mode: str,
+    ) -> None:
+        """Change one Host's inference key: both accepted, then one (see ``rotate``)."""
+        _validate_port(port)
+        _validate_identity(setup_id, old_key)
+        _validate_identity(setup_id, new_key)
+        await self._run(
+            connection,
+            {
+                "action": "rotate_gateway",
+                "mode": mode,
+                "port": port,
+                "old": {"key": old_key},
+                "new": {"key": new_key},
+                "setup_id": setup_id,
+                "inference_username": tunnel_username(setup_id, "inference"),
+            },
+        )
+
+    async def rotate_control(
+        self,
+        connection: SshConnection,
+        *,
+        old_keys: dict[str, str],
+        new_keys: dict[str, str],
+        endpoint: ControlPlaneEndpoint,
+        reverse_port: int,
+        setup_id: str,
+        mode: str,
+    ) -> None:
+        """Change one Host's MCP and main API keys, under the same restrictions as first setup."""
+        for key in (*old_keys.values(), *new_keys.values()):
+            _validate_identity(setup_id, key)
+        _validate_port(reverse_port)
+        await self._run(
+            connection,
+            {
+                "action": "rotate_control",
+                "mode": mode,
+                "old": {"mcp_key": old_keys["mcp"], "control_key": old_keys["control"]},
+                "new": {"mcp_key": new_keys["mcp"], "control_key": new_keys["control"]},
+                "endpoint": endpoint.model_dump(),
+                "reverse_port": reverse_port,
+                "setup_id": setup_id,
+                "mcp_username": tunnel_username(setup_id, "mcp"),
+                "control_username": tunnel_username(setup_id, "control"),
+            },
+        )
+
 
 def _validate_port(port: int) -> None:
     if type(port) is not int or not 1 <= port <= 65535:
@@ -625,6 +682,26 @@ def provision(params):
         reverse = endpoint['gateway_ip'] + ':' + str(params['reverse_port'])
         provision_account(params['control_username'], expected[1], endpoint['main_port'], reverse)
 
+# authorize: both keys; retire: only the new one; rollback: only the old one.
+def rotate_account(username, old, new, mode):
+    path, user = key_path(username)
+    current = path.read_text().splitlines() if path.exists() else []
+    if not set(current) <= {old, new} or (mode == 'retire' and new not in current):
+        refuse('setup_key_conflict')
+    wanted = {'authorize': [old, new], 'retire': [new], 'rollback': [old]}[mode]
+    if current != wanted:
+        atomic_write(path, '\n'.join(wanted) + '\n', user.pw_uid, user.pw_gid, 0o600)
+
+def rotate(params):
+    kind = 'gateway' if params['action'] == 'rotate_gateway' else 'control'
+    old = entries({**params, **params['old'], 'action': kind})
+    new = entries({**params, **params['new'], 'action': kind})
+    if kind == 'gateway':
+        rotate_account(params['inference_username'], old[0], new[0], params['mode'])
+    else:
+        rotate_account(params['mcp_username'], old[0], new[0], params['mode'])
+        rotate_account(params['control_username'], old[1], new[1], params['mode'])
+
 def main():
     try:
         params = json.load(sys.stdin)
@@ -634,19 +711,22 @@ def main():
         elif action == 'check_gateway':
             listening(params['port'])
             result = {'ok': True, 'machine_identity': machine_identity()}
-        elif action in ('gateway', 'control'):
+        elif action in ('gateway', 'control', 'rotate_gateway', 'rotate_control'):
             descriptor = os.open('/run/lock/cloud-agent-server-setup.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor, 'w') as lock:
                 info = os.fstat(lock.fileno())
                 if info.st_uid != 0 or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     refuse('setup_failed')
                 fcntl.flock(lock, fcntl.LOCK_EX)
-                if action == 'gateway':
+                if action in ('rotate_gateway', 'rotate_control'):
+                    rotate(params)
+                elif action == 'gateway':
                     listening(params['port'])
+                    provision(params)
                 else:
                     listening(params['endpoint']['main_port'])
                     listening(params['endpoint']['mcp_port'])
-                provision(params)
+                    provision(params)
             result = {'ok': True}
         else:
             refuse('setup_failed')

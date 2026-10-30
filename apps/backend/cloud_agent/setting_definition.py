@@ -23,6 +23,16 @@ if TYPE_CHECKING:
 
 SettingValue = str | int | float | bool
 SettingKind = Literal["string", "boolean", "integer", "number"]
+#: When a saved value reaches the code that uses it. ``unverified`` is the
+#: default and makes no promise; every other mode names a checked reader.
+ApplyMode = Literal["next_operation", "new_session", "restart", "host_reenroll", "unverified"]
+APPLY_MODES: tuple[ApplyMode, ...] = (
+    "next_operation",
+    "new_session",
+    "restart",
+    "host_reenroll",
+    "unverified",
+)
 
 
 class SettingTooShort(ValueError):
@@ -84,6 +94,20 @@ class Setting:
     check: Callable[[str], bool] | None = None
     #: What a valid value looks like, added to the message that refuses one.
     hint: str = ""
+    #: When a saved value takes effect, checked against its readers.
+    apply_mode: ApplyMode = "unverified"
+    #: Which component must restart (``apply_mode="restart"``), or what else
+    #: the administrator should know about when the value is used.
+    apply_description: str = ""
+    #: The reader this setting replaced used its default for a missing,
+    #: unparsable or out-of-range environment value. The import keeps doing
+    #: that rather than stopping the control plane on an old value.
+    invalid_env_uses_default: bool = False
+    #: Written only by a rotation workflow (the previous key it keeps for
+    #: verifying or decrypting, which key builds lookup digests). The settings
+    #: page shows it read-only and an administrator's update cannot set it:
+    #: a hand-set value would strand data the workflow has not re-encrypted.
+    workflow_only: bool = False
 
     @property
     def storage_key(self) -> str:
@@ -174,6 +198,11 @@ class Setting:
             result["choices"] = list(self.choices)
         if self.minimum_bytes:
             result["minimum_bytes"] = self.minimum_bytes
+        result["apply_mode"] = self.apply_mode
+        if self.workflow_only:
+            result["workflow_only"] = True
+        if self.apply_description:
+            result["apply_description"] = self.apply_description
         return result
 
 
@@ -278,6 +307,9 @@ def _numeric(
     *,
     env: str | None = None,
     description: str = "Applies to subsequent operations after settings synchronize.",
+    apply_mode: ApplyMode = "unverified",
+    apply_description: str = "",
+    invalid_env_uses_default: bool = False,
 ) -> Setting:
     return Setting(
         key,
@@ -289,6 +321,9 @@ def _numeric(
         minimum=minimum,
         maximum=maximum,
         description=description,
+        apply_mode=apply_mode,
+        apply_description=apply_description,
+        invalid_env_uses_default=invalid_env_uses_default,
     )
 
 

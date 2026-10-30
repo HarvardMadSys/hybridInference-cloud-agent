@@ -21,6 +21,9 @@ export interface AdminSettingDefinition {
   read_only?: boolean;
   /** Secrets are write-only; their values are always null in a snapshot. */
   secret: boolean;
+  /** When a saved value takes effect; `unverified` makes no promise. */
+  apply_mode?: 'next_operation' | 'new_session' | 'restart' | 'host_reenroll' | 'unverified';
+  apply_description?: string;
 }
 
 export interface AgentAdminSettings {

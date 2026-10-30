@@ -10042,6 +10042,22 @@
         "title": "ComputeOperationAction",
         "type": "object"
       },
+      "ConfirmRequest": {
+        "additionalProperties": false,
+        "description": "A repeated name confirming an irreversible action.",
+        "properties": {
+          "confirm": {
+            "maxLength": 128,
+            "title": "Confirm",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "ConfirmRequest",
+        "type": "object"
+      },
       "ConnectionView": {
         "additionalProperties": false,
         "description": "One connection, as its owner sees it.\n\nNo field here can hold a secret. ``has_credential`` and ``secret_hint`` are\nthe whole disclosure: enough to tell a configured connection from an\nunconfigured one, and not enough to use either.",
@@ -10570,6 +10586,43 @@
           "label"
         ],
         "title": "CreateConnectionRequest",
+        "type": "object"
+      },
+      "CreateCredentialRequest": {
+        "additionalProperties": false,
+        "description": "A new named credential.",
+        "properties": {
+          "deployment": {
+            "default": false,
+            "title": "Deployment",
+            "type": "boolean"
+          },
+          "expires_in_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 90,
+            "title": "Expires In Days"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]*$",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateCredentialRequest",
         "type": "object"
       },
       "CreateGitHubRepositoryRequest": {
@@ -11154,6 +11207,22 @@
         "title": "EnableConnectionRequest",
         "type": "object"
       },
+      "EnrollTokenRequest": {
+        "additionalProperties": false,
+        "description": "Which kind of machine the token enrolls.",
+        "properties": {
+          "role": {
+            "pattern": "^(control-plane|host)$",
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "EnrollTokenRequest",
+        "type": "object"
+      },
       "EnvironmentAction": {
         "additionalProperties": false,
         "description": "A stable named command executed through the owner terminal surface.",
@@ -11227,6 +11296,23 @@
           "reason"
         ],
         "title": "ExtendComputeRequest",
+        "type": "object"
+      },
+      "FarEndConfirmation": {
+        "additionalProperties": false,
+        "description": "An administrator changed a tunnel's far end as the workflow asked.",
+        "properties": {
+          "token": {
+            "maxLength": 256,
+            "minLength": 3,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "FarEndConfirmation",
         "type": "object"
       },
       "GitHubConnectRequest": {
@@ -12353,6 +12439,22 @@
             ],
             "description": "Optional host CPU / memory / retained-container observation, taken on the runner's own clock within the last five minutes. A runner that does not collect it simply omits the field, and one whose block is unusable has the block dropped rather than the heartbeat refused."
           },
+          "config_reports": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "maxProperties": 8,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Non-numeric configuration this host uses now, by name: runtime_registry_url is the npm registry its next agent download uses (empty for the public registry). Unknown names are dropped.",
+            "title": "Config Reports"
+          },
           "launch_error": {
             "anyOf": [
               {
@@ -12586,6 +12688,19 @@
       "HostHeartbeatResponse": {
         "description": "What the control plane thinks of this host after the heartbeat.",
         "properties": {
+          "credential_renewal": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A renewed credential for this host, signed with the current key. The host stores it in its credential file and presents it from then on; its first use replaces the current one. Sent only to a host that advertises host-credential-renewal-v1, again on each beat until it is used.",
+            "title": "Credential Renewal"
+          },
           "heartbeat_interval_seconds": {
             "description": "How often to report in. Missing three consecutive intervals is what moves a host to offline.",
             "title": "Heartbeat Interval Seconds",
@@ -12621,6 +12736,19 @@
             },
             "title": "Runtime Downloads",
             "type": "array"
+          },
+          "runtime_registry_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The npm registry this deployment downloads agent versions from; empty is the public registry. Absent from a control plane that does not manage it, in which case the host keeps its own environment value.",
+            "title": "Runtime Registry Url"
           },
           "sandbox_archive_settings": {
             "anyOf": [
@@ -13253,6 +13381,52 @@
           "text"
         ],
         "title": "ImportRequest",
+        "type": "object"
+      },
+      "IntentRequest": {
+        "additionalProperties": false,
+        "description": "One operation for one agent.",
+        "properties": {
+          "confirm": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirm"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Operation",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          },
+          "sealed": {
+            "additionalProperties": true,
+            "title": "Sealed",
+            "type": "object"
+          }
+        },
+        "required": [
+          "operation",
+          "idempotency_key"
+        ],
+        "title": "IntentRequest",
         "type": "object"
       },
       "InvitationCreatedResponse": {
@@ -15884,6 +16058,51 @@
         "title": "RebuildInput",
         "type": "object"
       },
+      "RegisterRequest": {
+        "additionalProperties": false,
+        "description": "An agent spending a one-time enrollment token.",
+        "properties": {
+          "machine": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Machine",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "public_key": {
+            "maxLength": 256,
+            "minLength": 32,
+            "title": "Public Key",
+            "type": "string"
+          },
+          "role": {
+            "pattern": "^(control-plane|host)$",
+            "title": "Role",
+            "type": "string"
+          },
+          "token": {
+            "maxLength": 256,
+            "minLength": 8,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "name",
+          "role",
+          "machine",
+          "public_key"
+        ],
+        "title": "RegisterRequest",
+        "type": "object"
+      },
       "ReleaseHostDrainFenceRequest": {
         "description": "Release only the automated drain owned by this opaque token.",
         "properties": {
@@ -16058,6 +16277,28 @@
         "title": "RepoBranchesResponse",
         "type": "object"
       },
+      "ReportRequest": {
+        "additionalProperties": false,
+        "description": "What the agent observes and the state of its recent operations.",
+        "properties": {
+          "observed": {
+            "additionalProperties": true,
+            "title": "Observed",
+            "type": "object"
+          },
+          "operations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "maxItems": 100,
+            "title": "Operations",
+            "type": "array"
+          }
+        },
+        "title": "ReportRequest",
+        "type": "object"
+      },
       "RequestRuntimeUpgradeRequest": {
         "description": "Move one agent to one exact npm release, newer or older.",
         "properties": {
@@ -16183,6 +16424,33 @@
           "source_revision"
         ],
         "title": "RestoreInput",
+        "type": "object"
+      },
+      "ResultRequest": {
+        "additionalProperties": false,
+        "description": "One intent's state, from the agent that ran it.",
+        "properties": {
+          "detail": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Detail",
+            "type": "string"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "state": {
+            "pattern": "^(running|succeeded|failed|rejected)$",
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "ResultRequest",
         "type": "object"
       },
       "RetainedSandboxBeat": {
@@ -16390,6 +16658,28 @@
           "expected_revision"
         ],
         "title": "RetireComputeRequest",
+        "type": "object"
+      },
+      "RolloutRequest": {
+        "additionalProperties": false,
+        "description": "Move every machine to one verified release.",
+        "properties": {
+          "confirm": {
+            "maxLength": 64,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "manifest_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Manifest Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest_sha256",
+          "confirm"
+        ],
+        "title": "RolloutRequest",
         "type": "object"
       },
       "RotateComputeRequest": {
@@ -22890,6 +23180,53 @@
         ],
         "title": "WorkerWaitResponse",
         "type": "object"
+      },
+      "WorkflowRequest": {
+        "additionalProperties": false,
+        "description": "A key rotation or database workflow.",
+        "properties": {
+          "confirm": {
+            "maxLength": 64,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "kind": {
+            "pattern": "^(admin_token|root_key|sandbox_manager_token|control_signing|credential_key|tunnel_keys|database_connection|database_migration)$",
+            "title": "Kind",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          },
+          "sealed_by_agent": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Sealed By Agent",
+            "type": "object"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          }
+        },
+        "required": [
+          "kind",
+          "confirm"
+        ],
+        "title": "WorkflowRequest",
+        "type": "object"
       }
     }
   },
@@ -24929,6 +25266,170 @@
         "summary": "Get Admin Conversation"
       }
     },
+    "/admin/agent/credentials": {
+      "get": {
+        "description": "Every named credential, without any secret.",
+        "operationId": "list_credentials_admin_agent_credentials_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Credentials Admin Agent Credentials Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Credentials"
+      },
+      "post": {
+        "description": "Create a credential; its secret is in this answer and nowhere else.",
+        "operationId": "create_credential_admin_agent_credentials_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Credential Admin Agent Credentials Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Credential"
+      }
+    },
+    "/admin/agent/credentials/{credential_id}/revoke": {
+      "post": {
+        "description": "Revoke a credential; every process refuses it from the next request.",
+        "operationId": "revoke_credential_admin_agent_credentials__credential_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "title": "Credential Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Revoke Credential Admin Agent Credentials  Credential Id  Revoke Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Credential"
+      }
+    },
     "/admin/agent/database-tools": {
       "get": {
         "description": "Show a launch link only while the private service answers its health ping.",
@@ -25149,6 +25650,727 @@
         ]
       }
     },
+    "/admin/agent/deployments": {
+      "get": {
+        "description": "Every agent with its evidence, recent intents and workflows, and the contract.",
+        "operationId": "overview_admin_agent_deployments_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Overview Admin Agent Deployments Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Overview"
+      }
+    },
+    "/admin/agent/deployments/agents/{agent_id}/intents": {
+      "post": {
+        "description": "Validate and queue one operation for one agent.",
+        "operationId": "create_intent_admin_agent_deployments_agents__agent_id__intents_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Intent Admin Agent Deployments Agents  Agent Id  Intents Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Intent"
+      }
+    },
+    "/admin/agent/deployments/agents/{agent_id}/revoke": {
+      "post": {
+        "description": "Revoke an agent's credential; it can no longer report or fetch.",
+        "operationId": "revoke_agent_admin_agent_deployments_agents__agent_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Revoke Agent Admin Agent Deployments Agents  Agent Id  Revoke Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Agent"
+      }
+    },
+    "/admin/agent/deployments/enroll-token": {
+      "post": {
+        "description": "A one-time token that enrolls one agent within the hour; shown once.",
+        "operationId": "enroll_token_admin_agent_deployments_enroll_token_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrollTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Enroll Token Admin Agent Deployments Enroll Token Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Enroll Token"
+      }
+    },
+    "/admin/agent/deployments/host-credentials": {
+      "get": {
+        "description": "Every enrolled server's credential: which signing key minted it, whether a renewal waits.",
+        "operationId": "host_credentials_admin_agent_deployments_host_credentials_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Host Credentials Admin Agent Deployments Host Credentials Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Host Credentials"
+      }
+    },
+    "/admin/agent/deployments/host-credentials/{host}/renew": {
+      "post": {
+        "description": "Give one server a fresh credential at its next heartbeat; the old one lapses after a grace.\n\nThe renewal replaces re-enrollment for a server whose runner can renew:\nno enrollment token, no restart, and the old credential stops working\nshortly after the new one's first use.",
+        "operationId": "renew_host_credential_admin_agent_deployments_host_credentials__host__renew_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "title": "Host",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Renew Host Credential Admin Agent Deployments Host Credentials  Host  Renew Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Renew Host Credential"
+      }
+    },
+    "/admin/agent/deployments/intents/{intent_id}/cancel": {
+      "post": {
+        "description": "Cancel an intent the agent has not fetched yet.",
+        "operationId": "cancel_intent_admin_agent_deployments_intents__intent_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "intent_id",
+            "required": true,
+            "schema": {
+              "title": "Intent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cancel Intent Admin Agent Deployments Intents  Intent Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Intent"
+      }
+    },
+    "/admin/agent/deployments/rollouts": {
+      "post": {
+        "description": "Prepare everywhere, migrate, activate hosts, then the control plane.",
+        "operationId": "start_rollout_admin_agent_deployments_rollouts_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RolloutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Rollout Admin Agent Deployments Rollouts Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Rollout"
+      }
+    },
+    "/admin/agent/deployments/workflows": {
+      "post": {
+        "description": "Start a rotation or database workflow (ADMIN_TOKEN or a signed-in administrator only).",
+        "operationId": "start_workflow_admin_agent_deployments_workflows_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Workflow Admin Agent Deployments Workflows Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Workflow"
+      }
+    },
+    "/admin/agent/deployments/workflows/{workflow_id}": {
+      "get": {
+        "description": "One workflow and its intents.",
+        "operationId": "read_workflow_admin_agent_deployments_workflows__workflow_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Workflow Admin Agent Deployments Workflows  Workflow Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Workflow"
+      }
+    },
+    "/admin/agent/deployments/workflows/{workflow_id}/confirm-far-end": {
+      "post": {
+        "description": "Tell a tunnel key rotation the requested far-end change is made.",
+        "operationId": "confirm_tunnel_far_end_admin_agent_deployments_workflows__workflow_id__confirm_far_end_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FarEndConfirmation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Confirm Tunnel Far End Admin Agent Deployments Workflows  Workflow Id  Confirm Far End Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Tunnel Far End"
+      }
+    },
+    "/admin/agent/deployments/workflows/{workflow_id}/retry": {
+      "post": {
+        "description": "Continue a stopped rotation from the step that stopped.",
+        "operationId": "retry_workflow_admin_agent_deployments_workflows__workflow_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retry Workflow Admin Agent Deployments Workflows  Workflow Id  Retry Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Workflow"
+      }
+    },
     "/admin/agent/host-settings": {
       "put": {
         "description": "Set or clear runtime settings for every server, without a redeploy.\n\nEach host picks the values up from its next heartbeat answer, except where\na value set for that server wins. ``null`` clears a setting, and each host\ngoes back to the deployment's built-in default for it.\n\n**Saving is not applying.** Each host reports what it applied, and the page\nshows the hosts that have not caught up yet. Nothing running is\ninterrupted: a turn keeps the time limit it started with, an existing\nsandbox keeps its chat capacity, and the terminal limits apply from the\nsandbox manager's next sweep.",
@@ -25204,6 +26426,104 @@
           }
         },
         "summary": "Set Agent Host Settings"
+      }
+    },
+    "/admin/agent/management/catalog": {
+      "get": {
+        "description": "Every configuration item and operation, without values.",
+        "operationId": "read_catalog_admin_agent_management_catalog_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Catalog Admin Agent Management Catalog Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Catalog"
+      }
+    },
+    "/admin/agent/management/status": {
+      "get": {
+        "description": "Saved versus adopted state, from the reports of every process and host.\n\n``adopted`` counts only current reports at or past the saved revision;\na stale, stopped or unreporting participant is never counted, and the\ndatabase sessions no reporting process opened are listed beside them.",
+        "operationId": "read_status_admin_agent_management_status_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Status Admin Agent Management Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Status"
       }
     },
     "/admin/agent/measurement-writer": {
@@ -29447,6 +30767,245 @@
           }
         },
         "summary": "Merge Agent Read Receipts"
+      }
+    },
+    "/v1/agent/deploy/intents": {
+      "get": {
+        "description": "Pending intents for this agent above ``after_seq``, now marked delivered.",
+        "operationId": "intents_v1_agent_deploy_intents_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "after_seq",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "After Seq",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Intents V1 Agent Deploy Intents Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Intents",
+        "tags": [
+          "deployment-agents"
+        ]
+      }
+    },
+    "/v1/agent/deploy/intents/{intent_id}/result": {
+      "post": {
+        "description": "Record one intent's state; only a forward transition is accepted.",
+        "operationId": "result_v1_agent_deploy_intents__intent_id__result_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "intent_id",
+            "required": true,
+            "schema": {
+              "title": "Intent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResultRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Result V1 Agent Deploy Intents  Intent Id  Result Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Result",
+        "tags": [
+          "deployment-agents"
+        ]
+      }
+    },
+    "/v1/agent/deploy/register": {
+      "post": {
+        "description": "Spend an enrollment token; the credential is returned once and never again.",
+        "operationId": "register_v1_agent_deploy_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Register V1 Agent Deploy Register Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register",
+        "tags": [
+          "deployment-agents"
+        ]
+      }
+    },
+    "/v1/agent/deploy/report": {
+      "post": {
+        "description": "Store the report and move the agent's intents forward from its journal.",
+        "operationId": "report_v1_agent_deploy_report_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Report V1 Agent Deploy Report Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Report",
+        "tags": [
+          "deployment-agents"
+        ]
       }
     },
     "/v1/agent/environment-action-runs/{run_id}": {

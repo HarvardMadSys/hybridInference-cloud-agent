@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from cloud_agent.environment_fingerprints import (
+    fingerprint_epoch,
+    optional_setup_fingerprint,
+    setup_fingerprints,
+)
 from cloud_agent.environments import (
     EnvironmentAccessRevoked,
     EnvironmentBusy,
@@ -53,25 +58,6 @@ def _cipher() -> EnvironmentCipher:
     return EnvironmentCipher()
 
 
-def setup_fingerprint(setup_script: str | None, variables: list[EnvironmentVariable]) -> str:
-    """HMAC of what an installation depends on: the script and setup-time values.
-
-    Equal fingerprints install the same thing, so an installation snapshot made
-    for one serves the other. Keyed, so a fingerprint written into a container
-    tells its code nothing about the values.
-    """
-    material = json.dumps(
-        {
-            "v": 1,
-            "setup_script": setup_script or "",
-            "variables": sorted([v.name, v.value] for v in variables if v.phase != "runtime"),
-        },
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return _cipher().mac(material)
-
-
 #: The environments an account may use: its own, and those of every active team
 #: it is an active member of, with its role there. Prefix of a query whose
 #: first parameter is the account.
@@ -104,22 +90,6 @@ def runtime_only(variables: list[EnvironmentVariable]) -> list[EnvironmentVariab
 
 #: Who may change a team's environments; every other active member may use them.
 _TEAM_EDITORS = frozenset({"owner", "admin"})
-
-
-def optional_setup_fingerprint(
-    setup_script: str | None, variables: list[EnvironmentVariable]
-) -> str | None:
-    """The fingerprint, or ``None`` without setup or without the deployment's key.
-
-    Snapshots need the key; tasks do not, so a deployment without it simply
-    never snapshots.
-    """
-    if not setup_script:
-        return None
-    try:
-        return setup_fingerprint(setup_script, variables)
-    except EnvironmentEncryptionError:
-        return None
 
 
 async def lock_environment_snapshots(conn: Any, user_id: str) -> None:
@@ -201,7 +171,7 @@ async def retire_changed_snapshots(
         return
     stale = []
     try:
-        installations = await PostgresEnvironmentRepository._environment_installations(
+        installations = await environment_installations(
             conn, user_id, list({row["environment_id"] for row in snapshots})
         )
         for row in snapshots:
@@ -211,8 +181,10 @@ async def retire_changed_snapshots(
             script, variables = installation
             if row["has_setup_override"]:
                 script = row["setup_override"]
-            current = setup_fingerprint(script, variables) if script else None
-            if current != row["setup_fingerprint"]:
+            # A key rotation may not have rebuilt this one yet: either key's counts.
+            if row["setup_fingerprint"] not in (
+                setup_fingerprints(script, variables) if script else [None]
+            ):
                 stale.append(row["id"])
     except EnvironmentEncryptionError:
         return
@@ -225,6 +197,81 @@ async def retire_changed_snapshots(
         )
 
 
+async def stored_environment_variables(
+    conn: Any, version_id: str | None
+) -> builtins.list[dict[str, Any]]:
+    """One version's stored variable rows."""
+    if version_id is None:
+        return []
+    return [
+        dict(v)
+        for v in await conn.fetch(
+            "SELECT * FROM agent_environment_version_variables WHERE version_id=$1 ORDER BY name",
+            version_id,
+        )
+    ]
+
+
+def decode_environment_variables(
+    variables: builtins.list[dict[str, Any]],
+    *,
+    include_secrets: bool = True,
+) -> builtins.list[EnvironmentVariable]:
+    """Decrypt stored variable rows; secrets only with ``include_secrets``."""
+    if not variables:
+        return []
+    cipher = _cipher() if any(include_secrets or not v["secret"] for v in variables) else None
+    return [
+        EnvironmentVariable(
+            name=v["name"],
+            value=cipher.decrypt(v["value_ciphertext"])
+            if cipher and (include_secrets or not v["secret"])
+            else "",
+            secret=v["secret"],
+            phase=v["phase"],
+        )
+        for v in variables
+    ]
+
+
+async def environment_installations(
+    conn: Any, user_id: str, environment_ids: builtins.list[str]
+) -> dict[str, tuple[str, builtins.list[EnvironmentVariable]]]:
+    """Each active environment's setup and merged values, as a task bound now installs them.
+
+    An environment whose configuration no longer merges is left out; a team
+    environment installs with the team's values alone (:func:`runtime_only`).
+    """
+    rows = await conn.fetch(
+        "SELECT e.id,e.team_id,v.id AS version_id,v.document FROM agent_environments e "
+        "JOIN agent_environment_versions v ON v.environment_id=e.id AND v.revision=e.revision "
+        "WHERE (e.user_id=$1 OR e.team_id IS NOT NULL) AND e.id=ANY($2::text[]) "
+        "AND e.repo IS NOT NULL AND e.archived_at IS NULL",
+        user_id,
+        environment_ids,
+    )
+    if not rows:
+        return {}
+    global_id = await conn.fetchval(
+        "SELECT v.id FROM agent_environments e JOIN agent_environment_versions v "
+        "ON v.environment_id=e.id AND v.revision=e.revision WHERE e.user_id=$1 AND e.repo IS NULL",
+        user_id,
+    )
+    decode, stored = decode_environment_variables, stored_environment_variables
+    global_values = decode(await stored(conn, global_id))
+    result = {}
+    for row in rows:
+        try:
+            merged = merge_variables(
+                [] if row["team_id"] else global_values,
+                decode(await stored(conn, row["version_id"])),
+            )
+        except ValueError:
+            continue
+        result[row["id"]] = (_json(row["document"]).get("setup_script") or "", merged)
+    return result
+
+
 class PostgresEnvironmentRepository:
     """Serialize configuration changes and bindings per owner over one pool."""
 
@@ -235,8 +282,8 @@ class PostgresEnvironmentRepository:
         self._redactors: OrderedDict[tuple[str, str, str], tuple[float, SecretRedactor]] = (
             OrderedDict()
         )
-        # Versions are immutable, so a pair's fingerprint never changes.
-        self._fingerprints: OrderedDict[tuple[str, str | None], str] = OrderedDict()
+        # Versions are immutable, so a pair's fingerprint changes only with the key.
+        self._fingerprints: OrderedDict[tuple[str, str | None, str], str] = OrderedDict()
 
     @staticmethod
     async def _environment_lock(conn: Any, user_id: str) -> None:
@@ -330,81 +377,7 @@ class PostgresEnvironmentRepository:
         )
         return dict(row) if row is not None else None
 
-    @staticmethod
-    async def _environment_stored_variables(
-        conn: Any, version_id: str | None
-    ) -> builtins.list[dict[str, Any]]:
-        if version_id is None:
-            return []
-        return [
-            dict(v)
-            for v in await conn.fetch(
-                "SELECT * FROM agent_environment_version_variables WHERE version_id=$1 ORDER BY name",
-                version_id,
-            )
-        ]
-
-    @staticmethod
-    def _environment_decode(
-        variables: builtins.list[dict[str, Any]],
-        *,
-        include_secrets: bool = True,
-    ) -> builtins.list[EnvironmentVariable]:
-        if not variables:
-            return []
-        cipher = _cipher() if any(include_secrets or not v["secret"] for v in variables) else None
-        return [
-            EnvironmentVariable(
-                name=v["name"],
-                value=cipher.decrypt(v["value_ciphertext"])
-                if cipher and (include_secrets or not v["secret"])
-                else "",
-                secret=v["secret"],
-                phase=v["phase"],
-            )
-            for v in variables
-        ]
-
-    @staticmethod
-    async def _environment_installations(
-        conn: Any, user_id: str, environment_ids: builtins.list[str]
-    ) -> dict[str, tuple[str, builtins.list[EnvironmentVariable]]]:
-        """What a task bound now would install with: each active environment's setup and values.
-
-        The values are the global and environment variables merged, as a
-        binding merges them; an environment whose configuration no longer
-        merges binds no task and is left out. A team environment installs with
-        the team's values alone (:func:`runtime_only`), whoever ``user_id`` is.
-        """
-        rows = await conn.fetch(
-            "SELECT e.id,e.team_id,v.id AS version_id,v.document FROM agent_environments e "
-            "JOIN agent_environment_versions v ON v.environment_id=e.id AND v.revision=e.revision "
-            "WHERE (e.user_id=$1 OR e.team_id IS NOT NULL) AND e.id=ANY($2::text[]) "
-            "AND e.repo IS NOT NULL AND e.archived_at IS NULL",
-            user_id,
-            environment_ids,
-        )
-        if not rows:
-            return {}
-        global_id = await conn.fetchval(
-            "SELECT v.id FROM agent_environments e JOIN agent_environment_versions v "
-            "ON v.environment_id=e.id AND v.revision=e.revision WHERE e.user_id=$1 AND e.repo IS NULL",
-            user_id,
-        )
-        decode = PostgresEnvironmentRepository._environment_decode
-        stored = PostgresEnvironmentRepository._environment_stored_variables
-        global_values = decode(await stored(conn, global_id))
-        result = {}
-        for row in rows:
-            try:
-                merged = merge_variables(
-                    [] if row["team_id"] else global_values,
-                    decode(await stored(conn, row["version_id"])),
-                )
-            except ValueError:
-                continue
-            result[row["id"]] = (_json(row["document"]).get("setup_script") or "", merged)
-        return result
+    _environment_decode = staticmethod(decode_environment_variables)
 
     @staticmethod
     def _environment_encode(
@@ -428,9 +401,7 @@ class PostgresEnvironmentRepository:
         self, conn: Any, row: Mapping[str, Any], version: Mapping[str, Any] | None = None
     ) -> dict[str, Any]:
         version = version or await self._environment_version(conn, row["id"], row["revision"])
-        variables = await self._environment_stored_variables(
-            conn, version["id"] if version else None
-        )
+        variables = await stored_environment_variables(conn, version["id"] if version else None)
         return environment_catalogue.public_environment(row, version, variables, _cipher)
 
     async def list_environments(
@@ -494,11 +465,11 @@ class PostgresEnvironmentRepository:
                 user_id,
                 environment_ids,
             )
-            cached = self._fingerprints.copy()
+            cached, epoch = self._fingerprints.copy(), fingerprint_epoch()
             missing = [
                 row
                 for row in rows
-                if (row["version_id"], None if row["team_id"] else global_id) not in cached
+                if (row["version_id"], None if row["team_id"] else global_id, epoch) not in cached
                 and _json(row["document"]).get("setup_script")
             ]
             needs_globals = global_id is not None and any(not row["team_id"] for row in missing)
@@ -515,7 +486,7 @@ class PostgresEnvironmentRepository:
             for row in rows:
                 # A team's installation does not depend on the member's globals.
                 scope = None if row["team_id"] else global_id
-                key = (row["version_id"], scope)
+                key = (row["version_id"], scope, epoch)
                 if key in cached:
                     result[row["id"]] = cached[key]
                     continue
@@ -597,7 +568,7 @@ class PostgresEnvironmentRepository:
                     merge_variables(
                         candidate,
                         self._environment_decode(
-                            await self._environment_stored_variables(conn, row["id"])
+                            await stored_environment_variables(conn, row["id"])
                         ),
                     )
                 except ValueError:
@@ -611,7 +582,7 @@ class PostgresEnvironmentRepository:
                 user_id,
             )
             merge_variables(
-                self._environment_decode(await self._environment_stored_variables(conn, global_id)),
+                self._environment_decode(await stored_environment_variables(conn, global_id)),
                 candidate,
             )
 
@@ -764,9 +735,7 @@ class PostgresEnvironmentRepository:
                         current_revision=row["revision"],
                     )
                 version = await self._environment_version(conn, row["id"], revision)
-                old = await self._environment_stored_variables(
-                    conn, version["id"] if version else None
-                )
+                old = await stored_environment_variables(conn, version["id"] if version else None)
                 values = {v["name"]: v for v in old}
                 changes: builtins.list[dict[str, Any]] = []
                 for edit in parsed:
@@ -981,7 +950,7 @@ class PostgresEnvironmentRepository:
                 )
             version = await self._environment_version(conn, environment_id, revision)
             assert version is not None
-            values = await self._environment_stored_variables(conn, version["id"])
+            values = await stored_environment_variables(conn, version["id"])
             row = {
                 **dict(
                     await conn.fetchrow(
@@ -1025,7 +994,7 @@ class PostgresEnvironmentRepository:
             source = await self._environment_version(conn, environment_id, source_revision)
             if source is None:
                 raise EnvironmentNotFound("Version not found")
-            values = await self._environment_stored_variables(conn, source["id"])
+            values = await stored_environment_variables(conn, source["id"])
             await self._environment_check_merged(
                 conn,
                 user_id,
@@ -1099,13 +1068,13 @@ class PostgresEnvironmentRepository:
                 else None
             )
             personal = self._environment_decode(
-                await self._environment_stored_variables(conn, row["global_version_id"]),
+                await stored_environment_variables(conn, row["global_version_id"]),
                 include_secrets=include_secrets,
             )
             values = merge_variables(
                 runtime_only(personal) if row["team_id"] else personal,
                 self._environment_decode(
-                    await self._environment_stored_variables(conn, row["environment_version_id"]),
+                    await stored_environment_variables(conn, row["environment_version_id"]),
                     include_secrets=include_secrets,
                 ),
                 # Task-only variables are no longer accepted, but a workspace
@@ -1180,14 +1149,14 @@ class PostgresEnvironmentRepository:
                 else None
             )
             personal = self._environment_decode(
-                await self._environment_stored_variables(
+                await stored_environment_variables(
                     conn, globals_latest["id"] if globals_latest else None
                 )
             )
             merged = merge_variables(
                 runtime_only(personal) if binding["team_id"] else personal,
                 self._environment_decode(
-                    await self._environment_stored_variables(conn, latest["id"] if latest else None)
+                    await stored_environment_variables(conn, latest["id"] if latest else None)
                 ),
                 # Empty for every binding made since task-only variables were removed.
                 self._environment_decode(_json(binding["overrides"])),
@@ -1894,14 +1863,12 @@ async def bind_environment(
     )
     team_id = env["team_id"] if env else None
     personal = ops._environment_decode(
-        await ops._environment_stored_variables(
-            conn, global_version["id"] if global_version else None
-        )
+        await stored_environment_variables(conn, global_version["id"] if global_version else None)
     )
     merged = merge_variables(
         runtime_only(personal) if team_id else personal,
         ops._environment_decode(
-            await ops._environment_stored_variables(conn, version["id"] if version else None)
+            await stored_environment_variables(conn, version["id"] if version else None)
         ),
     )
     has_override = bool(selection.get("has_setup_override", False))

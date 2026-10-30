@@ -1,0 +1,20 @@
+# Example systemd unit for the deployment agent. Copy it, adjust the paths and
+# the user (the account that runs deploy.sh today), then enable it. Nothing
+# installs this file for you.
+[Unit]
+Description=Cloud Agent deployment agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/opt/cloud-agent/release/current
+ExecStart=/opt/cloud-agent/deployer/bin/python -m deploy.agent --root /srv/cloud-agent-control run --interval 10
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

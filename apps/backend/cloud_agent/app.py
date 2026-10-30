@@ -12,7 +12,6 @@ requires the retained container and native CLI state.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
@@ -26,6 +25,7 @@ from cloud_agent.api._parameters import refuse_unstorable_parameters
 from cloud_agent.api._sensitive_routes import no_store
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
+from cloud_agent.maintenance import MaintenanceGuard, install_read_only_handler
 from cloud_agent_shared.storable_text import encodable_json
 
 logger = get_logger(__name__)
@@ -135,21 +135,56 @@ def install_admin_no_store(
 
 from cloud_agent.bootstrap.lifespan import lifespan
 
-#: Serves ``/docs``, ``/redoc`` and ``/openapi.json`` on the main listener when
-#: set to ``true``. Off by default: the schema describes every route to anyone
-#: who asks, and the two pages load their scripts from a CDN at a floating
-#: major version with no integrity check, on the origin the web app shares.
-ENV_API_DOCS = "AGENT_API_DOCS"
-
-#: What FastAPI needs to serve none of the three. ``app.openapi()`` still
-#: builds the schema; only the routes that publish it are left out.
+#: What FastAPI needs to serve none of its documentation routes.
+#: ``app.openapi()`` still builds the schema; only publishing it is left out.
 _NO_DOCS: dict[str, Any] = {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
 
-def _api_docs() -> dict[str, Any]:
-    """Return the main listener's docs arguments: FastAPI's own only on request."""
-    enabled = (os.environ.get(ENV_API_DOCS) or "").strip().lower() in {"1", "true", "yes"}
-    return {} if enabled else _NO_DOCS
+def _install_api_docs(app: FastAPI) -> None:
+    """Serve ``/docs``, ``/redoc`` and ``/openapi.json`` while ``api_docs`` is on.
+
+    The admin setting is read on every request, so turning it on or off takes
+    effect within one settings synchronization, with no restart. Off by
+    default: the schema describes every route to anyone who asks, and the two
+    pages load their scripts from a CDN at a floating major version with no
+    integrity check, on the origin the web app shares.
+    """
+    from fastapi.openapi.docs import (
+        get_redoc_html,
+        get_swagger_ui_html,
+        get_swagger_ui_oauth2_redirect_html,
+    )
+    from fastapi.responses import JSONResponse
+
+    from cloud_agent.settings import boolean_setting
+
+    def require_docs() -> None:
+        try:
+            enabled = boolean_setting("api_docs")
+        except ValueError:
+            enabled = False
+        if not enabled:
+            raise StarletteHTTPException(status_code=404, detail="Not Found")
+
+    @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(require_docs)])
+    def openapi_schema() -> JSONResponse:
+        return JSONResponse(app.openapi())
+
+    @app.get("/docs", include_in_schema=False, dependencies=[Depends(require_docs)])
+    def swagger_ui() -> Any:
+        return get_swagger_ui_html(
+            openapi_url="/openapi.json",
+            title=f"{app.title} - Swagger UI",
+            oauth2_redirect_url="/docs/oauth2-redirect",
+        )
+
+    @app.get("/docs/oauth2-redirect", include_in_schema=False, dependencies=[Depends(require_docs)])
+    def swagger_ui_redirect() -> Any:
+        return get_swagger_ui_oauth2_redirect_html()
+
+    @app.get("/redoc", include_in_schema=False, dependencies=[Depends(require_docs)])
+    def redoc() -> Any:
+        return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
 def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
@@ -161,10 +196,13 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         admin_audit,
         admin_compute,
         admin_conversations,
+        admin_credentials,
         admin_database,
         admin_database_browser,
+        admin_deployments,
         admin_hosts,
         admin_llm_requests,
+        admin_management,
         admin_measurements,
         admin_profiling_control,
         admin_runs,
@@ -176,6 +214,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         admin_usage,
         agent_memory,
         compute_registration,
+        deploy_agents,
         environments,
         host_profiling,
         hosts,
@@ -204,12 +243,15 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         # Every route, before its own dependencies: a NUL or an integer no
         # column holds is refused here rather than by the first query.
         dependencies=[Depends(refuse_unstorable_parameters)],
-        **_api_docs(),
+        **_NO_DOCS,
     )
+    _install_api_docs(app)
     # Every browser-facing write carries the session cookie, and SameSite=Lax
     # admits it from any page on the same site. Machine callers send bearers
     # and pass untouched; see the module for the exact rule.
     app.add_middleware(_cross_site.CrossSiteWriteGuard)
+    app.add_middleware(MaintenanceGuard)
+    install_read_only_handler(app)
     app.include_router(routes.router)
     app.include_router(usage.router)
     app.include_router(owner_usage.router)
@@ -281,6 +323,10 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     app.include_router(admin_runs.router)
     app.include_router(admin_sandboxes.router)
     app.include_router(admin_settings.router)
+    app.include_router(admin_management.router)
+    app.include_router(admin_deployments.router)
+    app.include_router(admin_credentials.router)
+    app.include_router(deploy_agents.router)
     app.include_router(admin_usage.router)
     app.include_router(admin_measurements.router)
     # Start/Stop for the same feature, in its own module so the write path's
@@ -387,4 +433,6 @@ def create_mcp_app() -> FastAPI:
         """Liveness, so the tunnel's health check has something to ask."""
         return {"status": "ok"}
 
+    app.add_middleware(MaintenanceGuard)
+    install_read_only_handler(app)
     return app

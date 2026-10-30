@@ -24,6 +24,9 @@ from cloud_agent.schemas.workers import (
     WorkerSandboxMember,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent_shared.host_settings import MAX_SETTINGS_KEYS
+
+#: The configuration reports a host may make about itself on the heartbeat.
+HOST_CONFIG_REPORT_NAMES = frozenset({"runtime_registry_url"})
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import read_reports
 from cloud_agent_shared.sandbox_resources import (
@@ -375,6 +378,15 @@ class HostHeartbeatRequest(BaseModel):
             "keeps the last observation for compatibility with older runners."
         ),
     )
+    config_reports: dict[str, str] | None = Field(
+        None,
+        max_length=8,
+        description=(
+            "Non-numeric configuration this host uses now, by name: "
+            "runtime_registry_url is the npm registry its next agent download uses "
+            "(empty for the public registry). Unknown names are dropped."
+        ),
+    )
     runtime_downloads: list[dict[str, Any]] | None = Field(
         None,
         description=(
@@ -385,6 +397,22 @@ class HostHeartbeatRequest(BaseModel):
             "heartbeat. Null means not reported and keeps what is stored."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _keep_known_config_reports(cls, data: Any) -> Any:
+        """Keep only report names this release knows, with bounded text values."""
+        if not isinstance(data, dict) or not isinstance(data.get("config_reports"), dict):
+            return data
+        kept = {
+            name: value
+            for name, value in data["config_reports"].items()
+            if name in HOST_CONFIG_REPORT_NAMES
+            and isinstance(value, str)
+            and len(value) <= 2048
+            and "\x00" not in value
+        }
+        return {**data, "config_reports": kept}
 
     @model_validator(mode="before")
     @classmethod
@@ -482,6 +510,25 @@ class HostHeartbeatResponse(BaseModel):
             "The archive policy this host should apply. Null for a host that cannot "
             "apply it: an enabled policy with a bucket other than the default goes "
             "only to a host advertising sandbox-archive-destination-v1."
+        ),
+    )
+    credential_renewal: str | None = Field(
+        None,
+        max_length=1024,
+        description=(
+            "A renewed credential for this host, signed with the current key. The host "
+            "stores it in its credential file and presents it from then on; its first use "
+            "replaces the current one. Sent only to a host that advertises "
+            "host-credential-renewal-v1, again on each beat until it is used."
+        ),
+    )
+    runtime_registry_url: str | None = Field(
+        None,
+        max_length=2048,
+        description=(
+            "The npm registry this deployment downloads agent versions from; empty is "
+            "the public registry. Absent from a control plane that does not manage it, "
+            "in which case the host keeps its own environment value."
         ),
     )
     runtime_downloads: list[dict[str, str]] = Field(

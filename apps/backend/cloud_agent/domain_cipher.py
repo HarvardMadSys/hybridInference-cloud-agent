@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+from typing import Any
 
 from cryptography.fernet import Fernet
 
@@ -31,3 +32,28 @@ def settings_root_key() -> str:
         or os.environ.get("AGENT_SESSION_SECRET")
         or ""
     )
+
+
+def previous_settings_root_key() -> str:
+    """The root key a rotation keeps for decrypting only, or ``""``.
+
+    ``AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS`` is written by the deployment
+    agent while a root key rotation re-encrypts; nothing is encrypted with it.
+    """
+    return os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS") or ""
+
+
+def decrypt_with_root(make_cipher: Any, ciphertext: str) -> str:
+    """Decrypt with the root key, then with the previous one during a rotation.
+
+    ``make_cipher`` builds the caller's cipher (its own domain) from a key.
+    """
+    from cloud_agent.credential_cipher import CredentialCipherError
+
+    try:
+        return str(make_cipher(settings_root_key()).decrypt(ciphertext))
+    except CredentialCipherError:
+        previous = previous_settings_root_key()
+        if len(previous.encode()) < 32:
+            raise
+        return str(make_cipher(previous).decrypt(ciphertext))

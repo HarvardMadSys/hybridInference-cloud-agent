@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from cloud_agent.application import managed_hosts
 from cloud_agent.application.cloudlab_inventory import CloudLabNodeInventory
 from cloud_agent.application.compute_autoscale import CloudLabAutoscaler
 from cloud_agent.application.compute_reconcile import ComputeReconciler
@@ -29,6 +30,7 @@ def build_compute_runtime(
     repository: ComputeResourceRepository,
     host_pool: HostPoolRepository,
     http: httpx.AsyncClient,
+    credential_rotation: Any = None,
 ) -> tuple[ComputeCommands, ComputeResourceWorker]:
     """Compose adapters outside the Host and HTTP layers."""
     configuration = ComputeConfiguration.from_env().with_runtime_settings()
@@ -54,5 +56,16 @@ def build_compute_runtime(
     )
     bootstrap = SshHostBootstrap(transport=transport, resolver=resolver)
     reconciler = ComputeReconciler(commands=commands, host_pool=host_pool, bootstrap=bootstrap)
+    if credential_rotation is not None:
+        managed_hosts.configure(
+            managed_hosts.ManagedHosts(
+                repository=repository,
+                credential_rotation=credential_rotation,
+                bootstrap=bootstrap,
+                secrets=secrets,
+                tunnels=automatic_setup.tunnels,
+                setup=automatic_setup,
+            )
+        )
     autoscaler = CloudLabAutoscaler(repository=repository, host_pool=host_pool)
     return commands, ComputeResourceWorker(reconciler, autoscaler=autoscaler)

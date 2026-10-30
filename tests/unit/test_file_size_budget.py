@@ -35,7 +35,7 @@ BASELINE = {
     "apps/backend/cloud_agent/api/mcp_connections.py": 2220,
     "apps/backend/cloud_agent/storage/repositories/attempt_commands.py": 2019,
     "apps/backend/cloud_agent/storage/repositories/mcp.py": 1974,
-    "apps/backend/cloud_agent/storage/repositories/environments.py": 1931,
+    "apps/backend/cloud_agent/storage/repositories/environments.py": 1898,
     "apps/backend/cloud_agent/api/mcp_relay.py": 1798,
     "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1673,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
@@ -64,7 +64,7 @@ TEST_BASELINE = {
     "tests/unit/test_host_pool_api.py": 3527,
     "tests/unit/test_mcp_connections_api.py": 3079,
     "tests/unit/test_retained_deploy.py": 2236,
-    "tests/unit/test_runner_host_service.py": 2919,
+    "tests/unit/test_runner_host_service.py": 2898,
     "tests/unit/test_shared_session_supervisor.py": 5302,
 }
 

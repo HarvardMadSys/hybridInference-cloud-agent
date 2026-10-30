@@ -671,3 +671,42 @@ def test_operator_admission_failure_happens_before_fragment_or_key_authorization
     with pytest.raises(namespace["Blocked"], match="ssh_admission_blocked"):
         namespace["ensure_policy"]("ca-m-test", 8101)
     assert writes == []
+
+
+def test_a_key_rotation_keeps_both_entries_then_only_the_new_one(tmp_path, monkeypatch):
+    """The same restricted entries as first setup; a foreign entry stops the rotation."""
+    script = remote()
+    path = tmp_path / "authorized_keys"
+    path.write_text("old-entry\n")
+    written = []
+
+    def write(target, content, uid, gid, mode):
+        written.append(mode)
+        target.write_text(content)
+
+    user = type("User", (), {"pw_uid": 0, "pw_gid": 0})()
+    script["key_path"] = lambda username: (path, user)
+    script["atomic_write"] = write
+    rotate = script["rotate_account"]
+
+    rotate("account", "old-entry", "new-entry", "authorize")
+    assert path.read_text().splitlines() == ["old-entry", "new-entry"]
+    rotate("account", "old-entry", "new-entry", "authorize")  # a retry changes nothing
+    assert len(written) == 1
+    rotate("account", "old-entry", "new-entry", "retire")
+    assert path.read_text().splitlines() == ["new-entry"]
+    rotate("account", "old-entry", "new-entry", "rollback")
+    assert path.read_text().splitlines() == ["old-entry"]
+    assert set(written) == {0o600}
+
+    path.write_text("someone-elses-entry\n")
+    with pytest.raises(script["Blocked"]):
+        rotate("account", "old-entry", "new-entry", "authorize")
+    assert path.read_text() == "someone-elses-entry\n"
+
+
+def test_rotated_entries_carry_the_restrictions_of_first_setup():
+    script = remote()
+    public = "ssh-ed25519 " + "A" * 68
+    old = script["entries"]({"action": "gateway", "setup_id": "s", "port": 8080, "key": public})
+    assert old[0].startswith('command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ')

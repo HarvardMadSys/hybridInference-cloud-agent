@@ -72,15 +72,26 @@ SOURCE_CONTROL_DOMAIN = b"hybridinference/source-control/v1"
 class SourceControlCipher(CredentialCipher):
     """Encrypt provider secrets with a domain-separated server key."""
 
-    def __init__(self, secret: str | None = None, *, domain: bytes = SOURCE_CONTROL_DOMAIN) -> None:
-        from cloud_agent.settings import setting_env
+    def __init__(
+        self,
+        secret: str | None = None,
+        *,
+        domain: bytes = SOURCE_CONTROL_DOMAIN,
+        previous: str | None = None,
+        index_previous: bool = False,
+    ) -> None:
+        from cloud_agent.credential_cipher import user_key_ring
 
-        material = secret if secret is not None else setting_env(ENV_ENCRYPTION_KEY, "")
-        if not material:
+        if secret is None:
+            secret, saved_previous, index_previous = user_key_ring()
+            previous = saved_previous if previous is None else previous
+        if not secret:
             raise SourceControlError(
                 f"{ENV_ENCRYPTION_KEY} must be set before source-control credentials can be stored"
             )
-        super().__init__(material, domain=domain)
+        super().__init__(
+            secret, domain=domain, previous=previous or "", index_previous=index_previous
+        )
 
     def decrypt(self, value: str) -> str:
         """Decrypt a persisted secret and fail closed on corruption."""

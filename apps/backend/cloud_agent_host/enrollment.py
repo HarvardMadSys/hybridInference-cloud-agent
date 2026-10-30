@@ -150,6 +150,10 @@ class HostIdentity:
     #: ``None`` means that control plane does not send them, which leaves
     #: downloads as they are rather than treating every target as withdrawn.
     runtime_downloads: list[dict[str, Any]] | None = None
+    #: The npm registry the control plane says this deployment downloads
+    #: agent versions from ("" for the public registry). ``None`` means that
+    #: control plane does not manage it, so the host keeps its own value.
+    runtime_registry_url: str | None = None
 
 
 def credential_path() -> Path:
@@ -212,6 +216,47 @@ def store_credential(credential: str) -> None:
             os.fsync(directory)
         finally:
             os.close(directory)
+
+
+#: Advertised while this host can keep a renewed credential: its credential is
+#: the file's, not injected through the environment (which it cannot rewrite).
+CREDENTIAL_RENEWAL_CAPABILITY = "host-credential-renewal-v1"
+
+
+def credential_renewable() -> bool:
+    """Whether a renewed credential can be stored where this host reads it at start."""
+    return not (os.environ.get(ENV_HOST_CREDENTIAL) or "").strip()
+
+
+def reload_credential(identity: HostIdentity) -> None:
+    """Pick up a credential another runner on this machine stored after a renewal."""
+    stored = load_credential()
+    if stored and stored != identity.credential:
+        identity.credential = stored
+
+
+def _adopt_renewed_credential(answer: dict[str, Any], identity: HostIdentity) -> None:
+    """Store a renewed credential first, then use it; a failed write keeps the current one.
+
+    The control plane sends it again on the next beat until it is used, and
+    keeps accepting the current one until then.
+    """
+    renewed = answer.get("credential_renewal")
+    if not (isinstance(renewed, str) and renewed.startswith("aht.") and credential_renewable()):
+        return
+    if renewed == identity.credential:
+        return
+    try:
+        store_credential(renewed)
+    except OSError as exc:
+        print(
+            f"host credential renewal could not be stored ({type(exc).__name__}); "
+            "keeping the current credential",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    identity.credential = renewed
 
 
 def _post(url: str, body: dict[str, Any], *, bearer: str = "") -> dict[str, Any]:
@@ -358,6 +403,7 @@ def heartbeat(
     settings_local: dict[str, int | float] | None = None,
     sandbox_archive_settings_applied_revision: int | None = None,
     runtime_downloads: list[dict[str, Any]] | None = None,
+    config_reports: dict[str, str] | None = None,
     on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
     on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
@@ -416,11 +462,13 @@ def heartbeat(
                 sandbox_archive_settings_applied_revision
             ),
             "runtime_downloads": runtime_downloads,
+            "config_reports": config_reports,
             "physical_host": os.environ.get("AGENT_PHYSICAL_HOST", "").strip() or None,
         },
         bearer=identity.credential,
     )
     _warn_sandbox_manager_error(answer, identity.host)
+    _adopt_renewed_credential(answer, identity)
     lost = answer.get("residencies_lost")
     if lost and on_residencies_lost is not None:
         # The control plane's side of the fence, delivered with the
@@ -472,6 +520,8 @@ def heartbeat(
     identity.runtime_downloads = (
         [item for item in targets if isinstance(item, dict)] if isinstance(targets, list) else None
     )
+    registry = answer.get("runtime_registry_url")
+    identity.runtime_registry_url = registry if isinstance(registry, str) else None
     return identity
 
 
@@ -604,6 +654,8 @@ class HostHeartbeat:
         on_sandbox_archive_settings: Callable[[dict[str, Any] | None], None] | None = None,
         runtime_downloads_report: Callable[[], list[dict[str, Any]]] | None = None,
         on_runtime_downloads: Callable[[list[dict[str, Any]] | None], None] | None = None,
+        config_reports: Callable[[], dict[str, str]] | None = None,
+        on_runtime_registry: Callable[[str | None], object] | None = None,
         on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
@@ -665,6 +717,10 @@ class HostHeartbeat:
         # when the answer does not say.
         self._runtime_downloads_report = runtime_downloads_report
         self._on_runtime_downloads = on_runtime_downloads
+        # Asked per beat for the non-numeric configuration this host uses,
+        # and told after each answered beat which registry to download from.
+        self._config_reports = config_reports
+        self._on_runtime_registry = on_runtime_registry
         self._on_residencies_lost = on_residencies_lost
         self._on_retained_sandboxes_stop = on_retained_sandboxes_stop
         self._stop = threading.Event()
@@ -729,6 +785,9 @@ class HostHeartbeat:
                 capabilities = (
                     self._capabilities() if callable(self._capabilities) else self._capabilities
                 )
+                if credential_renewable():
+                    reload_credential(self._identity)
+                    capabilities = [*(capabilities or []), CREDENTIAL_RENEWAL_CAPABILITY]
                 settings_applied, settings_local = (
                     self._settings_report() if self._settings_report is not None else (None, None)
                 )
@@ -772,9 +831,13 @@ class HostHeartbeat:
                         if self._runtime_downloads_report is not None
                         else None
                     ),
+                    config_reports=(
+                        self._config_reports() if self._config_reports is not None else None
+                    ),
                     on_residencies_lost=self._on_residencies_lost,
                     on_retained_sandboxes_stop=self._on_retained_sandboxes_stop,
                 )
+                self._apply_runtime_registry()
                 self._apply_settings()
                 self._apply_sandbox_archive_settings()
                 self._apply_runtime_downloads()
@@ -842,6 +905,21 @@ class HostHeartbeat:
                 "agent_sandbox_archive_settings_apply_failed",
                 extra={
                     "event": "agent_sandbox_archive_settings_apply_failed",
+                    "host": self._identity.host,
+                },
+            )
+
+    def _apply_runtime_registry(self) -> None:
+        """Hand the answered registry on before the targets that will use it."""
+        if self._on_runtime_registry is None:
+            return
+        try:
+            self._on_runtime_registry(self._identity.runtime_registry_url)
+        except Exception:
+            logger.exception(
+                "agent_runtime_registry_apply_failed",
+                extra={
+                    "event": "agent_runtime_registry_apply_failed",
                     "host": self._identity.host,
                 },
             )

@@ -33,14 +33,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from cloud_agent.credential_cipher import (
-    USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,
+    user_credential_cipher,
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
-from cloud_agent.settings import setting_env
 from cloud_agent_shared.ssh_access import (
     HOST_KEY_ALGORITHMS,
     HOST_KEY_TYPES,
@@ -92,10 +91,7 @@ class SshStorage(Protocol):
 
 def ssh_key_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher server private keys are stored under."""
-    material = (
-        secret if secret is not None else setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or ""
-    )
-    return CredentialCipher(material, domain=SSH_SERVER_KEY_DOMAIN)
+    return user_credential_cipher(SSH_SERVER_KEY_DOMAIN, secret)
 
 
 def generate_key_pair(comment: str) -> tuple[str, str]:

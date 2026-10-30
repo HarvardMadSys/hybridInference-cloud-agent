@@ -435,12 +435,16 @@ def test_each_heartbeat_recomputes_dynamic_host_capabilities(monkeypatch) -> Non
         return {"status": "online", "heartbeat_interval_seconds": 0.001}
 
     monkeypatch.setattr(enrollment, "_post", record)
+    monkeypatch.delenv(enrollment.ENV_HOST_CREDENTIAL, raising=False)
     beat._run()
 
-    assert bodies[0]["capabilities"] == ["shared-sandbox-v1"]
+    # A host whose credential is its file's can keep a renewed one, and says so.
+    renews = enrollment.CREDENTIAL_RENEWAL_CAPABILITY
+    assert bodies[0]["capabilities"] == ["shared-sandbox-v1", renews]
     assert bodies[1]["capabilities"] == [
         "shared-sandbox-v1",
         "shared-sandbox-deployment:target",
+        renews,
     ]
 
 

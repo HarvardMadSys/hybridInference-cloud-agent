@@ -1,11 +1,10 @@
 """Safe domain failures for owner environment configuration and execution."""
 
 from cloud_agent.credential_cipher import (
-    USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,
+    user_key_ring,
 )
-from cloud_agent.settings import setting_env
 from cloud_agent_shared.environment import ENVIRONMENT_DOMAIN
 
 
@@ -52,10 +51,13 @@ class EnvironmentCipher(CredentialCipher):
 
     def __init__(self) -> None:
         """Derive the environment domain key without exposing key diagnostics."""
+        current, previous, index_previous = user_key_ring()
         try:
             super().__init__(
-                setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or "",
+                current,
                 domain=ENVIRONMENT_DOMAIN,
+                previous=previous,
+                index_previous=index_previous,
             )
         except CredentialCipherError:
             raise EnvironmentEncryptionError("Environment encryption is unavailable") from None

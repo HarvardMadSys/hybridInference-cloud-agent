@@ -201,6 +201,8 @@ services:
       # A sandbox-manager-only secret. Host enrollment/claim uses its persisted host
       # credential; neither credential is accepted at the other's surface.
       AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:?a secret for this host's sandbox manager}
+      # Accepted beside the credential during a rotation (deploy/agent/rotation.py).
+      AGENT_SANDBOX_MANAGER_TOKEN_NEXT: ${AGENT_SANDBOX_MANAGER_TOKEN_NEXT:-}
       AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
       # Daemon-side path, observed through `docker info`; it is deliberately
       # not mounted into this container. Leave the default. A durable disk is
@@ -347,6 +349,8 @@ services:
       # Must match the sandbox manager service above. It is independent from the
       # enrollment-issued host credential used for heartbeat and claim.
       AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:?a secret for this host's sandbox manager}
+      # Accepted beside the credential during a rotation (deploy/agent/rotation.py).
+      AGENT_SANDBOX_MANAGER_TOKEN_NEXT: ${AGENT_SANDBOX_MANAGER_TOKEN_NEXT:-}
 
       # Every registered runtime has an exact pinned native-resume adapter;
       # the host advertises capability only after conformance.

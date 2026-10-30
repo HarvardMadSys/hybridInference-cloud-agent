@@ -37,6 +37,7 @@ vi.mock('@/components/providers', () => ({
     },
   }),
 }));
+vi.mock('@/lib/api/adminManagement', () => import('./settingsTestFixtures').then((f) => f.noApi));
 vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: vi.fn(),
   setAgentAdminSettings: vi.fn(),

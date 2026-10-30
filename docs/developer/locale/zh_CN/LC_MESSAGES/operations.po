@@ -347,30 +347,23 @@ msgstr ""
 "进程针对同一个控制平面地址最近一次读到的有效外观；第一次成功读取之前，用中性的默认显示。读取成功后，下一次打开页面就能看到保存的修改。这份备用数据里不包含任何会话或访问权限的判断，Web"
 " 进程重启后也不会保留。至于改动何时影响后续操作，以每项设置旁边的说明为准。"
 
-#: ../developer/operations.md:107
+#: ../developer/operations.md
 msgid ""
 "The import of registered environment settings refuses a "
 "`GATEWAY_GRANT_DISPATCH_TOKEN`, `AGENT_ONCALL_DISPATCH_TOKEN`, "
 "`AGENT_CONTROL_TOKEN_SECRET` or `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` "
 "shorter than 32 bytes: the listener stops with an error naming the "
-"variable before anything is written, so rolling back is safe. Check their"
-" lengths before the first deployment of this release. Replacing one has "
-"its usual cost: the dispatch token changes on both sides, a new control "
-"key needs hosts re-enrolled, and a new encryption key orphans saved user "
-"connections. Values already saved in Admin Settings keep working. The "
-"same import refuses an `AGENT_GITHUB_APP_INSTALL_URL` that is not an "
-"`https://github.com` URL and an `AGENT_GITLAB_OAUTH_REDIRECT_URI` that is"
-" not HTTPS (or HTTP on localhost), which their connect flows could never "
-"use."
-msgstr ""
-"导入已登记的环境变量设置时，如果 "
-"`GATEWAY_GRANT_DISPATCH_TOKEN`、`AGENT_ONCALL_DISPATCH_TOKEN`、`AGENT_CONTROL_TOKEN_SECRET`"
-" 或 `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` 短于 32 "
-"字节，就会拒绝：监听器会在写入任何内容之前停下，并在报错里指出是哪个变量，所以回滚是安全的。第一次部署这个版本之前，先检查一下它们的长度。换掉其中任何一个都有相应的代价：dispatch"
-" 令牌要两边同时改；新的控制密钥需要重新注册主机；新的加密密钥会让已保存的用户连接全部失效。已经保存在 Admin Settings "
-"里的值不受影响。同样的导入还会拒绝两种值：不是 `https://github.com` 地址的 "
-"`AGENT_GITHUB_APP_INSTALL_URL`，以及不是 HTTPS（localhost 上的 HTTP 除外）的 "
-"`AGENT_GITLAB_OAUTH_REDIRECT_URI`，因为它们的连接流程根本用不了这样的值。"
+"variable before anything is written, so rolling back is safe. Check "
+"their lengths before the first deployment of this release. Replacing one"
+" by hand has its usual cost: the dispatch token changes on both sides, a"
+" new control key needs hosts re-enrolled, and a new encryption key "
+"orphans saved user connections; the "
+"[rotations](#rotating-keys-and-credentials) avoid the last two. Values "
+"already saved in Admin Settings keep working. The same import refuses an"
+" `AGENT_GITHUB_APP_INSTALL_URL` that is not an `https://github.com` URL "
+"and an `AGENT_GITLAB_OAUTH_REDIRECT_URI` that is not HTTPS (or HTTP on "
+"localhost), which their connect flows could never use."
+msgstr "导入已登记的环境变量设置时，如果 `GATEWAY_GRANT_DISPATCH_TOKEN`、`AGENT_ONCALL_DISPATCH_TOKEN`、`AGENT_CONTROL_TOKEN_SECRET` 或 `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` 短于 32 字节，就会拒绝：监听器会在写入任何内容之前停下，并在报错里指出是哪个变量，所以回滚是安全的。第一次部署这个版本之前，先检查一下它们的长度。手动换掉其中任何一个都有相应的代价：dispatch 令牌要两边同时改；新的控制密钥需要重新注册主机；新的加密密钥会让已保存的用户连接全部失效。后两种可以用[轮换](#rotating-keys-and-credentials)避免。已经保存在 Admin Settings 里的值不受影响。同样的导入还会拒绝两种值：不是 `https://github.com` 地址的 `AGENT_GITHUB_APP_INSTALL_URL`，以及不是 HTTPS（localhost 上的 HTTP 除外）的 `AGENT_GITLAB_OAUTH_REDIRECT_URI`，因为它们的连接流程根本用不了这样的值。"
 
 #: ../developer/operations.md:120
 msgid ""
@@ -417,25 +410,20 @@ msgstr ""
 "和审计记录，没有认证的访问者既看不到也改不了设置。刷新或锁定页面，内存里的令牌就会被清掉。把网关登录、执行相关和用户凭据相关的字段填完，然后注册主机，执行平常的部署命令。可选的集成只有开始配置之后才需要填完"
 "。shared-live 部署关卡仍然要求主机通过资格验证并处于就绪状态。"
 
-#: ../developer/operations.md:150
+#: ../developer/operations.md
 msgid ""
-"Existing installations can retain the environment `AGENT_SESSION_SECRET` "
-"fallback for the settings root. Before removing that legacy environment "
-"entry, set `AGENT_SETTINGS_ENCRYPTION_KEY` to the **same original "
+"Existing installations can retain the environment `AGENT_SESSION_SECRET`"
+" fallback for the settings root. Before removing that legacy environment"
+" entry, set `AGENT_SETTINGS_ENCRYPTION_KEY` to the **same original "
 "value**. Both listeners must receive the same effective key. Back it up "
-"with the database. Before changing that key, re-encrypt stored settings "
-"from the old key to the new one and coordinate the listener rollout; "
-"replacing the environment value alone makes existing ciphertext "
-"unreadable. The saved session signing key can be changed separately from "
-"this stable root. The saved user/compute encryption keys continue to "
-"protect their separate credential stores; the API rejects replacing or "
-"resetting an existing encryption key without a separate credential re-"
-"encryption procedure."
-msgstr ""
-"已有的安装可以继续用环境变量 `AGENT_SESSION_SECRET` 充当设置的根密钥。在删掉这个旧的环境变量之前，先把 "
-"`AGENT_SETTINGS_ENCRYPTION_KEY` "
-"设成**同一个原始值**。两个监听器拿到的实际密钥必须相同。它要和数据库一起备份。要改用另一把密钥，得先把已保存的设置从旧密钥重新加密成新密钥，并协调好两个监听器的上线；只改环境变量的话，已有的密文就再也读不出来了。已保存的会话签名密钥，可以独立于这把固定的根密钥单独修改。已保存的用户加密密钥和计算资源加密密钥，继续保护各自的凭据存储；没有单独的凭据重新加密流程时，API"
-" 不允许替换或重置已有的加密密钥。"
+"with the database. Change that key with its "
+"[rotation](#rotating-keys-and-credentials); replacing the environment "
+"value alone makes existing ciphertext unreadable. The saved session "
+"signing key can be changed separately from this stable root. The saved "
+"user/compute encryption keys continue to protect their separate "
+"credential stores; the API refuses to replace or reset one except "
+"through its rotation."
+msgstr "已有的安装可以继续用环境变量 `AGENT_SESSION_SECRET` 充当设置的根密钥。在删掉这个旧的环境变量之前，先把 `AGENT_SETTINGS_ENCRYPTION_KEY` 设成**同一个原始值**。两个监听器拿到的实际密钥必须相同。它要和数据库一起备份。要换这把密钥，请用[轮换](#rotating-keys-and-credentials)；只改环境变量的话，已有的密文就再也读不出来了。已保存的会话签名密钥，可以独立于这把固定的根密钥单独修改。已保存的用户加密密钥和计算资源加密密钥，继续保护各自的凭据存储；除了各自的轮换，API 不允许替换或重置它们。"
 
 #: ../developer/operations.md:161
 msgid ""
@@ -8919,3 +8907,221 @@ msgid ""
 " any team environment exists, archived ones included."
 msgstr "**回滚。** 只要还存在任何团队环境（包括已归档的），降级到 `0082_team_environments` 以下就会被拒绝。"
 
+#: ../developer/operations.md
+msgid "Rotating keys and credentials"
+msgstr "轮换密钥和凭据"
+
+#: ../developer/operations.md
+msgid ""
+"**Admin → Deployment** rotates every key the deployment holds. Each "
+"rotation keeps the old material working until every process and server "
+"has moved, and says which ones it is waiting for; new values are "
+"generated in the browser and are not shown, except the recovery "
+"administrator token, once. A rotation that stops says what state it left "
+"and keeps the old material; continue it from the same page, from the step"
+" that stopped. A recovery-token rotation and a database workflow are "
+"started again instead."
+msgstr "部署持有的每一把密钥，都可以在 **Admin → Deployment** 里轮换。轮换期间旧材料一直可用，直到所有进程和服务器都换完；页面会写明还在等谁。新值在浏览器里生成，不会显示出来，只有恢复用管理员令牌例外，它会显示一次。轮换停下时，会说明停在了什么状态，并保留旧材料；可以在同一页面从停下的那一步继续。恢复令牌的轮换和数据库操作则要重新开始。"
+
+#: ../developer/operations.md
+msgid "Material"
+msgstr "材料"
+
+#: ../developer/operations.md
+msgid "What happens"
+msgstr "怎么换"
+
+#: ../developer/operations.md
+msgid "What it waits for"
+msgstr "等什么"
+
+#: ../developer/operations.md
+msgid "Recovery administrator token (`ADMIN_TOKEN`)"
+msgstr "恢复用管理员令牌（`ADMIN_TOKEN`）"
+
+#: ../developer/operations.md
+msgid ""
+"Each control-plane machine's agent writes it and restarts the API and "
+"MCP listeners."
+msgstr "每台控制平面机器的代理写入新值，并重启 API 和 MCP 监听器。"
+
+#: ../developer/operations.md
+msgid "Every process reports the new identifier."
+msgstr "所有进程都上报新的标识。"
+
+#: ../developer/operations.md
+msgid "Settings root key"
+msgstr "设置根密钥"
+
+#: ../developer/operations.md
+msgid ""
+"Separated from `AGENT_SESSION_SECRET` with the same bytes, then "
+"replaced, with saved secrets re-encrypted."
+msgstr "先用相同的字节把它从 `AGENT_SESSION_SECRET` 分离出来，再替换，同时重新加密已保存的密钥。"
+
+#: ../developer/operations.md
+msgid ""
+"Every process holds both keys before re-encryption, and drops the old "
+"one after."
+msgstr "重新加密之前，所有进程都持有两把密钥；重新加密之后，所有进程都丢弃旧密钥。"
+
+#: ../developer/operations.md
+msgid "User and compute credential keys"
+msgstr "用户和计算资源凭据密钥"
+
+#: ../developer/operations.md
+msgid ""
+"Both keys decrypt while every stored value is re-encrypted; the user "
+"key's environment fingerprints are then rebuilt."
+msgstr "重新加密每一条已存数据时，两把密钥都能解密；用户密钥的环境指纹随后重建。"
+
+#: ../developer/operations.md
+msgid "Every process declares it can do this and adopts each step."
+msgstr "所有进程都声明支持这项操作，并采纳了每一步。"
+
+#: ../developer/operations.md
+msgid "Server signing key"
+msgstr "服务器签名密钥"
+
+#: ../developer/operations.md
+msgid ""
+"The new key signs; each server receives a renewed credential at its next"
+" heartbeat."
+msgstr "由新密钥开始签发；每台服务器在下一次心跳时收到续期后的凭据。"
+
+#: ../developer/operations.md
+msgid ""
+"Every enrolled server holds a renewed credential, and every turn and "
+"resident session that started earlier has finished."
+msgstr "每台已注册的服务器都持有续期后的凭据，并且更早开始的回合和常驻会话都已结束。"
+
+#: ../developer/operations.md
+msgid "Sandbox manager credential"
+msgstr "sandbox manager 凭据"
+
+#: ../developer/operations.md
+msgid ""
+"Servers accept both, then the control plane switches, then servers drop "
+"the old one. Managed compute servers change over SSH, others through "
+"their deployment agent."
+msgstr "服务器先同时接受新旧两个凭据，然后控制平面切换，最后服务器丢弃旧凭据。托管 compute 服务器经 SSH 更换，其他服务器经部署代理更换。"
+
+#: ../developer/operations.md
+msgid "Each server answers an authenticated check with the new credential."
+msgstr "每台服务器都通过了用新凭据发起的认证检查。"
+
+#: ../developer/operations.md
+msgid "Tunnel keys"
+msgstr "隧道密钥"
+
+#: ../developer/operations.md
+msgid ""
+"New keys are authorized beside the old ones, the server switches, then "
+"the old keys are revoked."
+msgstr "先在旧密钥旁边授权新密钥，服务器切换之后再撤销旧密钥。"
+
+#: ../developer/operations.md
+msgid "A heartbeat over the new tunnel."
+msgstr "收到一次经新隧道发来的心跳。"
+
+#: ../developer/operations.md
+msgid ""
+"The last two restart services, one server at a time, and each server "
+"finishes its running turns first, so a long turn makes the rotation take"
+" as long as that turn. A server with neither a deployment agent nor the "
+"SSH executor stops the start, by name. So does a managed server whose "
+"deployment inputs are files rather than stored in the database."
+msgstr "最后两项要重启服务，一次一台服务器，每台都先跑完手上的回合，所以遇到很长的回合，轮换也要等这么久。既没有部署代理、SSH 执行器也够不到的服务器，会让轮换无法开始，并点名这台服务器。部署输入是文件、没有存进数据库的托管服务器也一样。"
+
+#: ../developer/operations.md
+msgid ""
+"The signing key's previous key is retired automatically. An offline "
+"server, a runner too old to renew, or a credential injected through the "
+"environment keeps it waiting, by name: bring the server back, or remove "
+"it. A single server's credential can also be renewed on its own from the"
+" same page; the old one stops working ten minutes after the new one is "
+"first used."
+msgstr "上一把签名密钥会自动退役。离线的服务器、版本太旧不能续期的 runner、经环境变量注入的凭据，都会让它继续等待，并点名是哪台：要么让这台服务器恢复，要么把它移除。同一页面还可以单独为一台服务器续期凭据；新凭据第一次使用十分钟后，旧凭据失效。"
+
+#: ../developer/operations.md
+msgid ""
+"A control-plane agent edits a tunnel's `authorized_keys` only if its "
+"local policy names that tunnel (`tunnel_authorized_keys`, with the file "
+"and the restrictions to use). For any other far end, typically the "
+"inference gateway, the rotation stops and shows the keys to add or "
+"remove until an administrator confirms; the server's own test of the new"
+" key still has to pass."
+msgstr "只有本机策略点名了某条隧道（`tunnel_authorized_keys`，写明文件和要用的限制），控制平面代理才会改它的 `authorized_keys`。其他远端（通常是推理网关）由轮换停下来，显示要添加或删除的密钥，等管理员确认；服务器自己对新密钥的测试仍然必须通过。"
+
+#: ../developer/operations.md
+msgid "Moving the database"
+msgstr "迁移数据库"
+
+#: ../developer/operations.md
+msgid ""
+"**Admin → Deployment** also changes the connection to the same database,"
+" rotates its password, and moves the data to another database. A "
+"connection change first proves, with a live probe, that the new "
+"connection reaches this same database; a clone cannot pass. Once a new "
+"password is set the old one no longer works, so a failure after that is "
+"fixed forward with the new connection, never rolled back."
+msgstr "**Admin → Deployment** 还可以修改到同一个数据库的连接、轮换数据库口令，以及把数据迁到另一个数据库。修改连接前，会先用实时探针证明新连接到达的就是这个数据库，克隆库通不过这一步。新口令一旦设置，旧口令就失效了，所以之后的失败只能用新连接继续修复，不能回滚。"
+
+#: ../developer/operations.md
+msgid ""
+"A move needs the PostgreSQL client programs in the control-plane "
+"machine's policy (`database_tools`). It runs in this order:"
+msgstr "迁移需要控制平面机器的策略里配置好 PostgreSQL 客户端程序（`database_tools`）。步骤如下："
+
+#: ../developer/operations.md
+msgid ""
+"Every control-plane process enters maintenance and confirms it. Writes "
+"are answered with 503 and `Retry-After`, including hosts' claims and "
+"heartbeats, and every page shows a banner. Reading keeps working."
+msgstr "每个控制平面进程进入维护状态并确认。写请求一律返回 503 和 `Retry-After`，主机的认领和心跳也一样，每个页面都会显示横幅。读取不受影响。"
+
+#: ../developer/operations.md
+msgid ""
+"The agent refuses a target that holds any table, runs an older "
+"PostgreSQL or lacks an extension the source uses. It then makes the "
+"source read-only and ends its other sessions."
+msgstr "代理会拒绝已有任何表、PostgreSQL 版本更旧、或缺少源库所用扩展的目标库。然后把源库设为只读，并结束它上面的其他会话。"
+
+#: ../developer/operations.md
+msgid ""
+"It copies the data and compares every table's row count, the migration "
+"revision and the identity namespace."
+msgstr "复制数据，并比对每张表的行数、迁移修订和身份命名空间。"
+
+#: ../developer/operations.md
+msgid ""
+"It marks maintenance over in the target and switches the control plane "
+"to it."
+msgstr "在目标库里标记维护结束，再把控制平面切换过去。"
+
+#: ../developer/operations.md
+msgid ""
+"The switch restarts the control plane, so the service stops answering "
+"for as long as the restart takes, usually a minute or two; that outage "
+"is separate from the maintenance before it. The Deployment page "
+"reconnects and shows the result from the new database."
+msgstr "切换会重启控制平面，重启期间服务不响应，通常一两分钟；这段中断和之前的维护状态是两回事。Deployment 页面重新连上后，会从新数据库显示结果。"
+
+#: ../developer/operations.md
+msgid ""
+"Until the switch, a failure reopens the source and removes the partial "
+"copy. After writes resume on the target, the source stays read-only and "
+"is never switched back to: keep it until you have confirmed the move, "
+"then drop it yourself."
+msgstr "切换之前出错，会重新打开源库并删除不完整的副本。写入在目标库恢复之后，源库保持只读，也绝不会再切回去：请保留它，确认迁移无误后再自行删除。"
+
+#: ../developer/operations.md
+msgid ""
+"The agent journals each step under `<DEPLOY_ROOT>/agent/`, with both "
+"connections sealed to its own key, so a move survives the control plane,"
+" and the agent itself, restarting: the agent resumes by itself. On the "
+"machine, `python -m deploy.agent --root \"$DEPLOY_ROOT\" database status` "
+"shows where it stands, and `database unfence --operation-id <id>` "
+"reopens the source before the switch. Keep `<DEPLOY_ROOT>/agent/` in the"
+" recovery set."
+msgstr "代理把每一步记录在 `<DEPLOY_ROOT>/agent/` 下，两个连接都用它自己的密钥密封，所以控制平面或代理本身重启都不影响迁移：代理会自己续做。在机器上，`python -m deploy.agent --root \"$DEPLOY_ROOT\" database status` 可以查看进度，切换之前可以用 `database unfence --operation-id <id>` 重新打开源库。请把 `<DEPLOY_ROOT>/agent/` 放进恢复集合。"

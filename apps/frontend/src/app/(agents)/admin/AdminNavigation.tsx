@@ -13,6 +13,7 @@ const SECTIONS = [
   { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
   { key: 'settings', label: 'Settings', href: '/admin/settings' },
   { key: 'database', label: 'Database', href: '/admin/database' },
+  { key: 'deployment', label: 'Deployment', href: '/admin/deployment' },
   { key: 'audit', label: 'Audit log', href: '/admin/audit' },
 ] as const;
 
@@ -29,6 +30,7 @@ export function AdminNavigation({
     | 'measurements'
     | 'settings'
     | 'database'
+    | 'deployment'
     | 'audit';
 }) {
   const section = current === 'runs' ? 'activity' : current;

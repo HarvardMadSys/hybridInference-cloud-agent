@@ -30,9 +30,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.credential_cipher import (
-    USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,
+    user_credential_cipher,
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.authorization import visible_capabilities
@@ -58,7 +58,6 @@ from cloud_agent.mcp.models import (
     Transport,
 )
 from cloud_agent.mcp.net_policy import EndpointRejected, resource_covers
-from cloud_agent.settings import setting_env
 
 if TYPE_CHECKING:
     from cloud_agent.ports.mcp import McpConnectionRepository
@@ -85,10 +84,7 @@ class McpRegistryError(Exception):
 
 
 def _credential_cipher(secret: str | None, *, domain: bytes) -> CredentialCipher:
-    material = (
-        secret if secret is not None else setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or ""
-    )
-    return CredentialCipher(material, domain=domain)
+    return user_credential_cipher(domain, secret)
 
 
 def mcp_cipher(secret: str | None = None) -> CredentialCipher:

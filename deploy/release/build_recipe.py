@@ -81,6 +81,24 @@ RECIPE_FILES: tuple[str, ...] = (
     "deploy/release/manifest.schema.json",
     "deploy/release/requirements.txt",
     "deploy/release/README.md",
+    # The deployment agent, with its copy of the contract it shares with the
+    # control plane (tests/unit/deploy/test_deploy_agent_contract.py keeps
+    # the copy identical to cloud_agent_shared.deployment_contract).
+    "deploy/agent/__init__.py",
+    "deploy/agent/__main__.py",
+    "deploy/agent/cli.py",
+    "deploy/agent/client.py",
+    "deploy/agent/database.py",
+    "deploy/agent/kata-install-helper.sh",
+    "deploy/agent/operations.py",
+    "deploy/agent/README.md",
+    "deploy/agent/releases.py",
+    "deploy/agent/requirements.txt",
+    "deploy/agent/rotation.py",
+    "deploy/agent/store.py",
+    "deploy/agent/system.py",
+    "deploy/agent/cloud-agent-deploy-agent.service",
+    "deploy/agent/deployment_contract.py",
 )
 
 #: Names that never belong in an archive, whatever the list says.

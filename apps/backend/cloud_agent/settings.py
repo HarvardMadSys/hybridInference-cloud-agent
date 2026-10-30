@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.deployment_setup import BOOTSTRAP as BOOTSTRAP, bootstrap_snapshot
-from cloud_agent.domain_cipher import settings_root_key
+from cloud_agent.domain_cipher import decrypt_with_root, settings_root_key
 from cloud_agent.setting_definition import (
     MINIMUM_CREDENTIAL_BYTES as MINIMUM_CREDENTIAL_BYTES,
     Setting,
@@ -31,6 +32,11 @@ from cloud_agent.setting_definition import (
     _s3_bucket,
     _s3_prefix,
     _s3_region,
+)
+from cloud_agent.setting_registrations import (
+    IMPORTED_AFTER_REGISTRATION,
+    LATER_MIGRATED_DEFINITIONS,
+    VERIFIED_APPLY,
 )
 from cloud_agent_shared.sandbox_manager_compat import (
     manager_env,
@@ -695,7 +701,7 @@ SETTINGS: tuple[Setting, ...] = (
     _numeric("task_titles.max_attempts", "Maximum title attempts", "Task titles", 5, 1, 5),
     _numeric("task_titles.max_tokens", "Maximum title output tokens", "Task titles", 256, 16, 256),
 )
-MIGRATED_SETTINGS: tuple[Setting, ...] = (
+_MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
     Setting(
         "sandbox_archive.bucket",
         "Sandbox archive S3 bucket",
@@ -792,7 +798,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         secret=True,
         minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
         minimum_bytes_new_values_only=True,
-        description="A random key of at least 32 bytes. Replacing it invalidates existing host and worker credentials; re-enroll hosts before resuming work.",
+        description="A random key of at least 32 bytes. Replace it with the rotation on the Deployment page, which moves every server to it first; saving another value here invalidates host and worker credentials at once.",
     ),
     Setting(
         "source_control_encryption_key",
@@ -803,7 +809,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         secret=True,
         minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
         minimum_bytes_new_values_only=True,
-        description="A random key of at least 32 bytes. Protects user source-control, MCP, environment, and SSH credentials. Once configured, rotation requires a separate re-encryption procedure.",
+        description="A random key of at least 32 bytes. Protects user source-control, MCP, environment, and SSH credentials. Once configured, it changes only through the rotation on the Deployment page, which re-encrypts them.",
     ),
     Setting(
         "compute_encryption_key",
@@ -813,7 +819,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_COMPUTE_SECRET_KEY",
         secret=True,
         minimum_bytes=32,
-        description="A random key of at least 32 bytes. Once configured, rotation requires a separate re-encryption procedure.",
+        description="A random key of at least 32 bytes. Once configured, it changes only through the rotation on the Deployment page, which re-encrypts stored compute credentials.",
     ),
     Setting(
         "sandbox_manager_token",
@@ -822,7 +828,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_SANDBOX_MANAGER_TOKEN",
         secret=True,
-        description="Must match the credential provisioned on each host's sandbox manager. Coordinate changes with those hosts.",
+        description="Must match the credential provisioned on each host's sandbox manager. Change it with the rotation on the Deployment page, which updates every server first.",
     ),
     Setting(
         "sandbox_manager_url_allowed_hosts",
@@ -892,8 +898,29 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
             "this deployment offers no default at all."
         ),
     ),
+    *LATER_MIGRATED_DEFINITIONS,
 )
-SETTINGS += MIGRATED_SETTINGS
+SETTINGS += _MIGRATED_DEFINITIONS
+
+SETTINGS = tuple(
+    replace(
+        setting,
+        apply_mode=VERIFIED_APPLY[setting.key][0],
+        apply_description=VERIFIED_APPLY[setting.key][1],
+    )
+    if setting.key in VERIFIED_APPLY
+    else setting
+    for setting in SETTINGS
+)
+_MIGRATED_DEFINITIONS = tuple(
+    next(candidate for candidate in SETTINGS if candidate.key == setting.key)
+    for setting in _MIGRATED_DEFINITIONS
+)
+#: Settings an existing database imports from the environment when its row
+#: lacks them. Every registration with an environment name belongs here.
+MIGRATED_SETTINGS: tuple[Setting, ...] = _MIGRATED_DEFINITIONS + tuple(
+    setting for setting in SETTINGS if setting.key in IMPORTED_AFTER_REGISTRATION
+)
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 SETTINGS_BY_STORAGE_KEY = {setting.storage_key: setting for setting in SETTINGS}
 _SETTINGS_BY_ENV = {setting.env: setting for setting in SETTINGS if setting.env}
@@ -940,9 +967,13 @@ def _decode(
     for setting in SETTINGS:
         value = encoded.get(setting.storage_key, setting.default)
         if setting.secret and isinstance(value, dict) and set(value) == {"ciphertext"}:
-            cipher = _cipher(setting.storage_key)
             try:
-                value = cipher.decrypt(value["ciphertext"])
+                value = decrypt_with_root(
+                    lambda key, domain=setting.storage_key: CredentialCipher(
+                        key, domain=b"cloud-agent/admin-settings/v1/" + domain.encode()
+                    ),
+                    value["ciphertext"],
+                )
             except CredentialCipherError:
                 # Name the setting, never the value: the cipher's own message
                 # cannot say which of the stored secrets failed.
@@ -1015,6 +1046,19 @@ def validate_stored_settings(encoded: Mapping[str, Any]) -> None:
     _decode(encoded)
 
 
+def _staged_rotation(
+    before: Mapping[str, SettingValue], after: Mapping[str, SettingValue], key: str
+) -> bool:
+    """Whether this update replaces ``key`` the one way a rotation may: keeping it to decrypt.
+
+    The new key must be set, the old one must become ``<key>_previous`` in the
+    same update, and no earlier rotation may still be keeping a previous key:
+    replacing that one would strand what is still encrypted with it.
+    """
+    previous = key + "_previous"
+    return bool(after[key]) and not before[previous] and after[previous] == before[key]
+
+
 def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, Any]) -> None:
     """Validate an atomic update against the snapshot it replaces.
 
@@ -1035,7 +1079,7 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
     }
     before, after = _decode(previous, []), _decode(encoded, [], changed=changed)
     for key in ("source_control_encryption_key", "compute_encryption_key"):
-        if before[key] and before[key] != after[key]:
+        if before[key] and before[key] != after[key] and not _staged_rotation(before, after, key):
             raise ValueError(
                 f"{SETTINGS_BY_KEY[key].label} cannot be replaced or reset without re-encrypting stored credentials"
             )
@@ -1057,8 +1101,18 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
         )
 
 
-def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
-    """Import only registered environment variables into the initial settings row."""
+def initial_settings(  # noqa: C901, PLR0912 complexity baseline, #771
+    *, keys: set[str] | None = None, problems: list[str] | None = None
+) -> dict[str, Any]:
+    """Import only registered environment variables into the initial settings row.
+
+    The first row refuses an invalid value, so a new deployment learns about
+    it before anything is stored. ``keys`` imports into an existing row on
+    upgrade: there an invalid value would stop a running deployment, so it
+    imports the default and ``problems`` names the variable, never its value.
+    A setting marked ``invalid_env_uses_default`` does that on the first row
+    too, as the reader it replaced did.
+    """
     result: dict[str, Any] = {}
     values: dict[str, SettingValue] = {setting.key: setting.default for setting in SETTINGS}
     imported: dict[str, SettingValue] = {}
@@ -1101,13 +1155,19 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:  # noqa
                     normalized = raw.strip().lower()
                     value = normalized if normalized in {"text", "json"} else "text"
                 value = setting.validate(value, saved=True)
-            except SettingTooShort:
-                raise ValueError(
-                    f"Invalid initial configuration for {setting.label} ({setting.env}): "
-                    f"use at least {setting.minimum_bytes} bytes"
-                ) from None
-            except (ValueError, OverflowError):
-                raise ValueError(f"Invalid initial configuration for {setting.label}") from None
+            except (ValueError, OverflowError) as exc:
+                if keys is None and not setting.invalid_env_uses_default:
+                    if isinstance(exc, SettingTooShort):
+                        raise ValueError(
+                            f"Invalid initial configuration for {setting.label} "
+                            f"({setting.env}): use at least {setting.minimum_bytes} bytes"
+                        ) from None
+                    raise ValueError(f"Invalid initial configuration for {setting.label}") from None
+                value = imported.get(setting.key, setting.default)
+                if problems is not None:
+                    problems.append(
+                        f"{setting.env} is not a valid {setting.label}; imported the default"
+                    )
         values[setting.key] = value
         result[setting.storage_key] = _encode(setting, value)
     _validate_relations(values)
@@ -1156,7 +1216,8 @@ def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, An
     return {
         "revision": revision,
         "definitions": [
-            {**setting.definition(), "read_only": setting.key in locked} for setting in SETTINGS
+            {**setting.definition(), "read_only": setting.key in locked or setting.workflow_only}
+            for setting in SETTINGS
         ],
         "values": {
             setting.key: None if setting.secret else values[setting.key] for setting in SETTINGS
@@ -1354,9 +1415,14 @@ async def initialize_settings(repository: SettingsRepository, *, seed: bool = Tr
     missing = {setting.storage_key for setting in MIGRATED_SETTINGS} - encoded.keys()
     if revision < 0 or missing:
         if seed:
+            problems: list[str] = []
             revision, encoded = await repository.seed_settings(
-                initial_settings(keys=missing if revision >= 0 else None)
+                initial_settings(keys=missing if revision >= 0 else None, problems=problems)
             )
+            from cloud_agent.logging_utils import get_logger
+
+            for problem in problems:
+                get_logger(__name__).warning("settings import: %s", problem)
         else:
             # Only the main listener has the complete legacy environment.
             # A relay racing it must never seed blank integration credentials.
@@ -1403,6 +1469,12 @@ async def synchronize_settings(repository: SettingsRepository) -> None:
             logger.warning("settings synchronization failed (%s: %s)", type(exc).__name__, exc)
         except Exception as exc:
             logger.warning("settings synchronization failed (%s)", type(exc).__name__)
+
+
+def adopted_revision() -> int:
+    """The settings revision this process uses now; ``-1`` before the first adoption."""
+    with _lock:
+        return _revision
 
 
 def reset_settings() -> None:

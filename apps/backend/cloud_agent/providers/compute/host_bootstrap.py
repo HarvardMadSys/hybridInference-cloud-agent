@@ -30,6 +30,11 @@ from cloud_agent.ports.external.host_bootstrap import (
     RecordedHostState,
     TransferResult,
 )
+from cloud_agent.providers.compute.host_apply_scripts import (
+    APPLY_ENVIRONMENT,
+    APPLY_KEYS,
+    APPLY_SERVICES,
+)
 from cloud_agent.providers.compute.release_scripts import _INVENTORY, _QUIESCE
 from cloud_agent.providers.compute.ssh import known_hosts_line
 from cloud_agent.providers.compute.transfer_scripts import (
@@ -38,6 +43,7 @@ from cloud_agent.providers.compute.transfer_scripts import (
     _REVOKE_TRANSFER_TARGET,
     _TRANSFER_KEY,
 )
+from cloud_agent_shared.deployment_contract import check_rendered_environment
 from cloud_agent_shared.sandbox_manager_compat import manager_environment
 
 if TYPE_CHECKING:
@@ -603,6 +609,9 @@ if marker.is_file() and not marker.is_symlink() and json.loads(marker.read_text(
 print(json.dumps({'ready': ready, 'blocked_reasons': [] if ready else ['host_readiness_failed']}))
 """
 
+#: A rotation's restart waits for the Host's running turns to finish.
+_APPLY_TIMEOUT_SECONDS = 24 * 3600
+
 _REQUIRED_ENV = {
     "AGENT_SANDBOX_IMAGE",
     "AGENT_SANDBOX_MANAGER_TOKEN",
@@ -1068,6 +1077,55 @@ class SshHostBootstrap:
             deployment_sha=profile.deployment_sha,
             blocked_reasons=_remote_reasons(result.get("blocked_reasons")),
         )
+
+    async def apply_environment(
+        self,
+        node: NodeObservation,
+        profile: DeploymentProfile,
+        intent: BootstrapIntent,
+        *,
+        changes: dict[str, str] | None = None,
+        remove: tuple[str, ...] = (),
+        files: dict[str, str] | None = None,
+        services: tuple[str, ...] = (),
+    ) -> None:
+        """Change a running Host's credentials through the fixed apply script.
+
+        ``changes`` and ``files`` travel on stdin, never in a command line. The
+        remote script refuses anything but its short lists of keys, files and
+        services, drains before it restarts, and restores what it replaced when
+        the services do not stay up. Raises ``ProviderError`` unless it applied.
+        """
+        check_rendered_environment("host", dict(changes or {}))
+        if not (set(changes or {}) | set(remove)) <= APPLY_KEYS or not (
+            set(services) <= APPLY_SERVICES
+        ):
+            raise ProviderError("invalid_configuration", "This change is not a credential rotation")
+        payload = {
+            **self._params(profile, intent),
+            "changes": dict(changes or {}),
+            "remove": list(remove),
+            "files": dict(files or {}),
+            "services": list(services),
+        }
+        result = self._json(
+            await self._transport.run(
+                self._connection(node),
+                "sudo -n python3 -c " + shlex.quote(APPLY_ENVIRONMENT),
+                stdin=json.dumps(payload, separators=(",", ":")).encode(),
+                timeout=_APPLY_TIMEOUT_SECONDS,
+            )
+        )
+        if result.get("applied") is not True:
+            reason = _remote_reason(result.get("reason")) or "host_apply_failed"
+            restored = result.get("restored")
+            raise ProviderError(
+                reason,
+                "The Host did not stay up on the new credentials"
+                + ("; the previous ones were restored" if restored else "")
+                if reason == "services_unhealthy"
+                else "The Host refused this credential change",
+            )
 
     async def inventory(
         self,

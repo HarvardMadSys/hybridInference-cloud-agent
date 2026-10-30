@@ -229,6 +229,7 @@ class FakeHostPoolStore(AllCapabilities):
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: list[dict[str, Any]] | None = None,
+        config_reports: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
@@ -241,19 +242,18 @@ class FakeHostPoolStore(AllCapabilities):
         row["last_heartbeat_at"] = datetime.now(UTC)
         for field, value in (
             ("slots_total", slots_total),
-            # "" overwrites — the host saying nothing is wrong — exactly the
-            # COALESCE the real store applies.
+            # "" overwrites (the host saying nothing is wrong), as the store's COALESCE.
             ("launch_error", launch_error),
             ("runner_version", runner_version),
             ("sandbox_manager_url", sandbox_manager_url),
-            # "" and {} overwrite — only None means "not reported", exactly
-            # the COALESCE the real store applies.
+            # "" and {} overwrite; only None is "not reported", as the store's COALESCE.
             ("sandbox_runtime", sandbox_runtime),
             ("sandbox_image_digest", sandbox_image_digest),
             ("runtime_versions", runtime_versions),
             ("runtime_versions_available", runtime_versions_available),
             ("settings_applied", settings_applied),
             ("settings_local", settings_local),
+            ("config_reports", config_reports),
         ):
             if value is not None:
                 row[field] = value

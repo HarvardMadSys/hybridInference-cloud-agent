@@ -637,7 +637,9 @@ async def test_public_site_settings_expose_only_display_allowlist():
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
     view = response.json()
-    assert set(view) == {"branding", "features"}
+    assert set(view) == {"branding", "features", "maintenance"}
+    # Whether changes are refused for maintenance, and nothing about why or where.
+    assert view["maintenance"] == {"active": False}
     assert set(view["branding"]) == {
         "appName",
         "orgName",

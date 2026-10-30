@@ -44,3 +44,9 @@ export function applicationSnapshot(over: Partial<AgentAdminSettings> = {}): Age
     ...over,
   };
 }
+
+/** The management API of a control plane that has none: the page must look the same. */
+export const noApi = {
+  getManagementCatalog: () => Promise.reject(new Error('not found')),
+  getManagementStatus: () => Promise.reject(new Error('not found')),
+};

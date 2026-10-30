@@ -93,8 +93,8 @@ def test_pending_deployment_heartbeats_but_does_not_poll(monkeypatch, tmp_path):
         ("AGENT_HOST_SLOTS", "1"),
         ("AGENT_HOST_SLOTS", "nope"),
         ("AGENT_HOST_SLOTS", "129"),
-        ("AGENT_SHARED_RESIDENT_CAPACITY", "1"),
-        ("AGENT_SHARED_RESIDENT_CAPACITY", "129"),
+        # A bad local AGENT_SHARED_RESIDENT_CAPACITY no longer withholds them
+        # (P1 debt, fixed): test_host_late_settings.py pins the default.
     ],
 )
 def test_shared_live_attestation_rejects_an_incomplete_host(monkeypatch, name, value):

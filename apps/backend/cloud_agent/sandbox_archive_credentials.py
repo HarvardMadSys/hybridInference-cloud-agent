@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
-from cloud_agent.domain_cipher import settings_root_key
+from cloud_agent.domain_cipher import decrypt_with_root, settings_root_key
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
@@ -39,6 +39,20 @@ def _cipher() -> CredentialCipher:
         raise SandboxArchivePolicyError(str(exc)) from exc
 
 
+def open_archive_secret(raw: Mapping[str, Any], *, previous_allowed: bool = True) -> dict[str, Any]:
+    """Decrypt a stored archive policy's secret; ``previous_allowed=False`` proves a re-encryption."""
+    if previous_allowed:
+        return _open_archive_secret(raw)
+    values = dict(raw)
+    secret = values.get(_SECRET)
+    if isinstance(secret, dict) and "ciphertext" in secret:
+        try:
+            values[_SECRET] = _cipher().decrypt(secret["ciphertext"])
+        except CredentialCipherError as exc:
+            raise SandboxArchivePolicyError("the re-encrypted access key does not open") from exc
+    return values
+
+
 def _open_archive_secret(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Decrypt a stored secret, rejecting plaintext at rest."""
     values = dict(raw)
@@ -52,7 +66,9 @@ def _open_archive_secret(raw: Mapping[str, Any]) -> dict[str, Any]:
         and isinstance(secret.get("ciphertext"), str)
     ):
         try:
-            values[_SECRET] = _cipher().decrypt(secret["ciphertext"])
+            values[_SECRET] = decrypt_with_root(
+                lambda key: CredentialCipher(key, domain=_DOMAIN), secret["ciphertext"]
+            )
         except CredentialCipherError as exc:
             raise SandboxArchivePolicyError(
                 "stored AWS secret access key could not be decrypted"

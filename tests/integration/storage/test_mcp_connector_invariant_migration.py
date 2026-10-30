@@ -20,7 +20,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0106_user_model_connections"
+_HEAD = "0112_rotation_closure"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
@@ -97,7 +97,21 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0088_sandbox_retry_budget").down_revision == (
         "0087_sandbox_deletion_attempts"
     )
-    assert script.get_revision(_HEAD).down_revision == "0105_job_event_usage_summary"
+    assert script.get_revision(_HEAD).down_revision == "0111_database_probes"
+    assert script.get_revision("0111_database_probes").down_revision == "0110_admin_credentials"
+    assert script.get_revision("0110_admin_credentials").down_revision == ("0109_deployment_agents")
+    assert script.get_revision("0109_deployment_agents").down_revision == (
+        "0108_control_plane_instances"
+    )
+    assert script.get_revision("0108_control_plane_instances").down_revision == (
+        "0107_host_late_settings"
+    )
+    assert script.get_revision("0107_host_late_settings").down_revision == (
+        "0106_user_model_connections"
+    )
+    assert script.get_revision("0106_user_model_connections").down_revision == (
+        "0105_job_event_usage_summary"
+    )
     assert script.get_revision("0105_job_event_usage_summary").down_revision == (
         "0104_notification_change_keyset"
     )

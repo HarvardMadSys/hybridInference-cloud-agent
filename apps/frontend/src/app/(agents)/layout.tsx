@@ -9,6 +9,7 @@ import { SessionSwitchWatcher } from '@/components/features/auth/SessionSwitchWa
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAgentChangeStream } from '@/components/features/agents/agentPush';
 import { AgentNotifications } from '@/components/features/agents/AgentNotifications';
+import { MaintenanceBanner } from '@/components/features/agents/MaintenanceBanner';
 import { FirstRunProvider } from '@/components/features/agents/firstRun';
 import { AgentReadProvider } from '@/components/features/agents/AgentReadProvider';
 import { useAuth, useT } from '@/components/providers';
@@ -454,6 +455,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
               }
             />
             <GatewayAccountBanner />
+            <MaintenanceBanner />
             <AgentsShell
               settingsNavigation={
                 onSettings

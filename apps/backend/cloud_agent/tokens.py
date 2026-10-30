@@ -85,6 +85,31 @@ def _signing_key() -> bytes:
     return hashlib.sha256(_SIGNING_CONTEXT + secret).digest()
 
 
+def _verification_keys() -> list[bytes]:
+    """The signing key, then the previous one while a rotation keeps it for verifying.
+
+    ``control_signing_secret_previous`` is only ever verified with, never
+    signed with: a token signed before the rotation keeps working until it
+    expires or the rotation retires the previous key.
+    """
+    from cloud_agent.settings import text_setting
+
+    keys = [_signing_key()]
+    previous = (text_setting("control_signing_secret_previous") or "").encode()
+    if previous:
+        keys.append(hashlib.sha256(_SIGNING_CONTEXT + previous).digest())
+    return keys
+
+
+def _signature_matches(payload: bytes, signature: bytes) -> bool:
+    """Whether ``signature`` is any verification key's HMAC of ``payload``."""
+    matched = False
+    for key in _verification_keys():
+        expected = hmac.new(key, payload, hashlib.sha256).digest()
+        matched = hmac.compare_digest(signature, expected) or matched
+    return matched
+
+
 def _b64encode(raw: bytes) -> str:
     """URL-safe base64 without padding."""
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -179,8 +204,7 @@ def parse_worker_token(token: str) -> dict[str, Any]:
     except (ValueError, TypeError) as exc:
         raise InvalidAgentToken("undecodable token") from exc
 
-    expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
-    if not hmac.compare_digest(signature, expected):
+    if not _signature_matches(payload, signature):
         raise InvalidAgentToken("bad signature")
 
     try:
@@ -221,6 +245,36 @@ def mint_host_token(*, host: str) -> str:
     return f"{_HOST_TOKEN_PREFIX}.{_b64encode(payload)}.{_b64encode(signature)}"
 
 
+def signing_key_id() -> str:
+    """The one-way identifier of the key that signs now; ``""`` when none is set."""
+    from cloud_agent.settings import setting_env
+    from cloud_agent_shared.deployment_contract import key_identifier
+
+    secret = setting_env(ENV_SIGNING_SECRET) or ""
+    return key_identifier(secret) if secret else ""
+
+
+def mint_renewed_host_token(*, host: str, current_hash: str) -> str:
+    """The credential a host switches to, signed with the current key.
+
+    Deterministic for one host, one current credential and one signing key,
+    so issuing it again (an answer lost on the way, or two runners on one
+    machine beating at once) issues the same credential rather than a second
+    one that would orphan the first. Nobody without the signing key can
+    compute it: its nonce is a MAC under that key.
+    """
+    nonce = hmac.new(
+        _signing_key(),
+        b"host-credential-renewal\0" + f"{host}\0{current_hash}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:16]
+    payload = json.dumps(
+        {"h": host, "n": nonce, "s": SCOPE_HOST}, separators=(",", ":"), sort_keys=True
+    ).encode()
+    signature = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
+    return f"{_HOST_TOKEN_PREFIX}.{_b64encode(payload)}.{_b64encode(signature)}"
+
+
 def parse_host_token(token: str) -> dict[str, Any]:
     """Verify a host credential and return the machine it names.
 
@@ -240,8 +294,7 @@ def parse_host_token(token: str) -> dict[str, Any]:
     except (ValueError, TypeError) as exc:
         raise InvalidHostToken("undecodable token") from exc
 
-    expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
-    if not hmac.compare_digest(signature, expected):
+    if not _signature_matches(payload, signature):
         raise InvalidHostToken("bad signature")
 
     try:
@@ -295,8 +348,7 @@ def parse_residency_mcp_token(token: str) -> dict[str, Any]:
     except (ValueError, TypeError) as exc:
         raise InvalidAgentToken("undecodable token") from exc
 
-    expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
-    if not hmac.compare_digest(signature, expected):
+    if not _signature_matches(payload, signature):
         raise InvalidAgentToken("bad signature")
 
     try:

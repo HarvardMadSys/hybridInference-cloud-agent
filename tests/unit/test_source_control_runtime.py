@@ -598,6 +598,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         compute_builder.assert_called_once_with(
             repository=app.state.storage.compute_resources,
             host_pool=app.state.storage.host_pool,
+            credential_rotation=app.state.storage.credential_rotation,
             http=app.state.http,
         )
         assert "compute" in started
@@ -643,7 +644,13 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         running = {
             name for name in _SHUTDOWN_TASK_ATTRS if getattr(relay.state, name, None) is not None
         }
-        assert running == {"settings_task", "mcp_maintenance_task", "notification_listener_task"}
+        assert running == {
+            "settings_task",
+            "instance_report_task",
+            "maintenance_task",
+            "mcp_maintenance_task",
+            "notification_listener_task",
+        }
         assert relay.state.source_control is None
         assert relay.state.compute_commands is None
         compute_builder.assert_not_called()

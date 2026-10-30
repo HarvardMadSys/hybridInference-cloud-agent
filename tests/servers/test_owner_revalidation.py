@@ -17,6 +17,7 @@ from cloud_agent.api._owner_auth import (
     authenticate_agent_owner,
     require_agent_owner,
 )
+from cloud_agent.api.deploy_agents import current_agent
 from cloud_agent.api.deps import (
     AGENT_ACCESS_ALLOW_TTL_S,
     AgentAccessAdmission,
@@ -236,7 +237,7 @@ REVALIDATING_GATES = (require_agent_owner, verify_admin_access)
 #: wrong thing. Named by the call each route actually makes, not by URL prefix:
 #: a prefix exempts whatever is put under it, which is the same "the next one
 #: falls off the list" failure this test exists to catch.
-MACHINE_GATES = (verify_claiming_host, authenticate_host, verify_oncall_dispatch)
+MACHINE_GATES = (verify_claiming_host, authenticate_host, verify_oncall_dispatch, current_agent)
 
 #: Routes that answer without a session or a machine credential, on purpose.
 #: Keyed by method and served path, so nothing inherits an exemption by sharing
@@ -250,6 +251,13 @@ PUBLIC_ROUTES = {
     ("GET", "/v1/session/me"): "asks the gateway for a fresh decision in its handler",
     ("POST", "/v1/agent/host/register"): "redeems a one-time enrollment token",
     ("POST", "/v1/compute/node-registrations"): "redeems a node's one-time registration token",
+    ("POST", "/v1/agent/deploy/register"): "redeems a deployment agent's one-time enrollment token",
+    # The API description pages answer 404 unless an administrator turns the
+    # api_docs setting on; they read the setting, never a caller.
+    ("GET", "/openapi.json"): "the API schema, served only while api_docs is on",
+    ("GET", "/docs"): "the API reference page, served only while api_docs is on",
+    ("GET", "/docs/oauth2-redirect"): "the reference page's redirect, only while api_docs is on",
+    ("GET", "/redoc"): "the API reference page, served only while api_docs is on",
     ("GET", "/v1/agent/mcp/oauth/callback/{provider}"): (
         "finishes only the OAuth flow the signed-in account started"
     ),

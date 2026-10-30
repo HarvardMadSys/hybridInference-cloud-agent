@@ -8,6 +8,7 @@ handed any object with the right shape.
 
 from __future__ import annotations
 
+from cloud_agent.ports.admin_credentials import AdminCredentialRepository
 from cloud_agent.ports.agent_memory import AgentMemoryRepository
 from cloud_agent.ports.attachments import AttachmentRepository
 from cloud_agent.ports.attempt_commands import AttemptCommands
@@ -17,6 +18,9 @@ from cloud_agent.ports.compute_resources import ComputeResourceRepository
 from cloud_agent.ports.conversation_commands import ConversationCommands
 from cloud_agent.ports.conversation_queries import ConversationQueries
 from cloud_agent.ports.credential_queries import CredentialQueries
+from cloud_agent.ports.credential_rotation import CredentialRotation
+from cloud_agent.ports.database_probes import DatabaseProbes
+from cloud_agent.ports.deployments import DeploymentAgentRepository
 from cloud_agent.ports.environments import (
     EnvironmentBindingRepository,
     EnvironmentConfigurationRepository,
@@ -30,8 +34,12 @@ from cloud_agent.ports.goal_wakeups import GoalWakeupRepository
 from cloud_agent.ports.goals import GoalRepository
 from cloud_agent.ports.grants import GrantRepository
 from cloud_agent.ports.host_capacity import HostCapacityRepository
+from cloud_agent.ports.host_credentials import HostCredentials
 from cloud_agent.ports.host_pool import HostPoolRepository
+from cloud_agent.ports.instances import InstanceReports
+from cloud_agent.ports.key_rotation import RootKeyFamilies
 from cloud_agent.ports.ledger import LedgerRepository
+from cloud_agent.ports.maintenance import MaintenanceState
 from cloud_agent.ports.mcp import McpConnectionRepository
 from cloud_agent.ports.mcp_catalog import McpCatalogRepository
 from cloud_agent.ports.model_connections import ModelConnectionRepository
@@ -67,6 +75,7 @@ from cloud_agent.ports.web_search import WebSearchAdmission, WebSearchRepository
 from cloud_agent.ports.work_insights import WorkInsightsRepository
 
 __all__ = [
+    "AdminCredentialRepository",
     "AgentMemoryRepository",
     "AttachmentRepository",
     "AttemptCommands",
@@ -76,6 +85,9 @@ __all__ = [
     "ConversationCommands",
     "ConversationQueries",
     "CredentialQueries",
+    "CredentialRotation",
+    "DatabaseProbes",
+    "DeploymentAgentRepository",
     "EnvironmentBindingRepository",
     "EnvironmentConfigurationRepository",
     "EnvironmentExecutionRepository",
@@ -87,8 +99,11 @@ __all__ = [
     "GoalWakeupRepository",
     "GrantRepository",
     "HostCapacityRepository",
+    "HostCredentials",
     "HostPoolRepository",
+    "InstanceReports",
     "LedgerRepository",
+    "MaintenanceState",
     "McpCatalogRepository",
     "McpConnectionRepository",
     "MeasurementWriteResult",
@@ -100,6 +115,7 @@ __all__ = [
     "PendingMessageRepository",
     "ProfilingControl",
     "ResidencyRepository",
+    "RootKeyFamilies",
     "SandboxRepository",
     "SessionForkRepository",
     "SettingsRepository",
