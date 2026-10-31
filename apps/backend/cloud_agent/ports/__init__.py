@@ -28,6 +28,7 @@ from cloud_agent.ports.environments import (
     EnvironmentWorkspaceRepository,
 )
 from cloud_agent.ports.execution_queries import ExecutionQueries
+from cloud_agent.ports.file_activity import FileActivityQueries
 from cloud_agent.ports.goal_wakeups import GoalWakeupRepository
 from cloud_agent.ports.goals import GoalRepository
 from cloud_agent.ports.grants import GrantRepository
@@ -87,6 +88,7 @@ __all__ = [
     "EnvironmentRunRepository",
     "EnvironmentWorkspaceRepository",
     "ExecutionQueries",
+    "FileActivityQueries",
     "GoalRepository",
     "GoalWakeupRepository",
     "GrantRepository",

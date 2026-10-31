@@ -434,3 +434,7 @@ export async function getThreadContextDna(
   if (resp.status === 404) return null;
   return jsonOrThrow<DnaBandsApi>(resp);
 }
+
+// The conversation's File Activity lives in its own module: it is a distinct
+// read with its own wire types, and the Context view mounts one section of it.
+export * from './fileActivity';
