@@ -11,7 +11,7 @@
 // current Git diff), a bounded scan window (never all history), and a delta
 // the record did not carry, which is a dash, never a zero.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import {
   FILE_ACTIVITY_FILTERS,
@@ -43,22 +43,16 @@ interface Query {
 
 const DEFAULT_QUERY: Query = { sort: 'active', filter: 'all', q: '' };
 
-/** Which read a state belongs to: the conversation, the filters, and a tick. */
-interface LoadKey {
-  key: string;
-  generation: number;
-}
-
 /**
  * Read the first page, and later pages as the reader asks.
  *
- * Every request is fenced twice: an effect-local `AbortController` cancels it
- * when the query or conversation changes or the section unmounts, and a
- * generation token makes a late response a no-op even if the transport ignored
- * the abort. A failed page is surfaced with a retry rather than swallowed.
- * `refreshTick` is bumped by the parent when the conversation settles, so a
- * running turn's new operations and a pending call that later completed become
- * visible without polling anything.
+ * Every request is fenced by a generation ref that advances whenever the
+ * conversation, the filters, a refresh or a retry replaces the list, and by an
+ * `AbortController` per request that is aborted on that same change and on
+ * unmount. A late response therefore cannot append an older list's page, and
+ * an old `finally` cannot clear a newer request's loading state. Failures are
+ * surfaced with a retry rather than swallowed; `refreshTick` re-reads when the
+ * page's own Context view is read again.
  */
 function useFileActivity(
   jobId: string,
@@ -66,81 +60,96 @@ function useFileActivity(
   query: Query,
   refreshTick: number,
 ) {
-  const [loadKey, setLoadKey] = useState<LoadKey>({ key: conversationKey, generation: 0 });
+  //: Advances on every replacement; compared by identity, never by closure.
+  const generation = useRef(0);
+  const listAbort = useRef<AbortController | null>(null);
+  const pagesAbort = useRef<AbortController | null>(null);
   const [loaded, setLoaded] = useState<{
     key: string;
     generation: number;
     view: FileActivityApi | null;
     error: boolean;
   } | null>(null);
-  const [more, setMore] = useState<FileActivityApi[]>([]);
+  const [more, setMore] = useState<{ generation: number; pages: FileActivityApi[] }>({
+    generation: -1,
+    pages: [],
+  });
   const [pagesError, setPagesError] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const [loadingMore, setLoadingMore] = useState<{ generation: number; on: boolean }>({
+    generation: -1,
+    on: false,
+  });
   const stateKey = `${conversationKey}\u0000${query.sort}\u0000${query.filter}\u0000${query.q}`;
-  const current =
-    loaded && loaded.key === stateKey && loaded.generation === loadKey.generation ? loaded : null;
-  const abortPages = useRef<AbortController | null>(null);
+  const current = loaded && loaded.key === stateKey ? loaded : null;
+  const pages = useMemo(() => (more.generation === generation.current ? more.pages : []), [more]);
+  const loading = loadingMore.generation === generation.current && loadingMore.on;
 
   useEffect(() => {
+    // A new query, conversation, refresh or retry replaces the whole list.
+    generation.current += 1;
+    const mine = generation.current;
+    listAbort.current?.abort();
+    pagesAbort.current?.abort();
     const controller = new AbortController();
-    const generation = loadKey.generation;
-    setMore([]);
+    listAbort.current = controller;
+    setMore({ generation: mine, pages: [] });
     setPagesError(false);
+    setLoadingMore({ generation: mine, on: false });
     getAgentFileActivity(jobId, { ...query, limit: PAGE }, controller.signal).then(
       (view) => {
-        if (controller.signal.aborted || generation !== loadKey.generation) return;
-        setLoaded({ key: stateKey, generation, view, error: false });
+        if (controller.signal.aborted || generation.current !== mine) return;
+        setLoaded({ key: stateKey, generation: mine, view, error: false });
       },
       () => {
-        if (controller.signal.aborted || generation !== loadKey.generation) return;
-        setLoaded({ key: stateKey, generation, view: null, error: true });
+        if (controller.signal.aborted || generation.current !== mine) return;
+        setLoaded({ key: stateKey, generation: mine, view: null, error: true });
       },
     );
     return () => controller.abort();
-  }, [jobId, stateKey, query, loadKey.generation, refreshTick]);
-
-  // A refreshed first page replaces the pages read from the older scan.
-  useEffect(() => {
-    setMore([]);
-    setPagesError(false);
-    abortPages.current?.abort();
-  }, [refreshTick]);
+  }, [jobId, stateKey, query, refreshTick, retryCount]);
 
   const retry = useCallback(() => {
+    // A new generation replaces the failed list; the effect below re-reads.
+    generation.current += 1;
     setLoaded(null);
-    setLoadKey((value) => ({ key: conversationKey, generation: value.generation + 1 }));
-  }, [conversationKey]);
+    setPagesError(false);
+    setRetryCount((value) => value + 1);
+  }, []);
 
   const loadMore = useCallback(async () => {
-    const tail = more.length > 0 ? more[more.length - 1] : current?.view;
-    if (!tail?.next_cursor || loadingMore) return;
-    const generation = loadKey.generation;
+    const tail = pages.length > 0 ? pages[pages.length - 1] : current?.view;
+    if (!tail?.next_cursor || loading) return;
+    const mine = generation.current;
     const controller = new AbortController();
-    abortPages.current?.abort();
-    abortPages.current = controller;
-    setLoadingMore(true);
+    pagesAbort.current?.abort();
+    pagesAbort.current = controller;
+    setLoadingMore({ generation: mine, on: true });
     setPagesError(false);
     try {
-      const next = await getAgentFileActivity(jobId, {
-        ...query,
-        limit: PAGE,
-        cursor: tail.next_cursor,
-      });
-      // A page that resolved after the query changed belongs to the old list.
-      if (controller.signal.aborted || generation !== loadKey.generation) return;
+      const next = await getAgentFileActivity(
+        jobId,
+        { ...query, limit: PAGE, cursor: tail.next_cursor },
+        controller.signal,
+      );
+      // A page that resolved after the list changed belongs to the old one.
+      if (controller.signal.aborted || generation.current !== mine) return;
       if (!next) return;
-      setMore((pages) => [...pages, next]);
+      setMore((value) => ({
+        generation: mine,
+        pages: (value.generation === mine ? value.pages : []).concat(next),
+      }));
     } catch {
-      if (!controller.signal.aborted && generation === loadKey.generation) setPagesError(true);
+      if (!controller.signal.aborted && generation.current === mine) setPagesError(true);
     } finally {
-      if (generation === loadKey.generation) setLoadingMore(false);
+      // Only this generation's own request may clear its loading state.
+      if (generation.current === mine) setLoadingMore({ generation: mine, on: false });
     }
-  }, [jobId, more, current, query, loadKey.generation, loadingMore]);
+  }, [jobId, pages, current, query, loading]);
 
-  // Later pages repeat the same totals; the first page's are the scan's own.
-  const pages = current?.view ? [current.view, ...more] : more;
-  const rows = pages.flatMap((page) => page.files);
-  const lastPage = pages[pages.length - 1];
+  const allPages = current?.view ? [current.view, ...pages] : pages;
+  const rows = allPages.flatMap((page) => page.files);
+  const lastPage = allPages[allPages.length - 1];
   return {
     view: current?.view ?? null,
     rows,
@@ -150,7 +159,7 @@ function useFileActivity(
     retry,
     hasMore: Boolean(lastPage?.next_cursor),
     loadMore,
-    loadingMore,
+    loadingMore: loading,
   };
 }
 
@@ -253,6 +262,7 @@ export function FileActivity({
               nowMs={nowMs}
               onOpenPoint={onOpenPoint}
               onOpenTurn={onOpenTurn}
+              revision={refreshTick + tick}
             />
           ))}
         </ul>

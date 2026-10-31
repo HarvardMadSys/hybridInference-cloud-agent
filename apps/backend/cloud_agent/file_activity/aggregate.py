@@ -258,12 +258,19 @@ def filter_counts(rows: Sequence[FileActivityRow]) -> dict[str, int]:
 def totals_for(
     rows: Sequence[FileActivityRow], operations: Sequence[FileOperation]
 ) -> FileActivityTotals:
-    """What the current search's files hold, plus what could not be attributed."""
-    unknown_path = sum(1 for op in operations if op.path is None and op.kind != "search")
-    unknown_search = sum(1 for op in operations if op.kind == "search" and op.path is None)
+    """What the current search's files hold, plus what could not be attributed.
+
+    An operation with no usable path is counted in its status totals and in
+    ``unknown_path_operations``: it happened, and hiding its outcome would
+    understate failures exactly where the record is weakest.
+    """
+    unattributed = [op for op in operations if op.path is None]
+    unknown_path = sum(1 for op in unattributed if op.kind != "search")
+    unknown_search = sum(1 for op in unattributed if op.kind == "search")
     return FileActivityTotals(
         files=len(rows),
-        operations=sum(row.operations for row in rows),
+        # Every scanned operation, including one no file could be named for.
+        operations=sum(row.operations for row in rows) + len(unattributed),
         reads=sum(row.reads for row in rows),
         writes=sum(row.writes for row in rows),
         searches=sum(row.searches for row in rows),
@@ -272,9 +279,12 @@ def totals_for(
         removed=sum(row.removed for row in rows),
         added_unknown_files=sum(1 for row in rows if row.added_unknown_ops),
         removed_unknown_files=sum(1 for row in rows if row.removed_unknown_ops),
-        failed=sum(row.failed for row in rows),
-        pending=sum(row.pending for row in rows),
-        not_recorded=sum(row.not_recorded for row in rows),
+        failed=sum(row.failed for row in rows)
+        + sum(1 for op in unattributed if op.status == "failed"),
+        pending=sum(row.pending for row in rows)
+        + sum(1 for op in unattributed if op.status == "pending"),
+        not_recorded=sum(row.not_recorded for row in rows)
+        + sum(1 for op in unattributed if op.status == "not_recorded"),
         unknown_path_operations=unknown_path,
         search_unknown_scope=unknown_search,
         subagent_operations=sum(row.subagent_operations for row in rows),

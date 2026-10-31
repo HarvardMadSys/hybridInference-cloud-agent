@@ -183,6 +183,12 @@ jsonb_strip_nulls(jsonb_build_object(
     'subagent', (e.payload ? 'parent_tool_use_id' OR e.payload ? 'agent_thread_id'),
     'cwd', CASE WHEN {CWD_SQL.strip()} THEN e.payload->>'cwd' END,
     'file_change_method', e.payload->'notification'->>'method',
+    -- The native item's own identity and outcome, read from the notification
+    -- directly: the bounded body below may be clipped, but these three small
+    -- fields still say which item it is and how it ended.
+    'file_change_item_id', e.payload->'notification'->'params'->'item'->>'id',
+    'file_change_item_status', e.payload->'notification'->'params'->'item'->>'status',
+    'file_change_item_type', e.payload->'notification'->'params'->'item'->>'type',
     'file_change', CASE WHEN {FILE_CHANGE_SQL.strip()}
                         THEN left((e.payload->'notification')::text, $3::integer) END,
     -- The stored text was longer than the bound: its changes are incomplete,
@@ -250,7 +256,12 @@ FILE_ACTIVITY_EVENT_SQL = f"""
            {PAYLOAD_SQL} AS payload,
            result.id AS result_id,
            (result.payload->>'is_error')::boolean AS result_error,
-           left(COALESCE(result.payload->>'content', ''), 4000) AS result_content
+           left(COALESCE(result.payload->>'content', ''), 4000) AS result_content,
+           -- An image result is a JSON content block anchored at the start of
+           -- the recorded text, so a large base64 body (clipped for transport)
+           -- still counts while a document that merely mentions an image does
+           -- not. The first block of a list counts too.
+           (COALESCE(result.payload->>'content', '') ~ $6::text) AS result_image
     FROM agent_job_events e
     JOIN agent_jobs j ON j.id = e.job_id AND j.thread_id = $1 AND j.user_id = $2
     JOIN agent_threads t ON t.id = j.thread_id AND t.deleted_at IS NULL

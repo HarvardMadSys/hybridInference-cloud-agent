@@ -53,13 +53,24 @@ export function ContextView(props: ContextViewProps) {
 }
 
 /**
- * Changes once per conversation read, after a turn settles.
+ * A revision of the conversation's recorded history, for the File Activity read.
  *
- * The section keys its read on this instead of polling: a new operation, or a
- * pending call that completed, appears when the Context view is read again.
+ * It must change when a turn settles, not when one starts: the turn row is
+ * created at the start, so its count (and its state, which flips while the
+ * request list grows) would either not move at settlement or move on every
+ * refresh. The latest request's sequence and time are recorded history and
+ * stop moving once the turn ends, and the generated timestamp raises a final
+ * read after it. A running turn still refreshes through ``active``.
  */
-function settledTick(view: ThreadContextApi): number {
-  return view.turns.length;
+export function settledRevision(view: ThreadContextApi): number {
+  const last = view.turns[view.turns.length - 1];
+  const seq = view.requests.length > 0 ? view.requests[view.requests.length - 1].seq : 0;
+  return (
+    view.turns.length * 1_000_000 +
+    (last?.requests ?? 0) * 1_000 +
+    seq +
+    (last?.state === 'succeeded' ? 500_000_000 : 0)
+  );
 }
 
 function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
@@ -102,7 +113,7 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         // The Context view's own read already refreshes while a turn runs; a
         // settled read bumps this, so the section re-reads without a poll of
         // its own touching the conversation.
-        refreshTick={settledTick(view)}
+        refreshTick={settledRevision(view)}
         active={view.latest?.turn_active === true}
       />
       <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />

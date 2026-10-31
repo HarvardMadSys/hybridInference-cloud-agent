@@ -18,6 +18,7 @@ or fork time: the read happens when a page asks for it.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -46,12 +47,19 @@ from cloud_agent.storage._sql.rows import load_json
 if TYPE_CHECKING:
     import asyncpg
 
-#: Wall time one whole File Activity read may take, across every page of its
-#: scan and the coverage statement. The per-statement timeout alone is not
-#: enough: a scan can issue many pages while holding one pooled connection, and
-#: this keeps a pathological ledger from occupying the shared pool for minutes.
+#: Wall time one whole File Activity read may take: acquiring a connection,
+#: resolving the conversation's owner, every page of the scan and the coverage
+#: statement. A per-statement timeout alone is not enough — a scan can issue
+#: many pages while holding one pooled connection, and a final page could begin
+#: just inside the deadline and run its full timeout past it. Each statement's
+#: timeout is therefore clipped to the time left, and the whole read is wrapped
+#: in one cancellation scope.
 READ_DEADLINE_S = 8.0
-#: Each statement's own timeout, so one slow page cannot outlast the deadline.
+#: A recorded tool result whose text begins with an image content block. The
+#: body itself may be clipped; this stays a structural check on the recorded
+#: text rather than a search for the word inside a document.
+IMAGE_BLOCK_PATTERN = r'^\s*(\[\s*)?\{\s*"type"\s*:\s*"image"\s*[,}]'
+#: A page's own timeout, clipped further by the deadline's remaining time.
 STATEMENT_TIMEOUT_MS = 5_000
 
 
@@ -84,6 +92,12 @@ class PostgresFileActivityQueries:
             job_id,
             user_id,
         )
+
+    async def _owned_thread(self, job_id: str, user_id: str, deadline: float) -> str | None:
+        """The caller's conversation, resolved under the read's own deadline."""
+        async with asyncio.timeout_at(deadline):
+            async with self._pool.acquire() as conn:
+                return await self._thread_id(conn, job_id, user_id)
 
     async def _scan(
         self,
@@ -123,6 +137,7 @@ class PostgresFileActivityQueries:
                 preview_chars,
                 before if before is not None else 2**63 - 1,
                 want,
+                IMAGE_BLOCK_PATTERN,
             )
             if not page:
                 break
@@ -170,11 +185,11 @@ class PostgresFileActivityQueries:
         return result
 
     async def _read(
-        self, conn: Any, *, thread_id: str, user_id: str, preview_chars: int
+        self, conn: Any, *, thread_id: str, user_id: str, preview_chars: int, deadline: float
     ) -> ScanResult:
-        """One scan with the read's own statement timeout and overall deadline."""
-        deadline = time.monotonic() + READ_DEADLINE_S
-        await conn.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
+        """One scan with the read's own statement timeout and the shared deadline."""
+        left_ms = max(1, int((deadline - time.monotonic()) * 1000))
+        await conn.execute(f"SET LOCAL statement_timeout = {min(STATEMENT_TIMEOUT_MS, left_ms)}")
         return await self._scan(
             conn,
             thread_id=thread_id,
@@ -182,6 +197,26 @@ class PostgresFileActivityQueries:
             preview_chars=preview_chars,
             deadline=deadline,
         )
+
+    async def _read_scoped(
+        self, *, thread_id: str, user_id: str, preview_chars: int, deadline: float
+    ) -> ScanResult:
+        """The read with its own pooled connection, deadline and cancellation.
+
+        The deadline starts before the connection is acquired, so a busy pool
+        counts against it; the read runs inside one cancellation scope, so a
+        client disconnect or a timeout releases the connection instead of
+        letting the scan finish in the background.
+        """
+        async with asyncio.timeout_at(deadline):
+            async with self._pool.acquire() as conn, conn.transaction():
+                return await self._read(
+                    conn,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    preview_chars=preview_chars,
+                    deadline=deadline,
+                )
 
     async def file_activity(
         self,
@@ -205,17 +240,16 @@ class PostgresFileActivityQueries:
             parsed = decode_cursor(cursor, FileActivityCursor, scope)
         except CursorError as exc:
             raise ValueError(str(exc)) from exc
-        async with self._pool.acquire() as conn:
-            thread_id = await self._thread_id(conn, job_id, user_id)
-            if thread_id is None:
-                return None
-            async with conn.transaction():
-                result = await self._read(
-                    conn,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    preview_chars=MAX_RECORDED_TEXT,
-                )
+        deadline = time.monotonic() + READ_DEADLINE_S
+        thread_id = await self._owned_thread(job_id, user_id, deadline)
+        if thread_id is None:
+            return None
+        result = await self._read_scoped(
+            thread_id=thread_id,
+            user_id=user_id,
+            preview_chars=MAX_RECORDED_TEXT,
+            deadline=deadline,
+        )
         view = build_view(
             thread_id=thread_id,
             operations=result.operations,
@@ -247,17 +281,16 @@ class PostgresFileActivityQueries:
             parsed = decode_cursor(cursor, OperationsCursor, scope)
         except CursorError as exc:
             raise ValueError(str(exc)) from exc
-        async with self._pool.acquire() as conn:
-            thread_id = await self._thread_id(conn, job_id, user_id)
-            if thread_id is None:
-                return None
-            async with conn.transaction():
-                result = await self._read(
-                    conn,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    preview_chars=MAX_RECORDED_TEXT,
-                )
+        deadline = time.monotonic() + READ_DEADLINE_S
+        thread_id = await self._owned_thread(job_id, user_id, deadline)
+        if thread_id is None:
+            return None
+        result = await self._read_scoped(
+            thread_id=thread_id,
+            user_id=user_id,
+            preview_chars=MAX_RECORDED_TEXT,
+            deadline=deadline,
+        )
         return build_operations_page(
             thread_id=thread_id,
             path=path,

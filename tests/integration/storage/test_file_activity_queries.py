@@ -626,3 +626,150 @@ async def test_a_capped_scan_keeps_the_newest_operations_and_says_so(db, store, 
     # asserted here rather than one exact first row.
     assert view.files[0].last_at is not None
     assert min(indices) >= 20
+
+
+async def test_a_large_image_result_is_image_activity_not_a_text_read(db, store):
+    """A base64 image body exceeds the transport clip, but stays image evidence."""
+    [job] = await conversation(db, store, "fa_big_image")
+    big = json.dumps(
+        {
+            "type": "image",
+            "source": {"media_type": "image/png", "data": "A" * 20_000},
+        }
+    )
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/workspace"}),
+            call("Read", "img-1", file_path="docs/shot.dat"),
+            result("img-1", big),
+        ],
+    )
+    view = await _view(store, job)
+    assert view is not None
+    row = view.files[0]
+    assert (row.images, row.reads) == (1, 0)
+    assert view.totals.images == 1
+
+
+async def test_a_text_result_mentioning_image_json_is_a_read(db, store):
+    [job] = await conversation(db, store, "fa_fake_image")
+    document = json.dumps({"type": "text", "text": 'example: {"type": "image"} in a schema'})
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/workspace"}),
+            call("Read", "doc-1", file_path="schema.json"),
+            result("doc-1", document),
+        ],
+    )
+    view = await _view(store, job)
+    assert view is not None
+    row = view.files[0]
+    assert (row.images, row.reads) == (0, 1)
+
+
+async def test_a_clipped_codex_item_keeps_one_identity_and_its_outcome(db, store):
+    """A clipped started/completed pair is one item, and a failed one stays failed."""
+    [job] = await conversation(db, store, "fa_clipped_codex")
+
+    def change_list() -> list[dict]:
+        return [
+            {
+                "path": f"app/generated/file_{index:03d}.py",
+                "kind": {"type": "update"},
+                "diff": "@@\n-a\n+b\n" + (" context line\n" * 40),
+            }
+            for index in range(60)
+        ]
+
+    # The notification's own JSON must exceed the read's text bound, so its
+    # change body is what the projection clips.
+    started = {
+        "method": "item/started",
+        "params": {
+            "item": {
+                "id": "fc-big",
+                "type": "fileChange",
+                "status": "inProgress",
+                "changes": change_list(),
+            },
+            "padding": "x" * 90_000,
+        },
+    }
+    completed = {
+        "method": "item/completed",
+        "params": {
+            "item": {
+                "id": "fc-big",
+                "type": "fileChange",
+                "status": "failed",
+                "changes": change_list(),
+            },
+            "padding": "x" * 90_000,
+        },
+    }
+    async with db.acquire() as conn:
+        attempt_id, start = await conn.fetchrow(
+            "SELECT a.id, COALESCE(MAX(e.seq), 0) FROM agent_attempts a"
+            " LEFT JOIN agent_job_events e ON e.attempt_id = a.id"
+            " WHERE a.job_id = $1 GROUP BY a.id",
+            job,
+        )
+        # The stored notification JSON is the event's whole payload fragment;
+        # make it larger than the read's preview bound so the projection clips
+        # the change body while the item's own small fields stay readable.
+        rows = [
+            ("lifecycle", {"phase": "started", "cwd": "/workspace"}),
+            ("raw", {"protocol": "codex-app-server", "text": "n", "notification": started}),
+            ("raw", {"protocol": "codex-app-server", "text": "n", "notification": completed}),
+        ]
+        for offset, (kind, payload) in enumerate(rows, start=1):
+            await conn.execute(
+                "INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload)"
+                " VALUES ($1, $2, $3, $4, $5::jsonb)",
+                job,
+                attempt_id,
+                start + offset,
+                kind,
+                json.dumps(payload),
+            )
+    view = await _view(store, job)
+    assert view is not None
+    # One item, so one operation, and its failed outcome is not read as success.
+    assert view.totals.operations == 1
+    assert view.totals.failed == 1
+    assert view.totals.files == 0
+    assert view.totals.unknown_path_operations == 1
+
+
+async def test_a_well_formed_codex_item_with_no_changes_is_not_an_unknown_edit(db, store):
+    [job] = await conversation(db, store, "fa_empty_codex")
+    notification = {
+        "method": "item/completed",
+        "params": {
+            "item": {"id": "fc-empty", "type": "fileChange", "status": "completed", "changes": []}
+        },
+    }
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/workspace"}),
+            (
+                "raw",
+                {
+                    "protocol": "codex-app-server",
+                    "text": json.dumps(notification)[:4000],
+                    "notification": notification,
+                },
+            ),
+        ],
+    )
+    view = await _view(store, job)
+    assert view is not None
+    # An explicit empty change list records no file operation, and invents none.
+    assert view.totals.operations == 0
+    assert view.totals.files == 0

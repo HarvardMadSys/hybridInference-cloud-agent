@@ -518,3 +518,108 @@ describe('pagination and refresh', () => {
     expect(await screen.findByText('app.ts')).toBeInTheDocument();
   });
 });
+
+describe('fencing across queries and settlement', () => {
+  function pageWith(path: string, extra = {}) {
+    return {
+      ...page(),
+      operations: [{ ...page().operations[0], path, call_id: `call-${path}` }],
+      ...extra,
+    };
+  }
+
+  it('drops a delayed page 2 of query A that resolves after query B started', async () => {
+    let releasePage2: (value: FileOperationsPageApi | null) => void = () => {};
+    const delayed = new Promise<FileOperationsPageApi | null>((resolve) => {
+      releasePage2 = resolve;
+    });
+    // First expansion page of query A, with a next cursor.
+    mockedOperations.mockResolvedValueOnce(
+      pageWith('/workspace/src/app.ts', { has_earlier: true, next_cursor: 'a-2' }),
+    );
+    mockedOperations.mockReturnValueOnce(delayed);
+    renderSection();
+    await screen.findByText('app.ts');
+    fireEvent.click(screen.getByLabelText('Show operations on app.ts'));
+    await screen.findByText(/recorded operations shown/);
+    fireEvent.click(screen.getByRole('button', { name: 'Show earlier operations' }));
+    await waitFor(() => expect(mockedOperations).toHaveBeenCalledTimes(2));
+
+    // The reader changes the search while page 2 is still in flight.
+    mockedActivity.mockResolvedValue(view({ q: 'zzz', files: [] }));
+    fireEvent.change(screen.getByPlaceholderText('Filter by path…'), {
+      target: { value: 'zzz' },
+    });
+    await waitFor(() =>
+      expect(mockedActivity).toHaveBeenCalledWith(
+        'job-2',
+        expect.objectContaining({ q: 'zzz' }),
+        expect.anything(),
+      ),
+    );
+    // The old page 2 now resolves: it must not appear under the new list.
+    releasePage2(pageWith('/workspace/src/app.ts'));
+    await waitFor(() =>
+      expect(screen.queryByText(/of 2 recorded operations/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it('follows a settlement that keeps the same turn count', async () => {
+    // A running turn: one turn, one request, a pending write with no result.
+    const running = {
+      ...page(),
+      operations: [
+        {
+          ...page().operations[0],
+          call_id: 'pending-write',
+          status: 'not_recorded' as const,
+          result_event_id: null,
+        },
+      ],
+    };
+    const settled = {
+      ...page(),
+      operations: [
+        {
+          ...page().operations[0],
+          call_id: 'pending-write',
+          status: 'succeeded' as const,
+          result_event_id: 42,
+          added: 4,
+        },
+      ],
+    };
+    mockedOperations.mockResolvedValueOnce(running);
+    mockedOperations.mockResolvedValueOnce(settled);
+    const { rerender } = render(
+      <LocaleProvider>
+        <FileActivity
+          jobId="job-2"
+          conversationKey="thread-1"
+          onOpenPoint={vi.fn()}
+          onOpenTurn={vi.fn()}
+          refreshTick={1}
+          active
+        />
+      </LocaleProvider>,
+    );
+    await screen.findByText('app.ts');
+    fireEvent.click(screen.getByLabelText('Show operations on app.ts'));
+    expect(await screen.findByText(/no result recorded/)).toBeInTheDocument();
+    // The turn count is unchanged; only the revision (settlement) moved.
+    rerender(
+      <LocaleProvider>
+        <FileActivity
+          jobId="job-2"
+          conversationKey="thread-1"
+          onOpenPoint={vi.fn()}
+          onOpenTurn={vi.fn()}
+          refreshTick={2}
+          active={false}
+        />
+      </LocaleProvider>,
+    );
+    await waitFor(() => expect(screen.queryByText(/no result recorded/)).not.toBeInTheDocument());
+    expect(mockedOperations).toHaveBeenCalledTimes(2);
+  });
+});

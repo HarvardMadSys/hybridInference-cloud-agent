@@ -114,6 +114,7 @@ def scan_operations(rows: Iterable[Mapping[str, Any]], *, thread_id: str) -> Sca
             "result_id": row.get("result_id"),
             "result_error": row.get("result_error"),
             "result_content": row.get("result_content"),
+            "result_image": row.get("result_image"),
         }
         if row.get("event_type") == "lifecycle":
             continue

@@ -460,10 +460,14 @@ def _file_operation(
     added = removed = None
     if status == "succeeded" and kind in {"write", "edit"}:
         added, removed = _write_edit_deltas(payload, fields, kind)
-    if kind == "read" and is_image_result(payload.get("result_content")):
+    if kind == "read" and (
+        payload.get("result_image") or is_image_result(payload.get("result_content"))
+    ):
         # The recorded result carried an image content block: this read is
-        # image activity. The check is structural — a source file that merely
-        # contains the text ``"type": "image"`` is not an image.
+        # image activity. ``result_image`` is the projection's structural
+        # check, which still holds for a base64 body too large to return; the
+        # parsed check covers a small complete body. A source file that merely
+        # contains the text ``"type": "image"`` is neither.
         kind, action = "image", "image"
     return FileOperation(
         **_base(
@@ -641,6 +645,27 @@ class CodexChange:
     at: Any
     status: OperationStatus
     changes: list[Any]
+    #: The bounded body was clipped, so ``changes`` is incomplete, not empty.
+    clipped: bool = False
+
+
+def _codex_native(payload: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """The item's own id, status and type, read from the projection.
+
+    These are projected separately from the bounded notification body, so a
+    long change list clipped out of ``file_change`` still leaves the item's
+    identity and outcome readable.
+    """
+
+    def text(key: str) -> str | None:
+        value = payload.get(key)
+        return value if isinstance(value, str) and value else None
+
+    return (
+        text("file_change_item_id"),
+        text("file_change_item_status"),
+        text("file_change_item_type"),
+    )
 
 
 def _codex_item(payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -684,45 +709,29 @@ def _codex_item_id(item: Mapping[str, Any], payload: Mapping[str, Any]) -> str:
 
 
 def codex_changes(payload: Mapping[str, Any]) -> tuple[str, str, CodexChange] | None:
-    """The native item a raw row records: its id, method, and this row's status.
+    """The native item a raw row records: its id, method, and this row's state.
 
-    ``None`` when the row is not a ``fileChange`` notification. A notification
-    whose stored text the projection had to clip still yields its identity and
-    its own (empty) change list, so the caller can report the gap rather than
-    silently drop the whole item.
+    ``None`` when the row is not a ``fileChange`` notification. The item's id,
+    status and type come from the projection's own small fields, so a
+    notification whose change body was clipped still keeps one identity and an
+    honest outcome. ``clipped`` on the returned record says the change list is
+    incomplete rather than empty.
     """
     method = str(payload.get("file_change_method") or "")
-    status = _codex_status(method, None)
-    if status is None:
+    if _codex_status(method, None) is None:
+        return None
+    native_id, native_status, native_type = _codex_native(payload)
+    if native_type is not None and native_type != "fileChange":
         return None
     item = _codex_item(payload)
-    if item is None or item.get("type") != "fileChange":
-        # The projection clipped this notification's text, so the item cannot
-        # be read at all. The method still says what it was, and the row keeps
-        # its own identity, so the loss is reported rather than hidden.
-        if item is not None:
-            # A well-formed notification for another item kind is not a file
-            # change at all: nothing was lost.
-            return None
-        if not payload.get("file_change_clipped"):
-            return None
-        item_id = str(payload.get("tool_id") or f"event:{payload['id']}")[:512]
-        return (
-            item_id,
-            method,
-            CodexChange(
-                item_id=item_id,
-                event_id=int(payload["id"]),
-                seq=int(payload.get("seq") or 0),
-                at=payload.get("created_at"),
-                status=status,
-                changes=[],
-            ),
-        )
-    status = _codex_status(method, item.get("status"))
-    assert status is not None
-    changes = item.get("changes")
-    item_id = _codex_item_id(item, payload)
+    status = _codex_status(method, native_status or (item or {}).get("status"))
+    if status is None:
+        return None
+    item_id = native_id or _codex_item_id(item or {}, payload)
+    changes: list[Any] = []
+    if item is not None:
+        raw_changes = item.get("changes")
+        changes = raw_changes if isinstance(raw_changes, list) else []
     return (
         item_id,
         method,
@@ -732,7 +741,8 @@ def codex_changes(payload: Mapping[str, Any]) -> tuple[str, str, CodexChange] | 
             seq=int(payload.get("seq") or 0),
             at=payload.get("created_at"),
             status=status,
-            changes=changes if isinstance(changes, list) else [],
+            changes=changes,
+            clipped=bool(payload.get("file_change_clipped")),
         ),
     )
 
@@ -764,7 +774,7 @@ def codex_operations(payload: Mapping[str, Any], cwd: str | None) -> list[FileOp
     if parsed is None:
         return []
     _item_id, _method, record = parsed
-    if not record.changes:
+    if not record.changes and record.clipped:
         # The notification was clipped: its item is known, its files are not.
         return [
             FileOperation(
@@ -783,8 +793,12 @@ def codex_operations(payload: Mapping[str, Any], cwd: str | None) -> list[FileOp
                 path_basis="unknown",
                 subagent=bool(payload.get("subagent")),
                 superseded=bool(payload.get("superseded")),
+                clipped=True,
             )
         ]
+    if not record.changes:
+        # A well-formed item that changed no file: nothing to record.
+        return []
     total = len(record.changes)
     built: list[FileOperation] = []
     for index, change in enumerate(record.changes, start=1):

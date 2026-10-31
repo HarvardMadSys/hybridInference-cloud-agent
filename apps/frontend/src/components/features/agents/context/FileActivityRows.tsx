@@ -36,6 +36,7 @@ export function FileRow({
   nowMs,
   onOpenPoint,
   onOpenTurn,
+  revision,
 }: {
   row: FileActivityRowApi;
   jobId: string;
@@ -45,6 +46,8 @@ export function FileRow({
   nowMs: number;
   onOpenPoint: OpenPoint;
   onOpenTurn: OpenTurn;
+  /** The section's refresh revision: an expanded file re-reads with it. */
+  revision?: number;
 }) {
   const { t, locale } = useLocale();
   const parts = splitPath(row.path);
@@ -90,6 +93,7 @@ export function FileRow({
           nowMs={nowMs}
           onOpenPoint={onOpenPoint}
           onOpenTurn={onOpenTurn}
+          revision={revision}
         />
       ) : null}
     </li>
@@ -188,6 +192,7 @@ function Operations({
   nowMs,
   onOpenPoint,
   onOpenTurn,
+  revision = 0,
 }: {
   jobId: string;
   conversationKey: string;
@@ -195,6 +200,7 @@ function Operations({
   nowMs: number;
   onOpenPoint: OpenPoint;
   onOpenTurn: OpenTurn;
+  revision?: number;
 }) {
   const { t, locale } = useLocale();
   const [state, setState] = useState<{
@@ -224,13 +230,13 @@ function Operations({
       },
     );
     return () => controller.abort();
-  }, [jobId, path, key, generation]);
+  }, [jobId, path, key, generation, revision]);
 
   useEffect(() => {
     setEarlier([]);
     setMoreError(false);
     abortMore.current?.abort();
-  }, [key, generation]);
+  }, [key, generation, revision]);
 
   const current = state?.key === key ? state : null;
   const operations = [
