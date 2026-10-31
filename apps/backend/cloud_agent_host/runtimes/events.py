@@ -145,3 +145,55 @@ def _payload_text(value: Any) -> str:
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False, default=str)
     return value
+
+
+#: Models one result may report a context window for. A turn uses one model
+#: and its delegated agents rarely more than one or two others; the bound only
+#: keeps a malformed report from putting an unbounded object on a result row.
+MAX_REPORTED_CONTEXT_WINDOWS = 8
+
+
+def _token_count(value: Any) -> int | None:
+    """A non-negative whole token count, or None for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value < 0 or value != int(value):  # NaN, negative, fraction
+        return None
+    return int(value)
+
+
+def reported_compaction(
+    *, trigger: Any, pre_tokens: Any = None, post_tokens: Any = None
+) -> dict[str, Any]:
+    """What a CLI said about one compaction, quoted rather than derived.
+
+    The sizes are the CLI's own; a missing one stays missing, so a reader can
+    tell "the CLI compacted and said nothing about size" from "it reported 0".
+    """
+    report: dict[str, Any] = {}
+    if isinstance(trigger, str) and trigger.strip():
+        report["trigger"] = trigger.strip()[:32]
+    for key, value in (("pre_tokens", pre_tokens), ("post_tokens", post_tokens)):
+        count = _token_count(value)
+        if count is not None:
+            report[key] = count
+    return report
+
+
+def reported_context_windows(model_usage: Any) -> dict[str, int] | None:
+    """Each model's context window, as a result line reports it.
+
+    Claude Code's result names every model the query used with the window it
+    ran under (``modelUsage[model].contextWindow``). Only the window is kept:
+    the per-model token counts there repeat what usage events already carry.
+    """
+    if not isinstance(model_usage, dict):
+        return None
+    windows: dict[str, int] = {}
+    for model, usage in model_usage.items():
+        if len(windows) >= MAX_REPORTED_CONTEXT_WINDOWS:
+            break
+        window = _token_count(usage.get("contextWindow")) if isinstance(usage, dict) else None
+        if isinstance(model, str) and model and window:
+            windows[model[:256]] = window
+    return windows or None

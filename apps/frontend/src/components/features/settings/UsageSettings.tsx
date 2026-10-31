@@ -3,43 +3,18 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
-import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import {
   getOwnerContainers,
-  getOwnerResources,
-  getOwnerTokens,
   type ContainerState,
   type OwnerContainer,
   type OwnerContainerList,
-  type OwnerResourceHistory,
-  type OwnerTokenUsage,
+  type UsageRangePreset,
 } from '@/lib/api/ownerUsage';
-import type { AdminUsageAggregate } from '@/lib/api/adminUsage';
-import { UsageChart } from './UsageChart';
-import {
-  STATE_ORDER,
-  USAGE_PERIODS,
-  cachedShare,
-  chartDays,
-  compactCount,
-  coreHours,
-  decimal,
-  duration,
-  formatCost,
-  formatMemory,
-  formatShare,
-  gibHours,
-  historyErrorKey,
-  partlyMeasured,
-  periodQuery,
-  rangeNote,
-  reasoningPartly,
-  relativeTime,
-  tokenTotal,
-  utcMidnightLocal,
-  type UsagePeriod,
-} from './usagePresent';
+import { ContextInsights } from './ContextInsights';
+import { UsageHistory } from './UsageHistory';
+import { Card, LoadError, RangeSelect, Tile, errorText } from './UsageParts';
+import { STATE_ORDER, decimal, formatMemory, relativeTime } from './usagePresent';
 
 /** Hosts sample every 15 seconds; reading faster shows nothing new. */
 export const CONTAINER_REFRESH_MS = 15_000;
@@ -76,53 +51,49 @@ const STATE_COUNT: Record<ContainerState, TranslationKey> = {
   unavailable: 'settings.usage.stateCount.unavailable',
 };
 
-const DURATION_UNIT: Record<'hours' | 'minutes', TranslationKey> = {
-  hours: 'settings.usage.hours',
-  minutes: 'settings.usage.minutes',
-};
-
-const PERIOD_LABEL: Record<UsagePeriod, TranslationKey> = {
-  today: 'settings.usage.periodToday',
-  '7d': 'settings.usage.period7d',
-  '30d': 'settings.usage.period30d',
-  all: 'settings.usage.periodAll',
-};
-
-function errorText(cause: unknown): string | null {
-  return cause instanceof Error && cause.message ? cause.message : null;
-}
-
-/** Your containers now, and what your work used over a period. */
+/**
+ * Your containers now, what your work used over a range, and how large each
+ * conversation's context got over the same range. The range is chosen once,
+ * between the live containers and the two sections it applies to.
+ */
 export function UsageSettings() {
+  const [range, setRange] = useState<UsageRangePreset>('7d');
   return (
     <>
       <Containers />
-      <History />
+      <RangeBar range={range} onChange={setRange} />
+      <UsageHistory range={range} />
+      <ContextInsights range={range} />
     </>
   );
 }
 
-function Card({
-  id,
-  title,
-  action,
-  children,
+/** The one range control, saying which sections it applies to and which it does not. */
+function RangeBar({
+  range,
+  onChange,
 }: {
-  id: string;
-  title: string;
-  action?: React.ReactNode;
-  children: React.ReactNode;
+  range: UsageRangePreset;
+  onChange: (range: UsageRangePreset) => void;
 }) {
+  const { t } = useLocale();
   return (
-    <section aria-labelledby={id} className="ui-card mt-4 bg-surface p-3 sm:p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 id={id} className="text-base font-semibold text-foreground">
-          {title}
-        </h2>
-        {action}
+    <div
+      role="group"
+      aria-labelledby="settings-usage-range-scope"
+      aria-describedby="settings-usage-range-note"
+      className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4"
+    >
+      <div className="min-w-0">
+        <p id="settings-usage-range-scope" className="text-sm font-medium text-foreground">
+          {t('usage.range.scope')}
+        </p>
+        <p id="settings-usage-range-note" className="text-xs text-muted">
+          {t('usage.range.scopeNote')}
+        </p>
       </div>
-      {children}
-    </section>
+      <RangeSelect id="settings-usage-range" value={range} onChange={onChange} />
+    </div>
   );
 }
 
@@ -172,7 +143,7 @@ function Containers() {
         setError(null);
       } catch (cause) {
         if (request === latest.current && !quiet) {
-          setError(errorText(cause) ?? t('settings.usage.loadError'));
+          setError(errorText(cause, t));
         }
       }
     },
@@ -201,7 +172,7 @@ function Containers() {
       });
       setCursor(page.next_cursor);
     } catch (cause) {
-      if (request === latest.current) setError(errorText(cause) ?? t('settings.usage.loadError'));
+      if (request === latest.current) setError(errorText(cause, t));
     } finally {
       setLoadingMore(false);
     }
@@ -354,316 +325,5 @@ function ContainerRow({ container, nowMs }: { container: OwnerContainer; nowMs: 
         )}
       </div>
     </li>
-  );
-}
-
-function History() {
-  const { t, locale } = useLocale();
-  const { branding } = useSiteConfig();
-  const [period, setPeriod] = useState<UsagePeriod>('7d');
-  const [tokens, setTokens] = useState<OwnerTokenUsage | null>(null);
-  const [resources, setResources] = useState<OwnerResourceHistory | null>(null);
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  const [resourceError, setResourceError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setTokenError(null);
-    setResourceError(null);
-    // Each half fails on its own: model usage can be refused for a selection
-    // too large to sum while container history still reads. A refusal is
-    // told in the reader's language, never in the server's English.
-    const query = periodQuery(period);
-    const reads = [
-      getOwnerTokens(query, controller.signal).then(setTokens, (cause: unknown) => {
-        if (controller.signal.aborted) return;
-        setTokens(null);
-        setTokenError(t(historyErrorKey(cause)));
-      }),
-      getOwnerResources(query, controller.signal).then(setResources, (cause: unknown) => {
-        if (controller.signal.aborted) return;
-        setResources(null);
-        setResourceError(t(historyErrorKey(cause)));
-      }),
-    ];
-    void Promise.all(reads).then(() => {
-      if (!controller.signal.aborted) setLoading(false);
-    });
-    return () => controller.abort();
-  }, [period, attempt, t]);
-
-  // Only after a history loads: the server's render has no reader time zone,
-  // and the first browser render has to match it.
-  const generatedAt = resources?.generated_at ?? tokens?.generated_at;
-  const dayStart = generatedAt ? utcMidnightLocal(Date.parse(generatedAt), locale) : null;
-  // Both halves read the same period; either one names it.
-  const note = rangeNote(tokens?.period ?? resources?.period);
-  return (
-    <Card
-      id="settings-usage-history"
-      title={t('settings.usage.history')}
-      action={<PeriodPicker period={period} onChange={setPeriod} />}
-    >
-      {note && !loading ? (
-        <p role="note" className="mt-2 text-xs text-muted">
-          {t(note.key, note.vars)}
-        </p>
-      ) : null}
-      {tokenError ? (
-        <LoadError message={tokenError} onRetry={() => setAttempt((value) => value + 1)} />
-      ) : null}
-      {resourceError ? (
-        <LoadError message={resourceError} onRetry={() => setAttempt((value) => value + 1)} />
-      ) : null}
-      <HistoryTotals tokens={tokens} resources={resources} loading={loading} />
-      {tokens || resources ? (
-        <UsageChart days={chartDays(tokens?.days, resources?.days)} locale={locale} />
-      ) : null}
-      {tokens ? <ByModel usage={tokens} /> : null}
-      <p className="mt-4 text-xs text-muted">
-        {dayStart
-          ? t('settings.usage.utcNoteLocal', { time: dayStart })
-          : t('settings.usage.utcNote')}
-        {branding.gatewayUrl ? (
-          <>
-            {' '}
-            <a
-              href={`${branding.gatewayUrl}/dashboard`}
-              className="ui-focus-ring rounded font-medium text-accent hover:underline"
-            >
-              {t('settings.usage.dashboardLink')}
-            </a>
-          </>
-        ) : null}
-      </p>
-    </Card>
-  );
-}
-
-/** The period's totals, each a dash until its half of the history reads. */
-function HistoryTotals({
-  tokens,
-  resources,
-  loading,
-}: {
-  tokens: OwnerTokenUsage | null;
-  resources: OwnerResourceHistory | null;
-  loading: boolean;
-}) {
-  const { t } = useLocale();
-  const totals = resources?.totals;
-  const hours = (seconds: number) => {
-    const { unit, value } = duration(seconds);
-    return t(DURATION_UNIT[unit], { value });
-  };
-  const summary = tokens?.summary;
-  let tokenDetail: string | undefined;
-  if (summary?.totals) {
-    tokenDetail = t('settings.usage.tokensInOut', {
-      in: compactCount(summary.totals.tokens_in),
-      out: compactCount(summary.totals.tokens_out),
-    });
-  }
-  return (
-    <>
-      <dl
-        aria-busy={loading}
-        className={`mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4 ${loading ? 'opacity-60' : ''}`}
-      >
-        <Tile
-          label={t('settings.usage.cost')}
-          value={summary ? formatCost(summary.totals?.spent_usd) : '—'}
-          detail={t('settings.usage.costEstimate')}
-        />
-        <Tile
-          label={t('settings.usage.tokens')}
-          value={summary ? compactCount(tokenTotal(summary)) : '—'}
-          detail={tokenDetail}
-        />
-        <CacheTile usage={summary} />
-        <ReasoningTile usage={summary} />
-        <Tile
-          label={t('settings.usage.runningTime')}
-          value={totals ? hours(totals.running_seconds) : '—'}
-        />
-        <Tile
-          label={t('settings.usage.cpuTime')}
-          value={
-            totals ? t('settings.usage.coreHours', { value: decimal(coreHours(totals)) }) : '—'
-          }
-        />
-        <Tile
-          label={t('settings.usage.memoryTime')}
-          value={totals ? t('settings.usage.gbHours', { value: decimal(gibHours(totals)) }) : '—'}
-        />
-      </dl>
-      {totals && partlyMeasured(totals) ? (
-        <p className="mt-2 text-xs text-muted">
-          {t('settings.usage.partlyMeasured', {
-            measured: hours(totals.measured_seconds),
-            running: hours(totals.running_seconds),
-          })}
-        </p>
-      ) : null}
-    </>
-  );
-}
-
-/** How much of the input was read from the cache; a dash unless both sides are fully known. */
-function CacheTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
-  const { t } = useLocale();
-  const share = usage ? cachedShare(usage) : null;
-  let detail: string | undefined;
-  if (share !== null && usage?.totals) {
-    detail = t('settings.usage.cacheReadOf', {
-      read: compactCount(usage.totals.cache_read),
-      in: compactCount(usage.totals.tokens_in),
-    });
-  }
-  return (
-    <Tile label={t('settings.usage.cacheHitRate')} value={formatShare(share)} detail={detail} />
-  );
-}
-
-/**
- * Reasoning tokens. They are a part of output tokens, so the token total holds
- * them already; they are shown on their own and never added to it again.
- */
-function ReasoningTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
-  const { t } = useLocale();
-  const partly = usage ? reasoningPartly(usage) : false;
-  return (
-    <Tile
-      label={t('settings.usage.reasoning')}
-      value={compactCount(usage?.totals?.reasoning)}
-      detail={t(partly ? 'settings.usage.reasoningPartly' : 'settings.usage.reasoningInOutput')}
-    />
-  );
-}
-
-function PeriodPicker({
-  period,
-  onChange,
-}: {
-  period: UsagePeriod;
-  onChange: (period: UsagePeriod) => void;
-}) {
-  const { t } = useLocale();
-  return (
-    <div
-      role="group"
-      aria-label={t('settings.usage.period')}
-      className="flex gap-1 rounded-lg border border-border bg-surface-muted p-1"
-    >
-      {USAGE_PERIODS.map((item) => (
-        <button
-          key={item}
-          type="button"
-          aria-pressed={period === item}
-          onClick={() => onChange(item)}
-          className={`ui-focus-ring min-h-9 rounded-md px-3 text-sm font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
-            period === item
-              ? 'bg-surface text-foreground shadow-subtle'
-              : 'text-muted hover:bg-surface-hover hover:text-foreground'
-          }`}
-        >
-          {t(PERIOD_LABEL[item])}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function ByModel({ usage }: { usage: OwnerTokenUsage }) {
-  const { t } = useLocale();
-  const rows = [...usage.by_model.groups, ...(usage.by_model.other ? [usage.by_model.other] : [])];
-  if (rows.length === 0) {
-    return <p className="mt-4 text-sm text-muted">{t('settings.usage.noData')}</p>;
-  }
-  const other = usage.by_model.other;
-  return (
-    <div className="mt-5 overflow-x-auto">
-      <table className="w-full min-w-[28rem] text-left text-sm">
-        <caption className="mb-1 text-left text-sm font-semibold text-foreground">
-          {t('settings.usage.byModel')}
-        </caption>
-        <thead className="text-xs text-muted">
-          <tr className="border-b border-border">
-            <th scope="col" className="py-1.5 pr-3 font-medium">
-              {t('settings.usage.model')}
-            </th>
-            <th scope="col" className="py-1.5 pr-3 text-right font-medium">
-              {t('settings.usage.cost')}
-            </th>
-            <th scope="col" className="py-1.5 pr-3 text-right font-medium">
-              {t('settings.usage.tokensIn')}
-            </th>
-            <th scope="col" className="py-1.5 pr-3 text-right font-medium">
-              {t('settings.usage.tokensOut')}
-            </th>
-            <th scope="col" className="py-1.5 text-right font-medium">
-              {t('settings.usage.turnsColumn')}
-            </th>
-          </tr>
-        </thead>
-        <tbody className="tabular-nums">
-          {rows.map((group) => (
-            <tr
-              key={group === other ? '\u0000other' : (group.key ?? '\u0000unknown')}
-              className="border-b border-border last:border-0"
-            >
-              <th
-                scope="row"
-                className="max-w-[16rem] truncate py-1.5 pr-3 font-normal text-foreground"
-              >
-                {group === other
-                  ? t('settings.usage.otherModels')
-                  : (group.key ?? t('settings.usage.unknownModel'))}
-              </th>
-              <td className="py-1.5 pr-3 text-right">
-                {formatCost(group.usage.totals?.spent_usd)}
-              </td>
-              <td className="py-1.5 pr-3 text-right">
-                {compactCount(group.usage.totals?.tokens_in)}
-              </td>
-              <td className="py-1.5 pr-3 text-right">
-                {compactCount(group.usage.totals?.tokens_out)}
-              </td>
-              <td className="py-1.5 text-right">{group.usage.run_count.toLocaleString('en-US')}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function Tile({ label, value, detail }: { label: string; value: string; detail?: string }) {
-  return (
-    <div className="min-w-0 rounded-lg border border-border px-3 py-2">
-      <dt className="text-xs text-muted">{label}</dt>
-      <dd className="mt-0.5 break-words text-base font-semibold tabular-nums text-foreground sm:text-lg">
-        {value}
-      </dd>
-      {detail ? <dd className="mt-0.5 truncate text-xs text-muted">{detail}</dd> : null}
-    </div>
-  );
-}
-
-function LoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
-  const { t } = useLocale();
-  return (
-    <div
-      role="alert"
-      className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-400"
-    >
-      <span className="min-w-0 break-words">{message}</span>
-      <button type="button" onClick={onRetry} className="ui-button ui-focus-ring min-h-11 shrink-0">
-        {t('settings.usage.retry')}
-      </button>
-    </div>
   );
 }

@@ -17,6 +17,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -98,7 +99,221 @@ def fork_payload(messages: Any, source_native_turn_no: int) -> dict[str, str]:
     return {"messageID": next_message_id}
 
 
+#: Entries one context summary carries; the largest are kept.
+CONTEXT_MAX_ENTRIES = 300
+CONTEXT_PREVIEW_CHARS = 160
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]")
+_ASCII = re.compile(r"[\x00-\x7f]")
+#: What the servers put in place of a tool output they pruned from context.
+PRUNED_OUTPUT = "[Old tool result content cleared]"
+#: Bounds of the turn-start context read. It runs beside the turn, never in
+#: its way: a read that is slow, large or late is dropped, not waited for.
+CONTEXT_READ_MAX_BYTES = 8 * 1024 * 1024
+CONTEXT_READ_TIMEOUT_S = 5.0
+#: The server may list the turn's prompt a moment after accepting it.
+CONTEXT_PROMPT_POLLS = 10
+CONTEXT_PROMPT_POLL_S = 0.2
+
+
+def carried_messages(messages: Any) -> list[dict[str, Any]]:
+    """The messages a request carries, as the pinned servers filter compacted history.
+
+    A port of ``filterCompacted`` (OpenCode 1.18.9 ``session/message-v2.ts``,
+    the same in Kilo 7.4.17), applied to the oldest-first list
+    ``GET /session/{id}/message`` returns.
+    """
+    if not isinstance(messages, list):
+        return []
+    newest_first = [m for m in reversed(messages) if isinstance(m, dict) and isinstance(m.get("info"), dict)]
+    result: list[dict[str, Any]] = []
+    completed: set[str] = set()
+    retain = None
+    for msg in newest_first:
+        info = msg["info"]
+        parts = [p for p in msg.get("parts") or [] if isinstance(p, dict)]
+        result.append(msg)
+        if retain:
+            if info.get("id") == retain:
+                break
+            continue
+        if info.get("role") == "user" and info.get("id") in completed:
+            part = next((p for p in parts if p.get("type") == "compaction"), None)
+            if part is None:
+                continue
+            if not part.get("tail_start_id"):
+                break
+            retain = part["tail_start_id"]
+            if info.get("id") == retain:
+                break
+            continue
+        if info.get("role") == "assistant" and info.get("summary") and info.get("finish") and not info.get("error"):
+            completed.add(str(info.get("parentID")))
+    result.reverse()
+
+    def has_tail_compaction(msg: dict[str, Any]) -> dict[str, Any] | None:
+        if msg["info"].get("role") != "user":
+            return None
+        return next(
+            (p for p in msg.get("parts") or [] if isinstance(p, dict) and p.get("type") == "compaction" and p.get("tail_start_id")),
+            None,
+        )
+
+    compaction_index = max((i for i, m in enumerate(result) if has_tail_compaction(m)), default=-1)
+    if compaction_index < 0:
+        return result
+    compaction = result[compaction_index]
+    part = has_tail_compaction(compaction) or {}
+    summary_index = next(
+        (
+            i
+            for i, m in enumerate(result)
+            if i > compaction_index
+            and m["info"].get("role") == "assistant"
+            and m["info"].get("summary")
+            and m["info"].get("parentID") == compaction["info"].get("id")
+        ),
+        -1,
+    )
+    tail_index = next((i for i, m in enumerate(result) if m["info"].get("id") == part.get("tail_start_id")), -1)
+    if 0 <= tail_index < compaction_index and summary_index > compaction_index:
+        return [
+            *result[compaction_index : summary_index + 1],
+            *result[tail_index:compaction_index],
+            *result[summary_index + 1 :],
+        ]
+    return result
+
+
+def _context_entry(category: str, label: Any, text: str, **extra: Any) -> dict[str, Any]:
+    cjk = len(_CJK.findall(text))
+    ascii_chars = len(_ASCII.findall(text))
+    preview = " ".join(text.split())[:CONTEXT_PREVIEW_CHARS]
+    entry = {
+        "category": category,
+        "label": str(label or "")[:200],
+        "chars": len(text),
+        "ascii": ascii_chars,
+        "cjk": cjk,
+        "other": max(0, len(text) - ascii_chars - cjk),
+        "preview": preview,
+    }
+    entry.update({key: value for key, value in extra.items() if value})
+    return entry
+
+
+def _part_entries(info: dict[str, Any], part: dict[str, Any]) -> list[dict[str, Any]]:
+    kind = part.get("type")
+    message_ref = {"message_id": str(info.get("id") or ""), "part_id": str(part.get("id") or "")}
+    if kind == "text":
+        text = str(part.get("text") or "")
+        if info.get("role") == "user":
+            category = "injected" if part.get("synthetic") else "user_messages"
+        else:
+            category = "compaction_summary" if info.get("summary") else "assistant"
+        return [_context_entry(category, info.get("role"), text, ref=message_ref, synthetic=part.get("synthetic") is True)]
+    if kind == "reasoning":
+        return [_context_entry("reasoning", "reasoning", str(part.get("text") or ""), ref=message_ref)]
+    if kind == "file":
+        return [_context_entry("user_messages", part.get("filename") or "file", f"[file {part.get('mime') or ''}]", ref=message_ref)]
+    if kind != "tool":
+        return []
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    call_ref = {**message_ref, "tool_use_id": str(part.get("callID") or "")}
+    tool = part.get("tool") or "tool"
+    entries = [
+        _context_entry("tool_calls", tool, json.dumps(state.get("input"), ensure_ascii=False, default=str), ref=call_ref)
+    ]
+    timing = state.get("time") if isinstance(state.get("time"), dict) else {}
+    if state.get("status") in {"completed", "error"}:
+        if timing.get("compacted"):
+            entries.append(_context_entry("tool_results", tool, PRUNED_OUTPUT, ref=call_ref, pruned=True))
+        else:
+            output = str(state.get("output") or state.get("error") or "")
+            entries.append(_context_entry("tool_results", tool, output, ref=call_ref, is_error=state.get("status") == "error"))
+    return entries
+
+
+def _tool_entries(tools: Any) -> list[dict[str, Any]]:
+    entries = []
+    for tool in tools if isinstance(tools, list) else []:
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("id") or "")
+        if name == "invalid":
+            # Registered to absorb malformed calls, never offered to the model:
+            # ``activeTools`` filters it out (OpenCode 1.18.9 session/llm.ts).
+            continue
+        text = f"{tool.get('description') or ''}\n{json.dumps(tool.get('parameters'), ensure_ascii=False, default=str)}"
+        # The platform's relay names its tools session_<alias>__<tool>.
+        category = "mcp_tools" if name.startswith("session_") and "__" in name else "tool_definitions"
+        entries.append(_context_entry(category, name, text))
+    return entries
+
+
+def request_messages(messages: Any, prompt: str, *, since_ms: float) -> list[dict[str, Any]] | None:
+    """The listed messages up to and including this turn's prompt; ``None`` until it is listed.
+
+    The prompt is the newest user message with a text part equal to it,
+    created no earlier than its admission. Whatever follows it is the turn's
+    own output, which its first request does not carry.
+    """
+    listed = [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
+    for index in range(len(listed) - 1, -1, -1):
+        info = listed[index].get("info")
+        if not isinstance(info, dict) or info.get("role") != "user":
+            continue
+        created = (info.get("time") or {}).get("created") if isinstance(info.get("time"), dict) else None
+        texts = [
+            p.get("text") for p in listed[index].get("parts") or [] if isinstance(p, dict) and p.get("type") == "text"
+        ]
+        if prompt in texts and isinstance(created, (int, float)) and created >= since_ms:
+            return listed[: index + 1]
+        return None
+    return None
+
+
+def context_summary(messages: Any, tools: Any, *, provider: str = "") -> dict[str, Any]:
+    """What a request carries, from the messages it is sent with, as bounded entries.
+
+    Messages are filtered as the server filters compacted history; a tool
+    output the server pruned is listed as pruned, with the placeholder the
+    server sends instead. ``tools`` is ``None`` when the list could not be read.
+    """
+    all_messages = [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
+    carried = carried_messages(all_messages)
+    entries: list[dict[str, Any]] = []
+    for msg in carried:
+        info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+        for part in msg.get("parts") or []:
+            if isinstance(part, dict):
+                entries.extend(_part_entries(info, part))
+    entries.extend(_tool_entries(tools))
+    kept = sorted(entries, key=lambda e: -e["chars"])[:CONTEXT_MAX_ENTRIES]
+    return {
+        "messages": len(carried),
+        "provider": provider,
+        "tools_listed": tools is not None,
+        "entries": kept,
+        "entries_omitted": max(0, len(entries) - len(kept)),
+        "excluded": {
+            "compacted_messages": max(0, len(all_messages) - len(carried)),
+            "pruned_tool_outputs": sum(1 for e in entries if e.get("pruned")),
+        },
+    }
+
+
+class ContextTooLarge(Exception):
+    """The server's answer is over the context read's size bound."""
+
+
+class ContextUnavailable(Exception):
+    """The context read found nothing it may report."""
+
+
 class Bridge:
+    #: The turn-start context read in flight, if any (see ``_start_context_read``).
+    _context_reader: threading.Thread | None = None
+
     def __init__(self, runtime: str) -> None:
         if runtime not in _RUNTIMES:
             raise BridgeError(f"unsupported live HTTP runtime: {runtime!r}")
@@ -540,6 +755,76 @@ class Bridge:
         self.emit({"bridge": "event", "turn_id": active, "event": event})
         return event_type
 
+    def _start_context_read(self, turn_id: str, prompt: str, admitted_ms: float) -> None:
+        """Read what this turn's first request carries, beside the turn (caller holds the turn lock).
+
+        Nothing waits for the read and nothing it does can fail the turn. One
+        runs at a time; a turn that starts while an earlier read is still
+        running is simply not read.
+        """
+        try:
+            reader = self._context_reader
+            if reader is not None and reader.is_alive():
+                return
+            reader = threading.Thread(
+                target=self._read_context, args=(turn_id, prompt, admitted_ms), daemon=True
+            )
+            self._context_reader = reader
+            reader.start()
+        except Exception:  # an observation never fails a turn
+            return
+
+    def _get_bounded(self, path: str) -> Any:
+        """A GET for the context read: bounded in time and size, never retried."""
+        request = urllib.request.Request(self.base_url + path, headers=self._headers(), method="GET")
+        with urllib.request.urlopen(request, timeout=CONTEXT_READ_TIMEOUT_S) as response:
+            content = response.read(CONTEXT_READ_MAX_BYTES + 1)
+        if len(content) > CONTEXT_READ_MAX_BYTES:
+            raise ContextTooLarge(f"over {CONTEXT_READ_MAX_BYTES} bytes")
+        return json.loads(content) if content else None
+
+    def _read_context(self, turn_id: str, prompt: str, admitted_ms: float) -> None:
+        """Report the read only while its turn is active; otherwise drop it.
+
+        A read that fails, is too large, or finds the turn over is dropped with
+        a stderr diagnostic: stdout carries only what a turn can use.
+        """
+        try:
+            session = urllib.parse.quote(str(self.session_id), safe="")
+            carried = None
+            for _ in range(CONTEXT_PROMPT_POLLS):
+                if self._stopping.is_set() or self._turn_id != turn_id:
+                    return
+                carried = request_messages(
+                    self._get_bounded(f"/session/{session}/message"), prompt, since_ms=admitted_ms
+                )
+                if carried is not None:
+                    break
+                time.sleep(CONTEXT_PROMPT_POLL_S)
+            if carried is None:
+                raise ContextUnavailable("the prompt was not listed in time")
+            tools = None
+            with contextlib.suppress(Exception):
+                tools = self._get_bounded(
+                    "/experimental/tool?"
+                    + urllib.parse.urlencode({"provider": "freeinference", "model": self.model})
+                )
+            report = {
+                "bridge": "context",
+                "turn_id": turn_id,
+                "context": context_summary(carried, tools, provider="freeinference"),
+            }
+            with self._turn_lock:
+                # Settlement and failure are emitted under this same lock, so a
+                # read can never follow its turn's end.
+                if self._turn_id == turn_id and not self._stopping.is_set():
+                    self.emit(report)
+                    return
+            raise ContextUnavailable("the turn ended first")
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                print(f"context read skipped: {type(exc).__name__}: {exc}"[:300], file=sys.stderr)
+
     def _settle_locked(self, turn_id: str) -> None:
         # The server emits busy/status before its matching idle. Ignore a
         # subscription's stale initial idle so it cannot settle a new prompt.
@@ -572,6 +857,7 @@ class Bridge:
                 self._permission_sessions = {str(self.session_id)}
                 self._turn_saw_busy = False
                 self._turn_failed = False
+                admitted_ms = time.time() * 1000 - 1
                 try:
                     # Hold the ownership lock through admission. A concurrent
                     # stream loss clears readiness first, then waits here and
@@ -594,6 +880,7 @@ class Bridge:
                     self._questions.clear()
                     raise
                 self.emit({"bridge": "turn_accepted", "turn_id": command_id})
+                self._start_context_read(command_id, prompt, admitted_ms)
             return
         if kind == "interrupt":
             with self._turn_lock:

@@ -6,6 +6,7 @@ import { useT } from '@/components/providers';
 import { isComposerSubmit } from '../composerKeys';
 import {
   composerCommandMatches,
+  parseContextCommand,
   parseGoalCommand,
   type ComposerCommand,
 } from '../composerCommands';
@@ -52,6 +53,12 @@ export interface GoalCommandWiring {
   onApply: (objective: string) => Promise<void>;
   /** Put a refused write where the composer shows its other failures. */
   onError: (message: string) => void;
+  /**
+   * Show the conversation's context: the `/context` app command. Nothing is
+   * sent, no turn is started, and the draft keeps whatever followed the
+   * token. Without it the composer does not offer the command.
+   */
+  onContext?: () => void;
 }
 
 /** Everything the composer needs to draw the menu and run what it holds. */
@@ -98,13 +105,18 @@ export function useGoalCommand({
   onNeedsObjective,
   onApply,
   onError,
+  onContext,
 }: GoalCommandWiring): GoalCommandControls {
   const t = useT();
   const menuId = useId();
   const [activeIndex, setActiveIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const matches = useMemo(() => composerCommandMatches(value), [value]);
+  const offersContext = Boolean(onContext);
+  const matches = useMemo(
+    () => composerCommandMatches(value, offersContext ? ['goal', 'context'] : ['goal']),
+    [value, offersContext],
+  );
   const open = matches.length > 0 && !dismissed;
   // What the menu draws: nothing at all once it has been dismissed, which is
   // what makes Escape mean "not now" rather than "keep showing it".
@@ -113,18 +125,26 @@ export function useGoalCommand({
   // Escape hides the menu until the next keystroke. Typing is what asks for it
   // again, so the hiding must not outlive the text it was about.
   useEffect(() => setDismissed(false), [value]);
+  // A shorter list must not leave the highlight past its end.
+  useEffect(() => setActiveIndex(0), [matches.length]);
 
-  // One command today. Choosing it writes the token into the box and hands the
-  // caret back, and the table is what says so: a second command with its own
-  // behaviour is a switch here, not a second menu.
+  // Choosing Goal writes the token into the box and hands the caret back.
+  // Choosing Context opens the context and clears the token it was chosen
+  // with: the menu only shows while the box holds nothing but that token.
   const choose = useCallback(
     (index: number) => {
-      if (!matches[index]) return;
+      const command = matches[index];
+      if (!command) return;
       setDismissed(true);
+      if (command.name === 'context' && onContext) {
+        setValue((current) => (composerCommandMatches(current).length > 0 ? '' : current));
+        onContext();
+        return;
+      }
       setValue(GOAL_COMMAND_PREFIX);
       focusComposer();
     },
-    [focusComposer, matches, setValue],
+    [focusComposer, matches, onContext, setValue],
   );
 
   const onHighlight = useCallback((index: number) => setActiveIndex(index), []);
@@ -164,6 +184,13 @@ export function useGoalCommand({
     // the box holds: `/go` is not a request. Enter and the send button agree.
     if (open) {
       choose(activeIndex);
+      return true;
+    }
+    const context = onContext ? parseContextCommand(value) : null;
+    if (context && onContext) {
+      // Never sent: the context opens, and what followed the token stays.
+      setValue(context.rest);
+      onContext();
       return true;
     }
     const command = parseGoalCommand(value);

@@ -152,6 +152,34 @@ async def read_model_ttft(
             this installation's to query.
         scope: The job or thread id, for logs only.
     """
+    read = await read_request_pages(sources, more_sources=more_sources, grants=grants, scope=scope)
+    return summarize_request_pages(
+        [page for _, page in read.pages], sources_total=read.started, gap=read.gap
+    )
+
+
+class RequestPages:
+    """The pages one bounded read returned, each with the source row it read."""
+
+    def __init__(
+        self,
+        pages: list[tuple[Mapping[str, Any], GrantUsageRequestPage]],
+        gap: str | None,
+        started: int,
+    ) -> None:
+        self.pages = pages
+        self.gap = gap
+        self.started = started
+
+
+async def read_request_pages(
+    sources: Sequence[Mapping[str, Any]],
+    *,
+    more_sources: bool,
+    grants: GrantClient,
+    scope: str,
+) -> RequestPages:
+    """One bounded page per queryable started execution, or why one was not read."""
     started = [row for row in sources if row.get("attempt_status") != ATTEMPT_ABORTED]
     gap = REASON_SOURCES_TRUNCATED if more_sources else None
     queryable: list[tuple[Mapping[str, Any], str]] = []
@@ -174,9 +202,13 @@ async def read_model_ttft(
             )
     except TimeoutError:
         read = [(None, REASON_GATEWAY_UNAVAILABLE) for _ in queryable]
-    pages = [page for page, _ in read if page is not None]
+    pages = [
+        (row, page) for (row, _), (page, _) in zip(queryable, read, strict=True) if page is not None
+    ]
     gap = gap or next((reason for page, reason in read if page is None), None)
-    return summarize_request_pages(pages, sources_total=len(started), gap=gap)
+    if gap is None and any(page.next_cursor is not None for _, page in pages):
+        gap = REASON_PAGE_TRUNCATED
+    return RequestPages(pages, gap, len(started))
 
 
 async def _read_page(

@@ -5,29 +5,11 @@
 import type { AdminUsageAggregate, AdminUsageDay } from '@/lib/api/adminUsage';
 import type {
   ContainerState,
-  HistoryQuery,
-  OwnerHistoryPeriod,
   OwnerResourceDay,
   OwnerResourceTotals,
+  UsageBucket,
+  UsageRange,
 } from '@/lib/api/ownerUsage';
-import type { TranslationKey, TranslationVars } from '@/lib/i18n/translate';
-import { APIError } from '@/lib/utils/errors';
-
-// Named, not counted: "today" is not "1 days", and all time is no number of days.
-export const USAGE_PERIODS = ['today', '7d', '30d', 'all'] as const;
-export type UsagePeriod = (typeof USAGE_PERIODS)[number];
-
-const PERIOD_QUERY: Record<UsagePeriod, HistoryQuery> = {
-  today: { days: 1 },
-  '7d': { days: 7 },
-  '30d': { days: 30 },
-  all: { all: true },
-};
-
-/** What a period asks the server for. */
-export function periodQuery(period: UsagePeriod): HistoryQuery {
-  return PERIOD_QUERY[period];
-}
 
 export const CHART_METRICS = ['cost', 'tokens', 'running', 'cpu', 'memory'] as const;
 export type ChartMetric = (typeof CHART_METRICS)[number];
@@ -149,7 +131,7 @@ export function reasoningPartly(usage: AdminUsageAggregate): boolean {
 
 export interface ChartDay {
   date: string;
-  /** False for today, which has not ended. */
+  /** False for the bucket that ends now, which is still going. */
   whole: boolean;
   tokens: AdminUsageDay | null;
   resources: OwnerResourceDay | null;
@@ -165,7 +147,8 @@ export function chartDays(
   const dates = resources?.length ? resources : (tokens ?? []);
   return dates.map((day) => ({
     date: day.date,
-    whole: Date.parse(day.until) - Date.parse(day.since) >= 86_400_000,
+    // A bucket clipped by the range's start is still whole; one clipped by now is not.
+    whole: Date.parse(day.until) % 86_400_000 === 0,
     tokens: tokensByDate.get(day.date) ?? null,
     resources: resourcesByDate.get(day.date) ?? null,
   }));
@@ -202,121 +185,56 @@ export function formatDayValue(metric: ChartMetric, value: number | null): strin
   return metric === 'tokens' ? compactCount(value) : decimal(value);
 }
 
-/** `Oct 9`, or `Oct 9, 2025` with ``withYear``, for a UTC calendar date. */
+/** `Oct 9`, for a UTC calendar date; `Oct 9, 2025` with ``withYear``. */
 export function shortDay(date: string, locale: string, withYear = false): string {
   const time = Date.parse(`${date}T00:00:00Z`);
   if (!Number.isFinite(time)) return date;
   return new Date(time).toLocaleDateString(locale, {
-    year: withYear ? 'numeric' : undefined,
     month: 'short',
     day: 'numeric',
+    ...(withYear ? { year: 'numeric' } : {}),
     timeZone: 'UTC',
   });
 }
 
 /**
- * Past this many days the chart draws one bar per week. Thirty days still fit
- * a phone as bars wide enough to point at; ninety, or a year, do not.
+ * A bucket's name: its day, the Monday its week starts, or its month. The year
+ * is named once the bars cross one, so `Jan` cannot be read as the wrong one.
  */
-export const MAX_DAILY_BARS = 31;
-const DAY_MS = 86_400_000;
-
-/** One bar of the chart: a UTC day, or the days of one week inside the period. */
-export interface ChartBar {
-  /** The first and last UTC date the bar sums; the same date for a day. */
-  first: string;
-  last: string;
-  days: number;
-  /** False when the bar covers only part of its day or week. */
-  whole: boolean;
-  /** Null is unknown: a week with one unknown day is unknown as a whole. */
-  value: number | null;
-}
-
-/** The Monday (UTC) that starts ``date``'s week, as ISO weeks do. */
-function weekOf(date: string): string {
+export function bucketLabel(
+  date: string,
+  bucket: UsageBucket,
+  locale: string,
+  withYear: boolean,
+): string {
+  if (bucket !== 'month') return shortDay(date, locale, withYear);
   const time = Date.parse(`${date}T00:00:00Z`);
-  const sinceMonday = (new Date(time).getUTCDay() + 6) % 7;
-  return new Date(time - sinceMonday * DAY_MS).toISOString().slice(0, 10);
+  if (!Number.isFinite(time)) return date;
+  return new Date(time).toLocaleDateString(locale, {
+    month: 'short',
+    ...(withYear ? { year: 'numeric' } : {}),
+    timeZone: 'UTC',
+  });
 }
 
-/**
- * A metric's bars: one per day, or one per calendar week past
- * ``MAX_DAILY_BARS`` days.
- *
- * A week sums only the days the period has. Days before the period are not
- * drawn as zero; the week the period starts in is partial instead, and so is
- * the week that holds today. Like ``tokenTotal``, a sum with one unknown day
- * in it is unknown.
- */
-export function chartBars(days: ChartDay[], metric: ChartMetric): ChartBar[] {
-  const bars: ChartBar[] = [];
-  const weekly = days.length > MAX_DAILY_BARS;
-  let week: string | null = null;
-  for (const day of days) {
-    const value = dayValue(day, metric);
-    const start = weekly ? weekOf(day.date) : null;
-    const bar = bars.at(-1);
-    if (bar && start !== null && start === week) {
-      bar.last = day.date;
-      bar.days += 1;
-      bar.whole &&= day.whole;
-      bar.value = bar.value === null || value === null ? null : bar.value + value;
-      continue;
-    }
-    week = start;
-    bars.push({ first: day.date, last: day.date, days: 1, whole: day.whole, value });
-  }
-  return weekly ? bars.map((bar) => ({ ...bar, whole: bar.whole && bar.days === 7 })) : bars;
+/** Whether a chart's buckets span more than one calendar year. */
+export function crossesYear(dates: string[]): boolean {
+  return dates.length > 1 && dates[0].slice(0, 4) !== dates[dates.length - 1].slice(0, 4);
 }
 
-/** Whether a chart's labels need their year: the bars cross a new year. */
-export function crossesYear(bars: ChartBar[]): boolean {
-  return bars.length > 0 && bars[0].first.slice(0, 4) !== bars[bars.length - 1].last.slice(0, 4);
-}
-
-/** The UTC date an instant falls on, as `2026-04-12`. */
-function utcDate(iso: string): string {
-  const time = Date.parse(iso);
-  return Number.isFinite(time) ? new Date(time).toISOString().slice(0, 10) : iso;
-}
-
-/**
- * What an all-time period covers, said as it is.
- *
- * All time is shown as all only when it starts at the owner's first run.
- * Narrowed, it names the first day it holds and why earlier days are left out.
- * A period of some number of days needs no note: its button says it.
- */
-export function rangeNote(
-  period: OwnerHistoryPeriod | null | undefined,
-): { key: TranslationKey; vars?: TranslationVars } | null {
-  if (period?.kind !== 'all') return null;
-  if (period.first_activity_at === null) return { key: 'settings.usage.range.noRuns' };
-  const date = utcDate(period.since);
-  if (period.limited_by === 'runs') return { key: 'settings.usage.range.runs', vars: { date } };
-  if (period.limited_by === 'days') {
-    const span = Date.parse(`${utcDate(period.until)}T00:00:00Z`) - Date.parse(period.since);
-    return { key: 'settings.usage.range.days', vars: { date, count: span / DAY_MS + 1 } };
-  }
-  return { key: 'settings.usage.range.first', vars: { date } };
-}
-
-const ERROR_KEY: Partial<Record<string, TranslationKey>> = {
-  usage_query_too_large: 'settings.usage.error.tooLarge',
-  usage_response_too_large: 'settings.usage.error.responseTooLarge',
-  usage_temporarily_unavailable: 'settings.usage.error.unavailable',
-};
-
-/**
- * The words for a history read the server refused, in the reader's language.
- * The server's own message is English prose for logs and is never shown.
- */
-export function historyErrorKey(cause: unknown): TranslationKey {
-  if (!(cause instanceof APIError)) return 'settings.usage.loadError';
-  const key = ERROR_KEY[cause.code];
-  if (key) return key;
-  return cause.statusCode === 503 ? 'settings.usage.error.unavailable' : 'settings.usage.loadError';
+/** The range's first and last UTC days, as the reader's language writes dates. */
+export function rangeSpan(period: UsageRange, locale: string): { since: string; until: string } {
+  const sinceDay = period.since.slice(0, 10);
+  // ``until`` is now, or a midnight that ends the previous day.
+  const untilMs = Date.parse(period.until) - 1;
+  const untilDay = Number.isFinite(untilMs)
+    ? new Date(untilMs).toISOString().slice(0, 10)
+    : sinceDay;
+  const withYear = sinceDay.slice(0, 4) !== untilDay.slice(0, 4) || period.preset === 'all';
+  return {
+    since: shortDay(sinceDay, locale, withYear),
+    until: shortDay(untilDay, locale, withYear),
+  };
 }
 
 /**

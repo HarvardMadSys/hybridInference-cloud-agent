@@ -313,6 +313,7 @@ def _full_claim() -> WorkerClaimResponse:
     return _claim(
         thread_attachment_count=2,
         turn_attachment_count=1,
+        context_injections=[{"producer": "memory", "items": 1, "chars": 40}],
         environment=BoundEnvironment(binding_id="b").model_dump(mode="json"),
         environment_snapshot=snapshot.model_dump(mode="json"),
         ssh_access=SshAccess(revision=1),

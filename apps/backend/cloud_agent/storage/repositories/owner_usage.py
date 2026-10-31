@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.admin_observability import encode_cursor
@@ -28,9 +27,12 @@ from cloud_agent.owner_usage import (
     memory_limit_bytes,
 )
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.usage_range import bucket_dates
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
 
 #: Containers the owner can still reach: not removed by a completed deletion,
@@ -180,7 +182,11 @@ _RUNNING_TIME_SQL = """
         FROM ordered
     )
     SELECT b.n,
-           COALESCE(SUM(EXTRACT(EPOCH FROM LEAST(s.ended, b.until) - GREATEST(s.started, b.since))),
+           -- A bucket no running span overlaps joins to NULLs, and LEAST and
+           -- GREATEST skip NULLs: unfiltered, that bucket counted as running
+           -- from its start to its end.
+           COALESCE(SUM(EXTRACT(EPOCH FROM LEAST(s.ended, b.until) - GREATEST(s.started, b.since)))
+                        FILTER (WHERE s.started IS NOT NULL),
                     0)::double precision AS running_seconds
     FROM unnest($4::timestamptz[], $5::timestamptz[]) WITH ORDINALITY AS b(since, until, n)
     LEFT JOIN spans s
@@ -189,15 +195,28 @@ _RUNNING_TIME_SQL = """
     ORDER BY b.n
 """
 
+#: Measured use per bucket: each bucket is the UTC days ``[first, after)``,
+#: one day for a daily history and a week or a month for a longer one.
 _MEASURED_SQL = """
     SELECT b.n,
            COALESCE(SUM(d.measured_seconds), 0) AS measured_seconds,
            COALESCE(SUM(d.cpu_core_seconds), 0) AS cpu_core_seconds,
            COALESCE(SUM(d.memory_byte_seconds), 0) AS memory_byte_seconds
-    FROM unnest($2::date[]) WITH ORDINALITY AS b(day, n)
-    LEFT JOIN agent_sandbox_usage_days d ON d.user_id = $1 AND d.day = b.day
+    FROM unnest($2::date[], $3::date[]) WITH ORDINALITY AS b(first, after, n)
+    LEFT JOIN agent_sandbox_usage_days d
+      ON d.user_id = $1 AND d.day >= b.first AND d.day < b.after
     GROUP BY b.n
     ORDER BY b.n
+"""
+
+#: The owner's earliest retained record: their first run (as the usage cohort
+#: selects runs) or their first container, whichever came first.
+_FIRST_RECORD_SQL = """
+    SELECT LEAST(
+        (SELECT MIN(j.created_at) FROM agent_jobs j
+         WHERE j.user_id = $1 AND j.fork_source_job_id IS NULL),
+        (SELECT MIN(s.created_at) FROM agent_sandboxes s WHERE s.user_id = $1)
+    )
 """
 
 
@@ -329,7 +348,7 @@ class PostgresOwnerUsageRepository:
         if not buckets:
             raise ValueError("A history needs at least one day.")
         since, until = buckets[0][0], buckets[-1][1]
-        days = [start.astimezone(UTC).date() for start, _ in buckets]
+        spans = bucket_dates(buckets)
         async with (
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
@@ -345,11 +364,16 @@ class PostgresOwnerUsageRepository:
                 [end for _, end in buckets],
                 list(RUNNING_STATES),
             )
-            measured = await conn.fetch(_MEASURED_SQL, user_id, days)
+            measured = await conn.fetch(
+                _MEASURED_SQL,
+                user_id,
+                [first for first, _ in spans],
+                [after for _, after in spans],
+            )
 
         result_days = []
-        for (start, end), day, run_row, measured_row in zip(
-            buckets, days, running, measured, strict=True
+        for (start, end), (day, _), run_row, measured_row in zip(
+            buckets, spans, running, measured, strict=True
         ):
             result_days.append(
                 OwnerResourceDay(
@@ -374,3 +398,8 @@ class PostgresOwnerUsageRepository:
             ),
             days=result_days,
         )
+
+    async def first_record_at(self, user_id: str) -> datetime | None:
+        """When the owner's earliest retained run or container was created."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(_FIRST_RECORD_SQL, user_id)

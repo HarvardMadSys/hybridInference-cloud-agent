@@ -97,13 +97,13 @@ export function JobDetailHeader({
             aria-label="Run views"
             className="flex shrink-0 items-center gap-0.5 rounded-md bg-surface-muted p-0.5 text-xs"
           >
-            {(['chat', 'trajectory'] as const).map((view) => (
+            {(['chat', 'trajectory', 'context'] as const).map((view) => (
               <button
                 key={view}
                 type="button"
                 onClick={() => setTab(view)}
                 aria-current={tab === view ? 'page' : undefined}
-                className={`ui-focus-ring min-h-7 rounded-md px-2.5 py-1 capitalize transition-colors [@media(pointer:coarse)]:min-h-11 ${
+                className={`ui-focus-ring min-h-7 rounded-md px-1.5 py-1 capitalize sm:px-2.5 transition-colors [@media(pointer:coarse)]:min-h-11 ${
                   tab === view
                     ? 'bg-surface font-semibold text-foreground shadow-sm ring-1 ring-border'
                     : 'text-muted hover:bg-surface-hover hover:text-foreground'

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.model_connections import anthropic_base_url
@@ -33,6 +34,8 @@ from .events import (
     NormalizedEvent,
     _harness_inventory,
     _payload_text,
+    reported_compaction,
+    reported_context_windows,
 )
 from .preview import ReplyPreview
 
@@ -75,6 +78,11 @@ class ClaudeCodeRuntime(AgentRuntime):
         # The text block being written: ``<message id>:<block index>``.
         self._message_id: str | None = None
         self._text_block: str | None = None
+        #: The synthetic user message a ``compact_boundary`` names as its
+        #: summary (``preserved_segment.anchor_uuid``), until it arrives.
+        self._summary_anchor: str | None = None
+        #: When the main agent's current content block started streaming.
+        self._block_started: float | None = None
 
     def prepare_live(
         self,
@@ -309,6 +317,8 @@ class ClaudeCodeRuntime(AgentRuntime):
             }
             if harness is not None:
                 payload["harness"] = harness
+            payload.update(_compaction_fields(subtype, event))
+            self._summary_anchor = _summary_anchor(subtype, event) or self._summary_anchor
             return NormalizedEvent(LIFECYCLE, payload)
         if kind == "stream_event":
             return self._from_stream(event)
@@ -350,6 +360,8 @@ class ClaudeCodeRuntime(AgentRuntime):
             self._text_block = None
             return None
         if kind == "content_block_start":
+            # When the block began streaming, for its duration (``block_ms``).
+            self._block_started = time.monotonic()
             block = stream.get("content_block")
             is_text = isinstance(block, dict) and block.get("type") == "text"
             self._text_block = (
@@ -384,6 +396,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             # recorded relationship so the UI can distinguish a child agent's
             # activity and reply from the conversation's own answer.
             usage_fields["parent_tool_use_id"] = parent_tool_use_id
+        elif self._block_started is not None:
+            # The pinned 2.1.220 writes a block's complete line as the block
+            # ends: the time since its start is how long it streamed to this
+            # host. Passive (no request of its own), one number per block.
+            usage_fields["block_ms"] = int((time.monotonic() - self._block_started) * 1000)
+            self._block_started = None
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -426,6 +444,9 @@ class ClaudeCodeRuntime(AgentRuntime):
             # A user message the CLI read from stdin, echoed back: the driver
             # accounts for it, and it is nothing new to report.
             return None
+        summary = self._compaction_summary(event)
+        if summary is not None:
+            return summary
         blocks = (event.get("message") or {}).get("content") or []
         parent_tool_use_id = event.get("parent_tool_use_id")
         parent_fields = (
@@ -454,7 +475,48 @@ class ClaudeCodeRuntime(AgentRuntime):
                         **result_fields,
                     },
                 )
+        injected = _record_content_text(blocks)
+        if injected.strip():
+            # Not the owner's message (those come back as replays) and not a
+            # tool result: text the CLI itself added to the conversation, such
+            # as a skill's body or an interrupt marker. Kept, bounded, as an
+            # injection the Context view lists.
+            flags = [name for name in ("isSynthetic", "isMeta") if event.get(name)]
+            return NormalizedEvent(
+                LIFECYCLE,
+                {
+                    "phase": "context_injection",
+                    "source": "claude_user_line",
+                    "label": ",".join(flags) or "user_line",
+                    "text": injected[:SUMMARY_TEXT_CHARS],
+                    "chars": len(injected),
+                    **({"truncated": True} if len(injected) > SUMMARY_TEXT_CHARS else {}),
+                    **parent_fields,
+                },
+            )
         return NormalizedEvent(RAW, {"text": "user turn without a tool result"})
+
+    def _compaction_summary(self, event: dict[str, Any]) -> NormalizedEvent | None:
+        """The summary a compaction carries forward, from the message it names.
+
+        After ``compact_boundary`` the pinned 2.1.220 writes the summary as a
+        synthetic user message whose uuid is the boundary's anchor. It is what
+        the next request carries in place of the compacted history.
+        """
+        anchor = self._summary_anchor
+        if not anchor or event.get("uuid") != anchor or not event.get("isSynthetic"):
+            return None
+        self._summary_anchor = None
+        text = _record_content_text((event.get("message") or {}).get("content"))
+        return NormalizedEvent(
+            LIFECYCLE,
+            {
+                "phase": "compaction_summary",
+                "text": text[:SUMMARY_TEXT_CHARS],
+                "chars": len(text),
+                **({"truncated": True} if len(text) > SUMMARY_TEXT_CHARS else {}),
+            },
+        )
 
     def _from_result(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map the terminal result line."""
@@ -480,6 +542,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                     "api_error_status": event.get("api_error_status"),
                     "text": text[:2000],
                     **usage_fields,
+                    **_context_window_fields(event),
                 },
             )
         return NormalizedEvent(
@@ -493,6 +556,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                 # api_logs.agent_job_id — the platform never trusts a number
                 # the agent computed about itself.
                 "reported_cost_usd": event.get("total_cost_usd"),
+                **_context_window_fields(event),
             },
         )
 
@@ -518,3 +582,57 @@ class ClaudeCodeRuntime(AgentRuntime):
     def capabilities(self) -> RuntimeCapabilities:
         """Claude Code takes the platform's MCP relay and an effort level."""
         return RuntimeCapabilities(mcp=CLAUDE_CODE.mcp, reasoning_efforts=self.EFFORT_LEVELS)
+
+
+def _compaction_fields(subtype: str, event: dict[str, Any]) -> dict[str, Any]:
+    """A ``compact_boundary``'s own account of the compaction.
+
+    Pinned 2.1.220 sends ``compact_metadata`` with the trigger (``auto`` or
+    ``manual``), the tokens before, and from later releases the tokens after.
+    Stored so a reader can show what the CLI said it reclaimed rather than
+    guess it from the next request's size.
+    """
+    if subtype != "compact_boundary":
+        return {}
+    metadata = event.get("compact_metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    report = reported_compaction(
+        trigger=metadata.get("trigger"),
+        pre_tokens=metadata.get("pre_tokens"),
+        post_tokens=metadata.get("post_tokens"),
+    )
+    return {"compaction": report} if report else {}
+
+
+def _context_window_fields(event: dict[str, Any]) -> dict[str, Any]:
+    """The context window each model of this query ran under, when reported."""
+    windows = reported_context_windows(event.get("modelUsage"))
+    return {"context_windows": windows} if windows else {}
+
+
+#: Characters of a compaction summary kept on its event.
+SUMMARY_TEXT_CHARS = 4000
+
+
+def _summary_anchor(subtype: str, event: dict[str, Any]) -> str | None:
+    """The uuid of the message a compaction boundary names as its summary."""
+    if subtype != "compact_boundary":
+        return None
+    metadata = event.get("compact_metadata")
+    segment = metadata.get("preserved_segment") if isinstance(metadata, dict) else None
+    anchor = segment.get("anchor_uuid") if isinstance(segment, dict) else None
+    return anchor if isinstance(anchor, str) and anchor else None
+
+
+def _record_content_text(content: Any) -> str:
+    """A message's text, whether the CLI sent a string or text blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""

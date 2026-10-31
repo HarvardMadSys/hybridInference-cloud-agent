@@ -71,21 +71,22 @@ export interface OwnerResourceDay extends OwnerResourceTotals {
   until: string;
 }
 
-/** A history's period: the last `days`, or all time as far as one read can sum. */
-export type HistoryQuery = { days: number } | { all: true };
+/** The presets every half of the Usage page reads, in UTC days. */
+export type UsageRangePreset = 'today' | '7d' | '30d' | 'all';
+export const USAGE_RANGE_PRESETS: readonly UsageRangePreset[] = ['today', '7d', '30d', 'all'];
+export type UsageBucket = 'day' | 'week' | 'month';
 
-/**
- * The period a history read covers. An all-time period starts at the owner's
- * first run's UTC day unless `limited_by` names what moved it later: more runs
- * than one read sums, or more days than an all-time read spans.
- */
-export interface OwnerHistoryPeriod {
-  kind: 'days' | 'all';
+/** The interval a read covers, as the server resolved it. */
+export interface UsageRange {
+  preset: UsageRangePreset | null;
+  days: number | null;
   since: string;
   until: string;
-  /** Read for an all-time period only; null when the owner has no runs. */
-  first_activity_at: string | null;
-  limited_by: 'runs' | 'days' | null;
+  day_timezone: 'UTC';
+  /** Each entry of a history is one of these: a day, an ISO week or a month. */
+  bucket: UsageBucket;
+  /** For `all`: the earliest retained record; null when there is none. */
+  first_record_at: string | null;
 }
 
 export interface OwnerResourceHistory {
@@ -94,8 +95,9 @@ export interface OwnerResourceHistory {
   day_timezone: 'UTC';
   generated_at: string;
   totals: OwnerResourceTotals;
+  /** One entry per bucket of `period` (a day, week or month). */
   days: OwnerResourceDay[];
-  period: OwnerHistoryPeriod | null;
+  period: UsageRange | null;
 }
 
 /** The admin Usage page's accounting, selected for the owner's own runs. */
@@ -105,10 +107,149 @@ export interface OwnerTokenUsage {
   day_timezone: 'UTC';
   time_basis: 'job_created_at';
   generated_at: string;
-  period: OwnerHistoryPeriod;
   summary: AdminUsageAggregate;
+  /** One entry per bucket of `period`. */
   days: AdminUsageDay[];
   by_model: AdminUsageBreakdown;
+  period: UsageRange | null;
+  /** Bounded batches the server summed this in; more than one for a long history. */
+  batches: number;
+}
+
+export type ContextSort = 'recent' | 'peak' | 'compactions' | 'requests';
+export const CONTEXT_SORTS: readonly ContextSort[] = ['recent', 'peak', 'compactions', 'requests'];
+
+/** Recorded-content categories, in the order a chart stacks them. */
+export type RecordedCategory =
+  | 'turn_prompts'
+  | 'platform_context'
+  | 'user_messages'
+  | 'assistant'
+  | 'reasoning'
+  | 'tool_calls'
+  | 'tool_results'
+  | 'compaction_summary'
+  | 'injected';
+
+/**
+ * Recorded content beside the provider's reported request sizes. The first is
+ * an estimate of stored text, each item counted once; the second is exact as
+ * the CLI relayed it, summed over every request, so retained text counts once
+ * per request that carried it. Neither is derived from the other.
+ */
+export interface ContextComposition {
+  recorded: {
+    basis: string;
+    categories: { key: RecordedCategory; tokens: number }[];
+    total_tokens: number;
+    turns: number;
+    turns_profiled: number;
+    turns_truncated: number;
+  };
+  provider: {
+    requests: number;
+    prompt_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    output_tokens: number;
+    output_unreported: number;
+    subagent_requests: number;
+    subagent_prompt_tokens: number;
+    subagent_output_tokens: number;
+  };
+}
+
+/** One UTC day of the range with matching runs. */
+export interface ContextActivityDay {
+  day: string;
+  turns: number;
+  conversations: number;
+  main_requests: number;
+  compactions: number;
+  peak_prompt_tokens: number | null;
+  /**
+   * The provider-reported input of every request that day, summed. Absent
+   * from a control plane that predates it: never read as zero.
+   */
+  prompt_tokens?: number;
+}
+
+/** One project of the matching runs; `repo` null is the temporary workspaces. */
+export interface ContextProject {
+  repo: string | null;
+  conversations: number;
+  turns: number;
+  main_requests: number;
+  compactions: number;
+  peak_prompt_tokens: number | null;
+  last_turn_at: string;
+}
+
+/** What narrows the list: all of it is applied by the server, over the whole range. */
+export interface ContextInsightsFilters {
+  q: string;
+  repo: string | null;
+  temporary: boolean;
+  day: string | null;
+}
+
+/** One conversation's context profile over its runs in the range. */
+export interface ConversationContext {
+  thread_id: string;
+  title: string | null;
+  repo: string | null;
+  archived: boolean;
+  latest_job_id: string;
+  turns: number;
+  first_turn_at: string;
+  last_turn_at: string;
+  runtimes: string[];
+  models: string[];
+  attempts: number;
+  attempts_profiled: number;
+  main_requests: number;
+  subagent_requests: number;
+  peak_prompt_tokens: number | null;
+  latest_prompt_tokens: number | null;
+  latest_observed_at: string | null;
+  context_window: number | null;
+  compactions: number;
+  /** Server-summed Gateway usage of these runs; null when none was recorded. */
+  usage: AdminUsageAggregate | null;
+  composition: ContextComposition | null;
+}
+
+export interface ContextInsightsPage {
+  period: UsageRange;
+  sort: ContextSort;
+  time_basis: 'job_created_at';
+  generated_at: string;
+  summary: {
+    conversations: number;
+    conversations_observed: number;
+    turns: number;
+    main_requests: number;
+    subagent_requests: number;
+    compactions: number;
+    peak_prompt_tokens: number | null;
+    peak_thread_id: string | null;
+    deleted_conversation_runs: number;
+  };
+  profiling: {
+    pending_attempts: number;
+    pending_capped: boolean;
+    refreshed: number;
+    complete: boolean;
+  };
+  conversations: ConversationContext[];
+  next_cursor: string | null;
+  filters: ContextInsightsFilters;
+  /** First page only: every UTC day of the range with matching runs, day filter aside. */
+  activity: ContextActivityDay[] | null;
+  /** First page only: every project of the matching runs, project filter aside. */
+  projects: ContextProject[] | null;
+  /** First page only: every matching conversation's composition, summed. */
+  composition: ContextComposition | null;
 }
 
 export async function getOwnerContainers(
@@ -126,29 +267,47 @@ export async function getOwnerContainers(
   return jsonOrThrow<OwnerContainerList>(response);
 }
 
-function historyParams(query: HistoryQuery): string {
-  return 'all' in query ? 'all=true' : `days=${query.days}`;
-}
-
 export async function getOwnerResources(
-  query: HistoryQuery,
+  range: UsageRangePreset,
   signal?: AbortSignal,
 ): Promise<OwnerResourceHistory> {
-  const response = await fetchWithAuth(
-    config.apiBase,
-    `${USAGE}/resources?${historyParams(query)}`,
-    { signal, cache: 'no-store' },
-  );
+  const response = await fetchWithAuth(config.apiBase, `${USAGE}/resources?range=${range}`, {
+    signal,
+    cache: 'no-store',
+  });
   return jsonOrThrow<OwnerResourceHistory>(response);
 }
 
 export async function getOwnerTokens(
-  query: HistoryQuery,
+  range: UsageRangePreset,
   signal?: AbortSignal,
 ): Promise<OwnerTokenUsage> {
-  const response = await fetchWithAuth(config.apiBase, `${USAGE}/tokens?${historyParams(query)}`, {
+  const response = await fetchWithAuth(config.apiBase, `${USAGE}/tokens?range=${range}`, {
     signal,
     cache: 'no-store',
   });
   return jsonOrThrow<OwnerTokenUsage>(response);
+}
+
+export async function getContextInsights(options: {
+  range: UsageRangePreset;
+  sort: ContextSort;
+  cursor?: string | null;
+  limit?: number;
+  filters?: Partial<ContextInsightsFilters>;
+  signal?: AbortSignal;
+}): Promise<ContextInsightsPage> {
+  const params = new URLSearchParams({ range: options.range, sort: options.sort });
+  const filters = options.filters ?? {};
+  if (filters.q?.trim()) params.set('q', filters.q.trim());
+  if (filters.repo) params.set('repo', filters.repo);
+  else if (filters.temporary) params.set('temporary', 'true');
+  if (filters.day) params.set('day', filters.day);
+  if (options.cursor) params.set('cursor', options.cursor);
+  if (options.limit) params.set('limit', String(options.limit));
+  const response = await fetchWithAuth(config.apiBase, `${USAGE}/context?${params}`, {
+    signal: options.signal,
+    cache: 'no-store',
+  });
+  return jsonOrThrow<ContextInsightsPage>(response);
 }

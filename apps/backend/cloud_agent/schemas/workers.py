@@ -275,6 +275,9 @@ class WorkerClaimResponse(BaseModel):
     repo: str | None
     base_sha: str | None = None
     task_prompt: str
+    #: What the platform wrapped ``task_prompt`` in, by size and never by text
+    #: (``cloud_agent.prompt_injections``); the runner stores it on ``started``.
+    context_injections: list[dict[str, Any]] = Field(default_factory=list)
     setup_script: str | None = None
     plugins: list[SandboxPlugin] = Field(default_factory=list)
     runtime: str

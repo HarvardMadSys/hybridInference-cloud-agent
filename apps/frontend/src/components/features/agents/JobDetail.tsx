@@ -5,16 +5,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import toast from 'react-hot-toast';
 import { JobComposer } from './job-detail/JobComposer';
 import { JobDetailHeader } from './job-detail/JobDetailHeader';
+import { JobDetailProviders } from './job-detail/JobDetailProviders';
 import { JobDetailSidePanels } from './job-detail/JobDetailSidePanels';
 import { JobTranscript } from './job-detail/JobTranscript';
 import { hasPublishableWorkspaceChanges } from './job-detail/RunOutcome';
-import { TrajectoryView } from './job-detail/LazyPanels';
+import { ContextView, TrajectoryView } from './job-detail/LazyPanels';
 import { inheritedFrom, useJobComposerSettings } from './job-detail/useJobComposerSettings';
 import { useJobConversation } from './job-detail/useJobConversation';
 import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
 import { useT } from '@/components/providers';
-import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
 import { basePath } from '@/config/env';
 import { publishAgentThread } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
@@ -114,7 +114,6 @@ export function JobDetail({
     setTrajectoryQuery,
     trajectorySteps,
     layoutContainerRef,
-    openWorkspaceFile,
     selectStep,
     openRun,
   } = panels;
@@ -740,12 +739,12 @@ export function JobDetail({
                 inspector is not holding instead of a reading column. */}
             <div
               className={`flex w-full flex-1 flex-col pb-4 pt-4 ${
-                tab === 'trajectory'
-                  ? 'px-4'
-                  : `mx-auto max-w-4xl ${showRail ? 'pl-4 pr-10' : 'px-4'}`
+                tab !== 'chat' ? 'px-4' : `mx-auto max-w-4xl ${showRail ? 'pl-4 pr-10' : 'px-4'}`
               }`}
             >
-              {tab === 'trajectory' ? (
+              {tab === 'context' ? (
+                <ContextView job={job} onOpenPoint={panels.openContextPoint} onOpenTurn={openRun} />
+              ) : tab === 'trajectory' ? (
                 <div className="flex-1">
                   <TrajectoryView
                     events={events}
@@ -757,14 +756,7 @@ export function JobDetail({
                     subagentFilter={
                       openSubagent && subagent ? JSON.stringify([subagent.jobId, subagent.key]) : ''
                     }
-                    onSubagentFilterChange={(value) => {
-                      if (!value) {
-                        setSubagent(null);
-                        return;
-                      }
-                      const [jobId, key] = JSON.parse(value) as [string, string];
-                      setSubagent({ jobId, key });
-                    }}
+                    onSubagentFilterChange={panels.setSubagentFilter}
                     selectedKey={inspector?.kind === 'step' ? inspector.stepKey : null}
                     onSelectStep={selectStep}
                     onOpenRun={openRun}
@@ -935,5 +927,5 @@ export function JobDetail({
       </div>
     </section>
   );
-  return <WorkspaceLinkProvider onOpenFile={openWorkspaceFile}>{content}</WorkspaceLinkProvider>;
+  return <JobDetailProviders panels={panels}>{content}</JobDetailProviders>;
 }

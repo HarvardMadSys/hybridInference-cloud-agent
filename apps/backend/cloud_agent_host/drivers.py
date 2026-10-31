@@ -37,6 +37,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.harness_event import LINE, HarnessEvent
+from cloud_agent_host.http_bridge_parts import ContextRecords, answer_preview, tool_call_event
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -55,9 +57,10 @@ from cloud_agent_host.runtimes import (
     ReplyPreview,
     RuntimeMCPConfig,
     get_runtime,
-    merged_mcp_server,
 )
+from cloud_agent_host.runtimes.context_snapshot import bridge_report
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
+from cloud_agent_host.stream_deltas import DeltaBatcher, StreamDelta
 from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
 from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import (
@@ -130,10 +133,6 @@ TURN_STARTED = "turn_started"
 TURN_COMPLETED = "turn_completed"
 TURN_FAILED = "turn_failed"
 FLOOR_EVENT_TYPES = frozenset({TURN_STARTED, TURN_COMPLETED, TURN_FAILED})
-
-#: Yielded for a stdout line the dialect adapter had no event for. Carries the
-#: raw line so the caller can keep its tail; never uploaded.
-LINE = "line"
 
 
 class DriverError(Exception):
@@ -382,20 +381,6 @@ class TurnResult:
     def __post_init__(self) -> None:
         if self.status == "completed" and not self.final_output.strip():
             raise ValueError("a completed turn must carry a non-empty final_output")
-
-
-@dataclass(frozen=True)
-class HarnessEvent:
-    """One item of a turn's stream.
-
-    Dialect events carry their ``raw_line``; floor events carry none. A line
-    the adapter had no event for is yielded as :data:`LINE` so the caller can
-    keep its tail without this layer deciding what to drop.
-    """
-
-    event_type: str
-    payload: dict[str, Any] = field(default_factory=dict)
-    raw_line: str | None = None
 
 
 @dataclass(frozen=True)
@@ -760,35 +745,6 @@ class _InputReceipt:
         return self._outcome
 
 
-@dataclass(frozen=True)
-class StreamDelta:
-    """One native record that only adds a few characters to a stream.
-
-    ``path`` leads to the added text inside ``value``; ``render`` turns a
-    record and its line into the row the platform stores for it.
-    """
-
-    value: dict[str, Any]
-    path: tuple[str, ...]
-    delta: str
-    line: str
-    render: Callable[[dict[str, Any], str], HarnessEvent]
-
-
-def _with_delta(value: dict[str, Any], path: tuple[str, ...], delta: str) -> dict[str, Any]:
-    """A copy of ``value`` whose text at ``path`` is ``delta``."""
-    head, *rest = path
-    inner = value.get(head)
-    if rest and isinstance(inner, dict):
-        return {**value, head: _with_delta(inner, tuple(rest), delta)}
-    return {**value, head: delta}
-
-
-def _escaped_chars(text: str) -> int:
-    """How many characters ``text`` takes inside a JSON string."""
-    return len(json.dumps(text)) - 2
-
-
 def _codex_raw_row(
     value: dict[str, Any], line: str, owner: Mapping[str, str] | None = None
 ) -> HarnessEvent:
@@ -811,80 +767,6 @@ def _codex_raw_row(
 def _bridge_raw_row(value: dict[str, Any], line: str) -> HarnessEvent:
     """An OpenCode/Kilo bridge record stored as its bounded line."""
     return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
-
-
-class DeltaBatcher:
-    """Merge adjacent per-token deltas of one native stream into fewer rows.
-
-    Codex's reasoning and command-output deltas and OpenCode/Kilo's reasoning
-    deltas arrive a few characters at a time, and every row the runner gets is
-    a stored event and a synchronous control-plane request. Only *adjacent*
-    deltas of the *same* stream are merged, so no text is dropped or
-    reordered: the first piece of a quiet stream goes out at once, later ones
-    at most once per :attr:`INTERVAL_S`, and any other protocol line -- the
-    item's completion, the turn's boundary, an interrupt's settlement --
-    first flushes what is gathered (see ``_JsonResidentTurn.events_for_line``).
-    """
-
-    INTERVAL_S = ReplyPreview.INTERVAL_S
-    #: A merged row's line stays within the 4,000 characters a raw row keeps
-    #: of its line, so merging never clips text that separate rows kept whole.
-    MAX_LINE_CHARS = 4000
-
-    def __init__(self, clock: Callable[[], float] | None = None) -> None:
-        """``clock`` is for tests; it defaults to ``time.monotonic``."""
-        self._clock = clock or time.monotonic
-        self._first: StreamDelta | None = None
-        self._key = ""
-        self._pieces: list[str] = []
-        self._line_chars = 0
-        self._reported_at: dict[str, float] = {}
-
-    @property
-    def holding(self) -> bool:
-        """Whether the latest delta is gathered rather than reported yet."""
-        return self._first is not None
-
-    def add(self, item: StreamDelta) -> list[HarnessEvent]:
-        """Gather ``item``; return the rows now due, in stream order."""
-        empty = _with_delta(item.value, item.path, "")
-        key = json.dumps(empty, sort_keys=True)
-        added = _escaped_chars(item.delta)
-        rows: list[HarnessEvent] = []
-        if self._first is not None and (
-            key != self._key or self._line_chars + added > self.MAX_LINE_CHARS
-        ):
-            rows.extend(self.flush())
-        now = self._clock()
-        if self._first is None:
-            reported_at = self._reported_at.get(key)
-            if reported_at is None or now - reported_at >= self.INTERVAL_S:
-                self._reported_at[key] = now
-                rows.append(item.render(item.value, item.line))
-                return rows
-            self._first, self._key = item, key
-            self._pieces = [item.delta]
-            self._line_chars = len(json.dumps(empty, separators=(",", ":"))) + added
-            return rows
-        self._pieces.append(item.delta)
-        self._line_chars += added
-        if now - self._reported_at[key] >= self.INTERVAL_S:
-            rows.extend(self.flush())
-        return rows
-
-    def flush(self) -> list[HarnessEvent]:
-        """Report whatever is gathered, as one row."""
-        first = self._first
-        if first is None:
-            return []
-        if len(self._pieces) == 1:
-            value, line = first.value, first.line
-        else:
-            value = _with_delta(first.value, first.path, "".join(self._pieces))
-            line = json.dumps(value, separators=(",", ":"))
-        self._reported_at[self._key] = self._clock()
-        self._first, self._key, self._pieces, self._line_chars = None, "", [], 0
-        return [first.render(value, line)]
 
 
 class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
@@ -1956,6 +1838,8 @@ class HttpAgentLiveTurn(_JsonResidentTurn[ResidentLiveRuntime]):
         #: The call of a tool part that ended without running, reported just
         #: ahead of the result the same update carries.
         self.unopened_call: HarnessEvent | None = None
+        #: What the server injected or pruned this turn (the Context events).
+        self.context = ContextRecords()
 
 
 class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
@@ -2120,9 +2004,11 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 # cannot turn the user's input into an assistant reply.
                 message_id = str(part.get("messageID") or "")
                 turn.text_parts[part_id] = (message_id, str(part.get("text") or ""))
+                if (injected := turn.context.text_part(part, part_id, turn)) is not None:
+                    return injected
                 timing = part.get("time")
                 ended = isinstance(timing, dict) and bool(timing.get("end"))
-                return self._answer_preview(turn, part_id, ended=ended, line=line)
+                return answer_preview(turn, part_id, ended=ended, line=line)
             if (
                 event_type == "message.part.delta"
                 and properties.get("field") == "text"
@@ -2135,7 +2021,7 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                     delta_part, (str(properties.get("messageID") or ""), "")
                 )
                 turn.text_parts[delta_part] = (owner, text + str(properties.get("delta") or ""))
-                return self._answer_preview(turn, delta_part, ended=False, line=line)
+                return answer_preview(turn, delta_part, ended=False, line=line)
             if event_type == "message.part.updated" and part_type == "reasoning":
                 text = str(part.get("text") or "")
                 if part.get("time", {}).get("end") if isinstance(part.get("time"), dict) else False:
@@ -2146,19 +2032,22 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 state = state if isinstance(state, dict) else {}
                 call_id = str(part.get("callID") or part_id)
                 status = state.get("status")
+                pruned = turn.context.tool_part(self.runtime.name, part, call_id, line)
+                if pruned is not None:
+                    return pruned
                 # Both servers open a tool part as pending, with an empty input,
                 # while the model is still writing the call's arguments. The
                 # call is reported from the update that starts it running,
                 # which is the first to carry them.
                 if status == "running" and call_id not in turn.reported_tools:
                     turn.reported_tools.add(call_id)
-                    return self._tool_call(part, state, call_id, line)
+                    return tool_call_event(part, state, call_id, line)
                 if status in {"completed", "error"}:
                     if call_id not in turn.reported_tools:
                         # It never ran, as when an interrupt stops a pending
                         # call: the update that ends it opens it as well.
                         turn.reported_tools.add(call_id)
-                        turn.unopened_call = self._tool_call(part, state, call_id, line)
+                        turn.unopened_call = tool_call_event(part, state, call_id, line)
                     content = str(state.get("output") or state.get("error") or "")
                     # A task's result is its subagent's whole answer, so only the
                     # marked event bound applies to it. Other tools keep a short
@@ -2184,48 +2073,17 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
         if bridge == "settled":
             # Reported by events_for_protocol_line, one message per part.
             return HarnessEvent(LIFECYCLE, {"phase": "result"}, raw_line=line)
+        if bridge == "context":
+            # The bridge's own read of what this turn's first request carries,
+            # sent only while the turn is active; nothing waits for it.
+            if value.get("turn_id") != turn.protocol_turn_id:
+                return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+            return HarnessEvent(LIFECYCLE, bridge_report(value, runtime=self.runtime.name))
         if bridge in {"fatal", "command_error"}:
             return HarnessEvent(
                 ERROR, {"text": str(value.get("detail") or "")[:2000]}, raw_line=line
             )
         return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
-
-    @staticmethod
-    def _tool_call(
-        part: dict[str, Any], state: dict[str, Any], call_id: str, line: str
-    ) -> HarnessEvent:
-        """The call a tool part stands for, with the input its state carries."""
-        return HarnessEvent(
-            TOOL_USE,
-            {
-                "name": part.get("tool"),
-                "id": call_id,
-                "input": state.get("input"),
-                # Both servers name a relay tool `session_<alias>__<tool>`.
-                **merged_mcp_server(part.get("tool"), separator="_"),
-            },
-            raw_line=line,
-        )
-
-    @staticmethod
-    def _answer_preview(
-        turn: HttpAgentLiveTurn, part_id: str, *, ended: bool, line: str
-    ) -> HarnessEvent:
-        """Preview a text part, if it is already known to be the assistant's.
-
-        A part whose message metadata arrives later is previewed from its next
-        update on, with all the text it has by then.
-        """
-        message_id, text = turn.text_parts[part_id]
-        if turn.message_roles.get(message_id) != "assistant":
-            return HarnessEvent(LINE, raw_line=line)
-        piece = turn.preview.grow_to(part_id, text)
-        if piece is None and ended:
-            # A finished part may sit before a long tool call; show all of it.
-            piece = turn.preview.flush(part_id)
-        if piece is None:
-            return HarnessEvent(LINE, raw_line=line)
-        return HarnessEvent(RAW, piece, raw_line=line)
 
     def events_for_protocol_line(
         self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
@@ -2250,12 +2108,15 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             opened, turn.unopened_call = turn.unopened_call, None
             return [event] if opened is None else [opened, event]
         turn.preview.clear()
+        injected = turn.context.pending(turn)
         answer = [
             HarnessEvent(MESSAGE, {"text": text, "preview_id": part_id}, raw_line=line)
             for part_id, (message_id, text) in turn.text_parts.items()
-            if text.strip() and turn.message_roles.get(message_id) == "assistant"
+            if text.strip()
+            and turn.message_roles.get(message_id) == "assistant"
+            and not turn.context.is_synthetic(part_id)
         ]
-        return answer or [self.event_for_protocol_line(line, turn)]
+        return [*injected, *(answer or [self.event_for_protocol_line(line, turn)])]
 
     def interrupt_turn(self, turn: _JsonResidentTurn[ResidentLiveRuntime]) -> None:
         """Interrupt only the active bridge turn on the resident session."""

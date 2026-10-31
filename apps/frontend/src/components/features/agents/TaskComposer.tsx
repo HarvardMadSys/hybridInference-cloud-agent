@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
 import type {
   AgentConfigApi,
@@ -32,6 +32,8 @@ import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { PromptRewrite } from './PromptRewrite';
 import { composerCommandMatches } from './composerCommands';
+import { useContextCommandDialog } from './context/ContextCommandDialog';
+import { PluginSelectionDialog, SkillSelectionDialog } from './job-detail/LazyPanels';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
@@ -52,15 +54,6 @@ import {
   TemporaryWorkspaceConfirm,
   useTemporaryWorkspaceAcknowledgement,
 } from './TemporaryWorkspace';
-
-const SkillSelectionDialog = lazy(() =>
-  import('./skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
-);
-const PluginSelectionDialog = lazy(() =>
-  import('./plugins/PluginSelectionDialog').then((module) => ({
-    default: module.PluginSelectionDialog,
-  })),
-);
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -129,6 +122,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
   // failure: nothing was created and nothing was sent.
   const [goalHint, setGoalHint] = useState<string | null>(null);
+  const contextCommand = useContextCommandDialog(() => taskBox.current?.focus());
   const [dropping, setDropping] = useState(false);
   // Drops whose folders are still being walked; their files are not attached yet.
   const [readingDrops, setReadingDrops] = useState(0);
@@ -205,6 +199,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
     onApply: applyGoalObjective,
     onError: setError,
+    onContext: contextCommand.open,
   });
 
   // The config fetch runs once on mount, but its fallback message has to be
@@ -940,6 +935,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         />
       ) : null}
 
+      {contextCommand.dialog}
       {pluginsOpen ? (
         <Suspense
           fallback={

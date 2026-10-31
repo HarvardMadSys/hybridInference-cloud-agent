@@ -42,16 +42,17 @@ it('keeps one tab stop and moves selection with arrows, Home, and End', () => {
   expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[0]]);
   expect(tabs[0]).toHaveAttribute('aria-controls', screen.getByRole('tabpanel').id);
 
+  const last = tabs.length - 1;
   fireEvent.keyDown(tabs[0], { key: 'ArrowLeft' });
-  expect(tabs[3]).toHaveFocus();
-  expect(tabs[3]).toHaveAttribute('aria-selected', 'true');
-  expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[3]]);
+  expect(tabs[last]).toHaveFocus();
+  expect(tabs[last]).toHaveAttribute('aria-selected', 'true');
+  expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[last]]);
 
-  fireEvent.keyDown(tabs[3], { key: 'ArrowRight' });
+  fireEvent.keyDown(tabs[last], { key: 'ArrowRight' });
   expect(tabs[0]).toHaveFocus();
   fireEvent.keyDown(tabs[0], { key: 'End' });
-  expect(tabs[3]).toHaveFocus();
-  fireEvent.keyDown(tabs[3], { key: 'Home' });
+  expect(tabs[last]).toHaveFocus();
+  fireEvent.keyDown(tabs[last], { key: 'Home' });
   expect(tabs[0]).toHaveFocus();
 });
 
@@ -68,7 +69,7 @@ it('focuses a newly opened chat and returns focus to a surviving tab when closed
   expect(screen.getByRole('tab', { name: /Git/ })).toHaveFocus();
 });
 
-it('always offers the environment entry without a feature flag', () => {
+it('always offers the environment entry without a feature flag, and no Context tab', () => {
   render(
     <WorkspaceTabBar
       selected="git"
@@ -80,5 +81,7 @@ it('always offers the environment entry without a feature flag', () => {
     />,
   );
   expect(screen.getByRole('tab', { name: 'Environment' })).toBeInTheDocument();
+  // Context is a main view beside Chat and Trajectory, not a workspace tab.
+  expect(screen.queryByRole('tab', { name: 'Context' })).not.toBeInTheDocument();
   expect(screen.getAllByRole('tab')).toHaveLength(4);
 });

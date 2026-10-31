@@ -114,6 +114,8 @@ class ClaimedJob:
     # earlier turns' files, so only a new container or a turn that attached
     # something needs the import to run.
     turn_attachment_count: int = 0
+    #: What the platform wrapped the prompt in, by size (``started`` carries it).
+    context_injections: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
@@ -163,7 +165,33 @@ class ClaimedJob:
             ),
             thread_attachment_count=int(body.get("thread_attachment_count") or 0),
             turn_attachment_count=int(body.get("turn_attachment_count") or 0),
+            context_injections=_context_injections(body.get("context_injections")),
         )
+
+    def started_context_fields(self) -> dict[str, Any]:
+        """What ``started`` records of the platform's prompt wrapping: sizes, never text."""
+        return (
+            {"context_injections": list(self.context_injections)} if self.context_injections else {}
+        )
+
+
+#: Platform injection records one claim carries, and the fields each may hold.
+_MAX_INJECTIONS = 10
+_INJECTION_FIELDS = ("producer", "items", "chars", "ascii", "cjk", "names")
+
+
+def _context_injections(value: Any) -> tuple[dict[str, Any], ...]:
+    """The claim's injection records, bounded; anything else is dropped, never fatal."""
+    if not isinstance(value, list):
+        return ()
+    records = []
+    for item in value[:_MAX_INJECTIONS]:
+        if isinstance(item, dict) and isinstance(item.get("producer"), str):
+            record = {key: item[key] for key in _INJECTION_FIELDS if key in item}
+            if isinstance(record.get("names"), list):
+                record["names"] = [str(name)[:120] for name in record["names"][:20]]
+            records.append(record)
+    return tuple(records)
 
 
 def claim_secret_values(job: ClaimedJob) -> dict[str, str]:

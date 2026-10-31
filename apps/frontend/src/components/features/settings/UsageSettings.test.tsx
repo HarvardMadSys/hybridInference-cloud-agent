@@ -8,25 +8,67 @@ import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
 import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import type { AdminUsageAggregate } from '@/lib/api/adminUsage';
 import {
+  getContextInsights,
   getOwnerContainers,
   getOwnerResources,
   getOwnerTokens,
+  type ContextInsightsPage,
+  type ConversationContext,
   type OwnerContainer,
   type OwnerContainerList,
-  type OwnerHistoryPeriod,
   type OwnerResourceHistory,
   type OwnerTokenUsage,
+  type UsageRange,
 } from '@/lib/api/ownerUsage';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
-import { APIError } from '@/lib/utils/errors';
 
 import { CONTAINER_REFRESH_MS, UsageSettings } from './UsageSettings';
 
-vi.mock('@/lib/api/ownerUsage', () => ({
+vi.mock('@/lib/api/ownerUsage', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/ownerUsage')>()),
+  getContextInsights: vi.fn(),
   getOwnerContainers: vi.fn(),
   getOwnerResources: vi.fn(),
   getOwnerTokens: vi.fn(),
 }));
+
+const WEEK = {
+  preset: '7d' as const,
+  days: null,
+  since: '2026-10-09T00:00:00Z',
+  until: '2026-10-15T12:00:00Z',
+  day_timezone: 'UTC' as const,
+  bucket: 'day' as const,
+  first_record_at: null,
+};
+
+function insights(overrides: Partial<ContextInsightsPage> = {}): ContextInsightsPage {
+  return {
+    period: WEEK,
+    sort: 'recent',
+    time_basis: 'job_created_at',
+    generated_at: '2026-10-15T12:00:00Z',
+    summary: {
+      conversations: 0,
+      conversations_observed: 0,
+      turns: 0,
+      main_requests: 0,
+      subagent_requests: 0,
+      compactions: 0,
+      peak_prompt_tokens: null,
+      peak_thread_id: null,
+      deleted_conversation_runs: 0,
+    },
+    profiling: { pending_attempts: 0, pending_capped: false, refreshed: 0, complete: true },
+    conversations: [],
+    next_cursor: null,
+    filters: { q: '', repo: null, temporary: false, day: null },
+    activity: null,
+    projects: null,
+    composition: null,
+    ...overrides,
+  };
+}
 
 const GIB = 1024 ** 3;
 const NOW = Date.parse('2026-10-15T12:00:00Z');
@@ -106,14 +148,6 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
   };
 }
 
-const WEEK: OwnerHistoryPeriod = {
-  kind: 'days',
-  since: '2026-10-09T00:00:00Z',
-  until: '2026-10-15T12:00:00Z',
-  first_activity_at: null,
-  limited_by: null,
-};
-
 function tokens(): OwnerTokenUsage {
   return {
     since: '2026-10-09T00:00:00Z',
@@ -121,7 +155,6 @@ function tokens(): OwnerTokenUsage {
     day_timezone: 'UTC',
     time_basis: 'job_created_at',
     generated_at: '2026-10-15T12:00:00Z',
-    period: WEEK,
     summary: aggregate(),
     days: [
       {
@@ -139,6 +172,8 @@ function tokens(): OwnerTokenUsage {
       ],
       other: null,
     },
+    period: WEEK,
+    batches: 1,
   };
 }
 
@@ -148,7 +183,6 @@ function resources(): OwnerResourceHistory {
     until: '2026-10-15T12:00:00Z',
     day_timezone: 'UTC',
     generated_at: '2026-10-15T12:00:00Z',
-    period: WEEK,
     totals: {
       running_seconds: 10 * 3600,
       measured_seconds: 4 * 3600,
@@ -166,6 +200,7 @@ function resources(): OwnerResourceHistory {
         memory_byte_seconds: 3 * 3600 * GIB,
       },
     ],
+    period: WEEK,
   };
 }
 
@@ -195,6 +230,7 @@ beforeEach(() => {
   vi.mocked(getOwnerContainers).mockResolvedValue(list());
   vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
   vi.mocked(getOwnerResources).mockResolvedValue(resources());
+  vi.mocked(getContextInsights).mockResolvedValue(insights());
 });
 
 afterEach(() => {
@@ -358,103 +394,63 @@ describe('UsageSettings', () => {
     expect(await tile('Tokens')).toBe('150K');
   });
 
-  it('reads both histories again for another period', async () => {
+  it('offers exactly today, 7 days, 30 days and all time', async () => {
     section();
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
-    expect(getOwnerTokens).toHaveBeenLastCalledWith({ days: 7 }, expect.anything());
-    const periods = screen.getByRole('group', { name: 'Period' });
-    expect(
-      within(periods)
-        .getAllByRole('button')
-        .map((button) => button.textContent),
-    ).toEqual(['Today', '7 days', '30 days', 'All']);
-    fireEvent.click(screen.getByRole('button', { name: '30 days' }));
-    await waitFor(() =>
-      expect(getOwnerTokens).toHaveBeenLastCalledWith({ days: 30 }, expect.anything()),
-    );
-    expect(getOwnerResources).toHaveBeenLastCalledWith({ days: 30 }, expect.anything());
-    expect(screen.getByRole('button', { name: '30 days' })).toHaveAttribute('aria-pressed', 'true');
-    fireEvent.click(screen.getByRole('button', { name: 'All' }));
-    await waitFor(() =>
-      expect(getOwnerTokens).toHaveBeenLastCalledWith({ all: true }, expect.anything()),
-    );
-    expect(getOwnerResources).toHaveBeenLastCalledWith({ all: true }, expect.anything());
+    fireEvent.click(await screen.findByRole('combobox', { name: 'Range' }));
+    const options = within(screen.getByRole('listbox')).getAllByRole('option');
+    expect(options.map((option) => option.textContent)).toEqual([
+      'Today',
+      'Last 7 days',
+      'Last 30 days',
+      'All time',
+    ]);
   });
 
-  it('draws no chart for today, only its totals', async () => {
-    const yesterday = {
-      date: '2026-10-14',
-      since: '2026-10-14T00:00:00Z',
-      until: '2026-10-15T00:00:00Z',
+  it('names the range it shows in UTC days, and all time from its first record', async () => {
+    const all = {
+      ...WEEK,
+      preset: 'all' as const,
+      since: '2024-03-09T00:00:00Z',
+      bucket: 'week' as const,
+      first_record_at: '2024-03-09T17:30:00Z',
     };
-    vi.mocked(getOwnerTokens).mockResolvedValue({
-      ...tokens(),
-      days: [{ ...tokens().days[0], ...yesterday }, ...tokens().days],
-    });
-    vi.mocked(getOwnerResources).mockResolvedValue({
-      ...resources(),
-      days: [{ ...resources().days[0], ...yesterday }, ...resources().days],
-    });
-    section();
-    expect(await screen.findByRole('region', { name: 'Cost by day' })).toBeInTheDocument();
-    vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
-    vi.mocked(getOwnerResources).mockResolvedValue(resources());
-    fireEvent.click(screen.getByRole('button', { name: 'Today' }));
-    await waitFor(() =>
-      expect(getOwnerTokens).toHaveBeenLastCalledWith({ days: 1 }, expect.anything()),
-    );
-    await waitFor(() =>
-      expect(screen.queryByRole('region', { name: 'Cost by day' })).not.toBeInTheDocument(),
-    );
-    expect(await tile('Model cost')).toBe('$12.35');
-  });
-
-  it('says where a narrowed all-time period starts, and sums weeks', async () => {
-    const period: OwnerHistoryPeriod = {
-      kind: 'all',
-      since: '2026-08-10T00:00:00Z',
-      until: '2026-10-15T12:00:00Z',
-      first_activity_at: '2026-02-01T09:00:00Z',
-      limited_by: 'runs',
-    };
-    const start = Date.parse(period.since);
-    const dates = Array.from({ length: 67 }, (_, index) =>
-      new Date(start + index * 86_400_000).toISOString().slice(0, 10),
-    );
-    vi.mocked(getOwnerTokens).mockResolvedValue({
-      ...tokens(),
-      since: period.since,
-      period,
-      days: dates.map((date) => ({ ...tokens().days[0], date, since: `${date}T00:00:00Z` })),
-    });
-    vi.mocked(getOwnerResources).mockResolvedValue({
-      ...resources(),
-      since: period.since,
-      period,
-      days: dates.map((date) => ({ ...resources().days[0], date, since: `${date}T00:00:00Z` })),
-    });
-    section();
-    fireEvent.click(await screen.findByRole('button', { name: 'All' }));
-    const note = await screen.findByRole('note');
-    expect(note).toHaveTextContent(
-      'Since 2026-08-10 · Earlier usage is more than one summary can add up and is not included.',
-    );
-    const chart = await screen.findByRole('region', { name: 'Cost by week' });
-    // Monday 2026-08-10 to Thursday 2026-10-15: nine whole weeks and a partial one.
-    expect(within(chart).getAllByRole('row')).toHaveLength(10);
-  });
-
-  it('keeps container history when model usage cannot be read', async () => {
-    vi.mocked(getOwnerTokens).mockRejectedValue(
-      new APIError('usage_query_too_large', 'Too many runs to sum.', 422),
-    );
+    vi.mocked(getOwnerTokens).mockResolvedValue({ ...tokens(), period: all });
+    vi.mocked(getOwnerResources).mockResolvedValue({ ...resources(), period: all });
     section();
     expect(
       await screen.findByText(
-        'This period has too many turns to add up at once. Choose a shorter period.',
+        'Everything since Mar 9, 2024, the first UTC day with a run or container. One bar per week, Monday to Sunday.',
       ),
     ).toBeInTheDocument();
-    expect(screen.queryByText('Too many runs to sum.')).not.toBeInTheDocument();
+  });
+
+  it('shows a refusal in the reader’s words', async () => {
+    const { APIError } = await import('@/lib/utils/errors');
+    vi.mocked(getOwnerTokens).mockRejectedValue(
+      new APIError('usage_temporarily_unavailable', 'Usage could not be read right now.', 503),
+    );
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    section();
+    expect(await screen.findByText('暂时无法读取用量，请重试。')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['usage_query_too_large', 422, 'This usage is too large to sum. Choose a shorter range.'],
+    ['usage_response_too_large', 422, 'This usage is too large to send. Choose a shorter range.'],
+    ['something_new', 503, 'Usage could not be read right now. Try again.'],
+    ['something_new', 400, 'Could not load usage.'],
+  ])('words a %s refusal itself, never the server’s prose', async (code, status, words) => {
+    const { APIError } = await import('@/lib/utils/errors');
+    vi.mocked(getOwnerTokens).mockRejectedValue(new APIError(code, 'Server prose.', status));
+    section();
+    expect(await screen.findByText(words)).toBeInTheDocument();
+    expect(screen.queryByText('Server prose.')).not.toBeInTheDocument();
+  });
+
+  it('keeps container history when model usage cannot be read', async () => {
+    vi.mocked(getOwnerTokens).mockRejectedValue(new Error('Too many runs to sum.'));
+    section();
+    expect(await screen.findByText('Could not load usage.')).toBeInTheDocument();
     expect(await screen.findByText('10 h')).toBeInTheDocument();
     vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -475,17 +471,295 @@ describe('UsageSettings', () => {
     expect(
       await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '今天' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '全部' })).toBeInTheDocument();
+  });
+});
+
+function conversation(overrides: Partial<ConversationContext> = {}): ConversationContext {
+  return {
+    thread_id: 'athr_ctx',
+    title: 'Long refactor',
+    repo: 'example-org/app',
+    archived: false,
+    latest_job_id: 'job-ctx',
+    turns: 4,
+    first_turn_at: '2026-10-14T00:00:00Z',
+    last_turn_at: '2026-10-15T09:00:00Z',
+    runtimes: ['codex'],
+    models: ['glm-5.1'],
+    attempts: 4,
+    attempts_profiled: 4,
+    main_requests: 12,
+    subagent_requests: 0,
+    peak_prompt_tokens: 90_000,
+    latest_prompt_tokens: 30_000,
+    latest_observed_at: '2026-10-15T09:00:00Z',
+    context_window: 200_000,
+    compactions: 1,
+    usage: aggregate({
+      totals: {
+        calls: 12,
+        tokens_in: 80_000,
+        tokens_out: 4_000,
+        cache_read: 60_000,
+        cache_write: 0,
+        reasoning: null,
+        spent_usd: '2.5',
+      },
+    }),
+    composition: null,
+    ...overrides,
+  };
+}
+
+/** A week of insights with one conversation, a busy day and both compositions. */
+function richInsights(period: UsageRange = WEEK): ContextInsightsPage {
+  return insights({
+    period,
+    summary: {
+      ...insights().summary,
+      conversations: 1,
+      conversations_observed: 1,
+      turns: 4,
+      main_requests: 12,
+      compactions: 1,
+      peak_prompt_tokens: 90_000,
+      peak_thread_id: 'athr_ctx',
+    },
+    conversations: [conversation()],
+    activity: [
+      {
+        day: '2026-10-14',
+        turns: 4,
+        conversations: 1,
+        main_requests: 12,
+        compactions: 1,
+        peak_prompt_tokens: 90_000,
+        prompt_tokens: 412_800,
+      },
+    ],
+    composition: {
+      recorded: {
+        basis: 'chars_cjk_v1',
+        categories: [
+          { key: 'turn_prompts', tokens: 1_000 },
+          { key: 'tool_results', tokens: 3_000 },
+        ],
+        total_tokens: 4_000,
+        turns: 4,
+        turns_profiled: 4,
+        turns_truncated: 0,
+      },
+      provider: {
+        requests: 12,
+        prompt_tokens: 80_000,
+        cache_read_tokens: 60_000,
+        cache_write_tokens: 2_000,
+        output_tokens: 4_000,
+        output_unreported: 0,
+        subagent_requests: 0,
+        subagent_prompt_tokens: 0,
+        subagent_output_tokens: 0,
+      },
+    },
+  });
+}
+
+async function chooseRange(name: string) {
+  fireEvent.click(screen.getByRole('combobox', { name: 'Range' }));
+  fireEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name }));
+}
+
+describe('UsageSettings: one range for History and Context insights', () => {
+  beforeEach(() => {
+    vi.mocked(getContextInsights).mockImplementation(async ({ range }) =>
+      richInsights({ ...WEEK, preset: range }),
+    );
   });
 
-  it('tells a refusal in Chinese rather than the server’s English', async () => {
-    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
-    vi.mocked(getOwnerResources).mockRejectedValue(
-      new APIError('usage_temporarily_unavailable', 'Usage could not be read right now.', 503),
-    );
+  it('has exactly one range control, above both sections and below the live containers', async () => {
     section();
-    expect(await screen.findByText('暂时无法读取用量，请稍后再试。')).toBeInTheDocument();
-    expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument();
+    await screen.findByRole('link', { name: 'Long refactor' });
+    const controls = screen.getAllByRole('combobox', { name: 'Range' });
+    expect(controls).toHaveLength(1);
+    const [control] = controls;
+    expect(control).toHaveTextContent('Last 7 days');
+    const group = screen.getByRole('group', { name: 'Range for History and Context insights' });
+    expect(group).toContainElement(control);
+    expect(group).toHaveAccessibleDescription(
+      'Containers above are live and not limited to this range.',
+    );
+    const containers = screen.getByRole('region', { name: 'Containers' });
+    const history = screen.getByRole('region', { name: 'History' });
+    const insightsCard = screen.getByRole('region', { name: 'Context insights' });
+    for (const card of [containers, history, insightsCard]) {
+      expect(card).not.toContainElement(control);
+    }
+    // Containers, then the control, then the two sections it applies to.
+    const follows = (a: Element, b: Element) =>
+      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(containers, group)).toBe(true);
+    expect(follows(group, history)).toBe(true);
+    expect(follows(history, insightsCard)).toBe(true);
+    // Sorting stays the insights' own.
+    expect(within(insightsCard).getByRole('combobox', { name: 'Sort by' })).toBeInTheDocument();
+    // The live containers are read without any range.
+    expect(getOwnerContainers).toHaveBeenCalledWith({ limit: 50 });
+  });
+
+  it.each([
+    ['Today', 'today'],
+    ['Last 30 days', '30d'],
+    ['All time', 'all'],
+  ] as const)('reads History and Context insights for %s together', async (name, range) => {
+    section();
+    await screen.findByRole('link', { name: 'Long refactor' });
+    expect(getOwnerTokens).toHaveBeenLastCalledWith('7d', expect.anything());
+    expect(getOwnerResources).toHaveBeenLastCalledWith('7d', expect.anything());
+    expect(getContextInsights).toHaveBeenLastCalledWith(expect.objectContaining({ range: '7d' }));
+    const containerReads = vi.mocked(getOwnerContainers).mock.calls.length;
+
+    await chooseRange(name);
+    await waitFor(() => expect(getOwnerTokens).toHaveBeenLastCalledWith(range, expect.anything()));
+    expect(getOwnerResources).toHaveBeenLastCalledWith(range, expect.anything());
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range, sort: 'recent' }),
+      ),
+    );
+    expect(screen.getByRole('combobox', { name: 'Range' })).toHaveTextContent(name);
+    // The live containers are not read again for a range.
+    expect(getOwnerContainers).toHaveBeenCalledTimes(containerReads);
+  });
+
+  it('drops a day picked from the heatmap when the range changes, without a stale read', async () => {
+    section();
+    const day = await screen.findByRole('button', {
+      name: '2026-10-14: 412.8K input tokens over 12 requests, in 4 turns across 1 conversations, 1 compactions',
+    });
+    fireEvent.click(day);
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          range: '7d',
+          filters: expect.objectContaining({ day: '2026-10-14' }),
+        }),
+      ),
+    );
+    // A day narrows the insights only; History is not read for it.
+    expect(getOwnerTokens).toHaveBeenCalledTimes(1);
+
+    await chooseRange('Last 30 days');
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range: '30d', filters: expect.objectContaining({ day: null }) }),
+      ),
+    );
+    // No read ever paired the new range with the old day.
+    const thirty = vi
+      .mocked(getContextInsights)
+      .mock.calls.filter(([options]) => options.range === '30d');
+    expect(thirty.length).toBeGreaterThan(0);
+    for (const [options] of thirty) expect(options.filters?.day).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Show every day' })).not.toBeInTheDocument();
+    const again = await screen.findByRole('button', {
+      name: '2026-10-14: 412.8K input tokens over 12 requests, in 4 turns across 1 conversations, 1 compactions',
+    });
+    expect(again).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('keeps search and sorting to the insights and out of the History reads', async () => {
+    section();
+    await screen.findByRole('link', { name: 'Long refactor' });
+    const historyReads = vi.mocked(getOwnerTokens).mock.calls.length;
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search conversations' }), {
+      target: { value: 'refactor' },
+    });
+    await waitFor(
+      () =>
+        expect(getContextInsights).toHaveBeenLastCalledWith(
+          expect.objectContaining({ filters: expect.objectContaining({ q: 'refactor' }) }),
+        ),
+      { timeout: 2_000 },
+    );
+    fireEvent.click(screen.getByRole('combobox', { name: 'Sort by' }));
+    fireEvent.click(
+      within(screen.getByRole('listbox')).getByRole('option', { name: 'Largest context' }),
+    );
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: 'peak', range: '7d' }),
+      ),
+    );
+    expect(getOwnerTokens).toHaveBeenCalledTimes(historyReads);
+    expect(getOwnerResources).toHaveBeenCalledTimes(historyReads);
+    expect(screen.getByRole('combobox', { name: 'Range' })).toHaveTextContent('Last 7 days');
+  });
+
+  it('keeps the whole History beside a context-only Context insights', async () => {
+    const usage = tokens();
+    usage.summary.totals = { ...usage.summary.totals!, cache_read: 36_000, reasoning: 5_000 };
+    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
+    section();
+    const history = await screen.findByRole('region', { name: 'History' });
+    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    // The global consumption metrics are the History's.
+    expect(await tile('Tokens')).toBe('150K');
+    expect(await tile('Cache hit rate')).toBe('30%');
+    expect(await tile('Reasoning tokens')).toBe('5,000');
+    expect(await tile('Container running time')).toBe('10 h');
+    expect(await tile('CPU')).toBe('2 core-hours');
+    expect(await tile('Memory')).toBe('3 GB-hours');
+    expect(
+      within(history).getByText(
+        'CPU and memory cover 4 h of 10 h running time; measurement began recently.',
+      ),
+    ).toBeInTheDocument();
+    // The daily trend still switches metric.
+    const metric = within(history).getByRole('group', { name: 'Chart' });
+    const running = within(metric).getByRole('button', { name: 'Running hours' });
+    fireEvent.click(running);
+    expect(running).toHaveAttribute('aria-pressed', 'true');
+    expect(within(history).getByRole('table', { name: 'By model' })).toBeInTheDocument();
+
+    const insightsCard = screen.getByRole('region', { name: 'Context insights' });
+    // The context analysis: totals, heatmap, recorded composition, one bar.
+    expect(within(insightsCard).getByText('Compactions', { selector: 'dt' })).toBeInTheDocument();
+    expect(
+      within(insightsCard).getByText('Largest request', { selector: 'dt' }),
+    ).toBeInTheDocument();
+    const composition = within(insightsCard).getByRole('region', { name: 'Composition' });
+    expect(within(composition).getByText('≈4,000 tokens recorded')).toBeInTheDocument();
+    expect(within(composition).getAllByRole('img')).toHaveLength(1);
+    // No second, provider-reported overview of input, output or cache.
+    for (const text of [
+      /providers reported \(exact\)/,
+      /^Input 80K/,
+      'Not from cache',
+      'Cache read',
+      'Cache write',
+      'Cache hit rate',
+      'Model cost',
+    ]) {
+      expect(within(insightsCard).queryByText(text)).not.toBeInTheDocument();
+    }
+    // Each conversation keeps its own cost and cache hit, and opens its Context view.
+    const link = within(insightsCard).getByRole('link', { name: 'Long refactor' });
+    expect(link).toHaveAttribute('href', '/job-ctx?view=context');
+    const item = link.closest('li')!;
+    expect(within(item).getByText('$2.50')).toBeInTheDocument();
+    expect(within(item).getByText('75%')).toBeInTheDocument();
+    expect(within(item).getByText('90K · 30K')).toBeInTheDocument();
+  });
+
+  it('names the shared range in Chinese', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    section();
+    await screen.findByRole('link', { name: 'Long refactor' });
+    const control = screen.getByRole('combobox', { name: '时间范围' });
+    expect(control).toHaveTextContent('最近 7 天');
+    expect(screen.getByRole('group', { name: '历史用量和上下文洞察的时间范围' })).toContainElement(
+      control,
+    );
+    expect(screen.getAllByRole('combobox', { name: '时间范围' })).toHaveLength(1);
   });
 });

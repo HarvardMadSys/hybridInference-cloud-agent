@@ -61,6 +61,8 @@ function read(key: string): TabsState {
       new Set(value.chats.map((chat) => chat.id)).size !== value.chats.length
     )
       return initial;
+    // An unknown tab, or Context from when it was a workspace tab (it is a
+    // main view now), falls back to Git.
     if (
       !['git', 'terminal', 'files', 'environment'].includes(value.selected) &&
       !value.chats.some((chat) => chat.id === value.selected)

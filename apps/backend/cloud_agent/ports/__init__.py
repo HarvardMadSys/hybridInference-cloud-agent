@@ -14,6 +14,7 @@ from cloud_agent.ports.attempt_commands import AttemptCommands
 from cloud_agent.ports.audit import AuditRepository
 from cloud_agent.ports.audit_log import AuditLogQueries
 from cloud_agent.ports.compute_resources import ComputeResourceRepository
+from cloud_agent.ports.context_queries import ContextQueries
 from cloud_agent.ports.conversation_commands import ConversationCommands
 from cloud_agent.ports.conversation_queries import ConversationQueries
 from cloud_agent.ports.credential_queries import CredentialQueries
@@ -73,6 +74,7 @@ __all__ = [
     "AuditLogQueries",
     "AuditRepository",
     "ComputeResourceRepository",
+    "ContextQueries",
     "ConversationCommands",
     "ConversationQueries",
     "CredentialQueries",

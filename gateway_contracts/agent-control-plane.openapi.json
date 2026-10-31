@@ -10035,6 +10035,154 @@
         "title": "CloudLabDefaults",
         "type": "object"
       },
+      "CompositionBoundary": {
+        "additionalProperties": false,
+        "description": "The last compaction the CLI reported before this request.",
+        "properties": {
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "may_preserve_recent": {
+            "default": false,
+            "title": "May Preserve Recent",
+            "type": "boolean"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "turn_no",
+          "seq",
+          "source"
+        ],
+        "title": "CompositionBoundary",
+        "type": "object"
+      },
+      "CompositionCategory": {
+        "additionalProperties": false,
+        "description": "One category's totals over every entry, not only the listed ones.",
+        "properties": {
+          "chars": {
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "entries": {
+            "minimum": 0.0,
+            "title": "Entries",
+            "type": "integer"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          },
+          "truncated_entries": {
+            "minimum": 0.0,
+            "title": "Truncated Entries",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "entries",
+          "chars",
+          "tokens",
+          "truncated_entries"
+        ],
+        "title": "CompositionCategory",
+        "type": "object"
+      },
+      "CompositionEntry": {
+        "additionalProperties": false,
+        "description": "One piece of stored content this request is reconstructed to carry.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "chars": {
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "preview": {
+            "title": "Preview",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "category",
+          "label",
+          "job_id",
+          "turn_no",
+          "chars",
+          "tokens",
+          "preview"
+        ],
+        "title": "CompositionEntry",
+        "type": "object"
+      },
       "ComputeOperationAction": {
         "additionalProperties": false,
         "description": "An explicit action whose current state is checked under the operation lock.",
@@ -10305,6 +10453,1304 @@
           }
         },
         "title": "ConnectionsResponse",
+        "type": "object"
+      },
+      "ContextActivityDay": {
+        "additionalProperties": false,
+        "description": "One UTC day's activity among the matching runs (the heatmap's cell).",
+        "properties": {
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "conversations": {
+            "minimum": 0.0,
+            "title": "Conversations",
+            "type": "integer"
+          },
+          "day": {
+            "format": "date",
+            "title": "Day",
+            "type": "string"
+          },
+          "main_requests": {
+            "minimum": 0.0,
+            "title": "Main Requests",
+            "type": "integer"
+          },
+          "peak_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Prompt Tokens"
+          },
+          "prompt_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "day",
+          "turns",
+          "conversations",
+          "main_requests",
+          "compactions"
+        ],
+        "title": "ContextActivityDay",
+        "type": "object"
+      },
+      "ContextChange": {
+        "additionalProperties": false,
+        "description": "One of the largest request-to-request changes.",
+        "properties": {
+          "compaction_between": {
+            "title": "Compaction Between",
+            "type": "boolean"
+          },
+          "delta_tokens": {
+            "title": "Delta Tokens",
+            "type": "integer"
+          },
+          "direction": {
+            "enum": [
+              "growth",
+              "drop"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "from_index": {
+            "minimum": 0.0,
+            "title": "From Index",
+            "type": "integer"
+          },
+          "to_index": {
+            "minimum": 0.0,
+            "title": "To Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "direction",
+          "delta_tokens",
+          "from_index",
+          "to_index",
+          "compaction_between"
+        ],
+        "title": "ContextChange",
+        "type": "object"
+      },
+      "ContextCompaction": {
+        "additionalProperties": false,
+        "description": "A compaction the CLI reported, with the requests observed around it.",
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "completed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "observed_after": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed After"
+          },
+          "observed_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Before"
+          },
+          "post_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Post Tokens"
+          },
+          "pre_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pre Tokens"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "turn_no",
+          "attempt_id",
+          "seq",
+          "source"
+        ],
+        "title": "ContextCompaction",
+        "type": "object"
+      },
+      "ContextComposition": {
+        "additionalProperties": false,
+        "description": "Recorded content (estimated, once) beside reported request sizes (exact, per request).",
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/ProviderTotals"
+          },
+          "recorded": {
+            "$ref": "#/components/schemas/RecordedComposition"
+          }
+        },
+        "required": [
+          "recorded",
+          "provider"
+        ],
+        "title": "ContextComposition",
+        "type": "object"
+      },
+      "ContextCoverage": {
+        "additionalProperties": false,
+        "description": "How much of the conversation the numbers above stand on.",
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "attempts_observed": {
+            "minimum": 0.0,
+            "title": "Attempts Observed",
+            "type": "integer"
+          },
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "compactions_unknown_outcome": {
+            "minimum": 0.0,
+            "title": "Compactions Unknown Outcome",
+            "type": "integer"
+          },
+          "main_requests": {
+            "minimum": 0.0,
+            "title": "Main Requests",
+            "type": "integer"
+          },
+          "points_omitted": {
+            "minimum": 0.0,
+            "title": "Points Omitted",
+            "type": "integer"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "unparsed_raw": {
+            "minimum": 0.0,
+            "title": "Unparsed Raw",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "turns",
+          "attempts",
+          "attempts_observed",
+          "main_requests",
+          "subagent_requests",
+          "compactions",
+          "compactions_unknown_outcome",
+          "points_omitted",
+          "unparsed_raw"
+        ],
+        "title": "ContextCoverage",
+        "type": "object"
+      },
+      "ContextEvent": {
+        "additionalProperties": false,
+        "description": "One event, with the sizes its record carries and no others.",
+        "properties": {
+          "after_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After Tokens"
+          },
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "attempt_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Id"
+          },
+          "before_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Tokens"
+          },
+          "chars": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chars"
+          },
+          "copied": {
+            "default": false,
+            "title": "Copied",
+            "type": "boolean"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "from_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Value"
+          },
+          "items": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Items"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "injection",
+              "compaction",
+              "prune",
+              "model_switch",
+              "mode"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Names",
+            "type": "array"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "superseded": {
+            "default": false,
+            "title": "Superseded",
+            "type": "boolean"
+          },
+          "to_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Value"
+          },
+          "tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens"
+          },
+          "tokens_basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "cli",
+                  "estimate"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Basis"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "source",
+          "job_id",
+          "turn_no"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "ContextInsightsPage": {
+        "additionalProperties": false,
+        "description": "A page of the owner's conversations, ranked by one context measure.",
+        "properties": {
+          "activity": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ContextActivityDay"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activity"
+          },
+          "composition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextComposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "conversations": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationContext"
+            },
+            "title": "Conversations",
+            "type": "array"
+          },
+          "filters": {
+            "$ref": "#/components/schemas/InsightsFilterEcho"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "period": {
+            "$ref": "#/components/schemas/UsageRange"
+          },
+          "profiling": {
+            "$ref": "#/components/schemas/ContextProfiling"
+          },
+          "projects": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ContextProject"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projects"
+          },
+          "sort": {
+            "enum": [
+              "recent",
+              "peak",
+              "compactions",
+              "requests"
+            ],
+            "title": "Sort",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ContextInsightsSummary"
+          },
+          "time_basis": {
+            "const": "job_created_at",
+            "default": "job_created_at",
+            "title": "Time Basis",
+            "type": "string"
+          }
+        },
+        "required": [
+          "period",
+          "sort",
+          "generated_at",
+          "summary",
+          "profiling",
+          "conversations"
+        ],
+        "title": "ContextInsightsPage",
+        "type": "object"
+      },
+      "ContextInsightsSummary": {
+        "additionalProperties": false,
+        "description": "Totals over every conversation in the range, not only this page.",
+        "properties": {
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "conversations": {
+            "minimum": 0.0,
+            "title": "Conversations",
+            "type": "integer"
+          },
+          "conversations_observed": {
+            "minimum": 0.0,
+            "title": "Conversations Observed",
+            "type": "integer"
+          },
+          "deleted_conversation_runs": {
+            "minimum": 0.0,
+            "title": "Deleted Conversation Runs",
+            "type": "integer"
+          },
+          "main_requests": {
+            "minimum": 0.0,
+            "title": "Main Requests",
+            "type": "integer"
+          },
+          "peak_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Prompt Tokens"
+          },
+          "peak_thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Thread Id"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          },
+          "turns": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversations",
+          "conversations_observed",
+          "main_requests",
+          "subagent_requests",
+          "compactions",
+          "deleted_conversation_runs"
+        ],
+        "title": "ContextInsightsSummary",
+        "type": "object"
+      },
+      "ContextPoint": {
+        "additionalProperties": false,
+        "description": "One model request of the conversation's own agent.",
+        "properties": {
+          "after_compaction": {
+            "default": false,
+            "title": "After Compaction",
+            "type": "boolean"
+          },
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Categories"
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
+          "delta_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta Tokens"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "index": {
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "prompt_tokens": {
+            "minimum": 0.0,
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "step_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Ms"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          },
+          "uncached_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncached Input Tokens"
+          },
+          "usage_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage Id"
+          }
+        },
+        "required": [
+          "index",
+          "job_id",
+          "turn_no",
+          "attempt_id",
+          "seq",
+          "prompt_tokens"
+        ],
+        "title": "ContextPoint",
+        "type": "object"
+      },
+      "ContextProfiling": {
+        "additionalProperties": false,
+        "description": "How complete the profiles behind this page are.",
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "pending_attempts": {
+            "minimum": 0.0,
+            "title": "Pending Attempts",
+            "type": "integer"
+          },
+          "pending_capped": {
+            "default": false,
+            "title": "Pending Capped",
+            "type": "boolean"
+          },
+          "refreshed": {
+            "minimum": 0.0,
+            "title": "Refreshed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pending_attempts",
+          "refreshed",
+          "complete"
+        ],
+        "title": "ContextProfiling",
+        "type": "object"
+      },
+      "ContextProject": {
+        "additionalProperties": false,
+        "description": "One project of the matching runs: a repository, or none (temporary workspaces).",
+        "properties": {
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "conversations": {
+            "minimum": 0.0,
+            "title": "Conversations",
+            "type": "integer"
+          },
+          "last_turn_at": {
+            "format": "date-time",
+            "title": "Last Turn At",
+            "type": "string"
+          },
+          "main_requests": {
+            "minimum": 0.0,
+            "title": "Main Requests",
+            "type": "integer"
+          },
+          "peak_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Prompt Tokens"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversations",
+          "turns",
+          "main_requests",
+          "compactions",
+          "last_turn_at"
+        ],
+        "title": "ContextProject",
+        "type": "object"
+      },
+      "ContextTurn": {
+        "additionalProperties": false,
+        "description": "One turn: the requests its attempts made and how the context moved.",
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "change_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Tokens"
+          },
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
+          "copied": {
+            "default": false,
+            "title": "Copied",
+            "type": "boolean"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "first_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Index"
+          },
+          "first_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Prompt Tokens"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "last_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Prompt Tokens"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "peak_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Prompt Tokens"
+          },
+          "requests": {
+            "minimum": 0.0,
+            "title": "Requests",
+            "type": "integer"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "turn_no",
+          "attempts",
+          "requests",
+          "subagent_requests",
+          "compactions"
+        ],
+        "title": "ContextTurn",
+        "type": "object"
+      },
+      "ConversationContext": {
+        "additionalProperties": false,
+        "description": "One conversation's context profile over its runs in the range.",
+        "properties": {
+          "archived": {
+            "default": false,
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "attempts_profiled": {
+            "minimum": 0.0,
+            "title": "Attempts Profiled",
+            "type": "integer"
+          },
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "composition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextComposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
+          "first_turn_at": {
+            "format": "date-time",
+            "title": "First Turn At",
+            "type": "string"
+          },
+          "last_turn_at": {
+            "format": "date-time",
+            "title": "Last Turn At",
+            "type": "string"
+          },
+          "latest_job_id": {
+            "title": "Latest Job Id",
+            "type": "string"
+          },
+          "latest_observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Observed At"
+          },
+          "latest_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Prompt Tokens"
+          },
+          "main_requests": {
+            "minimum": 0.0,
+            "title": "Main Requests",
+            "type": "integer"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "peak_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Prompt Tokens"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminUsageAggregate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "thread_id",
+          "latest_job_id",
+          "turns",
+          "first_turn_at",
+          "last_turn_at",
+          "runtimes",
+          "models",
+          "attempts",
+          "attempts_profiled",
+          "main_requests",
+          "subagent_requests",
+          "compactions"
+        ],
+        "title": "ConversationContext",
         "type": "object"
       },
       "ConversationUsage": {
@@ -11139,6 +12585,88 @@
         "title": "DiscoveredModels",
         "type": "object"
       },
+      "DnaBands": {
+        "additionalProperties": false,
+        "description": "DNA bands for a window of requests; recorded estimates throughout.",
+        "properties": {
+          "basis": {
+            "default": "stored_events_transcript_order",
+            "title": "Basis",
+            "type": "string"
+          },
+          "events_capped": {
+            "default": false,
+            "title": "Events Capped",
+            "type": "boolean"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/DnaRequest"
+            },
+            "title": "Requests",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requests"
+        ],
+        "title": "DnaBands",
+        "type": "object"
+      },
+      "DnaRequest": {
+        "additionalProperties": false,
+        "description": "One request's items, in transcript order: ``[key, category, tokens]``.",
+        "properties": {
+          "event_id": {
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "folded_items": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Folded Items",
+            "type": "integer"
+          },
+          "folded_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Folded Tokens",
+            "type": "integer"
+          },
+          "index": {
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "maxItems": 3,
+              "minItems": 3,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "index",
+          "event_id",
+          "items"
+        ],
+        "title": "DnaRequest",
+        "type": "object"
+      },
       "EnableConnectionRequest": {
         "additionalProperties": false,
         "description": "Account-wide availability, independent of connection health.",
@@ -11188,6 +12716,138 @@
           "command"
         ],
         "title": "EnvironmentAction",
+        "type": "object"
+      },
+      "EventCapability": {
+        "additionalProperties": false,
+        "description": "Whether a runtime's records can show one kind of event, and why not.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "injection",
+              "compaction",
+              "prune",
+              "model_switch",
+              "mode"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "support": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Support",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runtime",
+          "kind",
+          "support"
+        ],
+        "title": "EventCapability",
+        "type": "object"
+      },
+      "EventContent": {
+        "additionalProperties": false,
+        "description": "A window of one stored content event's text.",
+        "properties": {
+          "event_id": {
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "offset": {
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "total_chars": {
+            "minimum": 0.0,
+            "title": "Total Chars",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "event_id",
+          "event_type",
+          "offset",
+          "text",
+          "total_chars",
+          "truncated"
+        ],
+        "title": "EventContent",
+        "type": "object"
+      },
+      "ExcludedContent": {
+        "additionalProperties": false,
+        "description": "Stored content counted out of this request, by reason.",
+        "properties": {
+          "chars": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "entries": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Entries",
+            "type": "integer"
+          }
+        },
+        "title": "ExcludedContent",
         "type": "object"
       },
       "ExecutionProfile": {
@@ -13255,6 +14915,47 @@
         "title": "ImportRequest",
         "type": "object"
       },
+      "InsightsFilterEcho": {
+        "additionalProperties": false,
+        "description": "The filters this page applied, as the server understood them.",
+        "properties": {
+          "day": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Day"
+          },
+          "q": {
+            "default": "",
+            "title": "Q",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "temporary": {
+            "default": false,
+            "title": "Temporary",
+            "type": "boolean"
+          }
+        },
+        "title": "InsightsFilterEcho",
+        "type": "object"
+      },
       "InvitationCreatedResponse": {
         "description": "The new invitation and its token.\n\n``token`` is ``None`` when the request key was already used: the stored\nhash cannot give the link back, so the client revokes and creates anew.",
         "properties": {
@@ -13854,6 +15555,41 @@
           "expires_at"
         ],
         "title": "JoinRequestResponse",
+        "type": "object"
+      },
+      "LatestContext": {
+        "additionalProperties": false,
+        "description": "The latest observed request, and what is known about it.",
+        "properties": {
+          "compacted_after": {
+            "title": "Compacted After",
+            "type": "boolean"
+          },
+          "point": {
+            "$ref": "#/components/schemas/ContextPoint"
+          },
+          "turn_active": {
+            "title": "Turn Active",
+            "type": "boolean"
+          },
+          "window_share": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Share"
+          }
+        },
+        "required": [
+          "point",
+          "compacted_after",
+          "turn_active"
+        ],
+        "title": "LatestContext",
         "type": "object"
       },
       "ListAgentRunnerHostsResponse": {
@@ -15217,64 +16953,6 @@
         "title": "OwnerCurrentUse",
         "type": "object"
       },
-      "OwnerHistoryPeriod": {
-        "additionalProperties": false,
-        "description": "The period a history read covers, and for all time, why it starts where it does.\n\nAn all-time period is not always all time. It starts at the latest of the\nowner's first run's day, the earliest day whose runs one read can sum, and\nthe earliest day ``MAX_ALL_TIME_DAYS`` allows; ``limited_by`` names which\nof the last two moved it. The client says so rather than calling it \"all\".",
-        "properties": {
-          "first_activity_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "First Activity At"
-          },
-          "kind": {
-            "enum": [
-              "days",
-              "all"
-            ],
-            "title": "Kind",
-            "type": "string"
-          },
-          "limited_by": {
-            "anyOf": [
-              {
-                "enum": [
-                  "runs",
-                  "days"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Limited By"
-          },
-          "since": {
-            "format": "date-time",
-            "title": "Since",
-            "type": "string"
-          },
-          "until": {
-            "format": "date-time",
-            "title": "Until",
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind",
-          "since",
-          "until"
-        ],
-        "title": "OwnerHistoryPeriod",
-        "type": "object"
-      },
       "OwnerResourceDay": {
         "additionalProperties": false,
         "description": "One UTC day of the window; the last one ends now.",
@@ -15328,7 +17006,7 @@
       },
       "OwnerResourceHistory": {
         "additionalProperties": false,
-        "description": "The owner's container use per UTC day, summed over every container.",
+        "description": "The owner's container use per UTC bucket, summed over every container.\n\n``days`` keeps its name for older clients; with a long range each entry is\na week or a month, which ``period.bucket`` names.",
         "properties": {
           "day_timezone": {
             "const": "UTC",
@@ -15351,7 +17029,7 @@
           "period": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/OwnerHistoryPeriod"
+                "$ref": "#/components/schemas/UsageRange"
               },
               {
                 "type": "null"
@@ -15420,6 +17098,12 @@
         "additionalProperties": false,
         "description": "The owner's model usage for runs created in the window.\n\nEvery number is the admin Usage page's for the same runs: a run counts on\nthe UTC day it was created, in full, and an unknown amount stays unknown.",
         "properties": {
+          "batches": {
+            "default": 1,
+            "minimum": 0.0,
+            "title": "Batches",
+            "type": "integer"
+          },
           "by_model": {
             "$ref": "#/components/schemas/AdminUsageBreakdown"
           },
@@ -15442,7 +17126,14 @@
             "type": "string"
           },
           "period": {
-            "$ref": "#/components/schemas/OwnerHistoryPeriod"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "since": {
             "format": "date-time",
@@ -15468,7 +17159,6 @@
           "since",
           "until",
           "generated_at",
-          "period",
           "summary",
           "days",
           "by_model"
@@ -15863,6 +17553,145 @@
         "title": "ProtocolResultView",
         "type": "object"
       },
+      "ProviderTokens": {
+        "additionalProperties": false,
+        "description": "What the providers reported, summed over every request (exact).",
+        "properties": {
+          "cache_hit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit"
+          },
+          "cache_read_tokens": {
+            "minimum": 0.0,
+            "title": "Cache Read Tokens",
+            "type": "integer"
+          },
+          "cache_write_tokens": {
+            "minimum": 0.0,
+            "title": "Cache Write Tokens",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "output_unreported": {
+            "minimum": 0.0,
+            "title": "Output Unreported",
+            "type": "integer"
+          },
+          "requests": {
+            "minimum": 0.0,
+            "title": "Requests",
+            "type": "integer"
+          },
+          "subagent_input_tokens": {
+            "minimum": 0.0,
+            "title": "Subagent Input Tokens",
+            "type": "integer"
+          },
+          "subagent_output_tokens": {
+            "minimum": 0.0,
+            "title": "Subagent Output Tokens",
+            "type": "integer"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "input_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "output_tokens",
+          "output_unreported",
+          "subagent_requests",
+          "subagent_input_tokens",
+          "subagent_output_tokens"
+        ],
+        "title": "ProviderTokens",
+        "type": "object"
+      },
+      "ProviderTotals": {
+        "additionalProperties": false,
+        "description": "Every request's size as the provider reported it (via the CLI), summed.\n\nEach request resends what the conversation kept, so this is per-request\nexposure: retained text counts once for every request that carried it.\nCache reads and writes are parts of ``prompt_tokens``, not additions.",
+        "properties": {
+          "cache_read_tokens": {
+            "minimum": 0.0,
+            "title": "Cache Read Tokens",
+            "type": "integer"
+          },
+          "cache_write_tokens": {
+            "minimum": 0.0,
+            "title": "Cache Write Tokens",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "output_unreported": {
+            "minimum": 0.0,
+            "title": "Output Unreported",
+            "type": "integer"
+          },
+          "prompt_tokens": {
+            "minimum": 0.0,
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "requests": {
+            "minimum": 0.0,
+            "title": "Requests",
+            "type": "integer"
+          },
+          "subagent_output_tokens": {
+            "minimum": 0.0,
+            "title": "Subagent Output Tokens",
+            "type": "integer"
+          },
+          "subagent_prompt_tokens": {
+            "minimum": 0.0,
+            "title": "Subagent Prompt Tokens",
+            "type": "integer"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "prompt_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "output_tokens",
+          "output_unreported",
+          "subagent_requests",
+          "subagent_prompt_tokens",
+          "subagent_output_tokens"
+        ],
+        "title": "ProviderTotals",
+        "type": "object"
+      },
       "RebuildInput": {
         "additionalProperties": false,
         "description": "Which branch's head to build the installation snapshot from.",
@@ -15882,6 +17711,170 @@
           }
         },
         "title": "RebuildInput",
+        "type": "object"
+      },
+      "ReconstructedComposition": {
+        "additionalProperties": false,
+        "description": "Stored content selected for this request, in transcript order.",
+        "properties": {
+          "basis": {
+            "const": "stored_events_transcript_order",
+            "default": "stored_events_transcript_order",
+            "title": "Basis",
+            "type": "string"
+          },
+          "boundary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompositionBoundary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CompositionCategory"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "copied_turns": {
+            "minimum": 0.0,
+            "title": "Copied Turns",
+            "type": "integer"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/CompositionEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "entries_omitted": {
+            "minimum": 0.0,
+            "title": "Entries Omitted",
+            "type": "integer"
+          },
+          "entries_total": {
+            "minimum": 0.0,
+            "title": "Entries Total",
+            "type": "integer"
+          },
+          "estimated_tokens": {
+            "minimum": 0.0,
+            "title": "Estimated Tokens",
+            "type": "integer"
+          },
+          "events_capped": {
+            "default": false,
+            "title": "Events Capped",
+            "type": "boolean"
+          },
+          "excluded": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ExcludedContent"
+            },
+            "title": "Excluded",
+            "type": "object"
+          },
+          "token_basis": {
+            "default": "chars_cjk_v1",
+            "title": "Token Basis",
+            "type": "string"
+          }
+        },
+        "required": [
+          "categories",
+          "entries",
+          "entries_total",
+          "entries_omitted",
+          "estimated_tokens",
+          "excluded",
+          "copied_turns"
+        ],
+        "title": "ReconstructedComposition",
+        "type": "object"
+      },
+      "RecordedComposition": {
+        "additionalProperties": false,
+        "description": "What the turns recorded, each stored item counted once, by category.\n\nAn estimate from characters (``basis``), never a billed or reported\ncount. A turn counts its kept attempt only (a retried one was replaced),\na delegated agent's own context is left out, and a Fork's copied turns\nbelong to the conversation they were copied from. CLI system prompts and\ntool definitions were never stored, so they are not a category: nothing\nis derived by subtracting this from a reported total.",
+        "properties": {
+          "basis": {
+            "default": "chars_cjk_v1",
+            "title": "Basis",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/RecordedShare"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "total_tokens": {
+            "minimum": 0.0,
+            "title": "Total Tokens",
+            "type": "integer"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "turns_profiled": {
+            "minimum": 0.0,
+            "title": "Turns Profiled",
+            "type": "integer"
+          },
+          "turns_truncated": {
+            "minimum": 0.0,
+            "title": "Turns Truncated",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "categories",
+          "total_tokens",
+          "turns",
+          "turns_profiled",
+          "turns_truncated"
+        ],
+        "title": "RecordedComposition",
+        "type": "object"
+      },
+      "RecordedShare": {
+        "additionalProperties": false,
+        "description": "One category's recorded content, estimated in tokens.",
+        "properties": {
+          "key": {
+            "enum": [
+              "turn_prompts",
+              "platform_context",
+              "user_messages",
+              "assistant",
+              "reasoning",
+              "tool_calls",
+              "tool_results",
+              "compaction_summary",
+              "injected",
+              "skills"
+            ],
+            "title": "Key",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "tokens"
+        ],
+        "title": "RecordedShare",
         "type": "object"
       },
       "ReleaseHostDrainFenceRequest": {
@@ -16058,6 +18051,67 @@
         "title": "RepoBranchesResponse",
         "type": "object"
       },
+      "RequestComposition": {
+        "additionalProperties": false,
+        "description": "Everything known about what one model request carried.",
+        "properties": {
+          "native": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Native"
+          },
+          "native_relation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotRelation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "native_status": {
+            "title": "Native Status",
+            "type": "string"
+          },
+          "reconstructed": {
+            "$ref": "#/components/schemas/ReconstructedComposition"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ContextPoint"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "request",
+          "native_status",
+          "reconstructed"
+        ],
+        "title": "RequestComposition",
+        "type": "object"
+      },
       "RequestRuntimeUpgradeRequest": {
         "description": "Move one agent to one exact npm release, newer or older.",
         "properties": {
@@ -16080,6 +18134,43 @@
           "version"
         ],
         "title": "RequestRuntimeUpgradeRequest",
+        "type": "object"
+      },
+      "RequestTiming": {
+        "additionalProperties": false,
+        "description": "One model request the Gateway timed, by the id the CLI reported for it.",
+        "properties": {
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "response_id": {
+            "title": "Response Id",
+            "type": "string"
+          },
+          "ttft_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttft Ms"
+          }
+        },
+        "required": [
+          "response_id"
+        ],
+        "title": "RequestTiming",
         "type": "object"
       },
       "ResidencyBeat": {
@@ -16487,6 +18578,106 @@
           "storage_io"
         ],
         "title": "RunResourceSummary",
+        "type": "object"
+      },
+      "RuntimeContextCapability": {
+        "additionalProperties": false,
+        "description": "What one runtime's stored events can say about context, and how often they did.",
+        "properties": {
+          "compaction_events": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Compaction Events",
+            "type": "string"
+          },
+          "compaction_sizes": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Compaction Sizes",
+            "type": "string"
+          },
+          "context_window": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Context Window",
+            "type": "string"
+          },
+          "live_occupancy": {
+            "const": "not_collected",
+            "default": "not_collected",
+            "title": "Live Occupancy",
+            "type": "string"
+          },
+          "native_composition": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "names_only",
+              "not_reported"
+            ],
+            "title": "Native Composition",
+            "type": "string"
+          },
+          "request_usage": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Request Usage",
+            "type": "string"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "snapshot_turns": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Snapshot Turns",
+            "type": "integer"
+          },
+          "subagent_split": {
+            "enum": [
+              "reported",
+              "not_applicable",
+              "not_reported"
+            ],
+            "title": "Subagent Split",
+            "type": "string"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "window_reported_turns": {
+            "minimum": 0.0,
+            "title": "Window Reported Turns",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runtime",
+          "turns",
+          "request_usage",
+          "subagent_split",
+          "compaction_events",
+          "compaction_sizes",
+          "context_window",
+          "window_reported_turns",
+          "native_composition"
+        ],
+        "title": "RuntimeContextCapability",
         "type": "object"
       },
       "RuntimeRefreshInput": {
@@ -17467,6 +19658,33 @@
         "title": "SelectedSkill",
         "type": "object"
       },
+      "SessionCategoryShare": {
+        "additionalProperties": false,
+        "description": "One category of recorded content, estimated.",
+        "properties": {
+          "items": {
+            "minimum": 0.0,
+            "title": "Items",
+            "type": "integer"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "tokens",
+          "items"
+        ],
+        "title": "SessionCategoryShare",
+        "type": "object"
+      },
       "SessionStatistics": {
         "description": "Run performance estimates, with unavailable measurements left absent.",
         "properties": {
@@ -17526,6 +19744,69 @@
           }
         },
         "title": "SessionStatistics",
+        "type": "object"
+      },
+      "SessionTokens": {
+        "additionalProperties": false,
+        "description": "The conversation's tokens two ways that are never added together.",
+        "properties": {
+          "basis": {
+            "default": "chars_cjk_v1",
+            "title": "Basis",
+            "type": "string"
+          },
+          "not_recorded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Not Recorded",
+            "type": "array"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/ProviderTokens"
+          },
+          "recorded": {
+            "items": {
+              "$ref": "#/components/schemas/SessionCategoryShare"
+            },
+            "title": "Recorded",
+            "type": "array"
+          },
+          "recorded_total": {
+            "minimum": 0.0,
+            "title": "Recorded Total",
+            "type": "integer"
+          },
+          "reported_by": {
+            "const": "cli_relayed_provider_usage",
+            "default": "cli_relayed_provider_usage",
+            "title": "Reported By",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "turns_read": {
+            "minimum": 0.0,
+            "title": "Turns Read",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recorded",
+          "recorded_total",
+          "turns_read",
+          "turns",
+          "provider"
+        ],
+        "title": "SessionTokens",
         "type": "object"
       },
       "SessionUserResponse": {
@@ -18130,6 +20411,38 @@
           "instructions"
         ],
         "title": "SkillView",
+        "type": "object"
+      },
+      "SnapshotRelation": {
+        "additionalProperties": false,
+        "description": "How the CLI's account relates to this request: read when its turn started.",
+        "properties": {
+          "compacted_since": {
+            "default": false,
+            "title": "Compacted Since",
+            "type": "boolean"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "requests_before": {
+            "minimum": 0.0,
+            "title": "Requests Before",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests_before"
+        ],
+        "title": "SnapshotRelation",
         "type": "object"
       },
       "SourceControlAccount": {
@@ -19378,6 +21691,296 @@
         "title": "TestUpdate",
         "type": "object"
       },
+      "ThreadContextView": {
+        "additionalProperties": false,
+        "description": "The Context view of one conversation.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeContextCapability"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "category_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Category Keys",
+            "type": "array"
+          },
+          "compactions": {
+            "items": {
+              "$ref": "#/components/schemas/ContextCompaction"
+            },
+            "title": "Compactions",
+            "type": "array"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/ContextCoverage"
+          },
+          "event_capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/EventCapability"
+            },
+            "title": "Event Capabilities",
+            "type": "array"
+          },
+          "event_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Event Counts",
+            "type": "object"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ContextEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "events_omitted": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Events Omitted",
+            "type": "integer"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "largest_changes": {
+            "items": {
+              "$ref": "#/components/schemas/ContextChange"
+            },
+            "title": "Largest Changes",
+            "type": "array"
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LatestContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "peak": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextPoint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/ContextPoint"
+            },
+            "title": "Requests",
+            "type": "array"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionTokens"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "turns": {
+            "items": {
+              "$ref": "#/components/schemas/ContextTurn"
+            },
+            "title": "Turns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "thread_id",
+          "generated_at",
+          "capabilities",
+          "turns",
+          "requests",
+          "compactions",
+          "largest_changes",
+          "coverage"
+        ],
+        "title": "ThreadContextView",
+        "type": "object"
+      },
+      "ThreadTiming": {
+        "additionalProperties": false,
+        "description": "Where the executions' time went, and how much of it could be split.",
+        "properties": {
+          "active_ms": {
+            "minimum": 0.0,
+            "title": "Active Ms",
+            "type": "integer"
+          },
+          "blocks": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Blocks",
+            "type": "object"
+          },
+          "executions": {
+            "minimum": 0.0,
+            "title": "Executions",
+            "type": "integer"
+          },
+          "executions_split": {
+            "minimum": 0.0,
+            "title": "Executions Split",
+            "type": "integer"
+          },
+          "gateway": {
+            "enum": [
+              "available",
+              "partial",
+              "unavailable",
+              "not_recorded"
+            ],
+            "title": "Gateway",
+            "type": "string"
+          },
+          "gateway_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Reason"
+          },
+          "model_requests": {
+            "minimum": 0.0,
+            "title": "Model Requests",
+            "type": "integer"
+          },
+          "output_tps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tps"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/RequestTiming"
+            },
+            "title": "Requests",
+            "type": "array"
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/TimingSegment"
+            },
+            "title": "Segments",
+            "type": "array"
+          },
+          "segments_merged": {
+            "default": false,
+            "title": "Segments Merged",
+            "type": "boolean"
+          },
+          "tool_calls": {
+            "minimum": 0.0,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "tool_calls_unpaired": {
+            "minimum": 0.0,
+            "title": "Tool Calls Unpaired",
+            "type": "integer"
+          },
+          "totals": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "ttft",
+                "reasoning",
+                "text",
+                "toolarg",
+                "gen",
+                "tools",
+                "unsplit",
+                "other"
+              ]
+            },
+            "title": "Totals",
+            "type": "object"
+          }
+        },
+        "required": [
+          "active_ms",
+          "totals",
+          "executions",
+          "executions_split",
+          "model_requests",
+          "tool_calls",
+          "tool_calls_unpaired",
+          "gateway",
+          "segments"
+        ],
+        "title": "ThreadTiming",
+        "type": "object"
+      },
+      "TimingSegment": {
+        "additionalProperties": false,
+        "description": "One stretch of an execution with a single label (the strip).",
+        "properties": {
+          "end_ms": {
+            "title": "End Ms",
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "ttft",
+              "reasoning",
+              "text",
+              "toolarg",
+              "gen",
+              "tools",
+              "unsplit",
+              "other"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "start_ms": {
+            "title": "Start Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "start_ms",
+          "end_ms"
+        ],
+        "title": "TimingSegment",
+        "type": "object"
+      },
       "ToolCallResources": {
         "description": "Timing and attributable process resources for one tool call.\n\nCurrent shared turns leave whole-container sample fields empty because\nsibling members can execute concurrently. Kata may still attach exact\nexit-time accounting for child processes attributed to this call. Older\nrows can contain periodic sample windows; both shapes remain readable.\n\nA call that ran alongside others could not have its readings separated\nfrom theirs, so its numbers arrive in the ``shared`` fields with\n``overlap_n`` above one. Those are upper bounds and must be presented as\nsuch; a reader that only understands the exclusive fields correctly shows\nnothing for them.",
         "properties": {
@@ -20269,6 +22872,84 @@
         "title": "UpdateSkill",
         "type": "object"
       },
+      "UsageRange": {
+        "additionalProperties": false,
+        "description": "The interval one read covers, stated so a reader can label it.",
+        "properties": {
+          "bucket": {
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "day_timezone": {
+            "const": "UTC",
+            "default": "UTC",
+            "title": "Day Timezone",
+            "type": "string"
+          },
+          "days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days"
+          },
+          "first_record_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Record At"
+          },
+          "preset": {
+            "anyOf": [
+              {
+                "enum": [
+                  "today",
+                  "7d",
+                  "30d",
+                  "all"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until",
+          "bucket"
+        ],
+        "title": "UsageRange",
+        "type": "object"
+      },
       "UserAvatar": {
         "description": "An illustrated companion displayed directly by an image element.",
         "properties": {
@@ -20778,6 +23459,14 @@
             ],
             "description": "Short-lived read-only credential for this one repository, for the runner to check it out with. Stays in the runner; never enters the sandbox. Null when no GitHub App is configured, which is enough for a public repository.",
             "title": "Clone Token"
+          },
+          "context_injections": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Context Injections",
+            "type": "array"
           },
           "environment": {
             "anyOf": [
@@ -33413,6 +36102,353 @@
         "summary": "Get Agent Thread"
       }
     },
+    "/v1/agent/jobs/{job_id}/thread/context": {
+      "get": {
+        "description": "The Context view of the caller's conversation holding ``job_id``.",
+        "operationId": "get_thread_context_v1_agent_jobs__job_id__thread_context_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadContextView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Context",
+        "tags": [
+          "context"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/context/content/{event_id}": {
+      "get": {
+        "description": "A window of one stored content event of the caller's conversation.\n\nThe text is what the platform stored, already masked when it was recorded.",
+        "operationId": "get_event_content_v1_agent_jobs__job_id__thread_context_content__event_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Event Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 10000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventContent"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Event Content",
+        "tags": [
+          "context"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/context/dna": {
+      "get": {
+        "description": "The items each request in ``from``..``to`` carried (recorded estimates).\n\nAt most ``MAX_DNA_REQUESTS`` requests per read: the trend asks for the\nbars it shows, never the whole history.",
+        "operationId": "get_thread_context_dna_v1_agent_jobs__job_id__thread_context_dna_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "title": "From",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "title": "To",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DnaBands"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Context Dna",
+        "tags": [
+          "context"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/context/requests/{event_id}": {
+      "get": {
+        "description": "What one request of the caller's conversation carried, labelled by kind.",
+        "operationId": "get_request_composition_v1_agent_jobs__job_id__thread_context_requests__event_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Event Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestComposition"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Request Composition",
+        "tags": [
+          "context"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/context/timing": {
+      "get": {
+        "description": "Where the caller's conversation's execution time went.\n\nRead when the dashboard asks, never at settlement: the attempts' recorded\nspans and tool windows, and the Gateway's own request log for the newest\nexecutions (TTFT and latency per request). Nothing is asked of a CLI.",
+        "operationId": "get_thread_context_timing_v1_agent_jobs__job_id__thread_context_timing_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadTiming"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Context Timing",
+        "tags": [
+          "context"
+        ]
+      }
+    },
     "/v1/agent/jobs/{job_id}/thread/environment": {
       "get": {
         "description": "Show the workspace's fixed versions and preparation history.",
@@ -40606,12 +43642,195 @@
         ]
       }
     },
+    "/v1/agent/usage/context": {
+      "get": {
+        "description": "A ranked page of the owner's conversations with runs in the range.\n\nSearch, project and day narrow the whole range on the server, before it\nis ranked and paged; a cursor is bound to all of them.\n\nRaises:\n    HTTPException: 422 for a cursor from another list or a day outside the\n        range, 503 when the page's usage cannot be summed in time; never a\n        partial sum.",
+        "operationId": "read_context_insights_v1_agent_usage_context_get",
+        "parameters": [
+          {
+            "description": "today, 7d, 30d or all, in UTC days; the usage history's own range.",
+            "in": "query",
+            "name": "range",
+            "required": false,
+            "schema": {
+              "default": "7d",
+              "description": "today, 7d, 30d or all, in UTC days; the usage history's own range.",
+              "enum": [
+                "today",
+                "7d",
+                "30d",
+                "all"
+              ],
+              "title": "Range",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "recent",
+              "enum": [
+                "recent",
+                "peak",
+                "compactions",
+                "requests"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Title or repository, case-insensitive, over the whole range.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Title or repository, case-insensitive, over the whole range.",
+              "title": "Q"
+            }
+          },
+          {
+            "description": "One repository's conversations.",
+            "in": "query",
+            "name": "repo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One repository's conversations.",
+              "title": "Repo"
+            }
+          },
+          {
+            "description": "Only conversations without a repository.",
+            "in": "query",
+            "name": "temporary",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only conversations without a repository.",
+              "title": "Temporary",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "One UTC day of the range.",
+            "in": "query",
+            "name": "day",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One UTC day of the range.",
+              "title": "Day"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextInsightsPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Context Insights",
+        "tags": [
+          "context"
+        ]
+      }
+    },
     "/v1/agent/usage/resources": {
       "get": {
-        "description": "Running time and measured CPU and memory for each UTC day of the period.",
+        "description": "Running time and measured CPU and memory per UTC bucket of the range.",
         "operationId": "read_owner_resources_v1_agent_usage_resources_get",
         "parameters": [
           {
+            "description": "The last N UTC days, today included. Prefer `range`.",
             "in": "query",
             "name": "days",
             "required": false,
@@ -40626,10 +43845,36 @@
                   "type": "null"
                 }
               ],
+              "description": "The last N UTC days, today included. Prefer `range`.",
               "title": "Days"
             }
           },
           {
+            "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
+            "in": "query",
+            "name": "range",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "today",
+                    "7d",
+                    "30d",
+                    "all"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
+              "title": "Range"
+            }
+          },
+          {
+            "description": "Same as `range=all`.",
             "in": "query",
             "name": "all",
             "required": false,
@@ -40642,6 +43887,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Same as `range=all`.",
               "title": "All"
             }
           },
@@ -40692,10 +43938,11 @@
     },
     "/v1/agent/usage/tokens": {
       "get": {
-        "description": "Model usage and cost of the owner's runs created in the period.\n\nRaises:\n    HTTPException: 422 when the selection or its response exceeds the\n        aggregation's bounds, 503 when it cannot be read inside them.\n        Neither returns a partial sum.",
+        "description": "Model usage and cost of the owner's runs created in the range.\n\nA range larger than one bounded selection is summed in bounded batches\n(:mod:`cloud_agent.usage_batches`), never narrowed.\n\nRaises:\n    HTTPException: 422 when even a minimal batch exceeds the aggregation's\n        bounds or the response would, 503 when it cannot be read in time.\n        Neither returns a partial sum.",
         "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
         "parameters": [
           {
+            "description": "The last N UTC days, today included. Prefer `range`.",
             "in": "query",
             "name": "days",
             "required": false,
@@ -40710,10 +43957,36 @@
                   "type": "null"
                 }
               ],
+              "description": "The last N UTC days, today included. Prefer `range`.",
               "title": "Days"
             }
           },
           {
+            "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
+            "in": "query",
+            "name": "range",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "today",
+                    "7d",
+                    "30d",
+                    "all"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
+              "title": "Range"
+            }
+          },
+          {
+            "description": "Same as `range=all`.",
             "in": "query",
             "name": "all",
             "required": false,
@@ -40726,6 +43999,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Same as `range=all`.",
               "title": "All"
             }
           },

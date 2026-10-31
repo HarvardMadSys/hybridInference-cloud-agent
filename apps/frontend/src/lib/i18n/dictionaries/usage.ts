@@ -1,8 +1,11 @@
-// The Usage settings section: containers, the history of a period, and why a
-// period reads as it does. Kept apart from the main dictionaries, which only
-// shrink (see eslint-ratchet.json).
+// The Usage settings page: containers, the usage history and its ranges,
+// and Context insights across conversations. Kept beside the main
+// dictionaries so the page's strings are reviewed, and translated, together.
+
+import { contextEn, contextZhCN } from './context';
 
 export const usageEn = {
+  ...contextEn,
   'settings.usage.title': 'Usage',
   'settings.usage.description':
     'Your containers, what they use right now, and what your work has used over time.',
@@ -43,21 +46,7 @@ export const usageEn = {
   'settings.usage.stateCount.unavailable': '{count} unavailable',
   'settings.usage.history': 'History',
   'settings.usage.period': 'Period',
-  'settings.usage.periodToday': 'Today',
-  'settings.usage.period7d': '7 days',
-  'settings.usage.period30d': '30 days',
-  'settings.usage.periodAll': 'All',
-  'settings.usage.range.first': 'Since {date}, the day of your first turn.',
-  'settings.usage.range.noRuns': 'No turns yet, so this shows today only.',
-  'settings.usage.range.runs':
-    'Since {date} · Earlier usage is more than one summary can add up and is not included.',
-  'settings.usage.range.days':
-    'Since {date} · Usage from before the last {count} days is not included.',
-  'settings.usage.error.tooLarge':
-    'This period has too many turns to add up at once. Choose a shorter period.',
-  'settings.usage.error.responseTooLarge':
-    'This period’s usage is too large to show at once. Choose a shorter period.',
-  'settings.usage.error.unavailable': 'Usage cannot be read right now. Try again in a moment.',
+  'settings.usage.days': '{count} days',
   'settings.usage.cost': 'Model cost',
   'settings.usage.costEstimate': 'Estimate, not a bill',
   'settings.usage.tokens': 'Tokens',
@@ -77,9 +66,6 @@ export const usageEn = {
   'settings.usage.partlyMeasured':
     'CPU and memory cover {measured} of {running} running time; measurement began recently.',
   'settings.usage.chartLabel': '{metric} by day',
-  'settings.usage.chartLabelWeekly': '{metric} by week',
-  'settings.usage.dateRange': '{from} – {to}',
-  'settings.usage.partialWeek': 'part of a week',
   'settings.usage.chartMetric': 'Chart',
   'settings.usage.chart.cost': 'Cost',
   'settings.usage.chart.tokens': 'Tokens',
@@ -104,6 +90,7 @@ export const usageEn = {
 } as const;
 
 export const usageZhCN: Record<keyof typeof usageEn, string> = {
+  ...contextZhCN,
   'settings.usage.title': '用量',
   'settings.usage.description': '你的容器、它们现在用了多少资源，以及一段时间内你的工作用了多少。',
   'settings.usage.loading': '正在加载用量…',
@@ -142,18 +129,7 @@ export const usageZhCN: Record<keyof typeof usageEn, string> = {
   'settings.usage.stateCount.unavailable': '{count} 个不可用',
   'settings.usage.history': '历史用量',
   'settings.usage.period': '时间范围',
-  'settings.usage.periodToday': '今天',
-  'settings.usage.period7d': '7 天',
-  'settings.usage.period30d': '30 天',
-  'settings.usage.periodAll': '全部',
-  'settings.usage.range.first': '自 {date} 起，即你第一轮对话的那天。',
-  'settings.usage.range.noRuns': '还没有对话轮次，因此只显示今天。',
-  'settings.usage.range.runs': '自 {date} 起 · 更早的用量超出单次汇总上限，未计入。',
-  'settings.usage.range.days': '自 {date} 起 · 最近 {count} 天之前的用量未计入。',
-  'settings.usage.error.tooLarge': '这段时间的对话轮次太多，无法一次汇总。请选择更短的时间范围。',
-  'settings.usage.error.responseTooLarge':
-    '这段时间的用量数据太大，无法一次显示。请选择更短的时间范围。',
-  'settings.usage.error.unavailable': '暂时无法读取用量，请稍后再试。',
+  'settings.usage.days': '{count} 天',
   'settings.usage.cost': '模型费用',
   'settings.usage.costEstimate': '估算，不是账单',
   'settings.usage.tokens': 'Token',
@@ -173,9 +149,6 @@ export const usageZhCN: Record<keyof typeof usageEn, string> = {
   'settings.usage.partlyMeasured':
     'CPU 和内存只覆盖了 {running} 运行时长中的 {measured}；这项统计刚开始记录。',
   'settings.usage.chartLabel': '每天的{metric}',
-  'settings.usage.chartLabelWeekly': '每周的{metric}',
-  'settings.usage.dateRange': '{from} – {to}',
-  'settings.usage.partialWeek': '不满一周',
   'settings.usage.chartMetric': '图表',
   'settings.usage.chart.cost': '费用',
   'settings.usage.chart.tokens': 'Token',
