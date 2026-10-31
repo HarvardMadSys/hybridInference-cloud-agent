@@ -13,12 +13,12 @@ import {
   getAgentFileOperations,
   type FileActivityApi,
   type FileOperationsPageApi,
-} from '@/lib/api/agents/context';
+} from '@/lib/api/agents';
 
 import { FileActivity, FILE_SEARCH_DEBOUNCE_MS } from './FileActivity';
 
-vi.mock('@/lib/api/agents/context', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/api/agents/context')>()),
+vi.mock('@/lib/api/agents', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/agents')>()),
   getAgentFileActivity: vi.fn(),
   getAgentFileOperations: vi.fn(),
 }));
@@ -285,7 +285,9 @@ describe('FileActivity', () => {
   it('says which bounded window the totals describe', async () => {
     renderSection();
     await screen.findByText('app.ts');
-    expect(screen.getByText(/Scanned 40 recorded events over 2 turns and 2 attempts/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Scanned 40 recorded events over 2 turns and 2 attempts/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Net Git diff is not read here/)).toBeInTheDocument();
   });
 
@@ -304,9 +306,7 @@ describe('FileActivity', () => {
     );
     renderSection();
     await screen.findByText('app.ts');
-    expect(
-      screen.getByText(/This is the newest part of a long history/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/This is the newest part of a long history/)).toBeInTheDocument();
   });
 
   it('explains an empty conversation without inventing files', async () => {

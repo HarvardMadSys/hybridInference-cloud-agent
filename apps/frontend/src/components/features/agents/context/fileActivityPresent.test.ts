@@ -5,10 +5,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { FileActivityRowApi, FileOperationApi } from '@/lib/api/agents/context';
-import {
-  FILE_ACTIVITY_FILTERS,
-  FILE_ACTIVITY_SORTS,
-} from '@/lib/api/agents/fileActivity';
+import { FILE_ACTIVITY_FILTERS, FILE_ACTIVITY_SORTS } from '@/lib/api/agents/fileActivity';
 import {
   FILTER_LABEL,
   KIND_LABEL,

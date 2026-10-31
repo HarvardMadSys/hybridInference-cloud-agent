@@ -718,22 +718,23 @@ function OperationRow({
 function Coverage({ view, nowMs }: { view: FileActivityApi; nowMs: number }) {
   const { t, locale } = useLocale();
   const coverage = view.coverage;
-  const window =
-    coverage.window_first_at && coverage.window_last_at
-      ? t('files.coverage.window', {
-        from: relativeTime(coverage.window_first_at, nowMs, locale),
-        to: relativeTime(coverage.window_last_at, nowMs, locale),
-      })
-      : null;
+  const first = coverage.window_first_at;
+  const last = coverage.window_last_at;
+  const windowArgs = {
+    from: first ? relativeTime(first, nowMs, locale) : '',
+    to: last ? relativeTime(last, nowMs, locale) : '',
+  };
+  const window = first && last ? t('files.coverage.window', windowArgs) : null;
+  const scope = t('files.coverage.scope', {
+    events: compactCount(coverage.events_scanned),
+    turns: compactCount(coverage.turns),
+    attempts: compactCount(coverage.attempts),
+  });
   return (
     <p className="mt-1 text-[11px] text-muted">
       {coverage.events_capped ? t('files.coverage.capped') : null}
       {coverage.events_capped ? ' ' : null}
-      {t('files.coverage.scope', {
-        events: compactCount(coverage.events_scanned),
-        turns: compactCount(coverage.turns),
-        attempts: compactCount(coverage.attempts),
-      })}
+      {scope}
       {window ? ` ${window}` : null} {t('files.coverage.notGit')}
     </p>
   );
