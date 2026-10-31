@@ -11,13 +11,13 @@ ledger the platform already writes.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.command_executions import (
     DEFAULT_COMMAND_PAGE,
     MAX_COMMAND_EXECUTIONS,
-    MAX_RELATED_EVENTS,
     CommandFilter,
     CommandSort,
     assemble_command_executions,
@@ -33,6 +33,14 @@ from cloud_agent.storage._sql.command_executions import (
 
 if TYPE_CHECKING:
     import asyncpg
+
+#: Ids one results statement may look for. Postgres binds an array per query,
+#: so the covered identities are read in bounded chunks rather than one huge
+#: statement.
+RESULTS_CHUNK = 500
+#: Every read is bounded in wall time; a large ledger cannot hold a pooled
+#: connection for an unbounded period.
+COMMAND_READ_TIMEOUT_S = 15.0
 
 
 class PostgresCommandExecutionQueries:
@@ -61,41 +69,56 @@ class PostgresCommandExecutionQueries:
         Raises:
             ValueError: the cursor is malformed or belongs to another list.
         """
-        async with self._pool.acquire() as conn:
-            turns = [dict(row) for row in await conn.fetch(TURNS_SQL, job_id, user_id)]
-            if not turns:
-                return None
-            calls = [
-                dict(row)
-                for row in await conn.fetch(
-                    CALLS_SQL,
-                    job_id,
-                    user_id,
-                    MAX_COMMAND_EXECUTIONS,
-                )
-            ]
-            total = int(
-                await conn.fetchval(
-                    TOTAL_SQL,
-                    job_id,
-                    user_id,
-                )
-                or 0
+        async with self._pool.acquire() as conn, conn.transaction():
+            # One optional read never outlives this bound; the setting is LOCAL
+            # so it cannot leak to the pooled connection's next user.
+            await conn.execute(
+                f"SET LOCAL statement_timeout = {int(COMMAND_READ_TIMEOUT_S * 1000)}"
             )
-            attempt_ids = sorted({int(call["attempt_id"]) for call in calls})
-            related: list[dict[str, Any]] = []
-            if attempt_ids:
-                related = [
-                    dict(row)
-                    for row in await conn.fetch(
-                        RESULTS_SQL,
-                        attempt_ids,
-                        list(poll_tool_names()),
-                        MAX_RELATED_EVENTS,
-                        user_id,
-                        job_id,
-                    )
-                ]
+            return await self._read(
+                conn,
+                job_id=job_id,
+                user_id=user_id,
+                filter=filter,
+                sort=sort,
+                q=q,
+                program=program,
+                cursor=cursor,
+                limit=limit,
+            )
+
+    async def _read(
+        self,
+        conn: Any,
+        *,
+        job_id: str,
+        user_id: str,
+        filter: CommandFilter,
+        sort: CommandSort,
+        q: str,
+        program: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        turns = [dict(row) for row in await conn.fetch(TURNS_SQL, job_id, user_id)]
+        if not turns:
+            return None
+        calls = [
+            dict(row)
+            for row in await conn.fetch(CALLS_SQL, job_id, user_id, MAX_COMMAND_EXECUTIONS)
+        ]
+        total = int(await conn.fetchval(TOTAL_SQL, job_id, user_id) or 0)
+        attempt_ids = sorted({int(call["attempt_id"]) for call in calls})
+        call_ids = sorted({str(call["call_id"]) for call in calls if call.get("call_id")})
+        sessions = sorted({str(call["session_id"]) for call in calls if call.get("session_id")})
+        related = await self._results(
+            conn,
+            attempt_ids=attempt_ids,
+            call_ids=call_ids,
+            sessions=sessions,
+            job_id=job_id,
+            user_id=user_id,
+        )
         rows = [_call_row(call) for call in calls] + [_related_row(row) for row in related]
         assembly = assemble_command_executions(
             thread_id=str(turns[0].get("thread_id") or ""),
@@ -108,6 +131,65 @@ class PostgresCommandExecutionQueries:
             assembly, filter=filter, sort=sort, q=q, program=program, cursor=cursor, limit=limit
         )
         return page.model_dump(mode="json")
+
+    async def _results(
+        self,
+        conn: Any,
+        *,
+        attempt_ids: list[int],
+        call_ids: list[str],
+        sessions: list[str],
+        job_id: str,
+        user_id: str,
+    ) -> list[dict[str, Any]]:
+        """The results and polls that answer the covered calls, in bounded chunks.
+
+        Only identities the covered calls name are read, so an unrelated result
+        in the same attempt cannot crowd a command's own result out of the
+        bound. If the total bound is still reached, the caller reports the
+        read as incomplete instead of calling its totals complete.
+        """
+        if not attempt_ids:
+            return []
+        found: list[dict[str, Any]] = []
+        chunk = RESULTS_CHUNK
+        ids = call_ids or [""]
+        for start in range(0, len(ids), chunk):
+            batch = ids[start : start + chunk]
+            found.extend(
+                dict(row)
+                for row in await conn.fetch(
+                    RESULTS_SQL,
+                    attempt_ids,
+                    user_id,
+                    job_id,
+                    batch,
+                    sessions or [""],
+                    list(poll_tool_names()),
+                    chunk,
+                )
+            )
+        # A poll's own id is covered by the session branch; a chunk boundary may
+        # have split a call from its result, so query once more by session only
+        # when there is more than one chunk.
+        if len(ids) > chunk:
+            found.extend(
+                dict(row)
+                for row in await conn.fetch(
+                    RESULTS_SQL,
+                    attempt_ids,
+                    user_id,
+                    job_id,
+                    [""],
+                    sessions or [""],
+                    list(poll_tool_names()),
+                    chunk,
+                )
+            )
+        deduped: dict[int, dict[str, Any]] = {}
+        for row in found:
+            deduped[int(row["event_id"])] = row
+        return list(deduped.values())
 
 
 def _jobs(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -163,6 +245,8 @@ def _related_row(row: dict[str, Any]) -> dict[str, Any]:
         "seq": row.get("seq"),
         "at": row.get("at"),
         "tool_use_id": row.get("tool_use_id"),
+        "call_id": row.get("call_id"),
+        "tool_name": row.get("tool_name"),
         "is_error": row.get("is_error"),
         "exit_code": row.get("exit_code"),
         "content": row.get("content"),
@@ -170,9 +254,22 @@ def _related_row(row: dict[str, Any]) -> dict[str, Any]:
         "status": row.get("status"),
         "session_id": row.get("session_id"),
         "background": row.get("background"),
+        "structured_output": _structured(row.get("structured_output")),
         "command_text": None,
-        "tool_name": None,
     }
+
+
+def _structured(value: Any) -> dict[str, Any] | None:
+    """A recorded structured outcome, when the projection kept one."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.startswith("{"):
+        try:
+            loaded = json.loads(value)
+        except ValueError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    return None
 
 
 __all__ = ["PostgresCommandExecutionQueries"]

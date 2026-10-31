@@ -20,6 +20,8 @@ export function clip(text: string, limit: number): string {
 /** A duration in ms at a readable scale, or null when none was recorded. */
 export function durationLabel(ms: number | null): string | null {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  // A recorded zero is zero, not "1ms": the number exists and was measured.
+  if (ms === 0) return '0ms';
   if (ms < 1_000) return `${Math.max(1, Math.round(ms))}ms`;
   if (ms < 60_000) {
     const seconds = ms / 1_000;

@@ -173,7 +173,8 @@ describe('CommandExecutions', () => {
     const section = (await screen.findByRole('heading', { name: 'Command Executions' })).closest(
       'section',
     )!;
-    expect(within(section).getByText(/failed ÷ settled/)).toBeInTheDocument();
+    // The denominator is a tooltip on the Failed value, not a paragraph.
+    expect(within(section).getByTitle(/failed ÷ settled/)).toBeInTheDocument();
     expect(within(section).getByText('Running')).toBeInTheDocument();
     expect(within(section).getAllByText('13s').length).toBeGreaterThan(0);
   });
@@ -446,4 +447,102 @@ describe('CommandExecutions', () => {
     expect(within(details).getByText(/no exit code recorded/)).toBeInTheDocument();
     expect(within(details).queryByText('exit 0')).toBeNull();
   });
+});
+
+it('labels the retry attempt as an attempt, not a tool step', async () => {
+  mocked.mockResolvedValue(page());
+  renderSection();
+  const list = await screen.findByRole('list', { name: 'Command Executions' });
+  const item = within(list).getAllByRole('listitem')[0];
+  expect(within(item).getByText('T1 · A1')).toBeInTheDocument();
+  expect(within(item).getByText('T1 · A1').closest('[title]')).toHaveAttribute(
+    'title',
+    'Turn 1, attempt 1 (a retry is another attempt).',
+  );
+});
+
+it('reads the first page again while a turn is running, and not when it is not', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    mocked.mockResolvedValue(page());
+    const { rerender } = render(
+      <LocaleProvider>
+        <CommandExecutions
+          jobId="j1"
+          conversationKey="t1"
+          active
+          onOpenPoint={vi.fn()}
+          onOpenTurn={vi.fn()}
+        />
+      </LocaleProvider>,
+    );
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(5_100);
+    await waitFor(() => expect(mocked.mock.calls.length).toBeGreaterThan(1));
+
+    const calls = mocked.mock.calls.length;
+    rerender(
+      <LocaleProvider>
+        <CommandExecutions
+          jobId="j1"
+          conversationKey="t1"
+          active={false}
+          onOpenPoint={vi.fn()}
+          onOpenTurn={vi.fn()}
+        />
+      </LocaleProvider>,
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(mocked.mock.calls.length).toBe(calls);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('continues a long result by offset instead of hiding the rest', async () => {
+  const long = execution({
+    output_preview: 'x'.repeat(3_000),
+    output_chars: 25_000,
+    output_truncated: true,
+  });
+  mocked.mockResolvedValue(
+    page({ executions: [long], page: { total: 1, returned: 1, limit: 100, next_cursor: null } }),
+  );
+  mockedContent.mockImplementation(async (_job, _event, offset = 0) => {
+    if (offset === 0) {
+      return {
+        event_id: 2,
+        event_type: 'tool_result',
+        phase: null,
+        offset: 0,
+        text: 'first-page',
+        total_chars: 25_000,
+        truncated: false,
+        next_offset: 10,
+      };
+    }
+    return {
+      event_id: 2,
+      event_type: 'tool_result',
+      phase: null,
+      offset: 10,
+      text: '-second-page',
+      total_chars: 25_000,
+      truncated: false,
+      next_offset: null,
+    };
+  });
+  renderSection();
+  const list = await screen.findByRole('list', { name: 'Command Executions' });
+  const item = within(list).getAllByRole('listitem')[0];
+  fireEvent.click(within(item).getByRole('button', { expanded: false }));
+  const details = within(item).getByLabelText('Execution details');
+  fireEvent.click(within(details).getByRole('button', { name: 'Load the full result' }));
+  expect(await within(details).findByText('first-page')).toBeInTheDocument();
+  expect(mockedContent).toHaveBeenLastCalledWith('j1', 2, 0);
+  fireEvent.click(within(details).getByRole('button', { name: 'Load more' }));
+  await waitFor(() =>
+    expect(within(details).getByText('first-page-second-page')).toBeInTheDocument(),
+  );
+  expect(mockedContent).toHaveBeenLastCalledWith('j1', 2, 10);
 });

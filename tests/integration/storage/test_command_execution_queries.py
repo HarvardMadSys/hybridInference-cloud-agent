@@ -348,3 +348,144 @@ async def test_results_of_every_turn_in_the_conversation_are_matched(db, store):
         "out3",
     }
     assert page["coverage"]["turns"] == 3
+
+
+async def test_a_poll_result_matched_only_by_the_polls_own_id(db, store):
+    """A poll's result names the poll's call id, not a repeated session id."""
+    [turn] = await _conversation(db, store, "athr_poll_id")
+    await _events(
+        db,
+        turn["job_id"],
+        turn["attempt_id"],
+        [
+            (
+                "tool_use",
+                {
+                    "name": "Bash",
+                    "id": "c1",
+                    "input": {"command": "npm run dev", "run_in_background": True},
+                },
+            ),
+            # Claude's launch acknowledgement: the session id is here.
+            ("tool_result", {"tool_use_id": "c1", "content": "started", "shellId": "s1"}),
+            ("tool_use", {"name": "BashOutput", "id": "p1", "input": {"bash_id": "s1"}}),
+            # The poll's result names only the poll's id; no session id at all.
+            ("tool_result", {"tool_use_id": "p1", "content": "ready"}),
+            ("tool_use", {"name": "BashOutput", "id": "p2", "input": {"bash_id": "s1"}}),
+            ("tool_result", {"tool_use_id": "p2", "content": "listening", "exit_code": 0}),
+        ],
+    )
+    result = await store.command_executions.command_executions(job_id=turn["job_id"], user_id=OWNER)
+    assert result["summary"]["total"] == 1
+    assert result["executions"][0]["output_preview"] == "listening"
+    assert result["executions"][0]["status"] == "completed"
+
+
+async def test_a_native_structured_launch_ack_is_not_completion(db, store):
+    """Claude's structured output names the session and proves no completion."""
+    [turn] = await _conversation(db, store, "athr_structured")
+    await _events(
+        db,
+        turn["job_id"],
+        turn["attempt_id"],
+        [
+            (
+                "tool_use",
+                {
+                    "name": "Bash",
+                    "id": "c1",
+                    "input": {"command": "npm run dev", "run_in_background": True},
+                },
+            ),
+            (
+                "tool_result",
+                {
+                    "tool_use_id": "c1",
+                    "content": "Command running in background",
+                    "structured_output": {"shellId": "s1", "background": True},
+                },
+            ),
+        ],
+    )
+    result = await store.command_executions.command_executions(job_id=turn["job_id"], user_id=OWNER)
+    execution = result["executions"][0]
+    assert execution["background"] is True
+    # The launch acknowledgement does not prove the process finished.
+    assert execution["status"] == "unknown"
+    assert execution["exit_code"] is None
+
+
+async def test_a_structured_exit_code_settles_the_execution(db, store):
+    [turn] = await _conversation(db, store, "athr_structured_exit")
+    await _events(
+        db,
+        turn["job_id"],
+        turn["attempt_id"],
+        [
+            ("tool_use", {"name": "Bash", "id": "c1", "input": {"command": "pytest -q"}}),
+            (
+                "tool_result",
+                {"tool_use_id": "c1", "content": "failed", "structured_output": {"exitCode": 3}},
+            ),
+        ],
+    )
+    result = await store.command_executions.command_executions(job_id=turn["job_id"], user_id=OWNER)
+    assert result["executions"][0]["status"] == "failed"
+    assert result["executions"][0]["exit_code"] == 3
+
+
+async def test_a_continued_executions_duration_spans_to_the_final_poll(db, store):
+    """A launch acknowledged after 1s and finished after 60s is not 1s."""
+    [turn] = await _conversation(db, store, "athr_duration")
+    async with db.acquire() as conn:
+        rows = [
+            (
+                1,
+                "tool_use",
+                {
+                    "name": "Bash",
+                    "id": "c1",
+                    "input": {"command": "npm run dev", "run_in_background": True},
+                },
+                0,
+            ),
+            (2, "tool_result", {"tool_use_id": "c1", "content": "started", "shellId": "s1"}, 1),
+            (3, "tool_use", {"name": "BashOutput", "id": "p1", "input": {"bash_id": "s1"}}, 30),
+            (4, "tool_result", {"tool_use_id": "p1", "content": "still", "status": "running"}, 31),
+            (5, "tool_use", {"name": "BashOutput", "id": "p2", "input": {"bash_id": "s1"}}, 59),
+            (6, "tool_result", {"tool_use_id": "p2", "content": "done", "exit_code": 0}, 60),
+        ]
+        for seq, kind, payload, offset in rows:
+            await conn.execute(
+                "INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload,"
+                " created_at) VALUES ($1, $2, $3, $4, $5::jsonb,"
+                " TIMESTAMPTZ '2026-10-30 09:00:00+00'"
+                " + make_interval(secs => $6::double precision))",
+                turn["job_id"],
+                turn["attempt_id"],
+                seq,
+                kind,
+                json.dumps(payload),
+                float(offset),
+            )
+    result = await store.command_executions.command_executions(job_id=turn["job_id"], user_id=OWNER)
+    execution = result["executions"][0]
+    assert execution["duration_basis"] == "events"
+    assert 59_000 <= execution["duration_ms"] <= 61_000
+
+
+async def test_unrelated_results_cannot_crowd_a_commands_result(db, store):
+    """A late command result survives a long attempt full of other results."""
+    [turn] = await _conversation(db, store, "athr_crowd")
+    rows = []
+    for index in range(400):
+        rows.append(("tool_use", {"name": "Read", "id": f"r{index}", "input": {"path": "x"}}))
+        rows.append(("tool_result", {"tool_use_id": f"r{index}", "content": "x"}))
+    rows.append(("tool_use", {"name": "Bash", "id": "cmd", "input": {"command": "pytest"}}))
+    rows.append(("tool_result", {"tool_use_id": "cmd", "content": "ok", "exit_code": 0}))
+    await _events(db, turn["job_id"], turn["attempt_id"], rows)
+    result = await store.command_executions.command_executions(job_id=turn["job_id"], user_id=OWNER)
+    assert result["summary"]["total"] == 1
+    assert result["executions"][0]["status"] == "completed"
+    assert result["executions"][0]["output_preview"] == "ok"
+    assert result["coverage"]["truncated"] is False

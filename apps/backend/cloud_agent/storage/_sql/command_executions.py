@@ -129,15 +129,27 @@ CALLS_SQL = f"""
     LIMIT $3
 """
 
-#: The results and session polls that answer the covered calls. A result is
-#: matched to its call by the identity the assembler reads, or to the session a
-#: poll continues; never by command text. Poll tool names are matched here so
-#: a session's later polls are in the projection at all.
+#: Claude Code records a native tool's structured outcome outside the content
+#: block (``runtimes/claude.py::_from_user``): a background launch names its
+#: shell id, an exit, or an interrupted run. These are the fields the adapter
+#: stores; nothing here reads free-form prose.
+STRUCTURED_SQL = """
+    CASE WHEN jsonb_typeof(e.payload->'structured_output') = 'object'
+         THEN e.payload->'structured_output' END
+"""
+
+#: The results and session polls that answer exactly the calls this read
+#: covered. Matching is by the call identity or the session a poll continues —
+#: never by command text — so unrelated read/edit results in a long attempt
+#: cannot crowd a command's own result out of the bound. Poll tool names are
+#: matched here so a session's later polls are in the projection at all.
 RESULTS_SQL = f"""
     /* command_executions_results */
     SELECT e.id AS event_id, e.job_id, e.attempt_id, e.event_type,
            e.seq, e.created_at AS at,
            e.payload->>'tool_use_id' AS tool_use_id,
+           e.payload->>'id' AS call_id,
+           e.payload->>'name' AS tool_name,
            e.payload->>'is_error' AS is_error,
            CASE WHEN e.payload->>'exit_code' ~ '^-?[0-9]{{1,9}}$'
                 THEN (e.payload->>'exit_code')::integer END AS exit_code,
@@ -145,23 +157,43 @@ RESULTS_SQL = f"""
            length(COALESCE(e.payload->>'content', '')) AS content_chars,
            e.payload->>'status' AS status,
            {SESSION_SQL.strip()} AS session_id,
-           {BACKGROUND_SQL.strip()} AS background
+           {BACKGROUND_SQL.strip()} AS background,
+           left({STRUCTURED_SQL.strip()}::text, 4000) AS structured_output
     FROM agent_job_events e
     JOIN agent_jobs j ON j.id = e.job_id
     JOIN agent_threads t ON t.id = j.thread_id
     WHERE e.attempt_id = ANY($1::bigint[])
-      AND j.user_id = $4 AND t.deleted_at IS NULL
+      AND j.user_id = $2 AND t.deleted_at IS NULL
       AND j.thread_id = (
           SELECT owner_job.thread_id FROM agent_jobs owner_job
-          WHERE owner_job.id = $5 AND owner_job.user_id = $4
+          WHERE owner_job.id = $3 AND owner_job.user_id = $2
       )
       AND (
-          e.event_type = 'tool_result'
-          OR (e.event_type = 'tool_use'
-              AND LOWER(COALESCE(e.payload->>'name', '')) = ANY($2::text[]))
+          -- the covered calls' own results (including a launch ack that names
+          -- the session the later polls continue)
+          e.payload->>'tool_use_id' = ANY($4::text[])
+          -- the polls themselves, whatever session they name: their ids are
+          -- what their results match on
+          OR (
+              e.event_type = 'tool_use'
+              AND LOWER(COALESCE(e.payload->>'name', '')) = ANY($6::text[])
+          )
+          -- a poll's own result, by the poll's call id
+          OR (
+              e.event_type = 'tool_result'
+              AND e.payload->>'tool_use_id' IN (
+                  SELECT poll.payload->>'id' FROM agent_job_events poll
+                  WHERE poll.attempt_id = ANY($1::bigint[])
+                    AND poll.event_type = 'tool_use'
+                    AND LOWER(COALESCE(poll.payload->>'name', '')) = ANY($6::text[])
+                    AND poll.payload->>'id' IS NOT NULL
+              )
+          )
+          -- a result that names a session a covered call opened
+          OR ({SESSION_SQL.strip()}) = ANY($5::text[])
       )
     ORDER BY e.id
-    LIMIT $3
+    LIMIT $7
 """
 
 #: Command calls the conversation records in total, for honest coverage.

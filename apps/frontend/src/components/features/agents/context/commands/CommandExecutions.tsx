@@ -17,7 +17,7 @@ import {
 } from '@/lib/api/agents';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import { formatShare } from '@/components/features/settings/usagePresent';
-import { Section, type OpenPoint, type OpenTurn } from '../ContextSections';
+import type { OpenPoint, OpenTurn } from '../ContextSections';
 import { CommandRow } from './CommandRow';
 import {
   COMMAND_FILTERS,
@@ -48,15 +48,21 @@ interface Query {
   program: string | null;
 }
 
+/** How often a running conversation's commands are read again while visible. */
+export const COMMANDS_REFRESH_MS = 5_000;
+
 export function CommandExecutions({
   jobId,
   conversationKey,
+  active = false,
   onOpenPoint,
   onOpenTurn,
 }: {
   jobId: string;
   /** The conversation the data belongs to; a change drops what was loaded. */
   conversationKey: string;
+  /** The turn is still running: read again while the page is visible. */
+  active?: boolean;
   onOpenPoint: OpenPoint;
   onOpenTurn: OpenTurn;
 }) {
@@ -128,6 +134,22 @@ export function CommandExecutions({
     return () => controller.abort();
   }, [load, query, conversationKey]);
 
+  // A running turn adds commands and settles running ones: read the first page
+  // again on the shared cadence, only while the page is visible, and never
+  // while a paged read is in flight (so the cursor walk stays coherent).
+  useEffect(() => {
+    if (!active) return undefined;
+    const controller = new AbortController();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible' || loading) return;
+      void load(query, null, false, controller.signal);
+    }, COMMANDS_REFRESH_MS);
+    return () => {
+      window.clearInterval(timer);
+      controller.abort();
+    };
+  }, [active, load, query, loading]);
+
   const page = pages[0] ?? null;
   const executions = useMemo(
     () => (pages.length > 0 ? dedupe(pages.flatMap((entry) => entry.executions)) : []),
@@ -149,7 +171,8 @@ export function CommandExecutions({
   };
 
   return (
-    <Section title={t('executions.title')}>
+    <section className="mt-6">
+      <h3 className="text-sm font-semibold text-foreground">{t('executions.title')}</h3>
       <p className="mt-1 text-xs text-muted">{t('executions.note')}</p>
       <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)] lg:items-start">
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3">
@@ -251,7 +274,7 @@ export function CommandExecutions({
           ) : null}
         </div>
       </div>
-    </Section>
+    </section>
   );
 }
 
@@ -325,8 +348,9 @@ function SummaryRail({
   const cumulative = durationLabel(summary.cumulative_ms);
   return (
     <div className="min-w-0 rounded-lg border border-border p-3">
-      <h4 className="text-xs font-semibold text-foreground">{t('executions.rail.summary')}</h4>
-      <p className="mt-0.5 text-[11px] text-muted">{t('executions.rail.summaryTip')}</p>
+      <h4 className="text-xs font-semibold text-foreground" title={t('executions.rail.summaryTip')}>
+        {t('executions.rail.summary')}
+      </h4>
       <dl className="mt-2 grid grid-cols-2 gap-2">
         <Fact label={t('executions.rail.settled')} value={summary.settled.toLocaleString(locale)} />
         <Fact
@@ -348,13 +372,11 @@ function SummaryRail({
           value={summary.background.toLocaleString(locale)}
         />
       </dl>
-      <p className="mt-2 text-[11px] text-muted">{t('executions.rail.failedTip')}</p>
-      <p className="mt-0.5 text-[11px] text-muted">
-        {t('executions.rail.cumulativeTip')}
-        {summary.durations_missing > 0
-          ? ` · ${t('executions.duration.none')}: ${summary.durations_missing.toLocaleString(locale)}`
-          : ''}
-      </p>
+      {summary.durations_missing > 0 ? (
+        <p className="mt-2 text-[11px] text-muted">
+          {t('executions.duration.none')}: {summary.durations_missing.toLocaleString(locale)}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -398,7 +420,9 @@ function Programs({
           className="ui-input min-h-8 w-32 text-[11px]"
         />
       </div>
-      <p className="mt-0.5 text-[11px] text-muted">{t('executions.rail.programsScope')}</p>
+      <p className="mt-0.5 text-[11px] text-muted" title={t('executions.rail.programsScope')}>
+        {t('executions.rail.programsScope')}
+      </p>
       <ul className="mt-2 grid gap-1">
         {programs.map((program) => (
           <li key={program.name}>

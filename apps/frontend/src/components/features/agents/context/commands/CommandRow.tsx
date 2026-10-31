@@ -86,12 +86,15 @@ export function CommandRow({
               <span>{t('executions.duration.none')}</span>
             )}
             <span
-              title={t('executions.turnStepTip', {
+              title={t('executions.turnAttemptTip', {
                 turn: execution.turn_no,
-                step: execution.attempt_no,
+                attempt: execution.attempt_no,
               })}
             >
-              {t('executions.turnStep', { turn: execution.turn_no, step: execution.attempt_no })}
+              {t('executions.turnAttempt', {
+                turn: execution.turn_no,
+                attempt: execution.attempt_no,
+              })}
             </span>
             {execution.at ? (
               <time dateTime={execution.at}>
@@ -132,26 +135,32 @@ function CommandDetails({
 }) {
   const { t, locale } = useLocale();
   const [full, setFull] = useState<string | null>(null);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
-  const command = clip(execution.command, OUTPUT_CLIP);
+  const command = execution.command;
   const output = full ?? clip(execution.output_preview, OUTPUT_CLIP);
+  // Whether more of the stored result exists beyond what is shown, by the
+  // event's own total when a page has been read, or the preview flag before.
   const canLoad =
     execution.result_event_id != null &&
-    (execution.output_truncated || execution.output_chars > output.length);
+    (nextOffset !== null || (full === null && execution.output_truncated));
 
-  const load = () => {
+  const load = (offset: number) => {
     if (execution.result_event_id == null) return;
     setLoading(true);
     setFailed(false);
-    getEventContent(jobId, execution.result_event_id)
+    getEventContent(jobId, execution.result_event_id, offset)
       .then((content) => {
-        if (content) {
-          setFull(content.text);
-          if (content.next_offset != null) setFailed(false);
-        } else {
+        if (!content) {
           setFailed(true);
+          return;
         }
+        setFull((previous) =>
+          offset === 0 || previous === null ? content.text : previous + content.text,
+        );
+        setNextOffset(content.next_offset);
+        if (content.next_offset === null && !content.truncated) setNextOffset(null);
       })
       .catch(() => setFailed(true))
       .finally(() => setLoading(false));
@@ -199,17 +208,21 @@ function CommandDetails({
             ) : (
               <p className="text-muted">{t('executions.details.noOutput')}</p>
             )}
-            {execution.output_truncated && full === null ? (
+            {execution.output_truncated && nextOffset === null ? (
               <p className="mt-1 text-[11px] text-muted">{t('executions.details.truncated')}</p>
             ) : null}
-            {canLoad && full === null ? (
+            {canLoad ? (
               <button
                 type="button"
-                onClick={load}
+                onClick={() => load(nextOffset ?? 0)}
                 disabled={loading}
                 className="ui-button ui-button-ghost mt-1 min-h-8 px-2 text-[11px]"
               >
-                {loading ? t('executions.details.loading') : t('executions.details.loadFull')}
+                {loading
+                  ? t('executions.details.loading')
+                  : nextOffset !== null
+                    ? t('executions.details.loadMore')
+                    : t('executions.details.loadFull')}
               </button>
             ) : null}
             {failed ? (

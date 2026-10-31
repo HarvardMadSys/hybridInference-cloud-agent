@@ -90,6 +90,7 @@ def result(
     exit_code: int | None = None,
     session: str | None = None,
     status: str | None = None,
+    structured_output: dict[str, Any] | None = None,
     second: int = 1,
 ) -> dict[str, Any]:
     return {
@@ -110,6 +111,7 @@ def result(
         "content_chars": len(content),
         "status": status,
         "background": False,
+        "structured_output": structured_output,
     }
 
 
@@ -526,3 +528,70 @@ def test_a_codex_command_execution_event_is_recognized():
     page = command_executions_page(build(rows, [job(runtime="codex")]))
     assert page.executions[0].program == "ls"
     assert page.executions[0].status == "completed"
+
+
+def test_a_launch_acknowledgement_is_not_completion():
+    """A background call whose result only started the session stays running."""
+    rows = [
+        call(1, call_id="c1", session="s1", command="npm run dev", background=True),
+        result(2, call_id="c1", content="Command running in background", session="s1"),
+    ]
+    page = command_executions_page(build(rows, [job(state="running")]))
+    execution = page.executions[0]
+    assert execution.status == "running"
+    assert execution.background is True
+    assert execution.exit_code is None
+
+
+def test_a_launch_acknowledgement_with_a_finished_turn_is_unknown():
+    rows = [
+        call(1, call_id="c1", session="s1", command="npm run dev", background=True),
+        result(2, call_id="c1", content="started", session="s1"),
+    ]
+    page = command_executions_page(build(rows, [job(state="succeeded")]))
+    assert page.executions[0].status == "unknown"
+
+
+def test_a_poll_that_settles_a_background_session_completes_it():
+    rows = [
+        call(1, call_id="c1", session="s1", command="npm run dev", background=True),
+        result(2, call_id="c1", content="started", session="s1"),
+        poll(3, call_id="p1", session="s1"),
+        result(4, call_id="p1", content="listening", exit_code=0, second=4),
+    ]
+    page = command_executions_page(build(rows, [job(state="succeeded")]))
+    assert page.executions[0].status == "completed"
+    assert page.executions[0].output_preview == "listening"
+
+
+def test_a_structured_exit_code_and_interruption_are_read():
+    rows = [
+        call(1, call_id="a"),
+        result(2, call_id="a", structured_output={"exitCode": 4}),
+        call(3, call_id="b", second=3),
+        result(4, call_id="b", structured_output={"interrupted": True}, second=4),
+    ]
+    page = command_executions_page(build(rows))
+    by_id = {execution.id: execution for execution in page.executions}
+    assert by_id["1:a"].status == "failed" and by_id["1:a"].exit_code == 4
+    assert by_id["1:b"].status == "failed" and by_id["1:b"].tool_error is True
+
+
+def test_a_structured_shell_id_joins_a_later_poll():
+    rows = [
+        call(1, call_id="c1", command="npm run dev", background=True),
+        result(2, call_id="c1", content="started", structured_output={"shellId": "s1"}),
+        poll(3, call_id="p1", session="s1"),
+        result(4, call_id="p1", content="done", exit_code=0, second=4),
+    ]
+    page = command_executions_page(build(rows))
+    assert page.summary.total == 1
+    assert page.executions[0].status == "completed"
+
+
+def test_a_zero_duration_is_zero_not_one_millisecond():
+    rows = [call(1, duration_ms=0), result(2, exit_code=0)]
+    page = command_executions_page(build(rows))
+    assert page.executions[0].duration_ms == 0
+    assert page.summary.cumulative_ms == 0
+    assert page.summary.durations_known == 1

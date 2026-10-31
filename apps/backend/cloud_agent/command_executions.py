@@ -707,28 +707,68 @@ def _merge_call(execution: _Execution, row: Mapping[str, Any]) -> None:
         execution.background = True
 
 
-def _apply_result(execution: _Execution, row: Mapping[str, Any]) -> None:
-    """A result, or a session poll's result, updates its execution in place."""
+def _structured_evidence(execution: _Execution, structured: Mapping[str, Any]) -> bool:
+    """Apply a native structured outcome; return whether it settled the run.
+
+    Claude Code puts a tool's own structured result under ``structured_output``
+    (the adapter stores the CLI's ``tool_use_result`` there): a background
+    launch names the shell id the later poll continues, an exit names the
+    status, a timeout is a failure. None of this is inferred from prose.
+    """
+    shell = structured.get("shellId") or structured.get("bash_id")
+    if isinstance(shell, str) and shell:
+        execution.session_id = execution.session_id or shell
+    if _truth(structured.get("background")):
+        execution.background = True
+    exit_code = _integer(structured.get("exitCode"))
+    if exit_code is None:
+        exit_code = _integer(structured.get("exit_code"))
+    if exit_code is not None:
+        execution.exit_code = exit_code
+        return True
+    if _truth(structured.get("interrupted")) or _truth(structured.get("timedOut")):
+        execution.is_error = True
+        return True
+    return False
+
+
+def _apply_result(execution: _Execution, row: Mapping[str, Any]) -> bool:
+    """A result, or a session poll's result, updates its execution in place.
+
+    Returns whether this row settled the execution. A launch acknowledgement
+    (a background call whose result only says the session started) does not:
+    it leaves the execution running until a poll reports an outcome.
+    """
     if not execution.session_id and _text(row.get("session_id")):
         # The result that opened a session names it; later polls join on it.
         execution.session_id = str(row["session_id"])
-    execution.result_seen = True
+    structured = row.get("structured_output")
+    settled = (
+        _structured_evidence(execution, structured) if isinstance(structured, Mapping) else False
+    )
     execution.result_event_id = int(row["event_id"])
     execution.result_at = row.get("at")
     if _truth(row.get("is_error")):
         execution.is_error = True
+        settled = True
     exit_code = _integer(row.get("exit_code"))
     if exit_code is not None:
         execution.exit_code = exit_code
+        settled = True
     if _truth(row.get("background")):
         execution.background = True
     content = row.get("content")
     if isinstance(content, str) and content:
         execution.output = content
         execution.output_chars = int(row.get("content_chars") or len(content))
-    # A poll that reports the session still running has not settled it.
-    if row.get("status") == "running":
+    status = row.get("status")
+    if status == "running" or (execution.background and not settled):
+        # A poll or launch acknowledgement that reports the session still
+        # running has not settled it.
         execution.result_seen = False
+        return False
+    execution.result_seen = True
+    return True
 
 
 def _final_status(execution: _Execution, job_state: str, attempt_status: str) -> CommandStatus:
@@ -738,6 +778,8 @@ def _final_status(execution: _Execution, job_state: str, attempt_status: str) ->
         return "completed"
     if attempt_status == "running" or job_state in {"queued", "running", "publishing"}:
         return "running"
+    # A launch acknowledgement with no final result proves nothing about the
+    # process: a background run whose turn ended is unknown, not completed.
     return "unknown"
 
 
@@ -793,7 +835,7 @@ def _index_calls(
 ) -> None:
     """Read every command call once; a repeated identity only fills gaps."""
     for row in rows:
-        if _is_poll(row) or row.get("event_type") != "tool_use":
+        if row.get("event_type") != "tool_use" or _is_poll(row):
             continue
         job = jobs.get(str(row["job_id"]))
         if job is None:
@@ -823,10 +865,11 @@ def _index_results(rows: Sequence[Mapping[str, Any]], index: _Index) -> None:
         if _is_poll(row):
             session_id = _text(row.get("session_id"))
             poll_id = _text(row.get("call_id"))
-            if session_id is not None and poll_id is not None:
-                execution = index.sessions.get((attempt_id, session_id))
-                if execution is not None:
-                    index.poll_calls.setdefault((attempt_id, poll_id), execution)
+            execution = index.sessions.get((attempt_id, session_id)) if session_id else None
+            if execution is None and poll_id:
+                execution = index.calls.get((attempt_id, poll_id))
+            if execution is not None and poll_id:
+                index.poll_calls.setdefault((attempt_id, poll_id), execution)
             continue
         if row.get("event_type") != "tool_result":
             continue
@@ -839,15 +882,17 @@ def _index_results(rows: Sequence[Mapping[str, Any]], index: _Index) -> None:
             execution = index.sessions.get((attempt_id, session_id)) if session_id else None
         if execution is None:
             continue
-        _apply_result(execution, row)
+        settled = _apply_result(execution, row)
         if execution.session_id:
             index.sessions.setdefault((attempt_id, execution.session_id), execution)
-        if execution.duration_ms is None:
-            call_row = index.call_rows.get((attempt_id, execution.id.split(":", 1)[1]))
-            if call_row is not None:
-                execution.duration_ms = _event_duration(call_row, row)
-                if execution.duration_ms is not None:
-                    execution.duration_basis = "events"
+        # The call-to-final-result interval covers a continued execution; a
+        # recorded call duration stays the measured call itself.
+        call_row = index.call_rows.get((attempt_id, execution.id.split(":", 1)[1]))
+        if call_row is not None and execution.duration_basis != "recorded" and settled:
+            derived = _event_duration(call_row, row)
+            if derived is not None:
+                execution.duration_ms = derived
+                execution.duration_basis = "events"
 
 
 def _settle(

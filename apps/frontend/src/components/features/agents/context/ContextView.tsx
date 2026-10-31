@@ -87,6 +87,7 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         key={key}
         jobId={job.id}
         conversationKey={key}
+        active={Boolean(view.latest?.turn_active)}
         onOpenPoint={onOpenPoint}
         onOpenTurn={onOpenTurn}
       />

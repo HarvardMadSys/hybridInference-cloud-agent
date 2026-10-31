@@ -38,7 +38,7 @@ function execution(overrides: Partial<CommandExecutionApi> = {}): CommandExecuti
 
 describe('durationLabel', () => {
   it('renders a recorded duration at a readable scale', () => {
-    expect(durationLabel(0)).toBe('1ms');
+    expect(durationLabel(0)).toBe('0ms');
     expect(durationLabel(840)).toBe('840ms');
     expect(durationLabel(5_300)).toBe('5.3s');
     expect(durationLabel(14_000)).toBe('14s');

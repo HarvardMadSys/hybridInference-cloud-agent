@@ -6,8 +6,7 @@
 
 export const commandExecutionsEn = {
   'executions.title': 'Command Executions',
-  'executions.note':
-    'What the agent ran, parsed from recorded calls and results. Nothing here re-runs a command or expands its shell text.',
+  'executions.note': 'What the agent ran, from its recorded calls and results.',
   'executions.search': 'Filter commands…',
   'executions.searchLabel': 'Filter commands by text, working directory or program',
   'executions.programSearch': 'Filter programs…',
@@ -35,7 +34,7 @@ export const commandExecutionsEn = {
   'executions.rail.background': 'background',
   'executions.rail.programs': 'Programs · {count}',
   'executions.rail.programsScope':
-    'Executions per program over the covered runs, independent of the list filters. The program is the subject after launchers, assignments and cd navigation; an unresolvable head is grouped under shell, not renamed.',
+    'Runs per program across the covered executions; the head after launchers, assignments and cd. Unresolvable heads group under shell.',
   'executions.rail.programTip': 'Filter the list to {name}',
   'executions.rail.programTipOn': 'Clear the {name} filter',
   'executions.rail.attention': 'Attention',
@@ -56,8 +55,8 @@ export const commandExecutionsEn = {
   'executions.noExit': 'no exit code recorded',
   'executions.background': 'background',
   'executions.superseded': 'From an attempt a retry replaced',
-  'executions.turnStep': 'T{turn} · S{step}',
-  'executions.turnStepTip': 'Turn {turn}, attempt {step}.',
+  'executions.turnAttempt': 'T{turn} · A{attempt}',
+  'executions.turnAttemptTip': 'Turn {turn}, attempt {attempt} (a retry is another attempt).',
   'executions.duration.recorded': '{duration}',
   'executions.duration.events': '{duration}',
   'executions.duration.eventsTip':
@@ -75,6 +74,7 @@ export const commandExecutionsEn = {
   'executions.details.truncated':
     'The stored text is clipped; shorter text was kept, so this is not all of it.',
   'executions.details.loadFull': 'Load the full result',
+  'executions.details.loadMore': 'Load more',
   'executions.details.loading': 'Loading…',
   'executions.details.loadFailed': 'The full result could not be loaded.',
   'executions.details.characters': '{count} characters',
@@ -125,7 +125,7 @@ export const commandExecutionsZhCN: Record<keyof typeof commandExecutionsEn, str
   'executions.rail.background': '后台',
   'executions.rail.programs': '程序分布 · {count}',
   'executions.rail.programsScope':
-    '按覆盖到的每次执行统计，不受列表筛选影响。程序取启动器、赋值与 cd 导航之后的主体；无法解析时归入 shell，不改名。',
+    '按覆盖到的执行统计各程序的次数；程序取启动器、赋值与 cd 之后的主体，无法解析时归入 shell。',
   'executions.rail.programTip': '只看 {name}',
   'executions.rail.programTipOn': '取消 {name} 筛选',
   'executions.rail.attention': '值得注意',
@@ -145,8 +145,8 @@ export const commandExecutionsZhCN: Record<keyof typeof commandExecutionsEn, str
   'executions.noExit': '未记录退出码',
   'executions.background': '后台',
   'executions.superseded': '来自被重试替换的尝试',
-  'executions.turnStep': 'T{turn} · S{step}',
-  'executions.turnStepTip': '第 {turn} 轮，第 {step} 次尝试。',
+  'executions.turnAttempt': 'T{turn} · A{attempt}',
+  'executions.turnAttemptTip': '第 {turn} 轮，第 {attempt} 次尝试（重试会另起一次尝试）。',
   'executions.duration.recorded': '{duration}',
   'executions.duration.events': '{duration}',
   'executions.duration.eventsTip':
@@ -163,6 +163,7 @@ export const commandExecutionsZhCN: Record<keyof typeof commandExecutionsEn, str
   'executions.details.noOutput': '该结果没有文本输出。',
   'executions.details.truncated': '存储的文本已被截断，只保留了较短的内容，不是全部。',
   'executions.details.loadFull': '载入完整结果',
+  'executions.details.loadMore': '载入更多',
   'executions.details.loading': '载入中…',
   'executions.details.loadFailed': '完整结果载入失败。',
   'executions.details.characters': '{count} 个字符',
