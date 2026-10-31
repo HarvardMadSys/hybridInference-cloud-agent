@@ -38,7 +38,7 @@ from cloud_agent_host.member_preparation import (
     MemberStep,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
 _SPEC = ChatSandboxSpec(
@@ -298,6 +298,30 @@ def test_a_runner_that_ends_early_fails_the_step_it_was_in(tmp_path, capsys):
     assert after.exists(), "what the killed runner never reached runs in an exec of its own"
     assert calls[-1] == ["/bin/sh", "-c", f"touch {after}"]
 
+
+
+def test_kata_executes_member_steps_individually(tmp_path):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    log = tmp_path / "log"
+    _queue(preparation, _step(f"echo first >> {log}"), _step(f"echo second >> {log}"))
+
+    preparation.run()
+
+    assert log.read_text() == "first\nsecond\n"
+    assert len(manager.calls) == 2
+    assert all(call[0][0] == "/bin/sh" for call in manager.calls)
+
+
+def test_successful_runner_with_missing_reports_does_not_blame_next_step():
+    def truncated(_spec, argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, b'{"status": 0, "stderr": ""}\n', b"")
+
+    preparation = _preparation(SimpleNamespace(exec_capture=truncated))
+    _queue(preparation, _step("true"), _step("true", failure="stale cleanup"))
+    with pytest.raises(SandboxError, match=r"incomplete report \(1 of 2 steps\); outcome is unknown"):
+        preparation.run()
 
 def test_a_step_for_another_uid_is_refused():
     preparation = _preparation(_LocalExec())
