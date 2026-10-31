@@ -24,6 +24,7 @@ from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db
 
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.storage.repositories.file_activity import PostgresFileActivityQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -838,9 +839,9 @@ async def test_source_text_that_mentions_an_image_block_is_not_image_activity(db
 async def test_a_read_blocked_on_the_pool_is_cancelled_and_a_later_read_works(db, store):
     """A read that cannot acquire a connection is cancelled by its deadline.
 
-    The test's own pool is rebuilt with a single connection and that one is
+    A pool of one connection is built for this case and that connection is
     held, so the scoped read has nothing to acquire: it must raise at its
-    deadline instead of queueing forever, and a later read must succeed once
+    deadline instead of queueing forever, and the same read must succeed once
     the connection is free.
     """
     import asyncpg
@@ -855,7 +856,6 @@ async def test_a_read_blocked_on_the_pool_is_cancelled_and_a_later_read_works(db
             result("b1"),
         ],
     )
-    original = store.file_activity_queries._pool
     # The tier's own connection settings, read from the environment it exports.
     settings = {
         "host": os.environ["TEST_DB_HOST"],
@@ -865,7 +865,7 @@ async def test_a_read_blocked_on_the_pool_is_cancelled_and_a_later_read_works(db
         "database": os.environ["TEST_DB_NAME"],
     }
     small = await asyncpg.create_pool(**settings, min_size=1, max_size=1)
-    queries = type(store.file_activity_queries)(small)
+    queries = PostgresFileActivityQueries(small)
     try:
         async with small.acquire():
             start = time.monotonic()
@@ -891,4 +891,3 @@ async def test_a_read_blocked_on_the_pool_is_cancelled_and_a_later_read_works(db
         assert small.get_size() == small.get_idle_size()
     finally:
         await small.close()
-    assert original is store.file_activity_queries._pool
