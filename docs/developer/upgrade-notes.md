@@ -77,7 +77,10 @@ model connections. Nothing migrates old tasks, connections or identities.
 6. **Initial administrators.** List the verified addresses of the people who
    administer the deployment in `AGENT_LOCAL_ADMIN_EMAILS`
    (`admin-one@example.org,admin-two@example.org` are placeholders; production
-   names exactly its two administrators, staging its own list). A listed
+   names exactly its two administrators, staging its own list). The list,
+   like every account setting, is imported once, at the first start; after
+   that it is edited under **Admin → Settings → Accounts**, not in the
+   environment. A listed
    account is approved and made an administrator only once its address is
    proven, by a link sent to it. There is no grant to the first person who
    signs up. Alternatively, or for the very first one, exchange the setup code
@@ -87,9 +90,11 @@ model connections. Nothing migrates old tasks, connections or identities.
 
 7. **Deploy and verify.** Run the usual deployment. Then: sign-up sends a
    verification link at `AGENT_WEB_BASE_URL`; an administrator approves an
-   application; the applicant adds a model connection and runs a task. Turn on
-   `AGENT_MODEL_CONNECTIONS_ENABLED` once every host and control-plane replica
-   runs this release; nothing runs before it.
+   application; the applicant adds a model connection and runs a task. Model
+   connections are on by default. To hold new turns until every host and
+   control-plane replica runs this release, set
+   `AGENT_MODEL_CONNECTIONS_ENABLED=false` before deploying and unset it once
+   they all do.
 
 **Rollback.** Before the new deployment has taken writes that matter, stop it
 and redeploy the previous release against the archived database and
@@ -134,7 +139,7 @@ Newest first.
 |---|---|
 | `0107_local_accounts` | Creates the tables accounts use: accounts, password sign-in, waiting-list admissions, server-side sessions, emailed tokens, abuse counters, access terminations and the account identity marker. It changes no existing row and locks no existing table. A downgrade drops them, and with them every account. |
 | `0108_local_account_parity` | Local accounts only. Splits `agent_local_password_logins` into sign-in identities (email, login name, phone) and optional password credentials, carrying every account over with its verification time and hash (a verified email is recorded as verified by its link, the only way `0107_local_accounts` had); adds the access view every SQL gate reads, the `deleted` account state with the account's name, note, language and sign-in and deletion times, phone codes, browser sessions, sign-in events, the signup domain list, first-run setup and administrator mail to accounts. It touches only the account tables. A downgrade restores the email-and-password table and drops the new tables, with the sign-in events and mail history in them; it refuses while any account signs in some other way or is deleted, rather than dropping that account. |
-| `0106_user_model_connections` | Adds `agent_model_connections`, `agent_model_connection_checks` and `agent_model_connection_scan_keys` tables for owners' own inference endpoints (Chat Completions, Responses or Anthropic Messages), nullable source columns `agent_jobs.model_connection_id` and `agent_pending_messages.model_connection_id`, and a separate `agent_model_connection_residencies` table binding a resident member's process to one connection revision for one residency generation (a separate table, so a running previous release's prepared statements over the membership table keep working). Nothing is rewritten. The feature stays off until `AGENT_MODEL_CONNECTIONS_ENABLED` is set, and nothing runs before it. A downgrade refuses while any connection exists, or any turn, waiting message or resident member names one, finished conversations included ([owner model connections](operations.md#owner-model-connections)). |
+| `0106_user_model_connections` | Adds `agent_model_connections`, `agent_model_connection_checks` and `agent_model_connection_scan_keys` tables for owners' own inference endpoints (Chat Completions, Responses or Anthropic Messages), nullable source columns `agent_jobs.model_connection_id` and `agent_pending_messages.model_connection_id`, and a separate `agent_model_connection_residencies` table binding a resident member's process to one connection revision for one residency generation (a separate table, so a running previous release's prepared statements over the membership table keep working). Nothing is rewritten. Connections are admitted unless `AGENT_MODEL_CONNECTIONS_ENABLED` is set to `0`, `false` or `no`. A downgrade refuses while any connection exists, or any turn, waiting message or resident member names one, finished conversations included ([owner model connections](operations.md#owner-model-connections)). |
 | `0105_job_event_usage_summary` | Adds a nullable `usage_summary` column to `agent_job_events`. Adding it rewrites no rows and holds its lock only for the catalog change. New events store the projection of their payload that usage reads need, and those reads take it from there; events stored before the column existed are projected when read, as before. A downgrade drops the column, and usage reads project every payload again. |
 | `0104_notification_change_keyset` | Builds a `(user_id, kind, change_xid, entity_id)` index concurrently before dropping the preceding owner/XID index, so notification delta continuation pages seek directly instead of scanning the whole snapshot interval. It changes no row and does not block foreground writes. Existing v1 continuations finish in their previous kind/identity order before advancing to v2. The previous API remains functionally compatible during migration, although its delta reads may use a less selective index until it is replaced. A downgrade restores the preceding index concurrently. |
 | `0103_terminal_resume_keyset` | Rebuilds the partial terminal-resume index on `(updated_at, id)`, matching the replay keyset so every bounded continuation seeks directly instead of sorting equal-time rows again. The online build does not block foreground writes and changes no row. A downgrade restores the preceding one-column index. |

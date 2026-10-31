@@ -54,7 +54,7 @@ class PreparedFollowUp:
 
     ``model`` is the canonical id, or ``None`` to inherit the parent's.
     ``model_connection_id`` is its source when ``model`` is set -- the owner's
-    connection, or ``None`` for the Gateway -- and means nothing otherwise: an
+    connection -- and means nothing otherwise: an
     inherited model keeps the parent's source.
     ``reasoning_effort`` is the validated level, or ``None`` to inherit;
     ``reset_reasoning_effort`` is the one way to clear an inherited level back

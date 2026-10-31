@@ -332,7 +332,7 @@ experiments created by this control plane from the Cloud Agent profile:
    server template. Its node, image and data-disk parameters replace
    `small-lan`'s `phystype`, `osImage`, `dataMount` and `dataSize`.
 2. Provide a public HTTPS control-plane address through
-   `AGENT_SESSION_REDIRECT_URI` or `AGENT_COMPUTE_REGISTRATION_URL`.
+   `AGENT_PUBLIC_API_URL` or `AGENT_COMPUTE_REGISTRATION_URL`.
 3. Each acquisition sends a one-time token in experiment parameters. The control
    plane stores only its hash; it expires after two hours. At first boot, the
    node generates fresh SSH host keys and posts their public halves to

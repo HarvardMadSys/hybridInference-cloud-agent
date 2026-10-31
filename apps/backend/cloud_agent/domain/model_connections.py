@@ -170,7 +170,7 @@ def is_connection_id(value: object) -> bool:
 
 @dataclass(frozen=True)
 class TurnSource:
-    """Which model a turn runs, and where: ``connection_id`` ``None`` is the Gateway."""
+    """Which model a turn runs, and on which of its owner's connections."""
 
     model: str
     connection_id: str | None = None

@@ -3996,10 +3996,11 @@ key and bill. Design, protocol matrix and accepted risks:
 [model connection design](../agents/specs/2026-10-27-user-model-connections.zh-CN.md),
 and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
 
-- **Turning it on.** `AGENT_MODEL_CONNECTIONS_ENABLED` is off by default, and
-  nothing runs until it is on: there is no other inference. Turn it on once
-  every host and control-plane replica runs this release. The setting gates
-  admission only. Turning it off stops new connections, re-enabling one and
+- **Turning it off.** `AGENT_MODEL_CONNECTIONS_ENABLED` is on unless it is
+  set to `0`, `false` or `no`, and connections are the only inference, so
+  with it off no new turn starts. To hold new turns until every host and
+  control-plane replica runs this release, set it to `false` before the
+  rollout and unset it afterwards. The setting gates admission only. Turning it off stops new connections, re-enabling one and
   new turns or messages on one; turns already admitted still run on their
   connection or fail. It is not a way to stop running work.
 - **Rolling back.** Do not run a release from before independent accounts

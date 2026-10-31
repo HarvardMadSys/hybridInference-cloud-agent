@@ -21,8 +21,8 @@ from cloud_agent_shared.environment import environment_limits
 class ModelConnectionOption(BaseModel):
     """One of the owner's enabled model connections, as the composer offers it.
 
-    Everything needed to offer its models beside the Gateway's, and which
-    agents can run each one now; nothing about its key or its APIs.
+    Everything needed to offer its models, and which agents can run each one
+    now; nothing about its key or its APIs.
     """
 
     id: str

@@ -4,7 +4,7 @@ Every path that hands a connection to a turn -- admission, a follow-up, a
 waiting message, a goal round, a claim, a residency and a Fork -- reads it
 scoped to the turn's owner and asks :func:`require_usable`, so a disabled,
 deleted, rotated or foreign connection is refused wherever the turn is, and
-nothing falls back to the Gateway or to another model.
+nothing falls back to another connection or model.
 
 The key is decrypted only for a claim and a residency of its owner's own turn,
 and for the owner's explicit verification or model listing. A change that

@@ -55,7 +55,7 @@ so does `deploy/control-plane/deploy.sh` before it pulls anything.
 |---|---|
 | `AGENT_LOCAL_SESSION_SECRET` | At least 32 random bytes, different from `AGENT_SESSION_SECRET`. Keys the stored hashes of sessions, emailed tokens and abuse counters. |
 | `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Required at startup. Encrypts personal model keys and other stored credentials in separate domains. |
-| `AGENT_MODEL_CONNECTIONS_ENABLED=true` | Enables personal model setup and new turns. Leaving it off does not enable any shared inference; nothing runs. |
+| `AGENT_MODEL_CONNECTIONS_ENABLED` | On unless set to `0`, `false` or `no`. Off stops personal model setup and new turns, and enables no shared inference: nothing new runs. |
 | `AGENT_WEB_BASE_URL` | The only base used for emailed links. A request's `Host` is never used. |
 | `AGENT_PUBLIC_API_URL` | This API's public address, which OAuth callbacks name. |
 

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 22:37-0400\n"
+"POT-Creation-Date: 2026-10-30 22:44-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -3728,7 +3728,10 @@ msgid ""
 "group waits for. Both stay off until they are qualified on a Kata host "
 "([#1054](https://github.com/HarvardMadSys/hybridInference-cloud-"
 "agent/issues/1054)). To try them on one host, pass them to the installer:"
-msgstr "有两项设置或许能缩短每个新建或恢复的沙箱组都要等待的虚拟机启动。在 Kata 主机上完成资格验证之前，两者都保持关闭（[#1054](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/1054)）。要在某台主机上试用，把它们传给安装脚本："
+msgstr ""
+"有两项设置或许能缩短每个新建或恢复的沙箱组都要等待的虚拟机启动。在 Kata "
+"主机上完成资格验证之前，两者都保持关闭（[#1054](https://github.com/HarvardMadSys"
+"/hybridInference-cloud-agent/issues/1054)）。要在某台主机上试用，把它们传给安装脚本："
 
 #: ../developer/operations.md:1628
 msgid ""
@@ -3741,7 +3744,12 @@ msgid ""
 "Nothing caps the VM at the host's memory either: a VM larger than the "
 "host's memory plus 1 GiB, the most Kata lets QEMU address, fails to "
 "start, where hot-plug would stop adding memory at the host's limit."
-msgstr "`KATA_STATIC_SANDBOX_RESOURCES=true` 会设置 `runtime.static_sandbox_resource_mgmt`。之后 Kata 启动每台虚拟机时，就已经把容器的 `--cpus` 和 `--memory` 加到了 `default_vcpus` 和 `default_memory` 上，而不是在启动后再热插拔进去。虚拟机此后无法再扩容。平台上没有任何东西会调整运行中沙箱的资源，沙箱组也一直保持创建时的限额，所以这样不会损失什么。另外，也没有任何东西会把虚拟机限制在主机的内存以内：虚拟机一旦超过主机内存加 1 GiB（Kata 允许 QEMU 寻址的上限），就会启动失败；而用热插拔时，到了主机的上限就会停止添加内存。"
+msgstr ""
+"`KATA_STATIC_SANDBOX_RESOURCES=true` 会设置 "
+"`runtime.static_sandbox_resource_mgmt`。之后 Kata 启动每台虚拟机时，就已经把容器的 `--cpus` "
+"和 `--memory` 加到了 `default_vcpus` 和 `default_memory` "
+"上，而不是在启动后再热插拔进去。虚拟机此后无法再扩容。平台上没有任何东西会调整运行中沙箱的资源，沙箱组也一直保持创建时的限额，所以这样不会损失什么。另外，也没有任何东西会把虚拟机限制在主机的内存以内：虚拟机一旦超过主机内存加"
+" 1 GiB（Kata 允许 QEMU 寻址的上限），就会启动失败；而用热插拔时，到了主机的上限就会停止添加内存。"
 
 #: ../developer/operations.md:1636
 msgid ""
@@ -3753,7 +3761,12 @@ msgid ""
 "started without a limit, such as a deployment probe, gets nothing else. "
 "The installer refuses less than 256 MiB, which Kata would replace with "
 "2048 MiB without saying so."
-msgstr "`KATA_DEFAULT_MEMORY_MIB` 设置 `hypervisor.qemu.default_memory`，不设时是 Kata 的 2048 MiB。无论是否开启静态资源分配，每台虚拟机都会在容器的内存限额之外再得到这么多内存。它必须装下限额覆盖不到的东西：guest 内核、内核为虚拟机全部内存建立的页结构（每 4 KiB 页 64 字节），以及 Kata agent。没有设置限额就启动的容器（例如部署时的探测容器）只有这些内存可用。安装脚本拒绝小于 256 MiB 的值，因为 Kata 会不声不响地把它换成 2048 MiB。"
+msgstr ""
+"`KATA_DEFAULT_MEMORY_MIB` 设置 `hypervisor.qemu.default_memory`，不设时是 Kata 的"
+" 2048 MiB。无论是否开启静态资源分配，每台虚拟机都会在容器的内存限额之外再得到这么多内存。它必须装下限额覆盖不到的东西：guest "
+"内核、内核为虚拟机全部内存建立的页结构（每 4 KiB 页 64 字节），以及 Kata "
+"agent。没有设置限额就启动的容器（例如部署时的探测容器）只有这些内存可用。安装脚本拒绝小于 256 MiB 的值，因为 Kata "
+"会不声不响地把它换成 2048 MiB。"
 
 #: ../developer/operations.md:1644
 msgid ""
@@ -3769,7 +3782,13 @@ msgid ""
 "installer again. They are for qualification runs until the defaults "
 "switch. Every install starts a new runtime generation, so runners "
 "requalify the guest either way."
-msgstr "安装脚本把这些设置写进运行时配置旁边的一个 drop-in 文件 `config.d/cloud-agent-vm-boot.toml`，`--check` 再从这个文件读回它们，所以部署时什么都不用传。Kata 会把这个目录里的每个文件都叠加到主配置之上，因此 `--check` 会拒绝那里出现的任何其他文件，也会拒绝对这个文件的任何改动。不带这些设置运行安装，会删掉这个 drop-in 并给出提示，恢复 Kata 的默认值。控制平面对托管主机的自动部署，只要安装前置依赖（默认就会安装），就是这样一次安装，所以每次这样的部署都会撤销这些设置，直到再次把它们传给安装脚本。在默认值切换之前，这些设置只用于资格验证。每次安装都会开启一个新的运行时代次，所以无论哪种情况，runner 都会重新对 guest 做资格验证。"
+msgstr ""
+"安装脚本把这些设置写进运行时配置旁边的一个 drop-in 文件 `config.d/cloud-agent-vm-"
+"boot.toml`，`--check` 再从这个文件读回它们，所以部署时什么都不用传。Kata 会把这个目录里的每个文件都叠加到主配置之上，因此"
+" `--check` 会拒绝那里出现的任何其他文件，也会拒绝对这个文件的任何改动。不带这些设置运行安装，会删掉这个 drop-in "
+"并给出提示，恢复 Kata "
+"的默认值。控制平面对托管主机的自动部署，只要安装前置依赖（默认就会安装），就是这样一次安装，所以每次这样的部署都会撤销这些设置，直到再次把它们传给安装脚本。在默认值切换之前，这些设置只用于资格验证。每次安装都会开启一个新的运行时代次，所以无论哪种情况，runner"
+" 都会重新对 guest 做资格验证。"
 
 #: ../developer/operations.md:1656
 msgid ""
@@ -3778,7 +3797,10 @@ msgid ""
 "is not offered either. QEMU boots it directly, without the decompressor "
 "that randomizes the kernel's address (KASLR), so every guest would run "
 "its kernel at the same published addresses."
-msgstr "虚拟机模板（VM templating）保持关闭：它会让不同租户共享内核内存以及 RNG/KASLR 状态。发布包里同一个调试内核的未压缩版本也不提供。QEMU 会直接启动它，跳过负责随机化内核地址（KASLR）的解压程序，于是每个 guest 的内核都会运行在同一组公开的地址上。"
+msgstr ""
+"虚拟机模板（VM templating）保持关闭：它会让不同租户共享内核内存以及 RNG/KASLR "
+"状态。发布包里同一个调试内核的未压缩版本也不提供。QEMU 会直接启动它，跳过负责随机化内核地址（KASLR）的解压程序，于是每个 guest "
+"的内核都会运行在同一组公开的地址上。"
 
 #: ../developer/operations.md:1662
 msgid "Guest networking"
@@ -7307,7 +7329,16 @@ msgid ""
 "slowly that the pass is 60 seconds old when it reads it logs "
 "`network_guard_verification_aged_out`, runs the install and read-back "
 "itself, and accepts the turn only if that check passes."
-msgstr "**在任何东西接入网桥之前就装好。** runner 和 sandbox manager 启动时的预检，会安装这些表并读回来确认：每条链、它的钩子和规则数量、受保护的地址集合、登记的地址池。任何一处不一致，runner 就停止认领，sandbox manager 就无法启动。组网络相关的操作会再检查一次，检查通过的结果在 60 秒内都算数。不管这个部署有没有东西在运行，sandbox manager 的巡检都会在 45 秒后续一次这个结果，所以启动或唤醒时，从不需要自己去等安装和读回；在什么都没在运行的主机上，这相当于大约每 45 秒做一次安装和读回。runner 会在两次认领之间、自己那次结果满 35 秒时就续一次，所以交出轮次时也不用等它；如果交出时结果仍满 45 秒（比如之前续的那次失败了），就在那时续。轮次的进程通常不跑自己的辅助容器：它直接用 runner 的结果；如果 runner 的检查失败了，或者结果缺失、读不懂，就拒绝这个轮次。如果进程启动得太慢，读到结果时它已满 60 秒，进程就会记一条 `network_guard_verification_aged_out`，自己做一次安装和读回，只有这次检查通过才接这个轮次。"
+msgstr ""
+"**在任何东西接入网桥之前就装好。** runner 和 sandbox manager "
+"启动时的预检，会安装这些表并读回来确认：每条链、它的钩子和规则数量、受保护的地址集合、登记的地址池。任何一处不一致，runner "
+"就停止认领，sandbox manager 就无法启动。组网络相关的操作会再检查一次，检查通过的结果在 60 "
+"秒内都算数。不管这个部署有没有东西在运行，sandbox manager 的巡检都会在 45 "
+"秒后续一次这个结果，所以启动或唤醒时，从不需要自己去等安装和读回；在什么都没在运行的主机上，这相当于大约每 45 秒做一次安装和读回。runner"
+" 会在两次认领之间、自己那次结果满 35 秒时就续一次，所以交出轮次时也不用等它；如果交出时结果仍满 45 "
+"秒（比如之前续的那次失败了），就在那时续。轮次的进程通常不跑自己的辅助容器：它直接用 runner 的结果；如果 runner "
+"的检查失败了，或者结果缺失、读不懂，就拒绝这个轮次。如果进程启动得太慢，读到结果时它已满 60 秒，进程就会记一条 "
+"`network_guard_verification_aged_out`，自己做一次安装和读回，只有这次检查通过才接这个轮次。"
 
 #: ../developer/operations.md:3576
 msgid ""
@@ -8104,17 +8135,17 @@ msgstr ""
 
 #: ../developer/operations.md:3999
 msgid ""
-"**Turning it on.** `AGENT_MODEL_CONNECTIONS_ENABLED` is off by default, "
-"and nothing runs until it is on: there is no other inference. Turn it on "
-"once every host and control-plane replica runs this release. The setting "
-"gates admission only. Turning it off stops new connections, re-enabling "
-"one and new turns or messages on one; turns already admitted still run on"
-" their connection or fail. It is not a way to stop running work."
-msgstr ""
-"**打开功能。** `AGENT_MODEL_CONNECTIONS_ENABLED` "
-"默认关闭，在打开之前什么都不会运行：没有其他推理来源。等每台主机和每个控制平面副本都运行本版本后再打开。这个设置只控制准入。关闭它会停止新建连接、重新启用连接以及在连接上的新轮次或新消息；已经准入的轮次仍在原连接上运行或失败。它不能用来停止正在运行的工作。"
+"**Turning it off.** `AGENT_MODEL_CONNECTIONS_ENABLED` is on unless it is "
+"set to `0`, `false` or `no`, and connections are the only inference, so "
+"with it off no new turn starts. To hold new turns until every host and "
+"control-plane replica runs this release, set it to `false` before the "
+"rollout and unset it afterwards. The setting gates admission only. "
+"Turning it off stops new connections, re-enabling one and new turns or "
+"messages on one; turns already admitted still run on their connection or "
+"fail. It is not a way to stop running work."
+msgstr "**关闭功能。** 除非 `AGENT_MODEL_CONNECTIONS_ENABLED` 设为 `0`、`false` 或 `no`，否则它就是开启的；连接是唯一的推理来源，所以关闭后不会开始新的轮次。如果希望等每台主机和每个控制平面副本都运行本版本后再接受新轮次，就在发布前把它设为 `false`，之后再取消设置。这个设置只控制准入。关闭它会停止新建连接、重新启用连接以及在连接上的新轮次或新消息；已经准入的轮次仍在原连接上运行或失败。它不能用来停止正在运行的工作。"
 
-#: ../developer/operations.md:4005
+#: ../developer/operations.md:4006
 msgid ""
 "**Rolling back.** Do not run a release from before independent accounts "
 "against this database: it would read neither the accounts nor the "
@@ -8127,7 +8158,7 @@ msgstr ""
 "不要针对这个数据库运行独立账号版本之前的版本：它既读不了账号，也读不了连接来源。只要还存在任何连接、任何指向连接的轮次或等待中的消息、或任何驻留在连接上的成员（包括已结束的会话），降级"
 " `0106` 就会拒绝执行。是否删除这些数据，需要事先作为数据决策来定。"
 
-#: ../developer/operations.md:4010
+#: ../developer/operations.md:4011
 msgid ""
 "**Migration and key.** `0106_user_model_connections` adds the tables and "
 "the source columns. Keys are encrypted with "
@@ -8143,7 +8174,7 @@ msgstr ""
 "域下加密；没有这个密钥时，页面会说明原因，什么都无法保存。所有者接口不会返回密钥，被拒绝的请求只指出出错的字段，不回显其内容。主机经过授权的领取和驻留响应确实带有密钥：成员的"
 " CLI 就是这样拿到它的。"
 
-#: ../developer/operations.md:4017
+#: ../developer/operations.md:4018
 msgid ""
 "**Verification and protocols.** Owners are not asked which APIs their "
 "provider offers, and cannot declare them. Verifying a model streams a "
@@ -8184,7 +8215,7 @@ msgstr ""
 "`effort_unsupported`），输入框不提供推理强度控件，也不为此保存任何内容。模型无法支持的组合会在提交任务或消息时被拒绝，在每次领取和驻留时还会再检查一次；不会退回到其他连接、模型或"
 " API，推理时也不会边试边换。"
 
-#: ../developer/operations.md:4041
+#: ../developer/operations.md:4042
 msgid ""
 "**Verify before saving.** Creating a connection, and an edit that changes"
 " its key or Base URL or adds models, verifies inside the saving request "
@@ -8220,7 +8251,7 @@ msgstr ""
 " 48 次服务商请求、分两批各四个模型进行。 验证的总时限为 240 秒，超时返回 `504 "
 "model_connection_verification_timeout`，不写入任何内容。部署自带的边缘代理允许此时长，额外的代理也必须允许。保存期间禁用取消按钮，因为服务端仍可能提交请求。"
 
-#: ../developer/operations.md:4065
+#: ../developer/operations.md:4066
 msgid ""
 "**Where requests go.** The OpenAI CLIs append `/chat/completions` or "
 "`/responses` to the Base URL exactly as written. Claude Code's SDK "
@@ -8240,7 +8271,7 @@ msgstr ""
 "`anthropic-version: 2023-06-01` 认证；验证用同样的 URL 和同样的请求头。CLI 还可能在同一主机上调用 "
 "`count_tokens`、`/v1/models` 和 `HEAD /api/hello`；服务商没有这些接口也能正常运行。"
 
-#: ../developer/operations.md:4074
+#: ../developer/operations.md:4075
 msgid ""
 "**Model ID suggestions.** The add and edit forms can load the provider's "
 "model list on request to pick IDs from: `POST /v1/agent/model-connections"
@@ -8266,7 +8297,7 @@ msgstr ""
 "`…/v1/models`（最多两次请求）。失败时只返回类别。它不写入任何内容，列出的 ID "
 "在表单保存并验证之前不代表任何结论；读取列表是可选的，任何 ID 都可以手动输入。"
 
-#: ../developer/operations.md:4088
+#: ../developer/operations.md:4089
 msgid ""
 "**Host rollout.** Runners advertise `model-connections-v1`, and `model-"
 "protocol-translation-v1` when they can run a translated member. A claim "
@@ -8278,7 +8309,7 @@ msgstr ""
 "**主机发布。** 运行器会声明 `model-connections-v1`，能运行需要转换的成员时还会声明 `model-protocol-"
 "translation-v1`。连接上的轮次或需要转换的轮次如果被没有声明所需能力的运行器领取，会被释放且不消耗尝试次数，所以要先发布主机。连接被停用、删除或不再适用时，轮次在领取时以相应原因失败。"
 
-#: ../developer/operations.md:4094
+#: ../developer/operations.md:4095
 msgid ""
 "**What a turn does.** The claim carries the connection's exact Base URL, "
 "protocol, credential revision and key; the runner masks the key. The "
@@ -8299,7 +8330,7 @@ msgstr ""
 " 的 CLI 绝不会拿到 Messages 连接的密钥，Claude Code 也不会拿到 OpenAI 连接的密钥。密钥、Base URL "
 "或该模型经验证的路径变了之后，下一轮会启动新进程，因为计划和令牌都属于进程复用的身份。领取和它的驻留必须在凭据版本和计划（`client>upstream`）两方面都一致；如果轮次启动期间路径变了，这次启动会失败，而不会把两者混在一起。"
 
-#: ../developer/operations.md:4105
+#: ../developer/operations.md:4106
 msgid ""
 "**Scan history.** When a key is bound to a residency, an encrypted "
 "scanning copy is recorded under a separate domain against that sandbox "
@@ -8316,7 +8347,7 @@ msgstr ""
 " Fork "
 "成员的密钥，不包括其他组的密钥。删除连接后，副本仍随沙箱组记录保留；它仍然是真实的服务商密钥，在这里删除连接并不会在服务商处撤销它。如果某个组的历史超出扫描上限，扫描会失败关闭，而不会跳过密钥。"
 
-#: ../developer/operations.md:4114
+#: ../developer/operations.md:4115
 msgid ""
 "**Translated turns.** For Codex or Claude Code on a model whose only "
 "usable API is Chat Completions, the host installs `/usr/local/libexec"
@@ -8360,7 +8391,7 @@ msgstr ""
 "Code 不带 WebSearch 工具；其他工具照常可用，包括 Codex 子智能体和 MCP 工具。之前的推理或 thinking 不会发给 "
 "Chat Completions 服务商。`AGENT_COMPAT_*` 变量属于启动器，永远不会传到 CLI。"
 
-#: ../developer/operations.md:4138
+#: ../developer/operations.md:4139
 msgid ""
 "**Changes take effect at once.** A verified new key or Base URL, "
 "disabling or deleting a connection releases every residency started on "
@@ -8377,7 +8408,7 @@ msgstr ""
 " "
 "会替换所有模型的验证结果。保存时与已存值相同的字段（包括重新填入的同一个密钥）不算变更：重命名连接或移除模型不会关闭任何进程，其他模型的验证结果也保持不变。控制平面暂时联系不上的主机，会在下一次驻留心跳被拒绝时关闭进程。"
 
-#: ../developer/operations.md:4146
+#: ../developer/operations.md:4147
 msgid ""
 "**Verification dials out from the control plane.** It runs only on the "
 "owner's explicit save, never when a page opens or a field is typed in. "
@@ -8405,7 +8436,7 @@ msgstr ""
 " 端口 HTTPS：每个解析出的地址都必须通过 MCP 连接策略和沙箱的受保护网段（包括 "
 "`AGENT_EGRESS_PROTECTED_CIDRS`），连接固定到检查过的地址，不跟随重定向，不使用代理，也不回显或记录上游响应体和密钥。"
 
-#: ../developer/operations.md:4161
+#: ../developer/operations.md:4162
 msgid ""
 "**Usage.** The owner's provider bills these turns. A run's usage footer, "
 "the admin run detail and the Usage pages show the tokens the agent "
@@ -8415,11 +8446,11 @@ msgstr ""
 "**用量。** 这些轮次由所有者的服务商计费。运行的用量页脚、管理端的运行详情和用量页面显示智能体上报的 token "
 "数，并注明由服务商计费；不显示费用。哪些计入、哪些不计入，见[用量](#usage)。"
 
-#: ../developer/operations.md:4166
+#: ../developer/operations.md:4167
 msgid "Reusable cloud environments"
 msgstr "可复用的云环境"
 
-#: ../developer/operations.md:4168
+#: ../developer/operations.md:4169
 msgid ""
 "Migration `0065_environments` adds owner configuration, immutable "
 "encrypted versions, fixed workspace bindings, isolated test leases and "
@@ -8435,7 +8466,7 @@ msgstr ""
 "variable/v1` 域下加密。这把密钥要和现有的凭据存储一起备份；不经重新加密就换掉它，旧的绑定就读不出来了。Secrets "
 "无法通过所有者的读取或历史 API 拿到。"
 
-#: ../developer/operations.md:4175
+#: ../developer/operations.md:4176
 msgid ""
 "Repository environments are a standard product feature, available without"
 " an admin switch. Settings, task selection and the Environment tab are "
@@ -8451,7 +8482,7 @@ msgstr ""
 "`AGENT_REPOSITORY_ENVIRONMENTS_ENABLED`，都会被忽略，也不再出现在设置编辑器里。没有配置环境的任务，仍按基础环境运行，不做准备；配置了环境的工作区，仍然要求"
 " runner 和 sandbox manager 实际支持 `environment-v1`。"
 
-#: ../developer/operations.md:4183
+#: ../developer/operations.md:4184
 msgid ""
 "Upgrade every control-plane replica before creating any new environment-"
 "bound workspace; mixed old/new admission, Fork and terminal handlers may "
@@ -8463,7 +8494,7 @@ msgstr ""
 "在创建任何新的、绑定了环境的工作区之前，先把每一个控制平面副本都升级好；如果新旧版本混着处理准入、Fork "
 "和终端请求，绑定信息可能会悄悄丢失。一旦出现了第一个绑定，就不要再回滚到读不懂它的二进制版本。如果非要回滚：先关掉这些执行入口，把环境测试和环境准备都排空，并让已绑定的工作区留在兼容的主机上，或者隔离起来。"
 
-#: ../developer/operations.md:4189
+#: ../developer/operations.md:4190
 msgid ""
 "Roll out the environment-capable runner and sandbox manager together. A "
 "claiming replica must attest `environment-v1`, and the actual "
@@ -8480,7 +8511,7 @@ msgstr ""
 "attempt；它绝不能在缺少变量的情况下运行这些任务。环境测试同样遵守部署固定、计算资源准入、副本证明和主机槽位的限制，并且只拿到只读的源码凭据，拿不到推理、MCP"
 " 或仓库写入的授权。"
 
-#: ../developer/operations.md:4197
+#: ../developer/operations.md:4198
 msgid ""
 "Preparation receipts live in the host credential directory under "
 "`environment-preparation`, outside container mounts and source archives. "
@@ -8495,7 +8526,7 @@ msgstr ""
 "重启时，这份主机状态要保留。安装在每个固定的工作区上只会成功一次；startup 在每次实际启动时运行一次。失败的步骤会一直显示在 "
 "Environment 标签页里，可以针对原来的绑定重试。"
 
-#: ../developer/operations.md:4204
+#: ../developer/operations.md:4205
 msgid ""
 "Manual-action receipts live next to preparation state under `environment-"
 "actions`. They reserve the run before launching a command and retain its "
@@ -8513,7 +8544,7 @@ msgstr ""
 " "
 "`unknown`，绝不会自动重放。换一个幂等键开始新的运行之前，先检查一下它在外部已经造成了哪些影响。这些回执并不能保证外部服务里的副作用恰好只发生一次。"
 
-#: ../developer/operations.md:4213
+#: ../developer/operations.md:4214
 msgid ""
 "The output of a test, a preparation or an action is stored masked and "
 "bounded, with each NUL and unpaired surrogate replaced by U+FFFD: "
@@ -8523,7 +8554,7 @@ msgstr ""
 "测试、准备步骤或操作的输出，会经过遮蔽、限制长度后存储，其中每个 NUL 和落单的代理项都会替换为 U+FFFD：这两种字符 Postgres "
 "都存不了，而拒绝这段输出，会让测试或命令一直完不成。"
 
-#: ../developer/operations.md:4217
+#: ../developer/operations.md:4218
 msgid ""
 "Empty bindings still pin the original task's selection, but require "
 "neither `environment-v1` nor preparation. Each environment test reserves "
@@ -8535,7 +8566,7 @@ msgstr ""
 "上占用一个本地槽位，这样其他空闲槽位还能继续认领编码任务。主机上的孤儿查询是只读的，并且限流；租约过期和历史记录的维护，由控制平面的 reaper"
 " 负责。"
 
-#: ../developer/operations.md:4223
+#: ../developer/operations.md:4224
 msgid ""
 "Cancellation fences the result immediately but keeps the leased slot "
 "until cleanup is confirmed or the lease expires. An expired orphan no "
@@ -8553,7 +8584,7 @@ msgstr ""
 "ID，并在确认清理之前，删掉那些确切的、带标签的容器。不要为了腾容量去删无关的沙箱组，也不要绕过租约和容器身份的检查。已经归档、并且没人再引用的版本，30"
 " 天后回收；已有的工作区、测试和发布绑定，会保留它们当时的加密值，用于遮蔽和扫描。"
 
-#: ../developer/operations.md:4232
+#: ../developer/operations.md:4233
 msgid ""
 "Owner-provided credentials can be read and sent outside by user code "
 "through the existing network. Known-value masking and trusted publish "
@@ -8564,7 +8595,7 @@ msgstr ""
 "所有者提供的凭据，可以被用户代码读取，并通过现有的网络发送出去。按已知值做的遮蔽，以及受信任的发布扫描，都覆盖不到编码过的 "
 "secret、所有者原始的终端和文件，或者直接的 Git 推送。平台持有的长期凭据、保留的变量名，以及固定的出口规则，仍然受保护。"
 
-#: ../developer/operations.md:4237
+#: ../developer/operations.md:4238
 msgid ""
 "Environment setup, startup and actions share executable package data in "
 "`/workspace/.cloud-agent-tools`, excluded through Git's local exclude "
@@ -8579,11 +8610,11 @@ msgstr ""
 "目录仍然是私有的。显式刷新运行时会保留安装时的输入，并从下一轮开始生效；已经在运行的服务继续用旧值。startup "
 "恢复只是明确放行接下来的一次人工轮次，绝不是一张永久的成功回执。"
 
-#: ../developer/operations.md:4244
+#: ../developer/operations.md:4245
 msgid "Team environments"
 msgstr "团队环境"
 
-#: ../developer/operations.md:4246
+#: ../developer/operations.md:4247
 msgid ""
 "A team's owner and admins can create environments for the team: in "
 "Settings → Environments, **New environment** or **Copy** offers the teams"
@@ -8601,7 +8632,7 @@ msgstr ""
 " 403。创建、编辑和移除团队环境，都会记在团队的审计日志里。设计见[团队](../agents/specs/2026-10-15-team-"
 "shared-workspace-design.zh-CN.md) §6。"
 
-#: ../developer/operations.md:4255
+#: ../developer/operations.md:4256
 msgid ""
 "**Each member's own container.** A team environment is shared "
 "configuration, not a shared workspace. A member's task runs in that "
@@ -8615,7 +8646,7 @@ msgstr ""
 "团队环境共享的是配置，而不是工作区。成员的任务在这个成员自己的容器里运行，用的是团队的变量和脚本、这个成员自己的模型连接和 MCP "
 "连接；这个成员个人的全局变量只在运行时使用（只用于安装的那些会被排除；如果名字相同，以团队的定义为准）。所以安装结果对每位成员都一样，团队才能共享快照。"
 
-#: ../developer/operations.md:4262
+#: ../developer/operations.md:4263
 msgid ""
 "**Secrets are shared.** Every member who can run a task with a team "
 "environment can read its Secrets from inside that task; the dialog says "
@@ -8625,7 +8656,7 @@ msgstr ""
 "**Secrets 是共享的。** 只要能用团队环境运行任务，成员就能在任务里读到它的 "
 "Secrets，对话框里也会说明这一点。请把它们当作整个团队都知道的内容；如果某位成员离开后不应该再持有某个 Secret，就把它轮换掉。"
 
-#: ../developer/operations.md:4266
+#: ../developer/operations.md:4267
 msgid ""
 "**Leaving.** A binding records the team and the member's access "
 "generation. When a member leaves, is removed, or the team is deleted, "
@@ -8644,14 +8675,14 @@ msgstr ""
 " "
 "409；遮蔽和发布扫描仍然会读取它的值。重新加入团队也不会让旧对话恢复，因为代次已经往前走了。如果成员的仓库默认设置指向一个他已经不能再用的团队环境，下次他开始任务时，这个默认设置会被清掉。"
 
-#: ../developer/operations.md:4277
+#: ../developer/operations.md:4278
 msgid ""
 "**Removal.** Removing a team environment clears every member's default "
 "that names it. Conversations already bound keep their fixed "
 "configuration, as with a personal environment."
 msgstr "**移除环境。** 移除一个团队环境，会清掉所有指向它的成员默认设置。已经绑定的对话，和个人环境一样，保持它们固定下来的配置。"
 
-#: ../developer/operations.md:4280
+#: ../developer/operations.md:4281
 msgid ""
 "**Rollback.** Downgrading below `0082_team_environments` is refused while"
 " any team environment exists, archived ones included."

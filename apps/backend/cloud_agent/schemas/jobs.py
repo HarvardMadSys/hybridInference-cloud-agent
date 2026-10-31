@@ -112,18 +112,15 @@ class AgentJobCreate(BaseModel):
     model: str = Field(
         ...,
         max_length=255,
-        description=(
-            "Model id the runtime should use: a Gateway model, or one listed on "
-            "`model_connection_id` when that is set."
-        ),
+        description="Model id the runtime should use, one listed on `model_connection_id`.",
     )
     model_connection_id: str | None = Field(
         None,
         pattern=MODEL_CONNECTION_ID_PATTERN,
         description=(
-            "The owner's own model connection the model runs on. Null is the Gateway. "
-            "Together with `model` this names the source unambiguously: the same id "
-            "may exist on the Gateway and on several connections."
+            "The owner's own model connection the model runs on. A task without one "
+            "is refused with `model_connection_required`. Together with `model` this "
+            "names the source unambiguously: the same id may exist on several connections."
         ),
     )
     reasoning_effort: str | None = Field(
@@ -312,7 +309,8 @@ class AgentJobResponse(BaseModel):
     title_source: str | None = None
     runtime: str
     model: str
-    #: Null is the Gateway; otherwise the owner's model connection this turn runs on.
+    #: The owner's model connection this turn runs on; null only on a turn from
+    #: before connections were the only source, which runs on nothing.
     model_connection_id: str | None = None
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1
     #: Null means Auto, which is also what every turn created before this

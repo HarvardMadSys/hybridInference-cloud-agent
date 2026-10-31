@@ -4665,7 +4665,7 @@
             "title": "Metadata"
           },
           "model": {
-            "description": "Model id the runtime should use: a Gateway model, or one listed on `model_connection_id` when that is set.",
+            "description": "Model id the runtime should use, one listed on `model_connection_id`.",
             "maxLength": 255,
             "title": "Model",
             "type": "string"
@@ -4680,7 +4680,7 @@
                 "type": "null"
               }
             ],
-            "description": "The owner's own model connection the model runs on. Null is the Gateway. Together with `model` this names the source unambiguously: the same id may exist on the Gateway and on several connections.",
+            "description": "The owner's own model connection the model runs on. A task without one is refused with `model_connection_required`. Together with `model` this names the source unambiguously: the same id may exist on several connections.",
             "title": "Model Connection Id"
           },
           "plugins": {
@@ -7638,7 +7638,7 @@
                 "type": "null"
               }
             ],
-            "description": "The source of `model`: the owner's connection, or null for the Gateway. Only with `model`; an omitted model inherits the previous turn's model and its source together.",
+            "description": "The source of `model`: the owner's connection. Sent only with `model`, and required with it; an omitted model inherits the previous turn's model and its source together.",
             "title": "Model Connection Id"
           },
           "prompt": {
@@ -14216,7 +14216,7 @@
         "type": "object"
       },
       "ModelConnectionOption": {
-        "description": "One of the owner's enabled model connections, as the composer offers it.\n\nEverything needed to offer its models beside the Gateway's, and which\nagents can run each one now; nothing about its key or its APIs.",
+        "description": "One of the owner's enabled model connections, as the composer offers it.\n\nEverything needed to offer its models, and which agents can run each one\nnow; nothing about its key or its APIs.",
         "properties": {
           "id": {
             "title": "Id",
@@ -22417,7 +22417,7 @@
         "type": "object"
       },
       "WorkerSandboxResidencyRequest": {
-        "description": "Mint/rotate the renewable grant for a supervisor-owned member process.",
+        "description": "Establish or rotate the residency of a supervisor-owned member process.",
         "properties": {
           "runtime_id": {
             "maxLength": 128,
