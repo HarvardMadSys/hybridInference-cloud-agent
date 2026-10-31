@@ -33,6 +33,7 @@ from cloud_agent_host.sandbox_archive_s3 import (
     lifecycle_object_key,
 )
 from cloud_agent_host.sandbox_archives import (
+    DEFAULT_ARCHIVE_SPOOL_BUDGET_BYTES,
     CaptureGate,
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
@@ -322,8 +323,10 @@ class SandboxArchiveController:
         # Every policy revision may temporarily retain its own service for an
         # in-flight capture or failed final retry. They nevertheless share one
         # host-wide spool admission gate, so rapid policy changes cannot
-        # multiply the service's documented aggregate scratch-space bound.
-        self._capture_slots = CaptureGate(1)
+        # multiply the service's documented aggregate scratch-space bound. A
+        # capture someone waits on spools beside a background one only while
+        # both worst cases fit that same bound.
+        self._capture_slots = CaptureGate(1, spool_budget_bytes=DEFAULT_ARCHIVE_SPOOL_BUDGET_BYTES)
         self._condition = threading.Condition()
         self._policy: SandboxArchivePolicy | None = None
         self._current: _ServiceSlot | None = None

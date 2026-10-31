@@ -53,6 +53,7 @@ from cloud_agent_host.runtimes import (
     ResponsesViaChatUrl,
 )
 from cloud_agent_host.runtimes.base import COMPAT_LAUNCHER
+from cloud_agent_host.runtimes.codex import NATIVE_LAUNCHER
 from cloud_agent_shared.protocol_compat import ENV_TOKEN
 
 pytestmark = pytest.mark.external
@@ -122,7 +123,12 @@ def _launch(
     argv: list[str], env: dict[str, str], binary: str, tmp_path: Path, port: int, home: Path
 ) -> subprocess.Popen[str]:
     assert argv[: len(COMPAT_LAUNCHER)] == list(COMPAT_LAUNCHER)
-    cli = [binary, *argv[len(COMPAT_LAUNCHER) + 1 :]]
+    cli_argv = argv[len(COMPAT_LAUNCHER) :]
+    if cli_argv[: len(NATIVE_LAUNCHER)] == list(NATIVE_LAUNCHER):
+        # Codex's native launch reads the image's install, which a pinned
+        # prefix is not; the binary named here is the one it would run.
+        cli_argv = cli_argv[len(NATIVE_LAUNCHER) :]
+    cli = [binary, *cli_argv[1:]]
     zipapp = tmp_path / "model-protocol-translator.pyz"
     zipapp.write_bytes(helper_archive())
     wrapper = write_wrapper(tmp_path)

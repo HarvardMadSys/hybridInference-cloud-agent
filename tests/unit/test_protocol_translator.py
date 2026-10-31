@@ -11,7 +11,9 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -480,6 +482,60 @@ def test_the_service_leaves_when_the_cli_is_killed(tmp_path: Path):
     process.kill()
     process.wait(timeout=10)
     _assert_closed(port)
+
+
+#: The two signals CPython ignores from its start.
+_PYTHON_IGNORES = (1 << (signal.SIGPIPE - 1)) | (1 << (signal.SIGXFSZ - 1))
+_DISPOSITIONS = ["grep", "-E", "^Sig(Ign|Blk):", "/proc/self/status"]
+#: A CLI stand-in that reports what its one child, the service, ignores.
+_SERVICE_IGNORES = """\
+import os, re
+me = os.getpid()
+with open(f"/proc/{me}/task/{me}/children") as children:
+    (service,) = children.read().split()
+with open(f"/proc/{service}/status") as status:
+    print(re.search(r"^SigIgn:\\t([0-9a-f]+)$", status.read(), re.M).group(1))
+"""
+
+
+def _run_cli(argv: list[str]) -> str:
+    run = subprocess.run(
+        argv,
+        env={
+            "PATH": os.environ["PATH"],
+            "AGENT_COMPAT_CLIENT": "responses",
+            "AGENT_COMPAT_UPSTREAM_URL": "https://provider.example/v1",
+            "AGENT_COMPAT_UPSTREAM_KEY": _KEY,
+            "AGENT_COMPAT_MODEL": "m",
+            "AGENT_COMPAT_TOKEN": _TOKEN,
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    return run.stdout
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads dispositions from /proc")
+def test_the_cli_gets_a_direct_launchs_signals_and_the_service_keeps_pythons(tmp_path: Path):
+    """CPython ignores SIGPIPE and SIGXFSZ, and an exec would hand that to the CLI.
+
+    ``grep`` stands in for a native CLI: nothing resets a disposition on its way.
+    """
+    zipapp = tmp_path / "model-protocol-translator.pyz"
+    zipapp.write_bytes(helper_archive())
+    helper = ["/usr/bin/python3", "-I", str(zipapp)]
+
+    direct = _run_cli(_DISPOSITIONS)
+    behind = _run_cli([*helper, *_DISPOSITIONS])
+    service = _run_cli([*helper, sys.executable, "-I", "-c", _SERVICE_IGNORES])
+
+    assert re.findall(r"^Sig(?:Ign|Blk):", behind, re.M) == ["SigBlk:", "SigIgn:"]
+    assert behind == direct
+    # The service is the launcher's Python, where a closed client stays an error.
+    assert int(service, 16) & _PYTHON_IGNORES == _PYTHON_IGNORES
 
 
 def test_the_wrapper_seam_exists_only_in_test_code(tmp_path: Path):

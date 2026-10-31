@@ -429,17 +429,63 @@ class ControlPlane:
         activation_generation: int,
         residency_generation: int,
         process_generation: int,
+        continuity: tuple[str | None, str] | None = None,
     ) -> None:
-        """Record a CLI process rotation inside the same chat container."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/process",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "residency_generation": residency_generation,
-                "process_generation": process_generation,
-            },
+        """Record a CLI process rotation inside the same chat container.
+
+        ``continuity`` is the turn's continuity report: its rung, or ``None``
+        for a new context, and its context status. It is sent on a thread of
+        its own beside the record. The report is best-effort, neither endpoint
+        reads what the other writes, and the turn used to wait out its round
+        trip after the record's. Both have landed when this returns, so what
+        the turn sends next still follows the report. The record's own failure
+        is raised first, as when the report was sent only once the record had
+        succeeded; then a lost lease the report met, where the turn has always
+        learned of it.
+        """
+        path = f"/v1/agent/worker/jobs/{self.job_id}/sandbox/process"
+        body = {
+            "sandbox_generation": sandbox_generation,
+            "activation_generation": activation_generation,
+            "residency_generation": residency_generation,
+            "process_generation": process_generation,
+        }
+        if continuity is None:
+            self._post(path, body)
+            return
+        lost: list[LeaseLost] = []
+        reporter = threading.Thread(
+            target=self._report_continuity_into,
+            args=(continuity, lost),
+            name="continuity-report",
+            daemon=True,
         )
+        try:
+            reporter.start()
+        except RuntimeError:
+            # A process out of threads sends it after the record, as before.
+            self._post(path, body)
+            self._report_continuity_into(continuity, lost)
+        else:
+            try:
+                self._post(path, body)
+            finally:
+                reporter.join()
+        if lost:
+            raise lost[0]
+
+    def _report_continuity_into(
+        self, continuity: tuple[str | None, str], lost: list[LeaseLost]
+    ) -> None:
+        """Send one continuity report, keeping a lost lease for the caller to raise."""
+        mode, context_status = continuity
+        try:
+            if mode is None:
+                self.report_context_status(context_status)
+            else:
+                self.report_continuity(mode, context_status=context_status)
+        except LeaseLost as exc:
+            lost.append(exc)
 
     def establish_shared_residency(
         self,

@@ -36,16 +36,12 @@ from tests.support.model_connections import (
     verified_connection,
     with_connection_capability,
 )
-from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, on_connection
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, FakeOwners, on_connection
 from tests.support.uploads import thread_uploads
 
 from cloud_agent.api import routes, uploads, worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
-from cloud_agent.api.deps import (
-    get_agent_app_credentials,
-    get_owner_directory,
-    get_storage,
-)
+from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory, get_storage
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
@@ -89,31 +85,6 @@ def _db_config() -> dict[str, Any]:
     }
 
 
-class _Gateway:
-    """The gateway's catalog, which a case can change between two sends."""
-
-    def __init__(self) -> None:
-        self.models = ["glm-5.1", "glm-4.6"]
-        self.efforts = {"glm-5.1": ["low", "medium", "high", "max"], "glm-4.6": ["low", "high"]}
-
-    async def model_catalog(self, user_id: str) -> list[str]:
-        return list(self.models)
-
-    async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
-        return list(self.models), {}
-
-    async def model_catalog_bundle(
-        self, user_id: str
-    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
-        return list(self.models), {}, {m: list(v) for m, v in self.efforts.items()}
-
-    async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
-        return {model: list(levels) for model, levels in self.efforts.items()}
-
-    async def agent_access(self, user_id: str) -> dict[str, Any]:
-        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
-
-
 def _claim_body(worker_id: str) -> dict[str, Any]:
     return with_connection_capability(
         {
@@ -155,12 +126,12 @@ class Api:
     """The app, its store, and the host that runs its turns."""
 
     def __init__(
-        self, client: AsyncClient, store: Storage, pool: Any, gateway: _Gateway, app: FastAPI
+        self, client: AsyncClient, store: Storage, pool: Any, owners: FakeOwners, app: FastAPI
     ) -> None:
         self.client = client
         self.store = store
         self.pool = pool
-        self.gateway = gateway
+        self.owners = owners
         self.app = app
         #: The owner's verified connection, listing every model these cases use.
         self.connection: dict[str, Any] = {}
@@ -406,12 +377,12 @@ async def api(pool, monkeypatch):
         return None
 
     monkeypatch.setattr(worker, "_worker_sandbox_manager", no_sandbox_manager)
-    gateway = _Gateway()
+    owners = FakeOwners()
     app = FastAPI()
     app.include_router(routes.router)
     app.include_router(uploads.router)
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_owner_directory] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: owners
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
@@ -423,7 +394,7 @@ async def api(pool, monkeypatch):
         "credential_hash": _HOST_CREDENTIAL,
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        api = Api(client, store, pool, gateway, app)
+        api = Api(client, store, pool, owners, app)
         # The connection `on_connection` names, so every body built with it runs.
         api.connection = await verified_connection(
             store,
@@ -565,7 +536,7 @@ async def test_two_replicas_settling_at_once_create_one_turn(api: Api):
                 settle_queue(
                     replica,
                     thread_id=thread_id,
-                    owners=api.gateway,
+                    owners=api.owners,
                     app_credentials=None,
                 )
                 for replica in replicas
@@ -685,7 +656,7 @@ async def test_a_turn_the_reaper_fails_is_paused_by_the_periodic_sweep(api: Api)
     assert [action["action"] for action in actions] == ["failed"]
     assert (await api.queue(thread_id))["queue_paused_reason"] is None
 
-    settled = await settle_waiting_queues(api.store, owners=api.gateway, github_app=None)
+    settled = await settle_waiting_queues(api.store, owners=api.owners, github_app=None)
 
     assert settled == 1
     queue = await api.queue(thread_id)
@@ -739,7 +710,7 @@ async def test_the_maintenance_loops_run_queue_and_staged_attachment_sweeps(api:
             reap_expired_attempts(api.store, interval_seconds=0.05, max_attempts=1)
         ),
         asyncio.create_task(
-            run_pending_message_maintenance(api.store, owners=api.gateway, interval_seconds=0.05)
+            run_pending_message_maintenance(api.store, owners=api.owners, interval_seconds=0.05)
         ),
     ]
     try:
@@ -815,11 +786,11 @@ async def test_a_github_app_that_cannot_load_holds_a_message_back_without_refusi
     assert [(row["state"], row["last_error"]) for row in queue["messages"]] == [("queued", None)]
     assert (queue["queue_paused_reason"], queue["queue_settled_job_id"]) == (None, job["id"])
     assert thread_id in await api.store.pending_messages.threads_to_settle()
-    await settle_waiting_queues(api.store, owners=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.owners, github_app=app)
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
 
     app.loaded = True
-    await settle_waiting_queues(api.store, owners=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.owners, github_app=app)
 
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it", "next step"]
     assert (await api.queue(thread_id))["messages"] == []
@@ -873,7 +844,7 @@ async def test_a_github_app_that_cannot_load_does_not_stop_an_owner_withdrawing_
     # runs: nothing the owner withdrew or held is sent.
     await api.finish(running)
     app.loaded = True
-    await settle_waiting_queues(api.store, owners=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.owners, github_app=app)
 
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
     queue = await api.queue(thread_id)
@@ -2199,8 +2170,8 @@ async def test_a_round_the_goal_withdraws_lets_the_owners_waiting_message_go_nex
     )
     assert written.status_code == 200, written.text
 
-    await run_goal_wakeups(store=api.store, owners=api.gateway)
-    await settle_waiting_queues(api.store, owners=api.gateway, github_app=None)
+    await run_goal_wakeups(store=api.store, owners=api.owners)
+    await settle_waiting_queues(api.store, owners=api.owners, github_app=None)
 
     turns = await api.turns(thread_id)
     assert [(turn["turn_source"], turn["state"]) for turn in turns] == [

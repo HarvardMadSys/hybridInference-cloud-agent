@@ -16,6 +16,8 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -305,6 +307,87 @@ def test_an_immediate_shutdown_kills(pool) -> None:
 
     assert all(handle.killed for handle in handles)
     assert turns.running() == 0
+
+
+# ── Waiting for a slot ─────────────────────────────────────────────────
+
+#: The exit watcher waits with ``os.waitid``, which Python on macOS lacks.
+needs_waitid = pytest.mark.skipif(not hasattr(os, "waitid"), reason="no os.waitid here")
+
+
+@needs_waitid
+def test_a_real_childs_exit_ends_the_wait_and_only_reap_collects_it() -> None:
+    """The watcher waits without collecting the child; reap()'s poll does, exactly once.
+
+    Collected by the watcher, the child's PID would be free while ``Popen``
+    still took it for alive, and a kill in that moment could reach another
+    process.
+    """
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE
+    )
+    turns = TurnPool(launch=lambda _job: LaunchResult(LAUNCH_STARTED, process))
+    try:
+        turns.launch(_job())
+        [watcher] = [t for t in threading.enumerate() if t.name == f"turn-exit-{process.pid}"]
+        assert turns.wait_for_slot(0.05) is False, "it is still running"
+        assert process.stdin is not None
+        process.stdin.close()
+        assert turns.wait_for_slot(30) is True, "its exit ended the wait"
+        watcher.join(30)
+        assert not watcher.is_alive(), "the watcher ends with its child"
+        assert process.returncode is None, "nothing has collected it"
+        exited = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        assert exited is not None and exited.si_status == 0, "a zombie still holds its PID"
+    except BaseException:
+        process.kill()
+        process.wait(timeout=30)
+        raise
+    assert [(turn.job_id, turn.exit_code) for turn in turns.reap()] == [("ajob_1", 0)]
+    assert process.returncode == 0
+    assert turns.reap() == []
+    assert turns.running() == 0
+
+
+@needs_waitid
+def test_a_child_collected_before_its_watcher_waits_still_frees_its_slot() -> None:
+    """The watcher finds nothing left to wait for, and the wait ends all the same."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=30)
+    turns = TurnPool(launch=lambda _job: LaunchResult(LAUNCH_STARTED, process))
+
+    turns.launch(_job())
+
+    assert turns.wait_for_slot(30) is True
+    assert [turn.exit_code for turn in turns.reap()] == [0]
+
+
+def test_a_slot_freed_outside_the_pool_ends_one_wait(pool) -> None:
+    """Even one freed just before the wait began: the caller checked capacity before that."""
+    turns, _scripted, _launched, _clock = pool
+    assert turns.wait_for_slot(0.01) is False, "nothing freed: the wait runs out"
+    turns.slot_freed()
+    assert turns.wait_for_slot(30) is True
+    assert turns.wait_for_slot(0.01) is False, "one freed slot ends one wait, not every later one"
+    timer = threading.Timer(0.05, turns.slot_freed)
+    timer.start()
+    assert turns.wait_for_slot(30) is True, "freed from another thread while it waits"
+    timer.join()
+
+
+def test_a_launch_backoff_is_waited_out_whatever_comes_free(pool) -> None:
+    """No freed slot may be claimed during a backoff, so nothing ends its wait early."""
+    turns, scripted, _launched, _clock = pool
+    for _ in range(3):
+        scripted.append(LaunchResult(LAUNCH_NOT_STARTED, None, "broken"))
+        turns.launch(_job())
+    assert turns.may_claim(3) is False
+
+    turns.slot_freed()
+    started = time.monotonic()
+
+    assert turns.wait_for_slot(0.2) is False
+    assert time.monotonic() - started >= 0.19
 
 
 # ── The payload ────────────────────────────────────────────────────────

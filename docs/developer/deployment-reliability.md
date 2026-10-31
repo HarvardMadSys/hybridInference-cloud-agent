@@ -110,8 +110,10 @@ Terminals and sandbox manager workspace operations always check, as does every c
 when the sandbox manager did not supply that proof.
 
 The turn child normally does not install and read back the host rules itself.
-The host service keeps the network guard its startup preflight verified. When
-it hands a turn over, it renews that verification if it is 45 seconds old. It
+The host service keeps the network guard its startup preflight verified, and
+renews that verification between claims once it is 35 seconds old, so handing a
+turn over does not wait for it; a verification still 45 seconds old at a
+handover, after a failed renewal say, is renewed then. It
 adds the verification time and its own helper image to the child's stdin
 payload, after stripping claim-supplied underscore keys, as it does for the
 qualification verdict. The child declines the turn, before accepting it, unless
@@ -137,7 +139,9 @@ container starts. Its `checkout` measurement includes the remaining clone wait
 stage; an earlier stop discards prepared source. Startup measurements attribute
 qualification to `preflight` and cover claim request through prompt dispatch,
 excluding queue wait and model response time. Declined children do not publish a
-successful startup. A host at capacity checks completed children every second.
+successful startup. A host at capacity claims again as soon as a turn's child
+exits or an environment test ends. Failing that, it checks again after a
+second, or after five seconds while an environment test holds one of its slots.
 
 ### Empty-queue waits and CI evidence
 

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 22:33-0400\n"
+"POT-Creation-Date: 2026-10-30 22:37-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -3719,10 +3719,72 @@ msgstr ""
 " UID 统计、在这一轮的游标之后观察到的进程启动的生命周期清单；它既不是这一轮开始前就已经在跑的常驻进程的某一时刻快照，也不是整个容器的总量。"
 
 #: ../developer/operations.md:1616
+msgid "Faster VM boot settings (opt-in)"
+msgstr "加快虚拟机启动的设置（需显式开启）"
+
+#: ../developer/operations.md:1618
+msgid ""
+"Two settings may shorten the VM boot that every new or resumed sandbox "
+"group waits for. Both stay off until they are qualified on a Kata host "
+"([#1054](https://github.com/HarvardMadSys/hybridInference-cloud-"
+"agent/issues/1054)). To try them on one host, pass them to the installer:"
+msgstr "有两项设置或许能缩短每个新建或恢复的沙箱组都要等待的虚拟机启动。在 Kata 主机上完成资格验证之前，两者都保持关闭（[#1054](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/1054)）。要在某台主机上试用，把它们传给安装脚本："
+
+#: ../developer/operations.md:1628
+msgid ""
+"`KATA_STATIC_SANDBOX_RESOURCES=true` sets "
+"`runtime.static_sandbox_resource_mgmt`. Kata then boots each VM with its "
+"container's `--cpus` and `--memory` already added to `default_vcpus` and "
+"`default_memory`, instead of hot-plugging them after boot. The VM cannot "
+"grow afterwards. Nothing on the platform resizes a running sandbox, and a"
+" group keeps the limits it was created with, so this loses nothing. "
+"Nothing caps the VM at the host's memory either: a VM larger than the "
+"host's memory plus 1 GiB, the most Kata lets QEMU address, fails to "
+"start, where hot-plug would stop adding memory at the host's limit."
+msgstr "`KATA_STATIC_SANDBOX_RESOURCES=true` 会设置 `runtime.static_sandbox_resource_mgmt`。之后 Kata 启动每台虚拟机时，就已经把容器的 `--cpus` 和 `--memory` 加到了 `default_vcpus` 和 `default_memory` 上，而不是在启动后再热插拔进去。虚拟机此后无法再扩容。平台上没有任何东西会调整运行中沙箱的资源，沙箱组也一直保持创建时的限额，所以这样不会损失什么。另外，也没有任何东西会把虚拟机限制在主机的内存以内：虚拟机一旦超过主机内存加 1 GiB（Kata 允许 QEMU 寻址的上限），就会启动失败；而用热插拔时，到了主机的上限就会停止添加内存。"
+
+#: ../developer/operations.md:1636
+msgid ""
+"`KATA_DEFAULT_MEMORY_MIB` sets `hypervisor.qemu.default_memory`, "
+"otherwise Kata's 2048 MiB. Each VM gets it on top of its container's "
+"memory limit, with or without static sizing. It must hold what that limit"
+" does not cover: the guest kernel, its page structures for all of the "
+"VM's memory (64 bytes per 4 KiB page), and the Kata agent. A container "
+"started without a limit, such as a deployment probe, gets nothing else. "
+"The installer refuses less than 256 MiB, which Kata would replace with "
+"2048 MiB without saying so."
+msgstr "`KATA_DEFAULT_MEMORY_MIB` 设置 `hypervisor.qemu.default_memory`，不设时是 Kata 的 2048 MiB。无论是否开启静态资源分配，每台虚拟机都会在容器的内存限额之外再得到这么多内存。它必须装下限额覆盖不到的东西：guest 内核、内核为虚拟机全部内存建立的页结构（每 4 KiB 页 64 字节），以及 Kata agent。没有设置限额就启动的容器（例如部署时的探测容器）只有这些内存可用。安装脚本拒绝小于 256 MiB 的值，因为 Kata 会不声不响地把它换成 2048 MiB。"
+
+#: ../developer/operations.md:1644
+msgid ""
+"The installer writes them to one drop-in, `config.d/cloud-agent-vm-"
+"boot.toml` beside the runtime configuration, and `--check` reads them "
+"back from it, so deployment passes nothing. Kata applies every file in "
+"that directory over the main configuration, so `--check` refuses any "
+"other file there and any change to this one. An install without the "
+"settings deletes the drop-in, says so, and restores Kata's defaults. The "
+"control plane's automated deploy of a managed compute host is such an "
+"install whenever it installs prerequisites, which it does by default, so "
+"each of those deploys reverts the settings until they are passed to the "
+"installer again. They are for qualification runs until the defaults "
+"switch. Every install starts a new runtime generation, so runners "
+"requalify the guest either way."
+msgstr "安装脚本把这些设置写进运行时配置旁边的一个 drop-in 文件 `config.d/cloud-agent-vm-boot.toml`，`--check` 再从这个文件读回它们，所以部署时什么都不用传。Kata 会把这个目录里的每个文件都叠加到主配置之上，因此 `--check` 会拒绝那里出现的任何其他文件，也会拒绝对这个文件的任何改动。不带这些设置运行安装，会删掉这个 drop-in 并给出提示，恢复 Kata 的默认值。控制平面对托管主机的自动部署，只要安装前置依赖（默认就会安装），就是这样一次安装，所以每次这样的部署都会撤销这些设置，直到再次把它们传给安装脚本。在默认值切换之前，这些设置只用于资格验证。每次安装都会开启一个新的运行时代次，所以无论哪种情况，runner 都会重新对 guest 做资格验证。"
+
+#: ../developer/operations.md:1656
+msgid ""
+"VM templating stays off: it shares kernel memory and RNG/KASLR state "
+"across tenants. The release's uncompressed copy of the same debug kernel "
+"is not offered either. QEMU boots it directly, without the decompressor "
+"that randomizes the kernel's address (KASLR), so every guest would run "
+"its kernel at the same published addresses."
+msgstr "虚拟机模板（VM templating）保持关闭：它会让不同租户共享内核内存以及 RNG/KASLR 状态。发布包里同一个调试内核的未压缩版本也不提供。QEMU 会直接启动它，跳过负责随机化内核地址（KASLR）的解压程序，于是每个 guest 的内核都会运行在同一组公开的地址上。"
+
+#: ../developer/operations.md:1662
 msgid "Guest networking"
 msgstr "Guest 的网络"
 
-#: ../developer/operations.md:1618
+#: ../developer/operations.md:1664
 msgid ""
 "Docker's embedded DNS resolver (`127.0.0.11`) is outside the guest. After"
 " each Kata activation a trusted guest-root helper therefore writes two "
@@ -3745,11 +3807,11 @@ msgstr ""
 "也绝不会在底下被重新接线，因为单靠 Docker 的在线网络变更，并不会更新 Kata 3.32 里 guest "
 "的网络接口：一个正在运行、却没有恰好只接在自己组网桥上的沙箱，会被拒绝，直到它被停掉为止。"
 
-#: ../developer/operations.md:1630
+#: ../developer/operations.md:1676
 msgid "Existing runc groups and activation checks"
 msgstr "已有的 runc 沙箱组与激活时的检查"
 
-#: ../developer/operations.md:1632
+#: ../developer/operations.md:1678
 msgid ""
 "When switching a host from runc, keep its retained runc groups on a "
 "compatible sandbox manager or migrate them separately. A backend setting "
@@ -3761,13 +3823,13 @@ msgstr ""
 "上，要么单独迁移。改后端设置，并不会改变一个已停止 Docker 容器的运行时；特权辅助程序的栅栏会拒绝这些旧容器。不要在给新任务启用 Kata "
 "的过程中，顺手删掉保留的工作区。"
 
-#: ../developer/operations.md:1638
+#: ../developer/operations.md:1684
 msgid ""
 "Requirements: an x86_64 Linux host, bare metal or with nested "
 "virtualization enabled. Kata cannot run without KVM."
 msgstr "要求：一台 x86_64 的 Linux 主机，物理机，或者开启了嵌套虚拟化的虚拟机。没有 KVM，Kata 就跑不起来。"
 
-#: ../developer/operations.md:1641
+#: ../developer/operations.md:1687
 msgid ""
 "**Installing the shim is necessary, not sufficient.** A working guest "
 "kernel does not prove the sandbox can reach either relay. Before changing"
@@ -3778,7 +3840,7 @@ msgstr ""
 "内核能用，并不说明沙箱能连到任何一个中继。在给新的沙箱组改后端之前，先在主机上的仓库目录里，用它的 `.env` "
 "检查已配置的运行时和正在运行的服务："
 
-#: ../developer/operations.md:1651
+#: ../developer/operations.md:1697
 msgid ""
 "`preflight` verifies the configured image and guest kernel. `check` "
 "starts relay probes under Kata on the relay network "
@@ -3797,7 +3859,7 @@ msgstr ""
 "中继的地方；保留的沙箱组在激活时会拿到自己的网桥，从那里出发的路径，由每次冷启动时在 guest 里做的检查覆盖。compose 的 "
 "`..._internal` 网络是主机上各个服务用的网络，替代不了这两项检查中的任何一项。"
 
-#: ../developer/operations.md:1661
+#: ../developer/operations.md:1707
 msgid ""
 "The Kata relay probes resolve only the configured relay endpoints through"
 " Docker inspection and pass their addresses into the guest, matching the "
@@ -3810,7 +3872,7 @@ msgstr ""
 "的做法一致。单纯用 `alpine getent` 做探测，依赖的是 Docker 内置的 DNS，验证不了这条路径。检查失败时，先根据报告找出是"
 " guest、中继还是服务那段路径出了问题，再去切换新的沙箱组。"
 
-#: ../developer/operations.md:1667
+#: ../developer/operations.md:1713
 msgid ""
 "After those checks pass and existing runc groups have been accounted for,"
 " drop `AGENT_SANDBOX_BACKEND=container` from the host's `.env` and "
@@ -3821,7 +3883,7 @@ msgstr ""
 "`AGENT_SANDBOX_BACKEND=container`，重新部署。`deploy/host/sandbox_host.sh up` "
 "会针对它构建的镜像，把这些检查再做一遍："
 
-#: ../developer/operations.md:1671
+#: ../developer/operations.md:1717
 msgid ""
 "with the default `kata` backend, the shim must be installed, **and** one "
 "real container started from the sandbox image must report a kernel that "
@@ -3832,7 +3894,7 @@ msgstr ""
 "用默认的 `kata` 后端时，不仅要装好 "
 "shim，**而且**从沙箱镜像启动的一个真实容器，必须报告一个和主机不同的内核。如果守护进程接受了这个运行时，沙箱却仍然跑在主机内核上，这项检查就会失败；而这恰恰是所有更省事的检查方法都会漏掉的情况。"
 
-#: ../developer/operations.md:1675
+#: ../developer/operations.md:1721
 msgid ""
 "there is no automatic fallback to a shared kernel. Accepting one stays "
 "possible and stays explicit: set `AGENT_SANDBOX_BACKEND=container`, and "
@@ -3841,11 +3903,11 @@ msgstr ""
 "不会自动退回到共享内核。如果你确实接受共享内核，仍然可以，但必须明确选择：设置 "
 "`AGENT_SANDBOX_BACKEND=container`，每次部署都会再提醒一遍它的代价。"
 
-#: ../developer/operations.md:1679
+#: ../developer/operations.md:1725
 msgid "Scheduling and runtime attestation"
 msgstr "调度与运行时证明"
 
-#: ../developer/operations.md:1681
+#: ../developer/operations.md:1727
 msgid ""
 "The control plane independently enforces the same fact at scheduling "
 "time. `AGENT_DEFAULT_EXECUTION_PROFILE` is already `untrusted-kata-v1` in"
@@ -3865,23 +3927,23 @@ msgstr ""
 "通过预检之后，还是建议显式地设置它，让这个值在部署的 `.env` "
 "里一目了然。一个需要安全隔离的任务，只有在同一个认领事务里同时满足下面所有条件，才能被认领："
 
-#: ../developer/operations.md:1693
+#: ../developer/operations.md:1739
 msgid ""
 "the caller presents that Host's current enrollment-issued per-host "
 "credential; there is no shared dispatcher-token claim path;"
 msgstr "调用方出示的是这台 Host 当前有效的、注册时签发的、本机专属的凭据；不存在用共享 dispatcher 令牌认领的途径；"
 
-#: ../developer/operations.md:1695
+#: ../developer/operations.md:1741
 msgid "the exact runner replica reports `io.containerd.kata.v2`;"
 msgstr "确切的那个 runner 副本报告的是 `io.containerd.kata.v2`；"
 
-#: ../developer/operations.md:1696
+#: ../developer/operations.md:1742
 msgid ""
 "Python preflight started the configured sandbox image under that runtime "
 "and observed a non-empty guest kernel different from the Host kernel."
 msgstr "Python 预检用这个运行时启动了配置的沙箱镜像，并观察到一个非空的、和 Host 内核不同的 guest 内核。"
 
-#: ../developer/operations.md:1699
+#: ../developer/operations.md:1745
 msgid ""
 "The claim, not the Host's mutable heartbeat row, supplies the attempt's "
 "runtime, image digest, CLI version and kernel stamp. This matters during "
@@ -3905,11 +3967,11 @@ msgstr ""
 "execution profile。保留的对话在不可变的容器标签里记着最初的镜像摘要；在 Docker 返回容器 ID "
 "之前如果需要重试，就用这个按内容寻址的镜像。所以即使镜像标签被挪到了别的镜像上，只要数据库记录里写的还是旧镜像，对话实际用的镜像就不会变。"
 
-#: ../developer/operations.md:1712
+#: ../developer/operations.md:1758
 msgid "How many runners"
 msgstr "需要多少 runner"
 
-#: ../developer/operations.md:1714
+#: ../developer/operations.md:1760
 msgid ""
 "The retained shared-session topology is unconditional. An ordinary chat "
 "is a one-member group with one container/workspace and one live CLI "
@@ -3921,11 +3983,11 @@ msgstr ""
 "会立即调用固定版本 CLI 原生的、专门用于 fork "
 "的接口，在同一个容器里再加一个对话、会话和进程。父对话和子对话可以同时执行，组内没有轮次锁。"
 
-#: ../developer/operations.md:1720
+#: ../developer/operations.md:1766
 msgid "Member process cleanup"
 msgstr "清理成员进程"
 
-#: ../developer/operations.md:1722
+#: ../developer/operations.md:1768
 msgid ""
 "Each member has a distinct fixed UID. Before handing over a turn, the "
 "host captures that UID's `(pid, /proc starttime)` census through the "
@@ -3942,7 +4004,7 @@ msgstr ""
 "KILL，再扫描一遍，只要还有进程没退出，就判定失败。这份基线绝不是成员能写的文件，所以仓库代码没法改它来保住某个进程，或者让清理误杀一个被复用了"
 " PID 的进程。"
 
-#: ../developer/operations.md:1730
+#: ../developer/operations.md:1776
 msgid ""
 "`shared-sandbox-v1` is a claim attestation, not a feature switch. A host "
 "must advertise it from the exact process that claims the job. A host's "
@@ -3954,11 +4016,11 @@ msgstr ""
 "2，因为 Fork 出来的对话要和原对话同时运行；在管理员到 Servers 页面设置数值之前，这个上限就是 "
 "`AGENT_HOST_SLOTS`（默认 3）。"
 
-#: ../developer/operations.md:1735
+#: ../developer/operations.md:1781
 msgid "Fork compatibility and turn ordering"
 msgstr "Fork 的兼容性与轮次顺序"
 
-#: ../developer/operations.md:1737
+#: ../developer/operations.md:1783
 msgid ""
 "Historical Fork additionally requires `native-fork-at-anchor-v1`, and for"
 " the retained group either the host's current sandbox image being the "
@@ -3982,7 +4044,7 @@ msgstr ""
 "辅助程序，仍然按\"镜像必须完全一致\"的规则处理，绝不会假定它能理解历史某一轮的锚点；主机的 fork driver "
 "也绝不会指向它自己镜像里已经没有的 CLI 版本。给一个正在运行的轮次发消息，遵循同样的 CLI 版本规则，和 fork 辅助程序无关。"
 
-#: ../developer/operations.md:1750
+#: ../developer/operations.md:1796
 msgid ""
 "Migration `0026_fork_helper_version` records version `2` for existing "
 "groups created under this schema: both the old protocol-v2 claim gate and"
@@ -3999,7 +4061,7 @@ msgstr ""
 "新建沙箱组时，会在预留请求里上报辅助程序的版本；之后的预留不能用重新构建后的主机镜像版本去覆盖它。旧版 API 会忽略这个可选字段，旧版 "
 "runner 则根本不发它，于是新记录也保持未记录状态，直到能证明它的镜像具备这项能力为止，而不是根据主机当前的镜像去推测。"
 
-#: ../developer/operations.md:1759
+#: ../developer/operations.md:1805
 msgid ""
 "The Docker socket (or reviewed mTLS Engine endpoint) is the only host "
 "control/data interface for chat state. No repository, workspace, Agent "
@@ -4014,7 +4076,7 @@ msgstr ""
 "的主目录和会话文件，都不会从主机映射进去。没有共享保留沙箱的历史记录无法运行，会直接失败，包括上线期间遇到的、旧版本留下的一个还在进行中的父对话。切换之前由旧"
 " API 插入的、排在后面等待的轮次，会在那个父对话结束时失败；绝不会把它升格成一个新凭空造出来的原生会话。"
 
-#: ../developer/operations.md:1767
+#: ../developer/operations.md:1813
 msgid ""
 "All submitted turns that have not started use `queued`, including "
 "messages sent while an earlier turn is still running. A runner can claim "
@@ -4028,7 +4090,7 @@ msgstr ""
 "才能认领一个排队的轮次。取消中间某个排队的轮次，也不会让后面的消息插队到一个仍在进行的更早轮次前面。没有单独的\"提升\"步骤，也没有 "
 "`waiting` 这种任务状态。"
 
-#: ../developer/operations.md:1773
+#: ../developer/operations.md:1819
 msgid ""
 "Terminal freezing is also member-concurrent: each protected job phase "
 "owns a separate Sandbox Manager suspension token for the shared "
@@ -4039,11 +4101,11 @@ msgstr ""
 "终端冻结也是按成员各自处理的：每个受保护的任务阶段，都为共享工作区单独持有一个 Sandbox Manager "
 "挂起令牌。一个兄弟对话完成或恢复时，只释放它自己的令牌；只有在没有任何兄弟对话还处于受保护阶段时，交互式 PTY 才会恢复。"
 
-#: ../developer/operations.md:1778
+#: ../developer/operations.md:1824
 msgid "Execution slots"
 msgstr "执行槽位"
 
-#: ../developer/operations.md:1780
+#: ../developer/operations.md:1826
 msgid ""
 "Set concurrency from the admin Servers page. The runner container runs "
 "one service per host. It enrolls, heartbeats and samples capacity — the "
@@ -4058,7 +4120,7 @@ msgstr ""
 "容器在每台主机上只跑一个服务，负责注册、心跳和采集容量这些一台机器只需做一次的事；只有在没达到上限时，它才认领轮次，每认领一个就为它启动一个进程。这个进程把这一轮跑完就退出。所以这个上限*就是*主机同时运行的轮次数，其余的都在队列里等着。每个轮次的沙箱上限是"
 " 4g / 2 cpus，按每个并发轮次大约占这么多来规划资源。"
 
-#: ../developer/operations.md:1788
+#: ../developer/operations.md:1834
 #, python-brace-format
 msgid ""
 "Set it on the Servers page (_Execution slots_, the field under the "
@@ -4071,7 +4133,7 @@ msgstr ""
 "/runner-hosts/<host>/slots`，请求体是 `{\"slots\": N}`；传 `null` 会让主机回到它的 "
 "`AGENT_HOST_SLOTS` 默认值。应用这个值不需要启动或停止任何东西：主机会从下一次心跳的应答里读到这个数字，从那以后就按它来。"
 
-#: ../developer/operations.md:1794
+#: ../developer/operations.md:1840
 msgid ""
 "**Saving is not applying, and the page distinguishes them.** The "
 "heartbeat reports the limit the host is serving back as `slots_total`, "
@@ -4089,7 +4151,7 @@ msgstr ""
 " *finishing*。调高要等主机确认之后才生效，也就是再过一次心跳；在那之前，这一行显示 *applying N*。离线的主机显示 *N "
 "not applied*；如果 runner 早于\"远程设置上限\"这个功能，就显示 *redeploy to change*。"
 
-#: ../developer/operations.md:1804
+#: ../developer/operations.md:1850
 msgid ""
 "The bounds are two through 128. Two is the shared-live floor; 128 is a "
 "typo guard the host checks again, and neither is a statement about what "
@@ -4103,11 +4165,11 @@ msgstr ""
 "和内存。保存的数值在心跳、重启和重新注册之后都会保留，因为它是针对这台具名机器做的决定；只有选择 *Host "
 "default*，才会让它回到环境变量里的值。"
 
-#: ../developer/operations.md:1810
+#: ../developer/operations.md:1856
 msgid "Removing a server"
 msgstr "移除服务器"
 
-#: ../developer/operations.md:1812
+#: ../developer/operations.md:1858
 msgid ""
 "Open a server's details on the admin Servers page and choose **Remove "
 "server** from its action menu. Confirm permanent removal to delete its "
@@ -4119,7 +4181,7 @@ msgstr ""
 "在管理后台的 Servers 页面打开一台服务器的详情，从操作菜单里选 **Remove "
 "server**。确认永久移除后，会删除它的分配、节点、已注册的主机、主机设置和容量历史、节点注册令牌、准入限制，以及计算资源的操作记录。共用的连接和部署配置仍然保留。用户的对话、运行记录，以及已删除沙箱的审计记录，都会保留下来。"
 
-#: ../developer/operations.md:1819
+#: ../developer/operations.md:1865
 msgid ""
 "Release cloud resources before removing their records. Attached servers "
 "without release support can be removed after their hosts are disabled. "
@@ -4132,7 +4194,7 @@ msgstr ""
 "删除记录之前，先把云资源释放掉。不支持释放的已挂接服务器，可以在禁用它的主机之后移除。保留的沙箱，要通过沙箱删除流程移除，并等清理完成；还要先清掉默认的放置固定、正在运行的"
 " attempt 和部署排空。移除时会在清理的同一个事务里检查这些依赖。如果一次申请从没提交给服务商，即使资源观察不可用，也可以直接移除。"
 
-#: ../developer/operations.md:1827
+#: ../developer/operations.md:1873
 msgid ""
 "Removal also refuses with _The external operation is unresolved_ in three"
 " cases. The server's **Activity** tab lists the operations involved:"
@@ -4140,7 +4202,7 @@ msgstr ""
 "另外还有三种情况，移除会以 *The external operation is unresolved* 拒绝。服务器的 **Activity**"
 " 标签页会列出涉及的操作："
 
-#: ../developer/operations.md:1830
+#: ../developer/operations.md:1876
 msgid ""
 "An operation that is running, or waiting while it confirms a provider "
 "call (an acquisition waiting for its experiment, an extension or a "
@@ -4148,7 +4210,7 @@ msgid ""
 "for it to finish or stop."
 msgstr "操作正在运行，或者正在等待确认一次服务商调用（申请在等它的实验，续期或释放在等服务商的答复），说明它还没结束。等它完成或停止。"
 
-#: ../developer/operations.md:1833
+#: ../developer/operations.md:1879
 msgid ""
 "An operation whose outcome is `unknown`, such as an acquisition whose "
 "create request timed out, waits for an administrator, and a release "
@@ -4158,7 +4220,7 @@ msgstr ""
 "结果为 `unknown` "
 "的操作，比如创建请求超时的申请，要等管理员来处理，这期间请求的释放也排在它后面。打开它重试；如果是申请，也可以认定它创建的那个实验。"
 
-#: ../developer/operations.md:1837
+#: ../developer/operations.md:1883
 msgid ""
 "A server that never recorded its provider resource is refused while one "
 "of its operations suggests the provider has one: an answer that named it,"
@@ -4168,7 +4230,7 @@ msgid ""
 " the provider for one the request created."
 msgstr "服务器从没记录过它的服务商资源，而它的某个操作显示服务商那边可能有一个时，移除会被拒绝。这类迹象包括：服务商的答复里提到过这个资源、申请已经过了提交这一步、有节点已经注册，或者某次调用一直没有得到确认。这时要释放这台服务器。释放会删除操作里提到的资源；没有提到的话，就记为不存在资源，所以先去服务商那里查一下，这次请求有没有创建出东西。"
 
-#: ../developer/operations.md:1844
+#: ../developer/operations.md:1890
 msgid ""
 "Once the provider has confirmed the machine gone, an operation that "
 "stopped (blocked, failed or cancelled) no longer keeps the server, even "
@@ -4176,7 +4238,7 @@ msgid ""
 "change nothing now."
 msgstr "服务商一旦确认机器已经没了，停下来的操作（被阻塞、失败或已取消）就不会再挡住这台服务器，即使它是在确认服务商调用时停下的：那次调用现在已经改变不了什么了。"
 
-#: ../developer/operations.md:1848
+#: ../developer/operations.md:1894
 #, python-brace-format
 msgid ""
 "The compute API is `DELETE /admin/agent/servers/<allocation_id>` with "
@@ -4191,11 +4253,11 @@ msgstr ""
 "`DELETE /admin/agent/runner-hosts/<host>` 接口。非托管的主机 agent "
 "要先停掉再移除；清单清理不会关掉那台机器，也不会删除文件。"
 
-#: ../developer/operations.md:1854
+#: ../developer/operations.md:1900
 msgid "Sandbox settings"
 msgstr "沙箱设置"
 
-#: ../developer/operations.md:1856
+#: ../developer/operations.md:1902
 #, python-brace-format
 msgid ""
 "Use the admin settings pages for sandbox and workspace limits. The turn "
@@ -4243,7 +4305,7 @@ msgstr ""
 "CPU、内存、磁盘配额和对话容量；终端寿命改短之后，已经超时的终端会在 sandbox manager 下一轮巡检时关闭。不声明 `host-"
 "settings-v1` 的 runner，在重新部署之前会一直用自己 `.env` 里的值。"
 
-#: ../developer/operations.md:1885
+#: ../developer/operations.md:1931
 msgid ""
 "The container size controls apply to each new sandbox group, shared by "
 "its conversation and forks. Defaults are 2 vCPU, 4 GiB memory, and disk 0"
@@ -4262,7 +4324,7 @@ msgstr ""
 " `prjquota`）挂载的 XFS 上；主机不支持的话，Docker 会拒绝创建容器。已有的沙箱组在后续消息、重启、快照和 Fork "
 "时，都保持原来的限制。初始化变量和存储要求见 `ENVIRONMENT.md`。"
 
-#: ../developer/operations.md:1895
+#: ../developer/operations.md:1941
 msgid ""
 "**Recommended for servers that run untrusted work.** An `untrusted-"
 "kata-v1` sandbox's writable layer holds its workspace and every installed"
@@ -4290,11 +4352,11 @@ msgstr ""
 "启动这个组时也会记录同样的事件；Servers 页面会在这台服务器的 Storage 下面显示 **No container disk "
 "quota**。已有的沙箱组保持创建时的上限，不会被标记。"
 
-#: ../developer/operations.md:1910
+#: ../developer/operations.md:1956
 msgid "Sandbox archives"
 msgstr "沙箱归档"
 
-#: ../developer/operations.md:1912
+#: ../developer/operations.md:1958
 msgid ""
 "This policy captures automatic initial and final lifecycle archives. The "
 "explicit **Archive to S3 and delete** control has its own control-plane "
@@ -4304,7 +4366,7 @@ msgstr ""
 "这个策略负责自动生成的初始归档和最终生命周期归档。显式操作 **Archive to S3 and delete** "
 "有它自己的控制平面存储配置，见[沙箱归档存储](#sandbox-archive-storage)。"
 
-#: ../developer/operations.md:1916
+#: ../developer/operations.md:1962
 msgid ""
 "Use the **Sandbox archives** card under **Admin → Settings → Sandbox** to"
 " store the deployment-wide archive policy in the Agent database. Archives"
@@ -4334,7 +4396,7 @@ msgstr ""
 "只能写入，加密保存，也不会出现在审计记录里。更新时要带上次读取返回的修订号，所以两个管理员不会悄悄覆盖彼此的修改。每次改动都会记在 Audit "
 "log 里。"
 
-#: ../developer/operations.md:1932
+#: ../developer/operations.md:1978
 msgid ""
 "The dashboard uses admin-only `GET` and `PUT` `/admin/agent/sandbox-"
 "archive-settings`. To inspect the same policy and host rollout directly "
@@ -4343,7 +4405,7 @@ msgstr ""
 "仪表盘用的是只有管理员能调用的 `GET` 和 `PUT` `/admin/agent/sandbox-archive-"
 "settings`。如果想直接在 Postgres 里查看同一份策略，以及各主机的生效情况，可以用这样的只读查询："
 
-#: ../developer/operations.md:1949
+#: ../developer/operations.md:1995
 msgid ""
 "Do not put archive policy, the destination, or an AWS access key in "
 "`.env`. Enter an access key on the Sandbox archives card when the sandbox"
@@ -4370,7 +4432,7 @@ msgstr ""
 "凭据链。这个身份需要对固定前缀拥有范围很窄的 S3 分段上传和写入权限、对具体对象的元数据权限，以及对配置的 KMS "
 "密钥的加密权限。桶必须开启版本控制。生命周期保留规则和访问日志，在桶本身上配置。"
 
-#: ../developer/operations.md:1963
+#: ../developer/operations.md:2009
 msgid ""
 "Concretely, grant the sandbox manager role `s3:GetBucketVersioning` on "
 "`arn:aws:s3:::<bucket>`; `s3:ListBucket` on that bucket constrained to "
@@ -4406,7 +4468,7 @@ msgstr ""
 "](#environment-installation-snapshots)一节介绍的桶生命周期规则删除。再加一条 "
 "`AbortIncompleteMultipartUpload` 的桶生命周期规则作为兜底，以防某台主机在它有时限的中止请求完成之前就消失了。"
 
-#: ../developer/operations.md:1981
+#: ../developer/operations.md:2027
 msgid ""
 "Changing the bucket changes where new archives go and where restores "
 "read. Checkpoints and environment snapshots are read back by object "
@@ -4415,7 +4477,7 @@ msgid ""
 " no retained group still needs a checkpoint from the previous bucket."
 msgstr "换桶以后，新的归档写到新桶，恢复也从新桶读取。检查点和环境快照按对象版本读回，而复制到另一个桶不会保留版本，所以存在旧桶里的检查点和环境快照，换桶后不会再被恢复。只有在没有哪个保留沙箱组还需要旧桶里的检查点时，才可以换桶。"
 
-#: ../developer/operations.md:1987
+#: ../developer/operations.md:2033
 msgid ""
 "A ready environment snapshot in the previous bucket is still offered to "
 "new groups. A host that already holds its image, because it built the "
@@ -4437,7 +4499,7 @@ msgstr ""
 " 7 天，或者快照本身满 25 "
 "天，以先到的为准。在那之前，这个环境的新沙箱组只要落在其他主机上，都要先下载失败一次、再完整安装一遍，除非所有者重建快照。快照清理只删除当前桶里的对象；旧桶里的对象，交给那个桶自己的生命周期规则处理。"
 
-#: ../developer/operations.md:2000
+#: ../developer/operations.md:2046
 msgid ""
 "Redeploy every host before changing the bucket. Only a host that "
 "advertises `sandbox-archive-destination-v1` can archive to a bucket other"
@@ -4449,7 +4511,7 @@ msgstr ""
 "`freeinference` "
 "以外的桶；其他主机，要等归档开启、桶也换掉之后，设置卡片才会列出来。用这个只读查询可以先把它们找出来；和设置卡片一样，它不包括已经移除（`disabled`）的主机："
 
-#: ../developer/operations.md:2014
+#: ../developer/operations.md:2060
 msgid ""
 "While archives are disabled, such a host is sent the policy with the "
 "default bucket and keeps taking work. A disabled policy starts no new "
@@ -4466,7 +4528,7 @@ msgstr ""
 " sandbox manager "
 "会一直沿用最后应用的那份策略：继续把它手上的沙箱组归档到旧桶，存在那里的检查点也会被记录下来，之后哪台主机要恢复这些沙箱组，都会去新桶读取，结果失败。因为没有确认任何修订，这台主机什么工作都分不到。"
 
-#: ../developer/operations.md:2024
+#: ../developer/operations.md:2070
 msgid ""
 "Redeployed hosts write to the previous bucket for a while too. A stop "
 "that any host fenced before it applied the new revision finishes there: "
@@ -4483,7 +4545,7 @@ msgstr ""
 "已经重新部署的主机，也会继续往旧桶写一段时间。任何主机在应用新修订之前就设好栅栏的停止，都会在旧桶里完成：sandbox manager "
 "给一次停止设栅栏时，会固定当时生效的策略，这次停止的最终归档和检查点都按这份策略保存；重试失败的最终归档时是这样，重启后接着处理未完成的最终归档时也是这样。控制平面会把这个检查点记为沙箱组的恢复点，之后哪台主机需要下载它来恢复这个沙箱组，都会去新桶读取，结果失败。如果旧桶已经写不进去，这样的最终归档就永远完成不了。没有任何机制会放弃它：在上传成功之前，这个沙箱组拒绝每一次启动和每一次删除，它的对话也就一直卡住。"
 
-#: ../developer/operations.md:2035
+#: ../developer/operations.md:2081
 msgid ""
 "Keep the previous bucket writable by every host's workload identity, and "
 "by the saved access key if there is one, until every host reports the new"
@@ -4499,7 +4561,7 @@ msgstr ""
 " 密钥也要继续可用。同一个 sandbox manager "
 "重试最终归档时，用设栅栏时生效的访问密钥签名；重启后接着处理的最终归档，用现在保存的访问密钥签名。所以如果换桶的同时也换了访问密钥，新旧两把密钥都要保留这个权限。"
 
-#: ../developer/operations.md:2043
+#: ../developer/operations.md:2089
 msgid ""
 "Nothing in the database or on the admin pages shows a pending final: its "
 "group is recorded as `stopped`, like one whose final is stored. The "
@@ -4517,7 +4579,7 @@ msgstr ""
 "分钟之内它就会有结果，它的检查点还可能再花 12 分钟。所以要等每台主机都在线、都报告了新修订，再等到连续一个小时没有任何 sandbox "
 "manager 记过这个事件。"
 
-#: ../developer/operations.md:2053
+#: ../developer/operations.md:2099
 msgid ""
 "Nothing records which bucket a checkpoint is in either: "
 "`agent_sandbox_checkpoints` keeps its key and version, not its bucket. "
@@ -4530,7 +4592,7 @@ msgstr ""
 "同样，也没有任何地方记录检查点存在哪个桶里：`agent_sandbox_checkpoints` "
 "只记它的键和版本，不记桶。凡是在这段等待结束之前捕获的恢复点，都当作存在旧桶里。沙箱组下一次正常停止时，会在新桶里得到新的恢复点；在那之前，把它迁到别的主机上是恢复不了的。这个只读查询会列出这些沙箱组，截止时间就用这段等待结束的时间："
 
-#: ../developer/operations.md:2069
+#: ../developer/operations.md:2115
 msgid ""
 "A control plane older than this release refuses a stored bucket other "
 "than the default: its heartbeats and admin archive routes fail, and no "
@@ -4540,7 +4602,7 @@ msgstr ""
 "比这个版本更早的控制平面，不接受已保存的非默认桶：它的心跳和归档相关的管理接口都会失败，也不会有任何轮次被认领。要把控制平面回滚到这个版本之前，先把桶改回"
 " `freeinference`。"
 
-#: ../developer/operations.md:2074
+#: ../developer/operations.md:2120
 msgid ""
 "Enabling archives requires migration `0042_sandbox_archive_settings` and "
 "a runner/sandbox manager advertising `sandbox-archive-settings-v1`. The "
@@ -4555,17 +4617,17 @@ msgstr ""
 "manager 确认已应用的修订号分开显示。归档开启期间，如果某台主机或某个 runner "
 "副本还没应用这个修订，新的认领在它上面会直接失败；关闭这个策略，就能继续兼容旧主机。"
 
-#: ../developer/operations.md:2081
+#: ../developer/operations.md:2127
 msgid "This is a lifecycle archive, not a per-turn transcript log:"
 msgstr "这是生命周期归档，不是每一轮的对话记录："
 
-#: ../developer/operations.md:2083
+#: ../developer/operations.md:2129
 msgid ""
 "the initial object captures `/workspace` once after source/setup and "
 "before the first Agent process receives a prompt;"
 msgstr "初始对象在源码和 setup 完成之后、第一个 Agent 进程收到提示词之前，对 `/workspace` 拍一次；"
 
-#: ../developer/operations.md:2085
+#: ../developer/operations.md:2131
 msgid ""
 "each sandbox-manager-managed clean stop flushes native Agent state and "
 "stores a final object containing `/workspace`, `/agent-state`, and the "
@@ -4574,7 +4636,7 @@ msgstr ""
 "每次由 sandbox manager 正常执行的停止，都会先把原生 Agent 的状态写盘，再保存一个最终对象，包含 `/workspace"
 "`、`/agent-state`，以及可选的 `/home/agent/.freeinference-platform` 状态；"
 
-#: ../developer/operations.md:2088
+#: ../developer/operations.md:2134
 msgid ""
 "repeated turns while the sandbox remains live do not create objects. A "
 "later wake followed by another clean stop replaces the deterministic "
@@ -4584,7 +4646,7 @@ msgstr ""
 "沙箱一直在线期间的多次轮次，不会生成新的对象。之后如果唤醒、又一次正常停止，会覆盖那个固定的最终对象键；S3 "
 "桶的版本控制会按桶的生命周期策略，保留它以前的对象版本。"
 
-#: ../developer/operations.md:2093
+#: ../developer/operations.md:2139
 msgid ""
 "Policy changes are forward-only. Enabling archives cannot reconstruct the"
 " true pre-prompt baseline of a sandbox that already ran while the policy "
@@ -4600,7 +4662,7 @@ msgid ""
 "sandboxes before disabling it."
 msgstr "策略的改动只对之后生效。如果一个沙箱在策略关闭期间就已经运行过，开启归档也没法补出它真正的、提示词之前的基线，所以这样的沙箱可能只有最终对象，没有初始对象。关闭策略会阻止新的归档准备，可能留下一个只有初始对象、没有之后最终对象的情况。但它不会放弃开启期间已经准备好的持久化工作：上传结果还不确定的初始基线，或者已经为最终捕获设好栅栏的正常停止，都会固定在原来的修订上，并按那个修订完成。如果需要成对的\"前后\"归档，就开启策略，并等设置页面显示每台兼容的服务器都已应用这个修订之后，再开始接新的任务；关闭策略之前，先把那些沙箱停掉或排空。"
 
-#: ../developer/operations.md:2105
+#: ../developer/operations.md:2151
 msgid ""
 "The initial object is immutable and retry-safe. Final capture is "
 "synchronous with the stop hook, bounded by the configured size and "
@@ -4614,7 +4676,7 @@ msgstr ""
 "初始对象是不可变的，重试也安全。最终捕获和停止钩子同步执行，受配置的大小上限和操作截止时间约束；如果上传重试用尽，会报告为一次失败的正常停止，而不是谎称成功。初始归档和最终归档只用于导出和事后取证：没有任何功能会列出、下载或重放它们。要在另一台主机上恢复沙箱，用的是下面单独的[可恢复检查点"
 "](#restorable-checkpoints)；平时停止再启动时，仍以保留的 Docker 可写层为准。"
 
-#: ../developer/operations.md:2114
+#: ../developer/operations.md:2160
 msgid ""
 "A stop the Sandbox Manager did not perform cleanly has no final archive. "
 "This covers a host crash or reboot, a Sandbox Manager that exited while "
@@ -4637,11 +4699,11 @@ msgstr ""
 " S3 里不会有被跳过的那次停止的最终对象。旧版 Sandbox Manager 标为 `blocked` "
 "的沙箱组，升级后也按同样的方式处理。只有在跳过记录没法持久写入，或者在任何策略下发之前就被发现的沙箱组，才会连同它的网桥一起被隔离，直到调和成功为止。"
 
-#: ../developer/operations.md:2127
+#: ../developer/operations.md:2173
 msgid "Restorable checkpoints"
 msgstr "可恢复检查点"
 
-#: ../developer/operations.md:2129
+#: ../developer/operations.md:2175
 msgid ""
 "While archives are enabled, every clean archived stop also stores one "
 "more object: a checkpoint of the container's changes over its sandbox "
@@ -4663,7 +4725,7 @@ msgstr ""
 "id>.oci.tar`。这个路径标识的是沙箱而不是主机，所以别的服务器也能恢复它；见[恢复被移除主机上的沙箱](#restoring-a"
 "-removed-hosts-sandboxes)。"
 
-#: ../developer/operations.md:2139
+#: ../developer/operations.md:2185
 msgid ""
 "Checkpoints require archives and use the same bucket, credentials, size "
 "limit and IAM permissions on `cloud-agent/sandbox/*`. Each object is "
@@ -4673,7 +4735,7 @@ msgstr ""
 "检查点依赖归档，用的是同一个桶、同样的凭据、同样的大小上限，以及对 `cloud-agent/sandbox/*` 的同一套 IAM "
 "权限。每个对象只写一次（`If-None-Match`）；响应丢失后重试时，必须找到完全相同的字节。"
 
-#: ../developer/operations.md:2142
+#: ../developer/operations.md:2188
 msgid ""
 "A checkpoint never fails a stop. It runs after the final archive is "
 "durable; a failure is logged as `sandbox_checkpoint_failed` and the stop "
@@ -4684,7 +4746,7 @@ msgstr ""
 "`sandbox_checkpoint_failed`，停止照常完成。它和最终归档共用同一个捕获槽位和截止时间，会让每次正常停止多做一次 "
 "commit、一次导出和一次上传。"
 
-#: ../developer/operations.md:2146
+#: ../developer/operations.md:2192
 msgid ""
 "The Sandbox Manager reads the new layers straight from containerd's "
 "content store, mounted read-only at `AGENT_CONTAINERD_CONTENT_DIR`. Host "
@@ -4715,7 +4777,7 @@ msgstr ""
 "overlay2 镜像存储在 save 时，还会输出一些没有任何 manifest 引用的元数据 blob，恢复时会拒绝它们。在一台 "
 "CloudLab Kata 主机上实测，对一个 12 MiB 的改动，save 这条路每次导出大约要 90 秒；而内容存储这条路只写改动本身。"
 
-#: ../developer/operations.md:2161
+#: ../developer/operations.md:2207
 msgid ""
 "The Sandbox Manager keeps the latest receipt per sandbox under "
 "`AGENT_SANDBOX_ARCHIVE_STATE_DIR/checkpoints` and repeats it on every "
@@ -4730,7 +4792,7 @@ msgstr ""
 "`agent_sandbox_checkpoints`。管理后台的沙箱页面会显示最新的一张。回执刚记录时是 "
 "`reported`，等到某次恢复成功加载并启动了它，才变成 `verified`。"
 
-#: ../developer/operations.md:2167
+#: ../developer/operations.md:2213
 msgid ""
 "Each receipt names the control plane's start fence (`start_seq`) for the "
 "run its stop ended. Every path that may start the container (a turn, a "
@@ -4753,7 +4815,7 @@ msgstr ""
 "只用这次运行真正接纳了的请求的栅栏给运行打标。运行停下以后，栅栏不高于这个标记、又要重新启动容器的请求会被拒绝（409），控制平面把栅栏再往前推一次后重试。运行中的容器同样会清掉恢复点。只有回执上的栅栏仍是当前值时，它才算覆盖了这个沙箱组；还不支持恢复的旧版"
 " sandbox manager 给出的回执不带栅栏，永远不算覆盖任何沙箱组。"
 
-#: ../developer/operations.md:2180
+#: ../developer/operations.md:2226
 msgid ""
 "The policy omits the default and carries only an opt-out "
 "(`checkpoints_enabled: false`), which is sent only to hosts that "
@@ -4763,7 +4825,7 @@ msgstr ""
 "策略里不写默认值，只带一个关闭选项（`checkpoints_enabled: false`），并且只发给声明了 `sandbox-"
 "checkpoints-v1` 的主机。旧版 sandbox manager 照原样解析策略，继续只做归档，不做检查点。"
 
-#: ../developer/operations.md:2184
+#: ../developer/operations.md:2230
 msgid ""
 "The archive holds the container's writable layer: workspace, native "
 "session state, and anything installed outside `/workspace`. Credential "
@@ -4778,11 +4840,11 @@ msgstr ""
 "自己为停止的那一代写下的归档标记也在里面；恢复出来的容器会把本组更早一代的标记当作不存在，再写上自己的。桶的生命周期和保留规则，对 `v2/` "
 "前缀和其他归档一样适用。"
 
-#: ../developer/operations.md:2191
+#: ../developer/operations.md:2237
 msgid "Restoring a removed host's sandboxes"
 msgstr "恢复被移除主机上的沙箱"
 
-#: ../developer/operations.md:2193
+#: ../developer/operations.md:2239
 msgid ""
 "When a host leaves the pool, through **Remove** on the Servers page or "
 "the autoscaler releasing its node, its credential is revoked in one "
@@ -4801,7 +4863,7 @@ msgstr ""
 "`cold`。\"覆盖\"的意思是：容器、代次和启动栅栏都没变；每个成员最后一个已结束的轮次都有记录；并且有一个别的主机能按摘要拉取的基础镜像。其余的沙箱组和以前一样，仍然绑在被移除的主机上，只有那台主机重新注册后才能继续；管理后台的沙箱页面会标明哪些是哪种。吊销凭据时如果还有一次带检查点的心跳在路上，这个检查点会在"
 " reaper 的下一轮交出去。"
 
-#: ../developer/operations.md:2203
+#: ../developer/operations.md:2249
 msgid ""
 "Nothing starts a group on a removed host, since that host never reports "
 "the stop that would cover it again. A workspace request (Files, Terminal,"
@@ -4816,7 +4878,7 @@ msgstr ""
 "会被拒绝，发布时的捕获和基础导入会一直等到这个组迁走为止。所以，还在路上的检查点一到，就会覆盖它的组；请求或 Fork "
 "发现组已经被覆盖，会立刻把它交出去，这时请求返回 `workspace_restoring`。"
 
-#: ../developer/operations.md:2211
+#: ../developer/operations.md:2257
 msgid ""
 "Two other paths turn covered stopped groups `cold` without revoking the "
 "host: a provider that confirms the node terminated hands over all of "
@@ -4830,7 +4892,7 @@ msgstr ""
 "compute.md#moving-sandboxes-out-before-a-lease-"
 "ends)，这时每个沙箱组的最终检查点一到，就把它交出去。主机记录、它的凭据和任何部署排空栅栏，都留给移除流程去处理。"
 
-#: ../developer/operations.md:2217
+#: ../developer/operations.md:2263
 msgid ""
 "A `cold` group does not keep its old host from being forgotten, by "
 "**Forget** or by permanently removing the server: it no longer needs that"
@@ -4841,7 +4903,7 @@ msgstr ""
 "`cold` 沙箱组不会妨碍它原来的主机被遗忘，不管是点 "
 "**Forget**，还是永久移除服务器：它已经不需要那台机器了。在某次认领把它迁到认领它的主机之前，它记录的一直是它最后运行的那台主机。其他没删除的沙箱组仍然会挡住遗忘。"
 
-#: ../developer/operations.md:2222
+#: ../developer/operations.md:2268
 msgid ""
 "The next turn of any chat in a `cold` group is claimed by any host that "
 "advertises `sandbox-restore-v1` with archives enabled, except the host "
@@ -4856,17 +4918,17 @@ msgstr ""
 "restore-v1`、并开启了归档的主机认领，只有仍然持有这个组容器的那台主机除外：容器名里不带代次，所以那台主机（或者以同样名字重新注册的主机）会和旧容器撞名。恢复失败不会留下容器，所以试过的那台主机可以再试。认领会把这个组搬到新主机名下，并推进它的代次（`restoring`），这样旧主机手里剩下的任何东西都会被隔离在外。新主机的"
 " Sandbox Manager 会："
 
-#: ../developer/operations.md:2231
+#: ../developer/operations.md:2277
 msgid "pulls the group's base image by digest if it lacks it;"
 msgstr "如果本机没有这个组的基础镜像，就按摘要拉取；"
 
-#: ../developer/operations.md:2232
+#: ../developer/operations.md:2278
 msgid ""
 "downloads the checkpoint version the receipt names and checks its size "
 "and SHA-256;"
 msgstr "下载回执里写明的那个检查点版本，检查大小和 SHA-256；"
 
-#: ../developer/operations.md:2234
+#: ../developer/operations.md:2280
 msgid ""
 "checks the archive: one image, every blob verified, every layer either "
 "the base image's or carried in the archive, nothing else. It then "
@@ -4876,14 +4938,14 @@ msgstr ""
 "检查归档的内容：只能有一个镜像，每个 blob 都校验过，每一层要么是基础镜像里的，要么包含在归档里，此外不能有别的东西。然后自己重写 "
 "`index.json` 和 `manifest.json`，保证加载时只会创建检查点自己的那个名字；"
 
-#: ../developer/operations.md:2238
+#: ../developer/operations.md:2284
 msgid ""
 "loads it, creates the container from it with the group's own limits and "
 "network, labelled with the checkpoint id, and resumes each native session"
 " as after any restart."
 msgstr "加载镜像，用这个组自己的资源限制和网络，从它创建容器，打上检查点 ID 的标签，然后像任何一次重启之后那样，接上每个原生会话。"
 
-#: ../developer/operations.md:2242
+#: ../developer/operations.md:2288
 msgid ""
 "The download and the checked archive are unnamed files in "
 "`AGENT_SANDBOX_ARCHIVE_STATE_DIR/checkpoint-spool`, and Docker reads the "
@@ -4898,7 +4960,7 @@ msgstr ""
 "而中断时，不会在这个持久目录里留下任何东西。更早版本的 Sandbox Manager 会把这些文件命名为 "
 "`restore-*`；这样的文件都是被中断的恢复留下的，只要当前没有恢复在跑，就可以删掉。"
 
-#: ../developer/operations.md:2250
+#: ../developer/operations.md:2296
 msgid ""
 "The loaded image, `freeinference-checkpoint/<sandbox hash>:<checkpoint "
 "id>`, is that container's alone, and it goes with the container: when the"
@@ -4919,7 +4981,7 @@ msgstr ""
 "`sandbox_create_cleanup_failed`；留下的东西可以用 `docker image rm` 和 `docker rm "
 "--volumes` 清掉。"
 
-#: ../developer/operations.md:2262
+#: ../developer/operations.md:2308
 msgid ""
 "A restore that fails before the turn is admitted returns the group to "
 "`cold` and the turn to the queue without spending an attempt. The group "
@@ -4951,7 +5013,7 @@ msgstr ""
 "用的，是主机本来就会拿到的归档凭据：对归档前缀的 `s3:GetObject`、`s3:GetObjectVersion` 和 "
 "`kms:Decrypt`。"
 
-#: ../developer/operations.md:2280
+#: ../developer/operations.md:2326
 msgid ""
 "A turn that was running when its host disappeared is not covered and "
 "still ends as LOST. A group created from a locally built sandbox image "
@@ -4967,11 +5029,11 @@ msgstr ""
 "`ENVIRONMENT.md`）。如果一台主机在它的沙箱组被迁走之后又重新注册了，它没法再启动或上报这些组，因为它们的代次已经往前走了。用管理后台的"
 " **Discard** 操作，把那些旧容器删掉。"
 
-#: ../developer/operations.md:2288
+#: ../developer/operations.md:2334
 msgid "Environment installation snapshots"
 msgstr "环境安装快照"
 
-#: ../developer/operations.md:2290
+#: ../developer/operations.md:2336
 msgid ""
 "A new task whose environment has an install script can start from a saved"
 " installation instead of running the script again. A snapshot is a "
@@ -4983,7 +5045,7 @@ msgstr ""
 "如果新任务所用的环境带有安装脚本，可以直接从保存好的安装结果启动，不必再跑一遍脚本。快照就是环境安装完成后的容器，不含仓库自己的文件，和检查点一样存储。设计见[安装快照](../agents/specs/2026-10-15"
 "-environment-install-snapshots-design.zh-CN.md)。"
 
-#: ../developer/operations.md:2295
+#: ../developer/operations.md:2341
 msgid ""
 "**On with checkpoints.** Snapshots need archives and checkpoints enabled "
 "(**Save restorable checkpoints**). With either off, every task installs "
@@ -4993,7 +5055,7 @@ msgstr ""
 "**跟着检查点一起开启。** 快照要求归档和检查点（**Save restorable "
 "checkpoints**）都已开启。任何一个关着，每个任务都会完整安装，环境列表上也不显示快照状态，什么都不会排队。"
 
-#: ../developer/operations.md:2298
+#: ../developer/operations.md:2344
 msgid ""
 "**Where.** `cloud-agent/sandbox/env/v1/<sha256(owner)>/<snapshot "
 "id>.oci.tar`, under the prefix hosts already write, with the same size "
@@ -5007,7 +5069,7 @@ msgstr ""
 "写入约束。负责构建的主机会把 commit 后的镜像在本地保存为 `freeinference-environment/<owner "
 "hash>:<snapshot id>`；别的主机第一次用到时，会经过和恢复时一样的检查再加载它。"
 
-#: ../developer/operations.md:2303
+#: ../developer/operations.md:2349
 msgid ""
 "**Who builds.** Snapshots are built only by `prebuild` runs, in "
 "disposable environment-run containers, never from a chat's workspace. The"
@@ -5031,7 +5093,7 @@ msgstr ""
 "`environment-snapshot-v1` 的主机，并且永远不算作所有者那唯一一个正在运行的测试。一次构建失败后，6 "
 "小时内任务不会再为这个安装排队新的构建；但测试通过或所有者手动重建，仍然会触发。删除快照会取消它们还在等待的预构建；只有在运行的租约仍然有效时，才会接受它的回执。如果一个预构建排队一天之后还没有任何主机开始跑，就放弃它：维护任务先让它的快照失败，再让它的运行失败（反正也不会再有认领接手），这样它既不会永远等下去，也不会被自动扩缩容当成排队中的工作。"
 
-#: ../developer/operations.md:2317
+#: ../developer/operations.md:2363
 msgid ""
 "**Who uses.** A claim names a snapshot only for a new group on a host "
 "whose sandbox image is the snapshot's base image, and only when the "
@@ -5054,7 +5116,7 @@ msgstr ""
 " 会上报新沙箱组怎么处理了它的快照：用上的快照会因此保留，没通过检查的会被删掉，还会触发上面说的构建。这份上报只接受来自持有该任务有效租约的 "
 "attempt，而且它所在的主机仍处于注册状态；其他 worker 令牌会得到 `409 lease_lost`，什么都不会改变。"
 
-#: ../developer/operations.md:2329
+#: ../developer/operations.md:2375
 msgid ""
 "**Retention.** The newest snapshot of an installation supersedes older "
 "ones. Changing an installation — its install script, or a setup-time "
@@ -5077,7 +5139,7 @@ msgstr ""
 "小时后删除。快照满 25 天后不再分发；满足以下任一条件时会被删除：连续 7 天没人用；所属环境被所有者归档或删除；某个所有者就绪的快照总量超过 "
 "20 GiB（从最久没用的开始删）。"
 
-#: ../developer/operations.md:2342
+#: ../developer/operations.md:2388
 msgid ""
 "**Deletion.** Hosts poll `/v1/agent/worker/environment-"
 "snapshots/deletions` every 10 minutes and delete the object versions it "
@@ -5102,7 +5164,7 @@ msgstr ""
 "并重试；作为兜底，请在 `cloud-agent/sandbox/env/` 前缀上加一条桶生命周期规则：当前版本在创建 30 "
 "天后过期，非当前版本 1 天后过期。30 天比 25 天的使用期限更晚。"
 
-#: ../developer/operations.md:2353
+#: ../developer/operations.md:2399
 msgid ""
 "**Preparation records.** Installation writes a root-only marker, "
 "`/var/lib/freeinference-broker/environment-setup-v1.json`, into the "
@@ -5116,7 +5178,7 @@ msgstr ""
 "/environment-"
 "setup-v1.json`。对于本机没有记录的容器（从快照创建的，或者从检查点恢复的），只要标记里的指纹对得上，就认为安装已经完成，所以恢复时不会再重跑安装脚本。从快照创建的容器，接下来会运行这个环境可选的更新脚本。"
 
-#: ../developer/operations.md:2359
+#: ../developer/operations.md:2405
 msgid ""
 "**Team environments.** A team environment's snapshot serves every active "
 "member, whoever's task or test queued it, and every member's use keeps it"
@@ -5131,11 +5193,11 @@ msgstr ""
 " 20 "
 "GiB。只有团队的所有者和管理员能删除或重建它。他们改了安装脚本或安装阶段的值，就会让所有成员手里这个环境的快照全部作废；成员自己的全局变量则不会，因为团队环境安装时根本不用它们。"
 
-#: ../developer/operations.md:2367
+#: ../developer/operations.md:2413
 msgid "Launch failures and queue order"
 msgstr "启动失败与队列顺序"
 
-#: ../developer/operations.md:2369
+#: ../developer/operations.md:2415
 msgid ""
 "If a turn process cannot start or exits before taking delivery, the host "
 "returns it through `POST /v1/agent/worker/jobs/<job>/release`. That "
@@ -5152,7 +5214,7 @@ msgstr ""
 "已经接下了这个轮次，就不能再退回了，因为重放可能会把同一条提示词执行两次。这之后如果租约过期，就按保留会话的规则处理，可能会让对话结束。连续启动失败时，主机会暂停认领、逐步拉长重试间隔，并在心跳里上报，这样"
 " Servers 页面就能解释为什么有容量没用上。"
 
-#: ../developer/operations.md:2377
+#: ../developer/operations.md:2423
 msgid ""
 "Run one runner container per host. `AGENT_HOST_SLOTS` provides the "
 "initial limit until an administrator overrides it; the deployment no "
@@ -5165,17 +5227,17 @@ msgstr ""
 "提供初始的并发上限；部署已经不再读取副本数。把这个服务扩成多个副本，会让同一台主机注册两次。部署检查会用空的 stdin "
 "启动一个轮次进程，要求它先完成预检，再干脆地拒绝运行，这样在任何提示词被接下之前，就把启动这条路实际走了一遍。"
 
-#: ../developer/operations.md:2383
+#: ../developer/operations.md:2429
 msgid ""
 "Queue order is global FIFO. Per-user fairness and concurrency quotas "
 "remain deferred, so a batch from one user can occupy every slot."
 msgstr "队列顺序是全局的先进先出。按用户的公平调度和并发配额目前还没做，所以一个用户的一批任务，可能占满所有槽位。"
 
-#: ../developer/operations.md:2386
+#: ../developer/operations.md:2432
 msgid "One sandbox-group inactivity clock (and separate safety watchdogs)"
 msgstr "沙箱组唯一的空闲计时（以及几个独立的安全看门狗）"
 
-#: ../developer/operations.md:2388
+#: ../developer/operations.md:2434
 msgid ""
 "`AGENT_CHAT_IDLE_TIMEOUT_S` defaults to **1800 seconds (30 minutes)** and"
 " is the group's sole inactivity timeout. After the latest activity across"
@@ -5191,7 +5253,7 @@ msgstr ""
 "的操作还在进行时，Shared Session Supervisor 会停掉容器，并删除它的网桥。它绝不会执行 `docker "
 "rm`。之后再次获取时，会重新安装主机防火墙规则、重建网桥，然后启动并检查同一个带标签的容器。supervisor 自己关闭时，不会去动对话容器。"
 
-#: ../developer/operations.md:2396
+#: ../developer/operations.md:2442
 msgid ""
 "At sandbox manager startup, reconciliation stops running orphans before "
 "readmission. It never adopts resident processes on the strength of an "
@@ -5213,7 +5275,7 @@ msgstr ""
 "`shared_sandbox_reconcile_group_failed`，并按它当前的样子上报；这绝不会连累主机上其他沙箱组的观察结果。控制平面在下发一个针对特定代次的停止命令之前，会先检查持久化的"
 " attempt 栅栏和空闲截止时间；下一次心跳会记下 Docker 报告的 STOPPED 状态。"
 
-#: ../developer/operations.md:2407
+#: ../developer/operations.md:2453
 msgid ""
 "For a proven activation, the heartbeat also reports active turn, "
 "terminal, file, or Git operations and the remaining host-monotonic idle "
@@ -5230,11 +5292,11 @@ msgstr ""
 "PTY，则沿用原来的组计时窗口，不会再加一段超时。如果重建出一个代次为零、处于 RUNNING、却没有活跃 attempt "
 "也没有截止时间的容器，会给它一个新的 30 分钟恢复窗口。数据库只接受这一次，防止之后的心跳不断延长它，或者停掉一个正在进行的轮次。"
 
-#: ../developer/operations.md:2416
+#: ../developer/operations.md:2462
 msgid "Lost attempt leases"
 msgstr "attempt 租约丢失"
 
-#: ../developer/operations.md:2418
+#: ../developer/operations.md:2464
 msgid ""
 "Before a prompt reaches Agent CLI stdin, the worker persists its `job_id`"
 " as the sandbox's admission receipt. If that retained activation's "
@@ -5251,7 +5313,7 @@ msgstr ""
 "之前，也不会自动重试。已经排在这一轮后面等待的消息，会在同一个数据库事务里一起失败；之后再发的后续消息会收到 "
 "`sandbox_context_lost`，而不是变成一个永远没人能认领的排队任务。这个保守的做法，是为了防止提示词或工具被重复执行。"
 
-#: ../developer/operations.md:2427
+#: ../developer/operations.md:2473
 msgid ""
 "On the host, the reaper's close of that member's residency also ends the "
 "activation that ran on it, as an abandon would, so a Fork sibling's group"
@@ -5277,17 +5339,17 @@ msgstr ""
 "sandbox manager 5 秒，同一轮回收的成员并行处理；无论结果如何，都会释放每个成员的 "
 "residency：主机的下一次心跳会被告知这一代已经丢失，由它自己关掉进程。这样，一台不再响应的主机（这通常正是租约过期的原因）就不会拖住这一轮里其他所有主机的处理。"
 
-#: ../developer/operations.md:2442
+#: ../developer/operations.md:2488
 msgid "Safety watchdogs"
 msgstr "安全看门狗"
 
-#: ../developer/operations.md:2444
+#: ../developer/operations.md:2490
 msgid ""
 "These guards serve separate purposes; they do not create extra idle "
 "states or deactivate a healthy group:"
 msgstr "下面这些保护各有各的用途；它们不会制造额外的空闲状态，也不会停掉一个正常的沙箱组："
 
-#: ../developer/operations.md:2447
+#: ../developer/operations.md:2493
 msgid ""
 "`AGENT_TIMEOUT_S` defaults to 3600 seconds. It is a hard watchdog for one"
 " hung agent turn. A turn that reaches it is cancelled/fenced; it is never"
@@ -5296,7 +5358,7 @@ msgstr ""
 "`AGENT_TIMEOUT_S` 默认 3600 秒。它是针对单个卡死的 agent "
 "轮次的硬性看门狗。到达这个时限的轮次会被取消并隔离；绝不会被当成一次普通的\"已结束、转为空闲\"；"
 
-#: ../developer/operations.md:2450
+#: ../developer/operations.md:2496
 msgid ""
 "`AGENT_TERMINAL_IDLE_TTL_SECONDS` (30 minutes) closes a stale PTY whose "
 "client and process have stopped producing activity. For retained chats "
@@ -5307,7 +5369,7 @@ msgstr ""
 "`AGENT_TERMINAL_IDLE_TTL_SECONDS`（30 分钟）会关掉一个客户端和进程都已经没有动静的过时 "
 "PTY。对于保留对话，PTY 实际的空闲上限，取这项保护和对话计时里先到期的那个；释放时会保留最后一次活动的时间，不会再多等一轮；"
 
-#: ../developer/operations.md:2454
+#: ../developer/operations.md:2500
 msgid ""
 "`AGENT_TERMINAL_HARD_TTL_SECONDS` (8 hours) bounds one PTY even if it "
 "stays noisy forever. It is a resource/security guard, not sandbox "
@@ -5316,7 +5378,7 @@ msgstr ""
 "`AGENT_TERMINAL_HARD_TTL_SECONDS`（8 小时）限制单个 PTY "
 "的最长寿命，哪怕它一直有输出也一样。它是资源和安全上的保护，不是让沙箱停用；"
 
-#: ../developer/operations.md:2456
+#: ../developer/operations.md:2502
 msgid ""
 "`AGENT_RESIDENCY_TTL_S` defaults to 1800 seconds and fences each member's"
 " live-process ownership. Losing that lease demotes/restarts the member, "
@@ -5328,7 +5390,7 @@ msgstr ""
 "秒，给每个成员对常驻进程的归属加上栅栏。这个租约丢了，成员会被降级或重启；已经接手这个进程、但还没结束的激活，会在它正在跑的轮次关闭之后，以 "
 "LOST 上下文结束。它本身不会停掉一个正常的对话沙箱组，也不会构成另一套空闲计时；"
 
-#: ../developer/operations.md:2462
+#: ../developer/operations.md:2508
 msgid ""
 "no TTL removes chat data. A retained sandbox is removed only by an "
 "administrator's deletion or once its owner permanently deletes every chat"
@@ -5339,7 +5401,7 @@ msgstr ""
 "](#sandbox-inventory-resource-usage-and-controls)）。Docker "
 "存储的用量，需要运维人员另外监控。"
 
-#: ../developer/operations.md:2467
+#: ../developer/operations.md:2513
 msgid ""
 "A bounded workspace command's timeout or output overflow kills its own "
 "verified process group and preserves the sandbox's other resident "
@@ -5353,11 +5415,11 @@ msgstr ""
 " CLI 的单条记录过大时，会停掉对应的成员。即使 CLI 一直没有输出，资源检查点也会照常送到控制平面。具体的限制和边界，见[主机执行限制"
 "](host-execution-limits.md)。"
 
-#: ../developer/operations.md:2474
+#: ../developer/operations.md:2520
 msgid "Resume, Fork, and publication"
 msgstr "Resume、Fork 与发布"
 
-#: ../developer/operations.md:2476
+#: ../developer/operations.md:2522
 msgid ""
 "There is no retained/shared feature flag or runtime allowlist switch. "
 "Claude Code, Codex, Pi, OpenCode, and Kilo are claimable only after exact"
@@ -5384,7 +5446,7 @@ msgstr ""
 "只是诊断用的遥测，永远不会决定换用另一个执行器。当前的保留 runner 绝不会产生 `replay`；API "
 "之所以还接受它，只是为了让上一代版本已经接下的 attempt，在两边并行上线期间能够完成；历史记录在界面上仍然可以查看。"
 
-#: ../developer/operations.md:2492
+#: ../developer/operations.md:2538
 #, python-brace-format
 msgid ""
 "A settled turn publishes nothing. The platform publishes a workspace only"
@@ -5407,7 +5469,7 @@ msgstr ""
 "导入，都和以前一样。工作区里还有轮次在跑时发起请求，会被拒绝（`turn_running`）；如果已经有一次发布在进行，就直接返回那一次发布。在所有者要求之前，一个已结束的工作区不会卡住任何东西：空闲时它会停掉，它的对话也可以删除。还没发布的轮次留在保留沙箱里；沙箱正常停止后，也会保存在它的检查点里。见[设计](../agents/specs/2026-10-15"
 "-manual-publication-design.zh-CN.md)。"
 
-#: ../developer/operations.md:2504
+#: ../developer/operations.md:2550
 msgid ""
 "After a publication request, the snapshot and draft-PR fields change "
 "asynchronously. The detail view and recent-task list poll only while that"
@@ -5419,7 +5481,7 @@ msgstr ""
 "pending/capturing/captured/publishing 时轮询，到 published/failed "
 "就停止；其他已经结束的任务，不会因此在后台一直轮询。"
 
-#: ../developer/operations.md:2510
+#: ../developer/operations.md:2556
 msgid ""
 "A snapshot whose patch the publisher refuses, whose capture the host "
 "refuses, or whose five publication retries run out stays `failed` with "
@@ -5457,7 +5519,7 @@ msgstr ""
 "被拒的原因只是 head 分支（`head invalid`），这是 GitHub "
 "还没看到刚推上去的分支时可能给出的回答，会在同样五次尝试的额度内重试；base 分支无效则直接永久拒绝。"
 
-#: ../developer/operations.md:2532
+#: ../developer/operations.md:2578
 msgid ""
 "The base import adds a published commit's objects to the workspace and "
 "writes no ref, HEAD or index, so Git's own housekeeping prunes them once "
@@ -5484,7 +5546,7 @@ msgstr ""
 "导入（GitHub 不再提供那个 commit、访问权限被收回，或者工作区收不下这个 bundle），一小时后会失败，沙箱组保持 "
 "`dirty`；所有者下一次发起请求时，会重新捕获、重新导入。"
 
-#: ../developer/operations.md:2547
+#: ../developer/operations.md:2593
 msgid ""
 "An import completes only for the generation and container it was sent to."
 " If the group's host is removed and another host restores the group while"
@@ -5492,7 +5554,7 @@ msgid ""
 "the import is sent again to the restored container."
 msgstr "导入只对它发往的那一代和那个容器生效。如果导入还没完成，这个组的主机就被移除了，另一台主机又恢复了这个组，那么旧主机迟到的答复不会改变任何东西，导入会重新发给恢复后的容器。"
 
-#: ../developer/operations.md:2552
+#: ../developer/operations.md:2598
 msgid ""
 "Admission checks free space only through the [storage reserve](#how-full-"
 "is-the-sandbox-storage); disk-pressure alerting and a non-mutating pre-"
@@ -5503,11 +5565,11 @@ msgstr ""
 "storage)检查剩余空间；磁盘紧张告警，以及一个不修改状态的、提示词发出前的上下文指纹，都还没做。本地的功能检查，不能证明生产环境的 "
 "Kata、真实服务商或运维层面的验收都没问题。"
 
-#: ../developer/operations.md:2558
+#: ../developer/operations.md:2604
 msgid "Rolling deployment order"
 msgstr "滚动部署顺序"
 
-#: ../developer/operations.md:2560
+#: ../developer/operations.md:2606
 msgid ""
 "Downstream deployment automation coordinates the host and control-plane "
 "scripts. This repository publishes neutral artifacts; it does not contain"
@@ -5520,11 +5582,11 @@ msgstr ""
 "任务。在这里说的按确切 SHA "
 "的就绪栅栏之下，两条部署线可以同时进行。产物部署见[发布契约](../../deploy/release/README.md)。"
 
-#: ../developer/operations.md:2566
+#: ../developer/operations.md:2612
 msgid "Host and control-plane readiness"
 msgstr "主机和控制平面何时就绪"
 
-#: ../developer/operations.md:2568
+#: ../developer/operations.md:2614
 msgid ""
 "The host prepares the replacement sandbox/runner artifacts and proves "
 "Kata before invalidating its ready marker. It resolves the old runner's "
@@ -5565,7 +5627,7 @@ msgstr ""
 "冷启动的初始化阶段，也拿不到任何工作。如果放置固定在主机之间换过，检查还会探测每一台仍然持有保留沙箱组的在线主机；改了放置固定，不能让旧对话从上线安全检查里消失。`SHARED_READY_TIMEOUT`"
 " 控制这次等待，默认 900 秒。"
 
-#: ../developer/operations.md:2591
+#: ../developer/operations.md:2637
 msgid ""
 "A Host of a compute allocation the control plane manages, not just "
 "observes, is not waited for. Only the new control plane rolls it forward "
@@ -5583,7 +5645,7 @@ msgstr ""
 "manager 能正常响应。在它报告目标 commit 之前，认领接口仍然不让它开始新的对话。因此，如果把放置固定到一台托管的 Host "
 "上，就需要由部署中被排空的那台主机来证明目标版本。"
 
-#: ../developer/operations.md:2600
+#: ../developer/operations.md:2646
 msgid ""
 "The deploy user writes `.shared-live-ready` in the deployment checkout, "
 "separate from the container-owned enrollment directory. Runners mount "
@@ -5598,11 +5660,11 @@ msgstr ""
 "时，会保留文件的 inode，所以已有的文件挂载能看到这次变化；写入为空或写了一半，都无法声明一个确切的目标 "
 "SHA。一次上线不需要改动任何凭据的属主或权限。"
 
-#: ../developer/operations.md:2607
+#: ../developer/operations.md:2653
 msgid "Rollback compatibility"
 msgstr "回滚的兼容性"
 
-#: ../developer/operations.md:2609
+#: ../developer/operations.md:2655
 msgid ""
 "The deployment orchestrator runs separately from the target checkout. In "
 "a GitHub Actions deployment, it comes from the workflow commit. An online"
@@ -5630,7 +5692,7 @@ msgstr ""
 "迁移链已经不是数据库里记录的那一条了，所以不是 schema 兼容的回滚目标。数据库改动一律先扩展。绝不要在一个还在运行的新 API "
 "底下把列降级回去；先把代码回滚到一个 schema 兼容的 commit，之后任何收缩性的迁移，都作为一次单独评审的操作来做。"
 
-#: ../developer/operations.md:2625
+#: ../developer/operations.md:2671
 msgid ""
 "For downstream Actions triggered by `workflow_run`, the workflow "
 "definition comes from that repository's default branch. Synchronize "
@@ -5641,7 +5703,7 @@ msgstr ""
 "如果下游的 Actions 是由 `workflow_run` "
 "触发的，工作流的定义来自那个仓库的默认分支。要依赖新的回滚栅栏，先把编排器的改动同步到默认分支；在这次上线期间，不要对某个环境触发一个更旧的默认分支工作流。"
 
-#: ../developer/operations.md:2630
+#: ../developer/operations.md:2676
 msgid ""
 "Migration `0049_host_drain_fence` introduced durable drain ownership and "
 "its V1 recipe marker. Additive migration `0051_host_drain_fence_epoch` "
@@ -5660,7 +5722,7 @@ msgstr ""
 "`AGENT_DEPLOY_DRAIN_FENCE_V1`，只是为了让旧版编排器能完成过渡升级。一旦 V2 跑过，只支持 V1 "
 "的版本就不再是有效的回滚目标。"
 
-#: ../developer/operations.md:2639
+#: ../developer/operations.md:2685
 msgid ""
 "Every host now has a non-null `drain_fence_epoch`. The API returns its "
 "canonical UUID spelling and requires the same value, together with the "
@@ -5675,7 +5737,7 @@ msgstr ""
 "epoch。完全相同的请求令牌重试会先被检查，所以即使那次成功已经改了 epoch，成功响应丢失后的重试仍然是幂等的；而一个不同的令牌带着旧的 "
 "epoch，就算过时。"
 
-#: ../developer/operations.md:2646
+#: ../developer/operations.md:2692
 msgid ""
 "The database enforces the generation outside the API as well. Its `BEFORE"
 " UPDATE` trigger rotates the epoch when `status`, `credential_hash`, "
@@ -5695,7 +5757,7 @@ msgstr ""
 "检查会在排空栅栏生效期间拒绝删除。这样，无论是运维人员、reaper、旧版写入方，还是放置的变化，都会让之前所有的快照失效，而不会重新造出一个只看令牌的"
 " ABA 状态。旧版 V1 控制平面不比较 epoch，所以在运维上并不兼容，尽管它的写入照样会触发轮换。"
 
-#: ../developer/operations.md:2656
+#: ../developer/operations.md:2702
 msgid ""
 "A host that misses heartbeats and is marked `offline` keeps its inactive "
 "receipt. When it returns, the next rollout still finds the token its "
@@ -5705,11 +5767,11 @@ msgstr ""
 "主机错过心跳、被标成 `offline` 时，会留着那张未生效的回执。等它回来，下一次上线仍然找得到上一次释放的令牌；而 epoch "
 "已经轮换过，延迟到达的请求照样会被栅栏挡住。"
 
-#: ../developer/operations.md:2661
+#: ../developer/operations.md:2707
 msgid "Inspect fence state before rollback or recovery:"
 msgstr "回滚或恢复之前，先检查栅栏的状态："
 
-#: ../developer/operations.md:2670
+#: ../developer/operations.md:2716
 msgid ""
 "The compatibility floor remains even when this query is empty: the "
 "current control plane may create a receipt on its next automated "
@@ -5724,7 +5786,7 @@ msgstr ""
 "栅栏的版本，用它按令牌条件执行的释放（或者经过审计的强制覆盖）。如果做不到，就停掉控制平面和每一个部署工作流，开一个事务，锁定恰好一行主机记录，核实预期的令牌、epoch"
 " 和 `slots_used = 0`。只有这样，运维人员才能清除这一个生效中的栅栏："
 
-#: ../developer/operations.md:2701
+#: ../developer/operations.md:2747
 msgid ""
 "Require exactly one returned row. The returned epoch is the newly rotated"
 " value; do not try to assign it yourself. To clear only an inactive "
@@ -5739,7 +5801,7 @@ msgstr ""
 "drain_fence_active`；只有在单独核实过的恢复确实需要时，才改状态。绝不要批量清除栅栏字段。如果所有者、令牌或 epoch "
 "有任何不确定，就让主机保持排空，并恢复支持 V2 栅栏的控制平面。"
 
-#: ../developer/operations.md:2708
+#: ../developer/operations.md:2754
 msgid ""
 "**A Sandbox Manager rolled back past #763 cannot upload a deletion "
 "archive that a newer one prepared.** For **Archive to S3 and delete**, a "
@@ -5768,7 +5830,7 @@ msgstr ""
 " archive upload，失败代码是 `sandbox_manager_unavailable`，Sandbox Manager 返回的是 "
 "HTTP 500。没有任何东西丢失：容器保持原样，它的对话可以继续，旧版 Sandbox Manager 自己准备的请求也照常上传。"
 
-#: ../developer/operations.md:2724
+#: ../developer/operations.md:2770
 msgid ""
 "The older Sandbox Manager's abort removes only its own files, "
 "`rootfs.partial` and `archive.tar`, and so does its completion of a "
@@ -5785,7 +5847,7 @@ msgstr ""
 "GiB。它们不会拦住之后的删除，因为之后的删除会用新的请求和新的目录；已经结束的请求，也不计入 Sandbox Manager "
 "最多允许的四个待处理归档。这两个文件要手动删除。"
 
-#: ../developer/operations.md:2732
+#: ../developer/operations.md:2778
 #, python-brace-format
 msgid ""
 "With the supported host Compose, the state directory is "
@@ -5808,7 +5870,7 @@ msgstr ""
 "的请求目录里删掉这两个文件。其他的都不要动：回执要保留；这两个回执都没有的请求目录，说明请求还在进行中。如果主机的 `.env` 设了 "
 "`AGENT_HOST_STATE_ROOT`，先 export 这个值；否则下面的命令用的是默认值。"
 
-#: ../developer/operations.md:2752
+#: ../developer/operations.md:2798
 msgid ""
 "To retry the deletion, refresh the sandbox's details and, once it is "
 "stopped and idle, choose **Archive to S3 and delete** again (**Retry "
@@ -5824,11 +5886,11 @@ msgstr ""
 "按它自己的方式准备，所以不管那两个文件删了没有，重试都能完成。之后再升级回新版本，不需要做别的：当前的 Sandbox Manager "
 "仍然能上传旧版存成 `archive.tar` 的请求，它中止请求或完成删除时，两种方式留下的文件都会清掉。"
 
-#: ../developer/operations.md:2760
+#: ../developer/operations.md:2806
 msgid "Cold starts and failed deployments"
 msgstr "冷启动与部署失败"
 
-#: ../developer/operations.md:2762
+#: ../developer/operations.md:2808
 msgid ""
 "This fence is unconditional because retained/shared-live is the only "
 "executor. It cannot enable a legacy path and it cannot be bypassed by "
@@ -5851,11 +5913,11 @@ msgstr ""
 " SHA 的栅栏通过之前，Web 不会启动。一旦通过，这些初始化时启动的服务就归入期望的目标版本：之后如果最终的 API 或 Web "
 "探测失败，这套服务会继续运行以便诊断，但不会写入 `.deployed-sha`。"
 
-#: ../developer/operations.md:2775
+#: ../developer/operations.md:2821
 msgid "Preserving an old-chain database"
 msgstr "保留旧迁移链的数据库"
 
-#: ../developer/operations.md:2777
+#: ../developer/operations.md:2823
 msgid ""
 "Every database from before the independent-accounts release, whether on "
 "the retired pre-2026-09-10 Alembic chain or on the current one, is keyed "
@@ -5871,7 +5933,7 @@ msgstr ""
 "为键。本版本不会使用、转换这样的数据库，也不会把其所有者映射到账号：身份命名空间检查会在任何迁移之前拒绝它。把这样的数据库原样保留，作为归档和回滚来源，连同其转储、校验和、配置和根密钥一起保存，并在一个新的空数据库上启动本版本（[切换说明"
 "](upgrade-notes.md#independent-accounts-cutover)）。"
 
-#: ../developer/operations.md:2786
+#: ../developer/operations.md:2832
 msgid ""
 "`scripts/convert_legacy_database_copy.py` still converts a separately "
 "restored copy of a `0025_retained_followup_gate` database, keeping every "
@@ -5887,11 +5949,11 @@ msgstr ""
 "所有，会像原数据库一样被拒绝；绝不要让部署指向它。转换的约定见[旧数据库副本方案](../agents/specs/2026-09-18"
 "-legacy-database-copy.md)。"
 
-#: ../developer/operations.md:2793
+#: ../developer/operations.md:2839
 msgid "Rebuilding the agent database"
 msgstr "重建 Agent 数据库"
 
-#: ../developer/operations.md:2795
+#: ../developer/operations.md:2841
 msgid ""
 "The selected-state rebuild this section used to describe carried host "
 "registrations, user connections and the Gateway identity binding into a "
@@ -5905,11 +5967,11 @@ msgstr ""
 "Gateway 时代的数据库中没有任何东西可以沿用：其中的所有者、连接和 MCP 授权都属于没有任何账号持有的 Gateway 用户 "
 "ID。按上文归档它，然后从头开始。用新的注册令牌重新注册主机；所有者重新注册、申请，并重新添加模型连接。"
 
-#: ../developer/operations.md:2803
+#: ../developer/operations.md:2849
 msgid "Applying migrations that are not backwards-compatible"
 msgstr "执行不向后兼容的迁移"
 
-#: ../developer/operations.md:2805
+#: ../developer/operations.md:2851
 msgid ""
 "`deploy.sh` migrates before replacing the API. Each migration must "
 "therefore remain compatible with the running version until replacement. "
@@ -5923,7 +5985,7 @@ msgstr ""
 " 版本升级时，需要一个停机维护窗口。这份列表说的只是这几个 schema "
 "转换，并不意味着之后每个增量迁移都要停机。选择滚动部署之前，请针对实际的源版本和目标版本核对兼容性。"
 
-#: ../developer/operations.md:2812
+#: ../developer/operations.md:2858
 msgid ""
 "`0002_request_keys_and_actors` drops the default on "
 "`agent_admin_audit_log.actor_id`. The API that predates it inserts audit "
@@ -5935,7 +5997,7 @@ msgstr ""
 "的默认值。在它之前的 API 插入审计记录时不带这一列，而 `log_admin_action` "
 "按设计会吞掉这种失败，所以在这个窗口里，管理员的审计记录会悄悄丢失，而不是报错。"
 
-#: ../developer/operations.md:2816
+#: ../developer/operations.md:2862
 msgid ""
 "`0003_thread_level_config` drops `agent_jobs.repo`, `setup_script`, "
 "`execution_profile` and `mcp_servers`, which the older API selects on "
@@ -5945,7 +6007,7 @@ msgstr ""
 "`agent_jobs.repo`、`setup_script`、`execution_profile` 和 `mcp_servers`，而旧 "
 "API 每次读取任务都会查这几列。"
 
-#: ../developer/operations.md:2819
+#: ../developer/operations.md:2865
 msgid ""
 "`0004_residency_on_membership` drops `agent_thread_residencies`, which "
 "the older API writes on every residency heartbeat."
@@ -5953,7 +6015,7 @@ msgstr ""
 "`0004_residency_on_membership` 删掉了 `agent_thread_residencies`，而旧 API 每次 "
 "residency 心跳都会写它。"
 
-#: ../developer/operations.md:2821
+#: ../developer/operations.md:2867
 msgid ""
 "`0005_queued_follow_ups` converts `waiting` jobs to `queued` and removes "
 "`waiting` from the job-state constraint. The new scheduler leaves queued "
@@ -5972,7 +6034,7 @@ msgstr ""
 " "
 "`waiting`。如果某个已经进入终态的中间轮次，挡住了一个还没完成的更早轮次，降级会被拒绝，直到这些排队的后续消息被跑完或取消，因为旧的调度器保证不了它们的执行顺序。"
 
-#: ../developer/operations.md:2831
+#: ../developer/operations.md:2877
 msgid ""
 "`0008_generic_mcp_connections` empties and write-constrains the legacy "
 "`agent_threads.mcp_servers` column and turns `agent_mcp_connections` into"
@@ -6003,7 +6065,7 @@ msgstr ""
 "会在经过最初那个 `0008`（它删除或改名了这些列）升级的数据库上，把那几个不起作用的兼容列补回来。启动新版控制平面和 MCP "
 "中继之前，先把迁移执行到 head。"
 
-#: ../developer/operations.md:2847
+#: ../developer/operations.md:2893
 msgid ""
 "`0058_mcp_connector_invariant` repairs the singular connector route for "
 "MCP connections and adds a unique constraint on each connection's "
@@ -6017,11 +6079,11 @@ msgstr ""
 "路由必须唯一这一点，并给每个连接的授权映射加了唯一约束。请把这个修订当作一道\"必须先停掉所有写入\"的边界。旧版二进制可能会重新创建缺失的映射，在断开连接后留下过时的映射，或者在把连接从"
 " `user-connector` 改成别的类型之后，仍然保留 connector 的权限。不要对这个修订做新旧版本混跑的滚动部署，而应该："
 
-#: ../developer/operations.md:2855
+#: ../developer/operations.md:2901
 msgid "stop every control-plane, MCP relay and web-tier database writer;"
 msgstr "停掉所有控制平面、MCP 中继和 Web 层里写数据库的进程；"
 
-#: ../developer/operations.md:2856
+#: ../developer/operations.md:2902
 msgid ""
 "run `alembic upgrade 0058_mcp_connector_invariant` (or upgrade through "
 "`0058` to the intended later revision);"
@@ -6029,17 +6091,17 @@ msgstr ""
 "运行 `alembic upgrade 0058_mcp_connector_invariant`（或者经过 `0058` "
 "一直升级到预期的更新修订）；"
 
-#: ../developer/operations.md:2858
+#: ../developer/operations.md:2904
 msgid ""
 "deploy the invariant-aware control-plane, MCP relay and web-tier release;"
 " and"
 msgstr "部署能正确维护这一约束的控制平面、MCP 中继和 Web 层新版本；然后"
 
-#: ../developer/operations.md:2860
+#: ../developer/operations.md:2906
 msgid "resume writers only after every old binary has been replaced."
 msgstr "等所有旧的二进制都替换完之后，再恢复写入。"
 
-#: ../developer/operations.md:2862
+#: ../developer/operations.md:2908
 msgid ""
 "The runner holds no database connection — its heartbeats are HTTP calls "
 "to the control plane — so stopping the control plane, the MCP relay and "
@@ -6048,7 +6110,7 @@ msgstr ""
 "runner 不持有任何数据库连接，它的心跳都是发给控制平面的 HTTP 请求，所以停掉控制平面、MCP 中继和 Web "
 "层之后，数据库就没有任何写入方了。"
 
-#: ../developer/operations.md:2866
+#: ../developer/operations.md:2912
 msgid ""
 "Drain the hosts, keep the generated `cloudagent-undrain-*.sql`, and wait "
 "for two counts to reach zero. Neither can be settled once the writers "
@@ -6058,7 +6120,7 @@ msgstr ""
 "undrain-*.sql`，然后等两个计数都降到零。这两样一旦停掉写入方就再也结束不了，所以和上面重建流程的第 1 "
 "步一样，要在这里先等它们结束："
 
-#: ../developer/operations.md:2876
+#: ../developer/operations.md:2922
 msgid ""
 "A fork still `preparing` or `materialized` is one its coordinator has not"
 " finished. `0004` refuses to run over it rather than tombstone a fork the"
@@ -6070,11 +6132,11 @@ msgstr ""
 "不会在它上面执行，而不是冒险给一个 reaper 可能还会完成的 fork 打上删除标记；而 reaper 跑在 API "
 "里面，所以必须在停掉任何东西之前，先让它处理完。停滞太久的 `preparing` 操作，会在停滞窗口（默认 15 分钟）之后判为失败。"
 
-#: ../developer/operations.md:2882
+#: ../developer/operations.md:2928
 msgid "Stop the writers:"
 msgstr "停掉写入方："
 
-#: ../developer/operations.md:2888
+#: ../developer/operations.md:2934
 msgid ""
 "Build and run the target's `migrate` image with nothing writing. As in "
 "step 3 of the rebuild above, this runs in the deploy root with the target"
@@ -6084,22 +6146,22 @@ msgstr ""
 "在没有任何写入的情况下，构建并运行目标版本的 `migrate` 镜像。和上面重建流程的第 3 步一样，在已检出目标 commit "
 "的部署根目录里运行，并且先构建镜像，再动数据库："
 
-#: ../developer/operations.md:2899
+#: ../developer/operations.md:2945
 msgid ""
 "Undrain the hosts recorded in step 1, then deploy the target commit as "
 "usual. Its migration is a no-op, and readiness can now see a host that is"
 " allowed to claim:"
 msgstr "撤销第 1 步记下的那些主机的排空，然后像平常一样部署目标 commit。它的迁移什么都不用做，就绪检查这时也能看到一台允许认领的主机了："
 
-#: ../developer/operations.md:2908
+#: ../developer/operations.md:2954
 msgid "Run the acceptance sweep in step 7 of the rebuild above."
 msgstr "按上面重建流程的第 7 步做一遍验收检查。"
 
-#: ../developer/operations.md:2910
+#: ../developer/operations.md:2956
 msgid "Retained Docker storage on a host"
 msgstr "主机上的保留 Docker 存储"
 
-#: ../developer/operations.md:2912
+#: ../developer/operations.md:2958
 msgid ""
 "Retained chat state is the Docker container writable layer. On a daemon "
 "that uses the containerd image store, the images live beside it under "
@@ -6116,7 +6178,7 @@ msgstr ""
 "`/var/lib/docker`。自定义的 `data-root`、`graph` 或 containerd 的 "
 "`root`，在主机启动之前就会被拒绝。"
 
-#: ../developer/operations.md:2920
+#: ../developer/operations.md:2966
 msgid ""
 "Automatic SSH bootstrap does this from the server's sandbox storage path."
 " See [Sandbox storage path](operations-compute.md#sandbox-storage-path). "
@@ -6125,7 +6187,7 @@ msgstr ""
 "自动 SSH 初始化会根据服务器的沙箱存储路径完成这些设置，见[沙箱存储路径](operations-compute.md#sandbox-"
 "storage-path)。如果一个非空的存储还不是这种绑定方式，它会拒绝去搬动它。"
 
-#: ../developer/operations.md:2924
+#: ../developer/operations.md:2970
 msgid ""
 "A manual host uses the same layout. `<disk>` is an existing writable "
 "mount, for example `/scratch/hybridInference-cloud-agent/sandbox`:"
@@ -6133,11 +6195,11 @@ msgstr ""
 "手动安装的主机也用同样的布局。`<disk>` 是一个已有的可写挂载点，例如 `/scratch/hybridInference-cloud-"
 "agent/sandbox`："
 
-#: ../developer/operations.md:2932
+#: ../developer/operations.md:2978
 msgid "Persist the binds in `/etc/fstab`:"
 msgstr "把这些绑定写进 `/etc/fstab`，开机后自动生效："
 
-#: ../developer/operations.md:2939
+#: ../developer/operations.md:2985
 msgid ""
 "Give each daemon a drop-in, `/etc/systemd/system/docker.service.d/cloud-"
 "agent-storage.conf` and `/etc/systemd/system/containerd.service.d/cloud-"
@@ -6147,7 +6209,7 @@ msgstr ""
 "storage.conf` 和 `/etc/systemd/system/containerd.service.d/cloud-agent-"
 "storage.conf`："
 
-#: ../developer/operations.md:2947
+#: ../developer/operations.md:2993
 msgid ""
 "The containerd file names `/var/lib/containerd` instead of "
 "`/var/lib/docker`. Run `systemctl daemon-reload`. A missing disk then "
@@ -6157,7 +6219,7 @@ msgstr ""
 "containerd 那个文件里写的是 `/var/lib/containerd`，而不是 `/var/lib/docker`。然后运行 "
 "`systemctl daemon-reload`。这样一来，如果磁盘没挂上，对应的守护进程就会保持停止，而不是在原来的空路径上打开一个空存储。"
 
-#: ../developer/operations.md:2951
+#: ../developer/operations.md:2997
 msgid ""
 "To move a store that already has data, copy it while the daemons are "
 "running, stop Docker and containerd, and copy again with `--delete` until"
@@ -6172,7 +6234,7 @@ msgstr ""
 "指向新路径。设置了 `restart=no` "
 "的容器，这次重启后会一直停着，需要手动启动。挪到一边的旧副本，要等机器重启一次、这些绑定都正常恢复、主机也已经在正常服务之后，再删掉。"
 
-#: ../developer/operations.md:2959
+#: ../developer/operations.md:3005
 msgid ""
 "The sandbox manager compares `AGENT_RETAINED_DOCKER_DATA_ROOT` with the "
 "daemon-reported `DockerRootDir` and refuses a mismatch. It deliberately "
@@ -6186,7 +6248,7 @@ msgstr ""
 "manager 挂一个主机根目录，就破坏了\"只通过 Docker 操作\"的边界。挂载检查应该在主机开通时完成，也就是上面那些 "
 "`RequiresMountsFor=` drop-in。"
 
-#: ../developer/operations.md:2965
+#: ../developer/operations.md:3011
 msgid ""
 "Do not bind `<disk>`, `/var/lib/docker`, `/var/lib/containerd`, "
 "`/workspace`, or `/agent-state` into the sandbox manager or sandbox. Do "
@@ -6205,7 +6267,7 @@ msgstr ""
 "cp`，以及 sandbox manager 的 RPC），而不是直接翻 overlay 目录。只能在 Docker 和 containerd "
 "都停掉的情况下，备份或搬动这两个存储，并且要保留属主、硬链接、扩展属性和稀疏文件。"
 
-#: ../developer/operations.md:2974
+#: ../developer/operations.md:3020
 msgid ""
 "This makes `docker stop`/`docker start` survive runner, Sandbox Manager, "
 "Docker daemon, and host reboots as long as the same binds return. Another"
@@ -6223,7 +6285,7 @@ msgstr ""
 "sandboxes)，并且只能在这个组被交出去、而最新的检查点仍然覆盖它的时候：它的主机被移出资源池、它的节点被确认已回收，或者主机在租期结束前迁出。没有检查点的话，这两个存储一旦丢失，上下文就是"
 " `LOST`；不过控制平面的数据库仍然记着找到它所需的、权威的\"对话→主机→容器\"对应关系。"
 
-#: ../developer/operations.md:2985
+#: ../developer/operations.md:3031
 msgid ""
 "A missed heartbeat, an offline/disabled host row, or a temporarily "
 "unreachable sandbox manager is not evidence that this Docker state "
@@ -6237,11 +6299,11 @@ msgstr ""
 "状态已经没了。让对话继续固定在原主机上并显示为不可用，恢复或重新注册同一台具名主机，然后调和它那个确切的、带标签的容器。只有在所属的那个 "
 "Docker 守护进程上检查，证实预期的容器或数据目录确实没了，才可以把上下文改为 `LOST`；绝不要在另一台主机上建一个空白的替代品。"
 
-#: ../developer/operations.md:2992
+#: ../developer/operations.md:3038
 msgid "How full is the sandbox storage?"
 msgstr "沙箱存储用了多少？"
 
-#: ../developer/operations.md:2994
+#: ../developer/operations.md:3040
 msgid ""
 "The Servers table has a **Storage** column beside CPU and Memory: how "
 "much of the filesystem holding the retained sandbox writable layers is in"
@@ -6257,7 +6319,7 @@ msgstr ""
 "个容器，没说它们占了多少磁盘。而且它观察的是整个文件系统，不是单个对话：仓库、依赖、没提交的改动和原生 CLI "
 "会话，都在容器的可写层里，停掉容器也不会释放这些空间。"
 
-#: ../developer/operations.md:3002
+#: ../developer/operations.md:3048
 msgid ""
 "The same reading feeds **Storage reserve for new sandboxes** (default "
 "1024 MiB): below it, the runner declines a turn that would create a "
@@ -6269,11 +6331,11 @@ msgstr ""
 "不接需要新建沙箱的轮次，并把它原样退回队列。腾出 Docker 存储，或者调低预留值，就能恢复新的分配。这道保护和它的局限，见[主机运行时设置"
 "](runtime-settings.md)。"
 
-#: ../developer/operations.md:3008
+#: ../developer/operations.md:3054
 msgid "What the reading measures"
 msgstr "这个读数测的是什么"
 
-#: ../developer/operations.md:3010
+#: ../developer/operations.md:3056
 msgid ""
 "A runner is an ordinary container under the same Docker daemon and "
 "storage driver as the sandboxes, so OverlayFS's `statfs` semantics make "
@@ -6293,11 +6355,11 @@ msgstr ""
 "available` 计算。文件系统为 root 保留、目前仍空闲的块，两个数字里都不算，所以两者加起来不等于总量，`total - "
 "available` 也不等于已用空间。"
 
-#: ../developer/operations.md:3020
+#: ../developer/operations.md:3066
 msgid "Attesting the storage topology"
 msgstr "证实存储拓扑"
 
-#: ../developer/operations.md:3022
+#: ../developer/operations.md:3068
 msgid ""
 "Docker's `overlay2.size` (and a container's `--storage-opt size=` on XFS "
 "with pquota) is implemented with project quotas, and a quota is what "
@@ -6316,14 +6378,14 @@ msgstr ""
 "结果比较，因为挂载根不在任何容器的项目配额之内，然后把结论写进 `.shared-live-ready` 旁边的 `.storage-"
 "probe/verdict.json`："
 
-#: ../developer/operations.md:3032
+#: ../developer/operations.md:3078
 msgid ""
 "the mount root's size must equal the container's own `total_bytes` "
 "exactly — `size` does not move under writes, so this is the topology "
 "test;"
 msgstr "挂载根的大小，必须和容器自己读到的 `total_bytes` 完全相等。`size` 不会随写入变化，所以这一条就是拓扑测试；"
 
-#: ../developer/operations.md:3034
+#: ../developer/operations.md:3080
 msgid ""
 "`df <upperdir>` and `df <mount_root>` must agree on size, and "
 "`daemon.json` / the `dockerd` command line must not mention "
@@ -6333,7 +6395,7 @@ msgstr ""
 "`df <upperdir>` 和 `df <mount_root>` 的大小必须一致，并且 `daemon.json` 和 `dockerd` "
 "的命令行里都不能出现 `overlay2.size`；任何一条对不上，都会记为 `unsupported`（项目配额）；"
 
-#: ../developer/operations.md:3037
+#: ../developer/operations.md:3083
 #, python-format
 msgid ""
 "`used` and `available` are compared within `max(1 GiB, 1% of size)` and "
@@ -6343,7 +6405,7 @@ msgstr ""
 "`used` 和 `available` 只在 `max(1 GiB, 1% of size)` "
 "的误差范围内比较，而且只用于诊断，因为构建和清理在交错进行，不会有谁为了监控让一切停下来。"
 
-#: ../developer/operations.md:3041
+#: ../developer/operations.md:3087
 msgid ""
 "A non-root deployment user may be unable to traverse Docker/containerd's "
 "root-owned snapshot directories. When direct mount lookup fails, the "
@@ -6358,7 +6420,7 @@ msgstr ""
 "所有的快照目录。直接查挂载失败时，部署会用正在运行的副本那个不可变的镜像 ID，起一个临时的元数据辅助容器。Docker "
 "会解析两个非递归、只读的目录绑定：候选的挂载根，以及这个副本的上层目录。辅助程序在读取数据之前，会对照主机挂载表的预期，检查实际绑定的设备、文件系统根和类型。靠猜出来的路径，或者对不上的挂载，永远不会被判定为已核实。"
 
-#: ../developer/operations.md:3049
+#: ../developer/operations.md:3095
 msgid ""
 "The helper has no network, capabilities, host PID namespace, Docker "
 "socket or credentials. Its root filesystem is read-only; it only reads "
@@ -6374,7 +6436,7 @@ msgstr ""
 "`fstatvfs`。它共用证实流程剩下的时间预算，自己还有一个最多五秒的超时，退出时就被删除。启动失败的话，会在剩余的时间预算内清理掉。这是只在部署时才有的挂载例外；采集器和任务容器都拿不到这些主机视图。不需要任何"
 " sudo 规则，也不需要改主机目录的权限。"
 
-#: ../developer/operations.md:3057
+#: ../developer/operations.md:3103
 msgid ""
 "Each runner reads that file every sampling round and publishes a number "
 "only for its own upper directory, with a matching size. Anything else — "
@@ -6388,11 +6450,11 @@ msgstr ""
 " `unsupported`、文件系统的大小变了，都会报告为 `unverified` 或 "
 "`unsupported`，页面上会如实显示，而不是画出一个数字。重建的容器会有新的上层目录，所以旧的证实结果自然就不适用了；没有按时间过期的机制。"
 
-#: ../developer/operations.md:3064
+#: ../developer/operations.md:3110
 msgid "Refreshing or disabling the metric"
 msgstr "刷新或关闭这个指标"
 
-#: ../developer/operations.md:3066
+#: ../developer/operations.md:3112
 msgid ""
 "Compose binds only the dedicated `.storage-probe/` directory read-only at"
 " `/run/cloud-agent/storage-probe`. Each sample opens `verdict.json` by "
@@ -6414,7 +6476,7 @@ msgstr ""
 " `.storage-probe-verdict` 单文件绑定升级上来，执行一次普通的 `up` 即可，它会用新的挂载方式重建 "
 "runner；光执行 `check` 改变不了已有容器的挂载配置。旧文件会被忽略，也不会作为备用。"
 
-#: ../developer/operations.md:3077
+#: ../developer/operations.md:3123
 msgid ""
 "Where the helper is used, it needs **Docker 25 or newer on the host**. It"
 " binds its two directories non-recursively, which `--mount` spells `bind-"
@@ -6433,7 +6495,7 @@ msgstr ""
 "退出；所以为了兼容老主机去用旧写法，结果是所有不老的主机都用不了。Docker 低于 25 时，辅助容器的调用会失败，主机报告 "
 "`unverified`，警告里会引用 CLI 自己的报错。部署用户本来就能进入存储根目录的主机，根本不会走这条路。"
 
-#: ../developer/operations.md:3087
+#: ../developer/operations.md:3133
 msgid ""
 "**Storage verification never blocks a deployment.** A metric that cannot "
 "be established is not a reason to keep a working host out of the pool: "
@@ -6444,7 +6506,7 @@ msgstr ""
 "一个指标测不出来，不能成为把一台正常工作的主机挡在资源池外的理由：上面每一种失败，都只是一条警告和一条判定记录，`up` "
 "会继续执行。由此在运维上有两点："
 
-#: ../developer/operations.md:3102
+#: ../developer/operations.md:3148
 msgid ""
 "The `up` is not optional. A container's environment is fixed when it is "
 "created, so replicas started before the edit keep measuring until they "
@@ -6460,11 +6522,11 @@ msgstr ""
 "仍然有用：它会把判定结果重写为空，这样那些副本虽然还在测量，下一次采样时也不会再发布数字了。这个变量只接受 `overlay_root` 或 "
 "`off`，没有别的：其他任何写法在配置阶段就会被拒绝，以免脚本和 runner 对它的理解不一致。"
 
-#: ../developer/operations.md:3111
+#: ../developer/operations.md:3157
 msgid "Measurement limits"
 msgstr "测量的局限"
 
-#: ../developer/operations.md:3113
+#: ../developer/operations.md:3159
 msgid ""
 "The reading measures block space, so `available` does not promise that "
 "any particular container can still write — inodes, quotas and a read-only"
@@ -6485,11 +6547,11 @@ msgstr ""
 "的主机都没有验证过：探针会报告 `unsupported`，而不是去猜。在 Docker Desktop 上，主机的 shell "
 "看不到虚拟机里的挂载，所以本地开发时会显示 `unverified`。"
 
-#: ../developer/operations.md:3124
+#: ../developer/operations.md:3170
 msgid "Which machine runs the jobs"
 msgstr "任务在哪台机器上跑"
 
-#: ../developer/operations.md:3126
+#: ../developer/operations.md:3172
 msgid ""
 "**Admin → Servers.** The list is every enrolled execution environment "
 "with authenticated heartbeats, grouped by the physical server it "
@@ -6502,14 +6564,14 @@ msgstr ""
 "选择器决定，还没有沙箱的对话可以在哪里创建。默认选项是 "
 "**Automatic**，意思是谁先轮询到，新对话就归谁。一旦有了保留的沙箱组，它的轮次就只能由这个组所属的环境认领。"
 
-#: ../developer/operations.md:3133
+#: ../developer/operations.md:3179
 msgid ""
 "Runners pull work. Placement is enforced when a runner claims a job, "
 "rather than through a dispatch request from the control plane. These "
 "rules apply:"
 msgstr "runner 是主动来拉任务的。放置规则是在 runner 认领任务时执行的，而不是由控制平面派发过去。规则如下："
 
-#: ../developer/operations.md:3136
+#: ../developer/operations.md:3182
 msgid ""
 "**The switch is not preemptive, and not a drain.** The new host starts "
 "claiming chats that do not have a sandbox yet; jobs already running on "
@@ -6527,14 +6589,14 @@ msgstr ""
 "可写层的那台主机上，所以之后的后续消息仍然可以在那里被认领。沙箱组只会通过覆盖它的检查点迁移，而且只在它的主机被移除、被回收，或者在租期结束前迁出之后（见[恢复被移除主机上的沙箱](#restoring-a"
 "-removed-hosts-sandboxes)）。所以切换之后，两台主机可能会同时干活；排空的意思是先等旧主机清空，而这里不会这么做。"
 
-#: ../developer/operations.md:3146
+#: ../developer/operations.md:3192
 msgid ""
 "**An unenrolled runner cannot claim.** The control plane derives the host"
 " from its persisted host credential; a request-body name cannot "
 "impersonate a pinned machine."
 msgstr "**没注册的 runner 认领不了任务。** 控制平面根据保存的主机凭据确定是哪台主机；请求体里写个名字，冒充不了被固定的那台机器。"
 
-#: ../developer/operations.md:3149
+#: ../developer/operations.md:3195
 msgid ""
 "**A machine joins through one-time enrollment.** `AGENT_ENROLL_TOKEN` is "
 "bound to the chosen host name and redeemed once. Replicas then share the "
@@ -6543,7 +6605,7 @@ msgstr ""
 "**机器通过一次性注册加入。** `AGENT_ENROLL_TOKEN` "
 "绑定到选定的主机名，只能兑换一次。之后各个副本共用保存下来的主机凭据，心跳也和认领请求互不相干。"
 
-#: ../developer/operations.md:3152
+#: ../developer/operations.md:3198
 msgid ""
 "**There is no storage failover.** If the selected host stops, new chats "
 "wait rather than materializing somewhere else. Existing retained chats "
@@ -6558,7 +6620,7 @@ msgstr ""
 " Docker 层。选中的主机最近没有轮询时，管理页面会给出警告；但真正权威的运维信号，是它已注册的心跳和 sandbox manager "
 "探测，而不是最近有没有哪个 runner 碰巧认领过任务。"
 
-#: ../developer/operations.md:3159
+#: ../developer/operations.md:3205
 msgid ""
 "Adding a _second_ machine is not only this switch. The MCP endpoint uses "
 "the relay on the sandbox's group bridge, with private addresses otherwise"
@@ -6577,11 +6639,11 @@ msgstr ""
 "里的全部内容。沙箱中所有者的服务商密钥是一项[已接受的暴露](#mcp-prerequisite-and-accepted-owner-key-"
 "exposure)。预检会在启动时就拒绝，而不是等到任务第一次调用模型或 MCP 时才失败；但它是在*那台*机器上拒绝，不是在这里。"
 
-#: ../developer/operations.md:3170
+#: ../developer/operations.md:3216
 msgid "Running runners on another machine"
 msgstr "在另一台机器上运行 runner"
 
-#: ../developer/operations.md:3172
+#: ../developer/operations.md:3218
 msgid ""
 "A second machine is worth adding for capacity, or because it is the one "
 "with the hardware. What makes it more than \"run the script over there\" "
@@ -6597,7 +6659,7 @@ msgstr ""
 "隧道，生命周期代码在中继网络上找到它，再接到每个组的网桥上。模型调用经公网 HTTPS 发往所有者的服务商。另外还有一个单独的控制平面中继，只有 "
 "runner 能看到："
 
-#: ../developer/operations.md:3194
+#: ../developer/operations.md:3240
 msgid ""
 "Each tunnel is a relay, not a proxy — no CONNECT and no caller-chosen "
 "destination — so nothing a sandbox sends can widen either route. Setup "
@@ -6610,7 +6672,7 @@ msgstr ""
 "agent 共用这个组的网桥，所以 setup 访问软件包仓库时，走的也是和其他所有流量一样的公网 TCP "
 "80/443。控制平面隧道从不接入任何组网桥，它在 runner 网络上的地址是一个私有地址，主机规则对所有沙箱组都会拒绝。"
 
-#: ../developer/operations.md:3201
+#: ../developer/operations.md:3247
 msgid ""
 "**Why ssh rather than exposing the service ports.** Sandboxes carry "
 "scoped MCP tokens and runners carry enrolled-host credentials. Binding "
@@ -6620,7 +6682,7 @@ msgstr ""
 "**为什么用 ssh，而不是直接把服务端口暴露出来。** 沙箱里有限定范围的 MCP 令牌，runner "
 "里有已注册主机的凭据。把任何一个服务绑到实验室网络上，都会让这些凭据以明文出现在一个共享网段上。用隧道的话，每个服务都只需要监听回环地址。"
 
-#: ../developer/operations.md:3213
+#: ../developer/operations.md:3259
 msgid ""
 "`deploy/host/docker-compose.sandbox.yml` contains the runner, sandbox "
 "manager, two purpose-scoped tunnels (MCP and control plane), and two "
@@ -6695,17 +6757,17 @@ msgstr ""
 msgid "Runner-only control relay name, `agent-control-plane` by default"
 msgstr "runner 专用的控制中继名称，默认 `agent-control-plane`"
 
-#: ../developer/operations.md:3230
+#: ../developer/operations.md:3276
 msgid ""
 "Generate the known-hosts entry and compare its key fingerprint with a "
 "trusted record for the service host:"
 msgstr "生成 known-hosts 条目，并把它的密钥指纹，和这台服务主机的一份可信记录对比一下："
 
-#: ../developer/operations.md:3237
+#: ../developer/operations.md:3283
 msgid "Authorizing the tunnels on the far machines"
 msgstr "在远端机器上授权隧道"
 
-#: ../developer/operations.md:3239
+#: ../developer/operations.md:3285
 msgid ""
 "Prefer **Admin → Servers → Server setup → Automatic setup** ([compute "
 "runbook](operations-compute.md#automatic-setup)). It creates the accounts"
@@ -6717,7 +6779,7 @@ msgstr ""
 "](operations-compute.md#automatic-setup)）。它会创建下面这些账号，写入并读回它们的 sshd "
 "策略；如果已有的策略会把权限放宽，它会拒绝。只有在用不了它的时候，才手动授权隧道，并且要和它生成的配置一模一样。"
 
-#: ../developer/operations.md:3245
+#: ../developer/operations.md:3291
 msgid ""
 "Give each relay a dedicated account with no shell, the MCP and control "
 "accounts on the control-plane machine. Each account's `authorized_keys` "
@@ -6726,7 +6788,7 @@ msgstr ""
 "给每个中继一个专用的、没有 shell 的账号：MCP 账号和控制账号都在控制平面机器上。每个账号的 `authorized_keys` "
 "里只有一行："
 
-#: ../developer/operations.md:3256
+#: ../developer/operations.md:3302
 msgid ""
 "After `restrict`, `port-forwarding` re-enables remote (`-R`) as well as "
 "local forwarding, and `permitopen` limits only the local destination. On "
@@ -6754,7 +6816,7 @@ msgstr ""
 "sshd 之前，用 `sshd -T -C user=<account>,host=localhost,addr=127.0.0.1` "
 "逐个确认每个账号的最终配置。"
 
-#: ../developer/operations.md:3270
+#: ../developer/operations.md:3316
 msgid ""
 "Run `sandbox_host.sh check` from the host checkout. Sandbox-runtime "
 "containers on the relay network must receive HTTP 200 from MCP "
@@ -6766,21 +6828,21 @@ msgstr ""
 " HTTP 200。正在运行的 runner 必须通过完整的沙箱预检，包括读回主机的防火墙表，并且能访问 sandbox manager "
 "和控制平面。从主机 shell 直接发请求，测不到这些容器里的路径。"
 
-#: ../developer/operations.md:3275
+#: ../developer/operations.md:3321
 msgid ""
 "Once it is up, the machine appears in **Admin → Servers** and can be "
 "selected there."
 msgstr "跑起来之后，这台机器就会出现在 **Admin → Servers** 里，可以在那里选它。"
 
-#: ../developer/operations.md:3278
+#: ../developer/operations.md:3324
 msgid "The way back: the control plane reaching this host's sandbox manager"
 msgstr "回程：控制平面如何访问这台主机的 sandbox manager"
 
-#: ../developer/operations.md:3280
+#: ../developer/operations.md:3326
 msgid "The control plane also needs a route back to this host's sandbox manager."
 msgstr "控制平面还需要一条能回到这台主机 sandbox manager 的路。"
 
-#: ../developer/operations.md:3282
+#: ../developer/operations.md:3328
 msgid ""
 "File listings, terminal traffic, and `git status` go **control plane → "
 "workspace sandbox manager**. The sandbox manager runs beside the Docker "
@@ -6801,7 +6863,7 @@ msgstr ""
 " manager 的地址访问不到，就会返回 **503**，正常执行期间的 `terminals/suspend` "
 "也一样。历史上第一次部署，就在这一步连续失败了三次。开始接任务之前，先把这条路验证一遍。"
 
-#: ../developer/operations.md:3293
+#: ../developer/operations.md:3339
 msgid ""
 "The route cannot be opened from the other side: the control plane's "
 "machine generally cannot reach this one at all. So it rides the "
@@ -6847,7 +6909,7 @@ msgid ""
 "plane will dial"
 msgstr "`http://<bind>:<port>`，也就是 runner 上报、控制平面会去连接的地址"
 
-#: ../developer/operations.md:3313
+#: ../developer/operations.md:3359
 msgid ""
 "The **control plane host's** sshd must apply `GatewayPorts "
 "clientspecified` to the control account, as its block in [`deploy/host"
@@ -6874,7 +6936,7 @@ msgstr ""
 "下退出，容器随之重启；但上面那两个错误的 `GatewayPorts` 值都不会触发这种情况。在那台机器上用 `ss -ltn` "
 "确认一下：这个端口只在网桥地址上监听，别的地方都没有。"
 
-#: ../developer/operations.md:3327
+#: ../developer/operations.md:3373
 msgid ""
 "Also limit the reverse ports in that machine's firewall to its Docker "
 "bridge interface. The bind address alone does not: Linux accepts a packet"
@@ -6887,11 +6949,11 @@ msgstr ""
 "会在任何网卡上接受发往任何本机地址的数据包，所以同网段的邻居，如果把网桥地址的路由指向这台机器的局域网网卡，照样能连到这个监听端口。用 `ip "
 "-o -4 addr show to <bind>` 找到对应的网卡，然后针对每个反向端口（或者你分配的端口范围）加一条规则，例如："
 
-#: ../developer/operations.md:3338
+#: ../developer/operations.md:3384
 msgid "Persist the rule the way that machine persists its firewall."
 msgstr "按那台机器保存防火墙配置的方式，把这条规则持久化。"
 
-#: ../developer/operations.md:3340
+#: ../developer/operations.md:3386
 msgid ""
 "Set all three. The supported standalone host stack never publishes its "
 "sandbox manager and does not share a Compose network with the control "
@@ -6902,11 +6964,11 @@ msgstr ""
 "这三项都要设置。官方支持的独立主机服务，从不对外发布它的 sandbox manager，也不和控制平面共用 Compose "
 "网络，即使两套服务碰巧跑在同一台物理机上。如果声明了地址，背后却没有隧道，那就是一个没有任何东西应答的地址，结果还是 503，只是排查起来更费劲。"
 
-#: ../developer/operations.md:3346
+#: ../developer/operations.md:3392
 msgid "Check from inside the control-plane container:"
 msgstr "在控制平面容器里面检查："
 
-#: ../developer/operations.md:3353
+#: ../developer/operations.md:3399
 msgid ""
 "**HTTP 401 proves this route is reachable.** `urllib` reports it as an "
 "HTTPError because the sandbox manager refuses an unauthenticated request."
@@ -6915,11 +6977,11 @@ msgstr ""
 "**HTTP 401 恰恰说明这条路是通的。** `urllib` 会把它报成 HTTPError，因为 sandbox manager "
 "拒绝了这个没带认证的请求。如果是 DNS 错误或者超时，才说明路不通。"
 
-#: ../developer/operations.md:3357
+#: ../developer/operations.md:3403
 msgid "Three things about this topology that look like details and are not"
 msgstr "这个拓扑里，三件看起来是细节、其实很要紧的事"
 
-#: ../developer/operations.md:3359
+#: ../developer/operations.md:3405
 msgid ""
 "**The runner is not the control-plane image.** It builds from `Dockerfile"
 ".agent-runner`, which adds a Docker client to create/inspect the retained"
@@ -6931,7 +6993,7 @@ msgstr ""
 "客户端，用来创建和检查保留的对话容器；还加了 `git`，用来准备一份清除过凭据的源码归档。控制平面镜像这两样都没有，用它构建的 runner "
 "在任何主机上都过不了预检。"
 
-#: ../developer/operations.md:3365
+#: ../developer/operations.md:3411
 msgid ""
 "**There is no host worktree mapping.** For the first turn, the trusted "
 "runner uses a temporary directory only long enough to fetch the requested"
@@ -6946,7 +7008,7 @@ msgstr ""
 "`/workspace`。之后临时的克隆目录就删掉了。之后所有的编辑、服务商状态、终端、setup 的结果，以及 Fork "
 "出来的兄弟对话，都留在同一个 Docker 可写层里。"
 
-#: ../developer/operations.md:3372
+#: ../developer/operations.md:3418
 msgid ""
 "**The Docker socket is the host authority.** Runner and sandbox manager "
 "can create, start, stop, inspect, and exec in chat containers, so "
@@ -6960,11 +7022,11 @@ msgstr ""
 "重要得多。安全边界是保留沙箱本身（不受信任的多租户任务用 Kata；只有受信任的仓库才用普通 "
 "Docker），而不是主机目录的绑定挂载，也不是每一轮再起一个容器。"
 
-#: ../developer/operations.md:3379
+#: ../developer/operations.md:3425
 msgid "The sandbox network"
 msgstr "沙箱网络"
 
-#: ../developer/operations.md:3381
+#: ../developer/operations.md:3427
 msgid ""
 "A chat may carry a `setup_script`. It runs inside the retained container "
 "before the first Agent CLI turn, on the same network the agent gets "
@@ -6987,7 +7049,7 @@ msgstr ""
 "](#ssh-servers)）。长期有效的平台凭据留在沙箱之外；所有者的服务商密钥和限定到成员的 MCP 令牌，会进入各自的 CLI "
 "进程。沙箱以非特权身份运行，所以 `apt install` 用不了，请用 `pip --user`、virtualenv 或 `npm ci`。"
 
-#: ../developer/operations.md:3394
+#: ../developer/operations.md:3440
 #, python-brace-format
 msgid ""
 "New chats can also select up to eight runtime plugins through **+ → "
@@ -7010,7 +7072,7 @@ msgstr ""
 "\"@example/plugin@1.2.3\"}`，没有 marketplace。npm "
 "的确切版本号可以不写；版本范围、标签、本地路径、任意安装命令，以及来源地址里带凭据，都会被拒绝。"
 
-#: ../developer/operations.md:3405
+#: ../developer/operations.md:3451
 msgid ""
 "Installation runs during member runtime initialization, before its "
 "resident CLI accepts a prompt, using the pinned runtime version and the "
@@ -7027,7 +7089,7 @@ msgstr ""
 "开始接收提示词之前，用的是固定的运行时版本，以及这个成员私有的主目录和配置。安装成功后，进程和容器重启都会保留；安装失败可以重试，并且绝不会把这个选择标记为已完成。出错或超时会让启动失败，并给出一段长度有限的诊断信息。插件使用这个组现有的网络和非特权的成员身份。在运行时支持这些保护的地方，项目配置和插件的自动发现仍然保持关闭；明确选择的插件，通过运行时原生的机制加载，和平台的"
 " MCP 配置并存。"
 
-#: ../developer/operations.md:3415
+#: ../developer/operations.md:3461
 msgid ""
 "There is one network, the same for every task and every phase, and "
 "nothing selects it ([design](../agents/specs/2026-09-23-agent-public-"
@@ -7046,21 +7108,21 @@ msgstr ""
 "算出的五位十六进制数，再加上由这个组算出的八位。网桥的路由和地址伪装由 Docker 负责；它能访问什么，由这个部署在主机上的 nftables "
 "表决定。"
 
-#: ../developer/operations.md:3424
+#: ../developer/operations.md:3470
 msgid "What it allows and refuses"
 msgstr "放行什么，拒绝什么"
 
-#: ../developer/operations.md:3426
+#: ../developer/operations.md:3472
 msgid "Allowed:"
 msgstr "放行："
 
-#: ../developer/operations.md:3428
+#: ../developer/operations.md:3474
 msgid ""
 "public IPv4 on TCP 80 and 443 — curl, Python HTTP clients, pip, npm, Git "
 "over HTTPS;"
 msgstr "TCP 80 和 443 上的公网 IPv4，比如 curl、Python 的 HTTP 客户端、pip、npm、通过 HTTPS 的 Git；"
 
-#: ../developer/operations.md:3430
+#: ../developer/operations.md:3476
 msgid ""
 "the one resolver in `AGENT_EGRESS_DNS_SERVER`, on TCP and UDP 53. It is "
 "checked before the protected ranges, so a resolver on a private address "
@@ -7069,11 +7131,11 @@ msgstr ""
 "`AGENT_EGRESS_DNS_SERVER` 指定的那一个解析器，TCP 和 UDP 53 "
 "端口。它在受保护地址段之前检查，所以即使解析器在私有地址上，或者就在本机上，也能用，但只限 53 端口；"
 
-#: ../developer/operations.md:3433
+#: ../developer/operations.md:3479
 msgid "the group's own MCP relay, by exact bridge, address and port;"
 msgstr "这个组自己的 MCP 中继，按确切的网桥、地址和端口匹配；"
 
-#: ../developer/operations.md:3434
+#: ../developer/operations.md:3480
 msgid ""
 "the exact public IPv4 address and port of each SSH server the group's "
 "owner registered, checked and enabled for one of its chats, by exact "
@@ -7085,17 +7147,17 @@ msgstr ""
 "`ssh_targets` 集合里。它在受保护地址段之后才检查，所以不管集合里写了什么，受保护的地址照样拒绝（[SSH 服务器](#ssh-"
 "servers)）。"
 
-#: ../developer/operations.md:3439
+#: ../developer/operations.md:3485
 msgid "Refused:"
 msgstr "拒绝："
 
-#: ../developer/operations.md:3441
+#: ../developer/operations.md:3487
 msgid ""
 "every address of this host, the bridge's own gateway included, except the"
 " resolver above when it runs here;"
 msgstr "本主机的每一个地址，包括网桥自己的网关；唯一的例外是上面那个解析器正好跑在本机上的情况；"
 
-#: ../developer/operations.md:3443
+#: ../developer/operations.md:3489
 msgid ""
 "every IPv4 address that is not ordinary public unicast — IANA's special-"
 "purpose blocks `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`,"
@@ -7112,22 +7174,22 @@ msgstr ""
 "`168.63.129.16`，这是一个放在公网地址上的平台服务；以及 `AGENT_EGRESS_PROTECTED_CIDRS` "
 "额外加上的地址。这些地址的任何端口都拒绝；"
 
-#: ../developer/operations.md:3451
+#: ../developer/operations.md:3497
 msgid "other groups, this deployment's or another's;"
 msgstr "其他沙箱组，不管是本部署的还是别的部署的；"
 
-#: ../developer/operations.md:3452
+#: ../developer/operations.md:3498
 msgid "every other port and protocol: UDP 443 (QUIC), ping, all IPv6;"
 msgstr "其他所有端口和协议：UDP 443（QUIC）、ping，以及所有 IPv6；"
 
-#: ../developer/operations.md:3453
+#: ../developer/operations.md:3499
 msgid ""
 "connections started from outside. A reply is accepted only for a "
 "connection the group opened, and one from a protected address is dropped "
 "even then; there is no blanket \"established\" accept."
 msgstr "从外部主动发起的连接。只有这个组自己发起的连接，回包才会被接受；而且即使是这样，来自受保护地址的回包也会被丢弃。没有那种笼统的\"已建立连接一律放行\"。"
 
-#: ../developer/operations.md:3457
+#: ../developer/operations.md:3503
 msgid ""
 "The rules judge the address a packet is actually sent to, so a name that "
 "resolves — or is rebound — to a private address is refused like the "
@@ -7139,7 +7201,7 @@ msgstr ""
 "reset，或者 ICMP 的 \"administratively "
 "prohibited\"，所以被挡住的请求会马上失败，而不是一直等到超时；IPv6 则直接静默丢弃。"
 
-#: ../developer/operations.md:3463
+#: ../developer/operations.md:3509
 msgid ""
 "**What it does not promise** (design §2). TCP 80/443 is a port rule: "
 "nothing inspects what travels inside, so DNS over HTTPS or a tunnel on "
@@ -7153,11 +7215,11 @@ msgstr ""
 "HTTPS，也拦不住在这些端口上搭的隧道。也没有任何东西能阻止沙箱把仓库内容、它自己的短期令牌或其所有者的服务商密钥，发到某个公网主机上。平台自己的公网地址也可能访问得到。MCP"
 " 工具调用仍然不在公开的主 API 上；所有者密钥的暴露按下文所述被接受。"
 
-#: ../developer/operations.md:3471
+#: ../developer/operations.md:3517
 msgid "MCP prerequisite and accepted owner-key exposure"
 msgstr "MCP 的前提条件，以及已接受的所有者密钥暴露"
 
-#: ../developer/operations.md:3473
+#: ../developer/operations.md:3519
 msgid ""
 "**MCP isolation remains required.** Done in #327: the main API no longer "
 "mounts the tool-call router, so the MCP tunnel must point at 8001 (see "
@@ -7166,7 +7228,7 @@ msgstr ""
 "**MCP 隔离仍然是必须的。** 已经在 #327 里完成：主 API 不再挂载工具调用的路由，所以 MCP 隧道必须指向 8001（见 "
 "[MCP 服务器](#mcp-servers)）。"
 
-#: ../developer/operations.md:3477
+#: ../developer/operations.md:3523
 msgid ""
 "**Model calls go to the owner's provider.** The member's CLI holds its "
 "owner's provider key for the turn it runs (see [owner model connections"
@@ -7180,17 +7242,17 @@ msgstr ""
 "connections)）。任务遇到的代码或指令可能导致这把密钥离开沙箱。用它发起的调用消耗的是所有者自己的服务商配额；它不会获得任何其他用户的身份、MCP"
 " 工具或平台管理权限。所有者在服务商处撤销它；在这里删除连接不会在上游撤销它。"
 
-#: ../developer/operations.md:3485
+#: ../developer/operations.md:3531
 msgid ""
 "This decision does not waive Kata/network acceptance, member isolation, "
 "long-lived credential restrictions or other release gates."
 msgstr "这个决定并不免除 Kata 和网络的验收、成员隔离、长期凭据的限制，以及其他任何发布关卡。"
 
-#: ../developer/operations.md:3488
+#: ../developer/operations.md:3534
 msgid "The host tables"
 msgstr "主机上的防火墙表"
 
-#: ../developer/operations.md:3490
+#: ../developer/operations.md:3536
 msgid ""
 "The rules are two nftables tables of this deployment's: an `inet` table "
 "for routed traffic — to the internet, the host, another bridge — and a "
@@ -7204,7 +7266,7 @@ msgstr ""
 "`AGENT_SANDBOX_NAMESPACE` 的 SHA-256 的前五位十六进制数；在主机服务上，这个命名空间就是 Compose "
 "项目名，所以设好 `COMPOSE_PROJECT` 之后："
 
-#: ../developer/operations.md:3502
+#: ../developer/operations.md:3548
 msgid ""
 "The runner and the sandbox manager hold no `NET_ADMIN` and are not in the"
 " host's network namespace. They change host rules through a short-lived "
@@ -7225,45 +7287,36 @@ msgstr ""
 "命令一起执行，要么读取、比较并写入某一个网桥的中继放行规则，因为启动辅助容器的开销，远比它执行的那几条 `nft` "
 "命令大。不管守护进程的默认运行时是什么，它都在 runc 下运行，因为如果在 Kata 虚拟机里跑，改的是虚拟机自己内核的规则，而不是主机的。"
 
-#: ../developer/operations.md:3513
+#: ../developer/operations.md:3559
 msgid ""
 "**Installed before anything joins a bridge.** The runner's and the "
 "sandbox manager's startup preflight install the tables and read them back"
 " — every chain, its hook and its rule count, the protected set, the "
 "registered pool — and any difference stops the runner claiming and the "
 "sandbox manager starting. Group network work repeats the check and trusts"
-" a pass for 60 seconds. While anything of this deployment runs — a group,"
-" one that is stopping, or an environment test or prebuild — the sandbox "
-"manager's sweep renews that pass after 45 seconds, so a start or wake "
-"never waits for the install and read-back itself. A host where nothing "
-"runs starts no helper for it: the next start or wake renews a lapsed pass"
-" before its group joins a bridge. The runner renews its own pass when it "
-"hands a turn over and that pass is 45 seconds old. The turn's process "
-"normally runs no helper of its own: it takes the runner's pass, and "
-"declines the turn if the runner's check failed or its pass is missing or "
-"unreadable. A process that starts so slowly that the pass is 60 seconds "
-"old when it reads it logs `network_guard_verification_aged_out`, runs the"
-" install and read-back itself, and accepts the turn only if that check "
-"passes."
-msgstr ""
-"**在任何东西接入网桥之前就装好。** runner 和 sandbox manager "
-"启动时的预检，会安装这些表并读回来确认：每条链、它的钩子和规则数量、受保护的地址集合、登记的地址池。任何一处不一致，runner "
-"就停止认领，sandbox manager 就无法启动。组网络相关的操作会再检查一次，检查通过的结果在 60 "
-"秒内都算数。只要这个部署还有东西在运行（一个沙箱组、一个正在停止的组，或者一次环境测试或预构建），sandbox manager 的巡检就会在 "
-"45 "
-"秒后续一次这个结果，所以启动或唤醒时，从不需要自己去等安装和读回。什么都没在运行的主机，不会为此启动辅助容器：下一次启动或唤醒会在它的组接入网桥之前，先续上已经过期的结果。runner"
-" 交出轮次时，如果自己那次检查通过的结果已满 45 秒，也会续一次。轮次的进程通常不跑自己的辅助容器：它直接用 runner 的结果；如果 "
-"runner 的检查失败了，或者结果缺失、读不懂，就拒绝这个轮次。如果进程启动得太慢，读到结果时它已满 60 秒，进程就会记一条 "
-"`network_guard_verification_aged_out`，自己做一次安装和读回，只有这次检查通过才接这个轮次。"
+" a pass for 60 seconds. The sandbox manager's sweep renews that pass "
+"after 45 seconds, whether anything of this deployment runs or not, so a "
+"start or wake never waits for the install and read-back itself; on a host"
+" where nothing runs, that is one install and read-back about every 45 "
+"seconds. The runner renews its own pass between claims once it is 35 "
+"seconds old, so a turn it hands over does not wait for it either; a pass "
+"still 45 seconds old at a handover, after a failed renewal say, is "
+"renewed then. The turn's process normally runs no helper of its own: it "
+"takes the runner's pass, and declines the turn if the runner's check "
+"failed or its pass is missing or unreadable. A process that starts so "
+"slowly that the pass is 60 seconds old when it reads it logs "
+"`network_guard_verification_aged_out`, runs the install and read-back "
+"itself, and accepts the turn only if that check passes."
+msgstr "**在任何东西接入网桥之前就装好。** runner 和 sandbox manager 启动时的预检，会安装这些表并读回来确认：每条链、它的钩子和规则数量、受保护的地址集合、登记的地址池。任何一处不一致，runner 就停止认领，sandbox manager 就无法启动。组网络相关的操作会再检查一次，检查通过的结果在 60 秒内都算数。不管这个部署有没有东西在运行，sandbox manager 的巡检都会在 45 秒后续一次这个结果，所以启动或唤醒时，从不需要自己去等安装和读回；在什么都没在运行的主机上，这相当于大约每 45 秒做一次安装和读回。runner 会在两次认领之间、自己那次结果满 35 秒时就续一次，所以交出轮次时也不用等它；如果交出时结果仍满 45 秒（比如之前续的那次失败了），就在那时续。轮次的进程通常不跑自己的辅助容器：它直接用 runner 的结果；如果 runner 的检查失败了，或者结果缺失、读不懂，就拒绝这个轮次。如果进程启动得太慢，读到结果时它已满 60 秒，进程就会记一条 `network_guard_verification_aged_out`，自己做一次安装和读回，只有这次检查通过才接这个轮次。"
 
-#: ../developer/operations.md:3529
+#: ../developer/operations.md:3576
 msgid ""
 "**Scoped to this deployment.** The tables recognise traffic by the bridge"
 " interface prefix. They never flush or edit another deployment's rules, "
 "so several deployments can share a host."
 msgstr "**只作用于本部署。** 这些表通过网桥接口名的前缀来识别流量。它们绝不会清空或修改别的部署的规则，所以多个部署可以共用一台主机。"
 
-#: ../developer/operations.md:3532
+#: ../developer/operations.md:3579
 msgid ""
 "**Relays by exact endpoint.** When a group's relay is attached, its "
 "bridge, address and port are written to a `relays` set in both tables, "
@@ -7274,9 +7327,14 @@ msgid ""
 "check or a read-back that shows anything else forgets it, and the next "
 "update reads the kernel. The relay's own default route stays on its stack"
 " network, because it joins every group bridge at gateway priority -1."
-msgstr "**中继按确切的端点放行。** 一个组的中继接上之后，它的网桥、地址和端口会写进两张表里的 `relays` 集合，网桥删除时一起删掉。每次激活和每条工作区命令，都会重新同步这个网桥的放行规则；如果针对同一个 Docker 网络，防护已经做过这次更新，并且在最近 10 秒内（两次巡检）的读回中确认仍然有效，就不会再做一遍。重新安装、检查失败，或者读回时看到了别的内容，都会让它忘掉这条记录，下一次更新就会去读内核。中继自己的默认路由，仍然走它所在服务的网络，因为它是以网关优先级 -1 接入每个组网桥的。"
+msgstr ""
+"**中继按确切的端点放行。** 一个组的中继接上之后，它的网桥、地址和端口会写进两张表里的 `relays` "
+"集合，网桥删除时一起删掉。每次激活和每条工作区命令，都会重新同步这个网桥的放行规则；如果针对同一个 Docker "
+"网络，防护已经做过这次更新，并且在最近 10 "
+"秒内（两次巡检）的读回中确认仍然有效，就不会再做一遍。重新安装、检查失败，或者读回时看到了别的内容，都会让它忘掉这条记录，下一次更新就会去读内核。中继自己的默认路由，仍然走它所在服务的网络，因为它是以网关优先级"
+" -1 接入每个组网桥的。"
 
-#: ../developer/operations.md:3540
+#: ../developer/operations.md:3587
 msgid ""
 "**Watched while groups run.** While any group of this deployment is "
 "running, the sandbox manager reads the tables back on every five-second "
@@ -7301,18 +7359,18 @@ msgstr ""
 "`chat_group_exceptions_not_restored`，等它下一次激活时再同步。如果连续两次检查都失败，它会记一条 "
 "`shared_chat_network_unguarded`，并停掉所有正在运行的沙箱组（工作区和原生会话都保留），而不是让某个沙箱组在失去启动时依赖的那道边界之后继续跑。唤醒沙箱组时，会先重新安装并核实规则；做不到的话，唤醒就失败。"
 
-#: ../developer/operations.md:3553
+#: ../developer/operations.md:3600
 msgid ""
 "**Kept by the kernel.** A runner exiting leaves the tables in place; a "
 "reboot clears them, and no group starts until they have been installed "
 "again."
 msgstr "**规则保存在内核里。** runner 退出时，这些表还在；机器重启会把它们清掉，在重新装好之前，任何沙箱组都不会启动。"
 
-#: ../developer/operations.md:3557
+#: ../developer/operations.md:3604
 msgid "To look at them, read-only, use the same shape of helper:"
 msgstr "要以只读方式查看它们，用同样形态的辅助容器："
 
-#: ../developer/operations.md:3571
+#: ../developer/operations.md:3618
 msgid ""
 "Keep `--runtime runc`: on a host whose Docker default runtime is Kata the"
 " listing would otherwise come from a VM. The counters are totals across "
@@ -7322,11 +7380,11 @@ msgstr ""
 "`--runtime runc` 不能省：如果主机的 Docker 默认运行时是 "
 "Kata，不加的话列出来的就是某个虚拟机里的规则。计数器是本部署所有沙箱组的总和。不会保留按连接记录的日志（设计 §10）。"
 
-#: ../developer/operations.md:3575
+#: ../developer/operations.md:3622
 msgid "Overlapping pools"
 msgstr "地址池重叠"
 
-#: ../developer/operations.md:3577
+#: ../developer/operations.md:3624
 msgid ""
 "Each deployment registers its pool in its own `inet` table, and after "
 "installing it compares its pool with those of the `cloud_agent_*` tables "
@@ -7343,7 +7401,7 @@ msgstr ""
 "registered earlier by …`，并要求给每个部署各自分配一个 "
 "`AGENT_EGRESS_CHAT_NETWORK_POOL`。先装的那个继续运行，所以一个照抄了地址池的邻居启动时，没法把一个正在工作的部署搞垮；而且因为每个部署都是装好之后才检查，两个同时启动的部署也不会互相漏掉对方。"
 
-#: ../developer/operations.md:3586
+#: ../developer/operations.md:3633
 msgid ""
 "The pool must also stay clear of every network the host already routes. "
 "Docker takes an explicit subnet as given — it checks other Docker "
@@ -7367,7 +7425,7 @@ msgstr ""
 "还宽的兜底路由（比如全隧道 VPN 的两个 "
 "`/1`），以及这个部署自己的网桥，都不算冲突。只通过默认网关才能到达的网络，没有自己的路由可查，所以选地址池时，也要考虑站点本身的地址规划。"
 
-#: ../developer/operations.md:3599
+#: ../developer/operations.md:3646
 msgid ""
 "A retired deployment's tables stay until the host reboots, and keep its "
 "pool registered. Once that deployment is gone for good, delete its two "
@@ -7386,11 +7444,11 @@ msgstr ""
 "会对每个组网桥做路由和地址伪装，限制它的正是这张表。任何清空主机整套规则的操作，也会把这些表删掉；下一次检查时会重新装上，连同每个运行中沙箱组的中继和"
 " SSH 例外，但不要在有活跃沙箱组的主机上做这种重新加载。"
 
-#: ../developer/operations.md:3609
+#: ../developer/operations.md:3656
 msgid "Choosing the resolver"
 msgstr "选择解析器"
 
-#: ../developer/operations.md:3611
+#: ../developer/operations.md:3658
 msgid ""
 "`AGENT_EGRESS_DNS_SERVER` is one IPv4 address, and the only DNS a sandbox"
 " can use. A public resolver works anywhere. A site resolver on a private "
@@ -7402,7 +7460,7 @@ msgstr ""
 "DNS。公共解析器在哪里都能用。站点自己的解析器，即使在私有地址上，或者就在本机上，也能用，它会成为沙箱唯一能访问的私有地址，而且只限 53 "
 "端口。它不能是回环地址（沙箱访问不到主机的 `127.0.0.53`），不能是未指定地址，也不能在地址池里面。"
 
-#: ../developer/operations.md:3617
+#: ../developer/operations.md:3664
 msgid ""
 "Under runc, a sandbox is created with `--dns` set to it: Docker's "
 "embedded resolver at `127.0.0.11` answers the relay aliases and forwards "
@@ -7421,11 +7479,11 @@ msgstr ""
 "`/etc/hosts` 里的中继条目放在一起。每次冷启动时在 guest 里做的检查，会同时确认两件事：guest "
 "配置的确实是这个解析器，并且它能正常应答；具体做法是查询一次根域名服务器，任何正常工作的递归解析器都会在三秒内回答。"
 
-#: ../developer/operations.md:3627
+#: ../developer/operations.md:3674
 msgid "Protecting more addresses"
 msgstr "保护更多的地址"
 
-#: ../developer/operations.md:3629
+#: ../developer/operations.md:3676
 msgid ""
 "`AGENT_EGRESS_PROTECTED_CIDRS` takes comma-separated IPv4 blocks to "
 "refuse on top of the built-in ones — an institution's services on public "
@@ -7440,11 +7498,11 @@ msgstr ""
 "端口也仍然能访问，因为 DNS 是最先检查的。改了这个值，要等 runner 和 sandbox manager "
 "带着新值重新部署，才会在主机上生效：每次安装都会替换受保护的地址集合，读回时会拿它和配置对比。"
 
-#: ../developer/operations.md:3636
+#: ../developer/operations.md:3683
 msgid "When something is refused"
 msgstr "被拒绝时怎么排查"
 
-#: ../developer/operations.md:3638
+#: ../developer/operations.md:3685
 msgid ""
 "Settings first. `sandbox_host.sh prepare` reads them with the candidate "
 "image's own parser before any runner is drained, and a refusal prints "
@@ -7455,7 +7513,7 @@ msgstr ""
 "之前，用候选镜像自己的解析器读取这些设置；如果被拒绝，会在下面某条错误之后打印 `the sandbox network settings "
 "were refused (see the error above)`："
 
-#: ../developer/operations.md:3643
+#: ../developer/operations.md:3690
 msgid ""
 "`AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address"
 " pool` or `… must be RFC1918 space holding at least one /29` — unset, "
@@ -7468,7 +7526,7 @@ msgstr ""
 "`10.0.0.0/8`、`172.16.0.0/12` 和 `192.168.0.0/16` "
 "范围内（链路本地、回环和其他特殊用途的地址段也会被拒绝）；或者比一个 `/29` 还小；"
 
-#: ../developer/operations.md:3647
+#: ../developer/operations.md:3694
 msgid ""
 "`AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` or `… "
 "must be reachable from a group bridge` — unset, not IPv4, loopback, "
@@ -7477,7 +7535,7 @@ msgstr ""
 "`AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` 或 `… must"
 " be reachable from a group bridge`：没设置、不是 IPv4、是回环地址、是未指定地址，或者落在地址池里；"
 
-#: ../developer/operations.md:3650
+#: ../developer/operations.md:3697
 msgid ""
 "`AGENT_SANDBOX_MCP_URL='…' names a relay by IP; use its network alias` — "
 "each group bridge gives the relay a fresh address, so only its name "
@@ -7486,13 +7544,13 @@ msgstr ""
 "`AGENT_SANDBOX_MCP_URL='…' names a relay by IP; use its network "
 "alias`：每个组网桥都会给中继分配一个新地址，只有名字是不变的。"
 
-#: ../developer/operations.md:3654
+#: ../developer/operations.md:3701
 msgid ""
 "Preflight — until it passes, the runner claims nothing and the sandbox "
 "manager does not start:"
 msgstr "然后是预检。预检通过之前，runner 不会认领任何任务，sandbox manager 也不会启动："
 
-#: ../developer/operations.md:3657
+#: ../developer/operations.md:3704
 msgid ""
 "`the relay network '…' does not exist` — the stack is not up, or "
 "`AGENT_RELAY_NETWORK` names something else;"
@@ -7500,7 +7558,7 @@ msgstr ""
 "`the relay network '…' does not exist`：服务还没起来，或者 `AGENT_RELAY_NETWORK` "
 "指向了别的网络；"
 
-#: ../developer/operations.md:3659
+#: ../developer/operations.md:3706
 msgid ""
 "`` the relay network '…' is not `internal` `` — it must not route "
 "anywhere; let Compose recreate it as declared;"
@@ -7508,7 +7566,7 @@ msgstr ""
 "`` the relay network '…' is not `internal` ``：中继网络绝不能路由到任何地方，让 Compose "
 "按声明重新创建它；"
 
-#: ../developer/operations.md:3661
+#: ../developer/operations.md:3708
 msgid ""
 "`nft failed: …` or `network guard helper could not run: …` — the helper "
 "could not install the rules: the host kernel lacks nftables support, or "
@@ -7517,7 +7575,7 @@ msgstr ""
 "`nft failed: …` 或 `network guard helper could not run: "
 "…`：辅助容器没能装上规则，要么是主机内核不支持 nftables，要么是 Docker 拒绝了这个辅助容器；"
 
-#: ../developer/operations.md:3664
+#: ../developer/operations.md:3711
 msgid ""
 "`the network guard runs its helper from this container's own image` — the"
 " runner finds its image by inspecting its own container, named by "
@@ -7526,7 +7584,7 @@ msgstr ""
 "`the network guard runs its helper from this container's own "
 "image`：runner 是通过检查自己的容器（按 `HOSTNAME` 找）来确定镜像的，自定义了 `hostname:` 就会找不到；"
 
-#: ../developer/operations.md:3667
+#: ../developer/operations.md:3714
 msgid ""
 "`… is missing chain …`, `… holds N rules, expected M`, `… is not hooked "
 "on …`, `… protects …, not the configured set` or `… registers pool …, not"
@@ -7539,7 +7597,7 @@ msgstr ""
 "…`，每条都会写明是哪张表：这些表在装好之后被人改过，或者设置不一样的 runner 和 sandbox manager 在互相覆盖。用同一份 "
 "`.env` 把两者重新部署一遍；"
 
-#: ../developer/operations.md:3672
+#: ../developer/operations.md:3719
 msgid ""
 "`this deployment's pool … overlaps …` — another deployment's pool, or `… "
 "overlaps the host route … on …` — a network the host already has; see "
@@ -7548,19 +7606,21 @@ msgstr ""
 "`this deployment's pool … overlaps …`：和另一个部署的地址池重叠；或者 `… overlaps the "
 "host route … on …`：和主机已有的某个网络重叠；见[地址池重叠](#overlapping-pools)；"
 
-#: ../developer/operations.md:3675
+#: ../developer/operations.md:3722
 msgid ""
 "`the sandbox network needs Docker 28 or newer, client and daemon` — the "
 "relay's gateway priority needs both; see §0."
-msgstr "`the sandbox network needs Docker 28 or newer, client and daemon`：中继的网关优先级要求客户端和守护进程都满足；见 §0。"
+msgstr ""
+"`the sandbox network needs Docker 28 or newer, client and "
+"daemon`：中继的网关优先级要求客户端和守护进程都满足；见 §0。"
 
-#: ../developer/operations.md:3678
+#: ../developer/operations.md:3725
 msgid ""
 "Group lifecycle. These fail the turn or operation that needed the group's"
 " network; the workspace is kept:"
 msgstr "最后是沙箱组的生命周期。下面这些错误，会让需要这个组网络的轮次或操作失败，工作区会保留："
 
-#: ../developer/operations.md:3681
+#: ../developer/operations.md:3728
 msgid ""
 "`relay alias '…' has no running container on relay network '…'` (or "
 "`multiple running containers`) — a tunnel is down or restarting, or two "
@@ -7569,7 +7629,7 @@ msgstr ""
 "`relay alias '…' has no running container on relay network '…'`（或者 "
 "`multiple running containers`）：某条隧道挂了或正在重启，或者两套服务共用了同一个中继网络；"
 
-#: ../developer/operations.md:3684
+#: ../developer/operations.md:3731
 msgid ""
 "`AGENT_EGRESS_CHAT_NETWORK_POOL … has no free /29 subnet` — every `/29` "
 "in the pool is taken, by this deployment's groups or by other Docker "
@@ -7578,7 +7638,7 @@ msgstr ""
 "`AGENT_EGRESS_CHAT_NETWORK_POOL … has no free /29 subnet`：地址池里的每个 `/29` "
 "都被占满了，要么是本部署的沙箱组占的，要么是同一地址段里的其他 Docker 网络占的；"
 
-#: ../developer/operations.md:3687
+#: ../developer/operations.md:3734
 msgid ""
 "`group network check failed inside the sandbox: …` — the in-guest check "
 "after a cold start found one of:"
@@ -7586,11 +7646,11 @@ msgstr ""
 "`group network check failed inside the sandbox: …`：冷启动之后在 guest "
 "里做的检查，发现了下面某个问题："
 
-#: ../developer/operations.md:3689
+#: ../developer/operations.md:3736
 msgid "`no default route`, `resolver is […], expected […]`;"
 msgstr "`no default route`、`resolver is […], expected […]`；"
 
-#: ../developer/operations.md:3690
+#: ../developer/operations.md:3737
 msgid ""
 "`resolver … did not answer: …` or `… did not answer the query usefully` —"
 " the resolver is down, refuses recursion, or (under runc) the container "
@@ -7599,11 +7659,11 @@ msgstr ""
 "`resolver … did not answer: …` 或 `… did not answer the query "
 "usefully`：解析器挂了、拒绝递归查询，或者（在 runc 下）容器创建时用的解析器，已经不被现在的规则允许了；"
 
-#: ../developer/operations.md:3693
+#: ../developer/operations.md:3740
 msgid "`relay host:port unreachable: …`;"
 msgstr "`relay host:port unreachable: …`；"
 
-#: ../developer/operations.md:3694
+#: ../developer/operations.md:3741
 msgid ""
 "`the host at …:9/udp was refused by ECONNREFUSED, not by the network "
 "rules`, `the metadata address 169.254.169.254:80 answered; the network "
@@ -7619,13 +7679,13 @@ msgstr ""
 "168.63.129.16:80` 也会有同样的提示），或者 `… was not refused within "
 "2s`：主机地址和两个平台地址，都应该立即被规则自己回复的 ICMP 拒绝，结果没有，说明 guest 的流量没有经过本部署的表。"
 
-#: ../developer/operations.md:3702
+#: ../developer/operations.md:3749
 msgid ""
 "The sandbox is stopped, not deleted. Reaching the public internet is not "
 "part of the check — an outside outage is not a broken boundary;"
 msgstr "沙箱会被停掉，但不会删除。能不能访问公网不在检查范围内，因为外部服务出故障，并不代表边界坏了；"
 
-#: ../developer/operations.md:3704
+#: ../developer/operations.md:3751
 msgid ""
 "`fixed relay joined the chat network without its gateway priority` — the "
 "Docker daemon ignored `--gw-priority`; it needs Docker 28 or newer;"
@@ -7633,7 +7693,7 @@ msgstr ""
 "`fixed relay joined the chat network without its gateway priority`：Docker"
 " 守护进程忽略了 `--gw-priority`，需要 Docker 28 或更新版本；"
 
-#: ../developer/operations.md:3706
+#: ../developer/operations.md:3753
 msgid ""
 "`Kata guest network sync failed: …` — the guest-root helper could not "
 "write `/etc/hosts` or `/etc/resolv.conf`;"
@@ -7641,7 +7701,7 @@ msgstr ""
 "`Kata guest network sync failed: …`：guest-root 辅助程序没能写入 `/etc/hosts` 或 "
 "`/etc/resolv.conf`；"
 
-#: ../developer/operations.md:3708
+#: ../developer/operations.md:3755
 msgid ""
 "`retained chat is attached to network '…', which is not its group "
 "bridge`, ending `needs the one-time cleanup` — a chat from the previous "
@@ -7652,7 +7712,7 @@ msgstr ""
 "bridge`，结尾是 `needs the one-time cleanup`：这是旧网络时代留下的对话；sandbox manager "
 "启动时遇到它，会直接无法启动。见下一节；"
 
-#: ../developer/operations.md:3711
+#: ../developer/operations.md:3758
 msgid ""
 "`a running retained chat is not on exactly its group bridge` — a running "
 "guest is never rewired underneath it; stop it first."
@@ -7660,7 +7720,7 @@ msgstr ""
 "`a running retained chat is not on exactly its group bridge`：运行中的 guest "
 "绝不会在底下被重新接线，先把它停掉。"
 
-#: ../developer/operations.md:3714
+#: ../developer/operations.md:3761
 msgid ""
 "In the sandbox manager's log, `chat_legacy_network_found` names a bridge "
 "of this deployment from the previous per-phase topology; it is reported, "
@@ -7673,11 +7733,11 @@ msgstr ""
 "指的是本部署里一个来自以前\"按阶段分网络\"拓扑的网桥；它只会被报告出来，绝不会被接管或修复。`chat_group_relay_exceptions_left`"
 " 表示某个已删除网桥的中继条目，没能从表里撤掉。网桥没了之后，这些条目什么都匹配不上；如果辅助容器一直运行不了，下一次激活会失败。"
 
-#: ../developer/operations.md:3720
+#: ../developer/operations.md:3767
 msgid "One-time cleanup when upgrading to the one network"
 msgstr "升级到单一网络时的一次性清理"
 
-#: ../developer/operations.md:3722
+#: ../developer/operations.md:3769
 msgid ""
 "Only for a host that ran the previous network — per-phase bridges and the"
 " Squid proxy. A host that never did needs none of this. The new version "
@@ -7696,7 +7756,7 @@ msgstr ""
 "就完全起不来；旧的网桥则只会被记日志。设计上把这次切换定位为开发和测试主机上的一步操作，那些主机上没有需要迁移的用户（§8），所以下面的步骤会丢弃旧的保留对话。**在第"
 " 4 步之前，把你需要的工作区都导出来。**"
 
-#: ../developer/operations.md:3732
+#: ../developer/operations.md:3779
 msgid ""
 "**Remove only this deployment's resources.** Every listing below filters "
 "by this deployment's own labels: the Compose project for the stack's own "
@@ -7712,24 +7772,24 @@ msgstr ""
 "Compose "
 "项目名）。删任何东西之前，先看一遍列出来的内容。带着别的项目名或命名空间的资源，属于这台机器上的另一个部署，不要动它；分不清归属的东西，也不要动。"
 
-#: ../developer/operations.md:3740
+#: ../developer/operations.md:3787
 msgid ""
 "Drain the host (**Admin → Servers**) and wait until it runs nothing, then"
 " stop this stack:"
 msgstr "排空主机（**Admin → Servers**），等它上面什么都不跑了，再停掉这套服务："
 
-#: ../developer/operations.md:3748
+#: ../developer/operations.md:3795
 msgid ""
 "If the checkout already holds the new release, add the two settings from "
 "step 7 to `.env` first: the new compose file does not render without "
 "them."
 msgstr "如果代码目录里已经是新版本了，先把第 7 步里的两个设置加进 `.env`，否则新的 compose 文件渲染不出来。"
 
-#: ../developer/operations.md:3751
+#: ../developer/operations.md:3798
 msgid "List this deployment's chat containers:"
 msgstr "列出本部署的对话容器："
 
-#: ../developer/operations.md:3760
+#: ../developer/operations.md:3807
 msgid ""
 "Stopping the stack leaves chat containers as they were, so some may still"
 " be running. Every one of them predates the upgrade. The new version "
@@ -7740,17 +7800,17 @@ msgstr ""
 "停掉服务并不会改变对话容器的状态，所以有些可能还在运行。它们全都是升级之前创建的。新版本会拒绝任何还接在旧网络上的容器，而且它们没有一个是用 "
 "`AGENT_EGRESS_DNS_SERVER` 创建的，在 runc 下，容器的解析器在创建时就固定了。所以它们都得删掉。"
 
-#: ../developer/operations.md:3766
+#: ../developer/operations.md:3813
 msgid ""
 "Export what you want to keep. A chat's workspace exists only in its "
 "container's writable layer, and `docker cp` reads a stopped container:"
 msgstr "先把想保留的东西导出来。对话的工作区只存在于容器的可写层里，`docker cp` 可以读取已停止的容器："
 
-#: ../developer/operations.md:3773
+#: ../developer/operations.md:3820
 msgid "Remove the containers from step 2, by ID:"
 msgstr "按 ID 删除第 2 步列出的那些容器："
 
-#: ../developer/operations.md:3779
+#: ../developer/operations.md:3826
 msgid ""
 "This is the one sanctioned `docker rm` of chat containers; everywhere "
 "else [Retained Docker storage on a host](#retained-docker-storage-"
@@ -7760,11 +7820,11 @@ msgstr ""
 "这是唯一一处被允许对对话容器执行 `docker rm` 的地方；其他任何场合，[主机上的保留 Docker 存储](#retained-"
 "docker-storage-on-a-host)都禁止这么做。这些对话无法再继续（上下文显示为 `LOST`）；新任务会用新的容器。"
 
-#: ../developer/operations.md:3784
+#: ../developer/operations.md:3831
 msgid "List this deployment's chat networks, and remove the old ones:"
 msgstr "列出本部署的对话网络，删掉旧的："
 
-#: ../developer/operations.md:3795
+#: ../developer/operations.md:3842
 msgid ""
 "Each line is a name, whether the network is internal, and its bridge "
 "interface name. An old `freeinference-chat-net-*` network is internal "
@@ -7776,13 +7836,13 @@ msgstr ""
 "internal 的（`true`），并且没有接口名；新版本的组网桥不是 internal 的，接口名以 `ca…` "
 "开头。新版本运行之前，列出来的全都是旧的。"
 
-#: ../developer/operations.md:3801
+#: ../developer/operations.md:3848
 msgid ""
 "Remove the proxy and the old Compose networks and volume. List what "
 "Compose created for this project:"
 msgstr "删掉代理，以及旧的 Compose 网络和卷。先列出 Compose 为这个项目创建的东西："
 
-#: ../developer/operations.md:3813
+#: ../developer/operations.md:3860
 msgid ""
 "Remove, with `docker rm -f`, `docker network rm` and `docker volume rm`: "
 "the containers of the services `agent-egress-proxy` and `agent-egress-"
@@ -7803,7 +7863,7 @@ msgstr ""
 "egress-proxy-config` 卷，它里面只有生成的 Squid 配置。列表里的其他东西都不属于这次清理。如果之前用上一个版本执行过 "
 "`down`，其中一部分可能已经删掉了。"
 
-#: ../developer/operations.md:3824
+#: ../developer/operations.md:3871
 msgid ""
 "Update `.env` from the new `deploy/host/.env.example`. Set "
 "`AGENT_EGRESS_CHAT_NETWORK_POOL`, which no longer has a default, and "
@@ -7822,7 +7882,7 @@ msgstr ""
 "`10.240.0.0/16`：如果这台机器上的两个部署都沿用了它，给其中一个换一个，否则后装的那个会拒绝启动。删掉已经退役的设置：`AGENT_EGRESS_SETUP_TIER`、`AGENT_EGRESS_AGENT_TIER`、`AGENT_EGRESS_ALLOWLIST`、`AGENT_EGRESS_NETWORK_*`、`AGENT_EGRESS_PROXY_*`、`AGENT_EGRESS_STOP_GRACE`、`AGENT_SANDBOX_NETWORK`"
 " 和 `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`。已经没有代码读取它们了。"
 
-#: ../developer/operations.md:3834
+#: ../developer/operations.md:3881
 msgid ""
 "Undrain the host (**Admin → Servers**, or `POST /admin/agent/runner-"
 "hosts/<host>/undrain`) — with its runners stopped it claims nothing yet, "
@@ -7840,24 +7900,24 @@ msgstr ""
 "tables`（见[主机上的防火墙表](#the-host-tables)）确认本部署的 `inet` 和 `bridge` "
 "两张表都在，然后跑一个 setup 里会安装软件包的新任务。"
 
-#: ../developer/operations.md:3843
+#: ../developer/operations.md:3890
 msgid "Runtime verification"
 msgstr "运行时验证"
 
-#: ../developer/operations.md:3845
+#: ../developer/operations.md:3892
 msgid ""
 "Run the adapter contract tests after changing runtime integration code. "
 "They replay recorded and synthetic events to pin normalized mapping "
 "without a live model or deployment credential:"
 msgstr "改了运行时集成代码之后，要跑适配器的契约测试。它们会重放录下来的事件和合成的事件，在不需要真实模型、也不需要部署凭据的情况下，锁定事件规范化后的映射："
 
-#: ../developer/operations.md:3853
+#: ../developer/operations.md:3900
 msgid ""
 "The MCP suites live here with the catalogue, per-user registry, relay, "
 "filters, API and runtime adapter. After changing that path, run at least:"
 msgstr "MCP 的测试套件也在这里，和目录、每用户的注册表、中继、过滤器、API 以及运行时适配器放在一起。改了这条路径之后，至少要跑："
 
-#: ../developer/operations.md:3863
+#: ../developer/operations.md:3910
 msgid ""
 "These tests do not invoke the installed agent binaries. An installed-CLI "
 "smoke test and full live-model matrix belong to the deployment operating "
@@ -7869,7 +7929,7 @@ msgstr ""
 "的冒烟测试，以及完整的真实模型测试矩阵，归运营这些二进制、模型和凭据的部署方负责。那套一致性测试的配置放在部署 overlay "
 "里，不要放进中立的上游仓库。"
 
-#: ../developer/operations.md:3868
+#: ../developer/operations.md:3915
 msgid ""
 "What the first staging and production runs exercised, and what they left "
 "unverified, is kept as a [dated record](../agents/reviews/2026-08-04"
@@ -7879,11 +7939,11 @@ msgstr ""
 "运行实际验证了哪些东西、又留下了哪些没验证，保存为一份[带日期的记录](../agents/reviews/2026-08-04-sandbox-"
 "operations-verification-baseline.md)。"
 
-#: ../developer/operations.md:3872
+#: ../developer/operations.md:3919
 msgid "SSH servers"
 msgstr "SSH 服务器"
 
-#: ../developer/operations.md:3874
+#: ../developer/operations.md:3921
 msgid ""
 "An owner registers their own Linux servers under **Settings → SSH "
 "connections** (`/settings/ssh-connections`), checks each one, and turns "
@@ -7899,7 +7959,7 @@ msgstr ""
 "服务器设计](../agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md)，以及 "
 "[AGENTS.md](../../AGENTS.md) §7 里关于所有者 SSH 服务器的那一条。"
 
-#: ../developer/operations.md:3882
+#: ../developer/operations.md:3929
 msgid ""
 "**Migration and key.** `0080_user_ssh_servers` adds `agent_ssh_servers`, "
 "`agent_ssh_thread_bindings`, `agent_ssh_server_events` and the "
@@ -7914,7 +7974,7 @@ msgstr ""
 "`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` 在它专用的 `hybridinference/ssh-server-"
 "key/v1` 域下加密；没有这把密钥时，这一部分会如实提示，并且无法添加任何服务器。"
 
-#: ../developer/operations.md:3888
+#: ../developer/operations.md:3935
 #, python-brace-format
 msgid ""
 "**Rollout.** Runners and sandbox managers advertise `ssh-access-v1`, and "
@@ -7932,7 +7992,7 @@ msgstr ""
 " 这个接口，这一轮会失败，而不是在缺了服务器的情况下照样启动 "
 "agent。先把主机升级好，再让所有者在上面开启服务器；已经固定在旧主机上的沙箱组会等着。"
 
-#: ../developer/operations.md:3895
+#: ../developer/operations.md:3942
 msgid ""
 "**What a turn does.** Before setup and the agent start, the runner sends "
 "the sandbox manager the group's whole SSH state from the claim, marked as"
@@ -7959,7 +8019,7 @@ msgstr ""
 "最上面加一行 "
 "`Include`。其他成员只会失去服务器，不会多出服务器。如果一个沙箱组里从来没有对话选过服务器，这些都不会发生，也不会发送任何状态。"
 
-#: ../developer/operations.md:3908
+#: ../developer/operations.md:3955
 msgid ""
 "**Taking access away is immediate; granting it waits for the next turn.**"
 " Turning a server on or off for a chat, editing, checking, rekeying or "
@@ -7993,7 +8053,7 @@ msgstr ""
 "把沙箱组标记为运行中时，控制平面会再推送一次这个组的状态；它比认领时读到的更新，不管两者谁先到，manager "
 "都会保留这一份。控制平面连不上的主机，会随下一轮的认领拿到状态。"
 
-#: ../developer/operations.md:3927
+#: ../developer/operations.md:3974
 msgid ""
 "**Checks dial out from the control plane.** A check resolves the address,"
 " refuses it whole if any answer is private, reserved or protected, reads "
@@ -8012,17 +8072,17 @@ msgstr ""
 "设成和主机一样的值，这样检查拒绝的地址块就和沙箱一致。控制平面需要能向外连接所有者服务器的 SSH 端口（TCP）。每个所有者每小时最多做 20 "
 "次检查。每次检查对每个输出流最多读 64 KB，超过就杀掉客户端，所以一台用大量输出刷屏的服务器，只会让检查失败，而不会把控制平面的内存撑满。"
 
-#: ../developer/operations.md:3937
+#: ../developer/operations.md:3984
 msgid ""
 "**Owner firewalls.** A server that limits who may connect must allow both"
 " the control plane (for checks) and every host its chats may run on."
 msgstr "**所有者的防火墙。** 如果服务器限制了谁能连接，就必须同时放行控制平面（用于检查），以及它的对话可能运行的每一台主机。"
 
-#: ../developer/operations.md:3940
+#: ../developer/operations.md:3987
 msgid "Owner model connections"
 msgstr "所有者模型连接"
 
-#: ../developer/operations.md:3942
+#: ../developer/operations.md:3989
 msgid ""
 "An owner adds their own inference endpoint under **Settings → My settings"
 " → Personal model connections** (`/settings/my-settings`): a name, a Base"
@@ -8042,7 +8102,7 @@ msgstr ""
 "-user-model-connections.zh-CN.md)，以及 [AGENTS.md](../../AGENTS.md) §7 "
 "中的所有者模型连接条目。"
 
-#: ../developer/operations.md:3952
+#: ../developer/operations.md:3999
 msgid ""
 "**Turning it on.** `AGENT_MODEL_CONNECTIONS_ENABLED` is off by default, "
 "and nothing runs until it is on: there is no other inference. Turn it on "
@@ -8054,7 +8114,7 @@ msgstr ""
 "**打开功能。** `AGENT_MODEL_CONNECTIONS_ENABLED` "
 "默认关闭，在打开之前什么都不会运行：没有其他推理来源。等每台主机和每个控制平面副本都运行本版本后再打开。这个设置只控制准入。关闭它会停止新建连接、重新启用连接以及在连接上的新轮次或新消息；已经准入的轮次仍在原连接上运行或失败。它不能用来停止正在运行的工作。"
 
-#: ../developer/operations.md:3958
+#: ../developer/operations.md:4005
 msgid ""
 "**Rolling back.** Do not run a release from before independent accounts "
 "against this database: it would read neither the accounts nor the "
@@ -8067,7 +8127,7 @@ msgstr ""
 "不要针对这个数据库运行独立账号版本之前的版本：它既读不了账号，也读不了连接来源。只要还存在任何连接、任何指向连接的轮次或等待中的消息、或任何驻留在连接上的成员（包括已结束的会话），降级"
 " `0106` 就会拒绝执行。是否删除这些数据，需要事先作为数据决策来定。"
 
-#: ../developer/operations.md:3963
+#: ../developer/operations.md:4010
 msgid ""
 "**Migration and key.** `0106_user_model_connections` adds the tables and "
 "the source columns. Keys are encrypted with "
@@ -8083,7 +8143,7 @@ msgstr ""
 "域下加密；没有这个密钥时，页面会说明原因，什么都无法保存。所有者接口不会返回密钥，被拒绝的请求只指出出错的字段，不回显其内容。主机经过授权的领取和驻留响应确实带有密钥：成员的"
 " CLI 就是这样拿到它的。"
 
-#: ../developer/operations.md:3970
+#: ../developer/operations.md:4017
 msgid ""
 "**Verification and protocols.** Owners are not asked which APIs their "
 "provider offers, and cannot declare them. Verifying a model streams a "
@@ -8124,7 +8184,7 @@ msgstr ""
 "`effort_unsupported`），输入框不提供推理强度控件，也不为此保存任何内容。模型无法支持的组合会在提交任务或消息时被拒绝，在每次领取和驻留时还会再检查一次；不会退回到其他连接、模型或"
 " API，推理时也不会边试边换。"
 
-#: ../developer/operations.md:3994
+#: ../developer/operations.md:4041
 msgid ""
 "**Verify before saving.** Creating a connection, and an edit that changes"
 " its key or Base URL or adds models, verifies inside the saving request "
@@ -8160,7 +8220,7 @@ msgstr ""
 " 48 次服务商请求、分两批各四个模型进行。 验证的总时限为 240 秒，超时返回 `504 "
 "model_connection_verification_timeout`，不写入任何内容。部署自带的边缘代理允许此时长，额外的代理也必须允许。保存期间禁用取消按钮，因为服务端仍可能提交请求。"
 
-#: ../developer/operations.md:4018
+#: ../developer/operations.md:4065
 msgid ""
 "**Where requests go.** The OpenAI CLIs append `/chat/completions` or "
 "`/responses` to the Base URL exactly as written. Claude Code's SDK "
@@ -8180,7 +8240,7 @@ msgstr ""
 "`anthropic-version: 2023-06-01` 认证；验证用同样的 URL 和同样的请求头。CLI 还可能在同一主机上调用 "
 "`count_tokens`、`/v1/models` 和 `HEAD /api/hello`；服务商没有这些接口也能正常运行。"
 
-#: ../developer/operations.md:4027
+#: ../developer/operations.md:4074
 msgid ""
 "**Model ID suggestions.** The add and edit forms can load the provider's "
 "model list on request to pick IDs from: `POST /v1/agent/model-connections"
@@ -8206,7 +8266,7 @@ msgstr ""
 "`…/v1/models`（最多两次请求）。失败时只返回类别。它不写入任何内容，列出的 ID "
 "在表单保存并验证之前不代表任何结论；读取列表是可选的，任何 ID 都可以手动输入。"
 
-#: ../developer/operations.md:4041
+#: ../developer/operations.md:4088
 msgid ""
 "**Host rollout.** Runners advertise `model-connections-v1`, and `model-"
 "protocol-translation-v1` when they can run a translated member. A claim "
@@ -8218,7 +8278,7 @@ msgstr ""
 "**主机发布。** 运行器会声明 `model-connections-v1`，能运行需要转换的成员时还会声明 `model-protocol-"
 "translation-v1`。连接上的轮次或需要转换的轮次如果被没有声明所需能力的运行器领取，会被释放且不消耗尝试次数，所以要先发布主机。连接被停用、删除或不再适用时，轮次在领取时以相应原因失败。"
 
-#: ../developer/operations.md:4047
+#: ../developer/operations.md:4094
 msgid ""
 "**What a turn does.** The claim carries the connection's exact Base URL, "
 "protocol, credential revision and key; the runner masks the key. The "
@@ -8239,7 +8299,7 @@ msgstr ""
 " 的 CLI 绝不会拿到 Messages 连接的密钥，Claude Code 也不会拿到 OpenAI 连接的密钥。密钥、Base URL "
 "或该模型经验证的路径变了之后，下一轮会启动新进程，因为计划和令牌都属于进程复用的身份。领取和它的驻留必须在凭据版本和计划（`client>upstream`）两方面都一致；如果轮次启动期间路径变了，这次启动会失败，而不会把两者混在一起。"
 
-#: ../developer/operations.md:4058
+#: ../developer/operations.md:4105
 msgid ""
 "**Scan history.** When a key is bound to a residency, an encrypted "
 "scanning copy is recorded under a separate domain against that sandbox "
@@ -8256,7 +8316,7 @@ msgstr ""
 " Fork "
 "成员的密钥，不包括其他组的密钥。删除连接后，副本仍随沙箱组记录保留；它仍然是真实的服务商密钥，在这里删除连接并不会在服务商处撤销它。如果某个组的历史超出扫描上限，扫描会失败关闭，而不会跳过密钥。"
 
-#: ../developer/operations.md:4067
+#: ../developer/operations.md:4114
 msgid ""
 "**Translated turns.** For Codex or Claude Code on a model whose only "
 "usable API is Chat Completions, the host installs `/usr/local/libexec"
@@ -8300,7 +8360,7 @@ msgstr ""
 "Code 不带 WebSearch 工具；其他工具照常可用，包括 Codex 子智能体和 MCP 工具。之前的推理或 thinking 不会发给 "
 "Chat Completions 服务商。`AGENT_COMPAT_*` 变量属于启动器，永远不会传到 CLI。"
 
-#: ../developer/operations.md:4091
+#: ../developer/operations.md:4138
 msgid ""
 "**Changes take effect at once.** A verified new key or Base URL, "
 "disabling or deleting a connection releases every residency started on "
@@ -8317,7 +8377,7 @@ msgstr ""
 " "
 "会替换所有模型的验证结果。保存时与已存值相同的字段（包括重新填入的同一个密钥）不算变更：重命名连接或移除模型不会关闭任何进程，其他模型的验证结果也保持不变。控制平面暂时联系不上的主机，会在下一次驻留心跳被拒绝时关闭进程。"
 
-#: ../developer/operations.md:4099
+#: ../developer/operations.md:4146
 msgid ""
 "**Verification dials out from the control plane.** It runs only on the "
 "owner's explicit save, never when a page opens or a field is typed in. "
@@ -8345,7 +8405,7 @@ msgstr ""
 " 端口 HTTPS：每个解析出的地址都必须通过 MCP 连接策略和沙箱的受保护网段（包括 "
 "`AGENT_EGRESS_PROTECTED_CIDRS`），连接固定到检查过的地址，不跟随重定向，不使用代理，也不回显或记录上游响应体和密钥。"
 
-#: ../developer/operations.md:4114
+#: ../developer/operations.md:4161
 msgid ""
 "**Usage.** The owner's provider bills these turns. A run's usage footer, "
 "the admin run detail and the Usage pages show the tokens the agent "
@@ -8355,11 +8415,11 @@ msgstr ""
 "**用量。** 这些轮次由所有者的服务商计费。运行的用量页脚、管理端的运行详情和用量页面显示智能体上报的 token "
 "数，并注明由服务商计费；不显示费用。哪些计入、哪些不计入，见[用量](#usage)。"
 
-#: ../developer/operations.md:4119
+#: ../developer/operations.md:4166
 msgid "Reusable cloud environments"
 msgstr "可复用的云环境"
 
-#: ../developer/operations.md:4121
+#: ../developer/operations.md:4168
 msgid ""
 "Migration `0065_environments` adds owner configuration, immutable "
 "encrypted versions, fixed workspace bindings, isolated test leases and "
@@ -8375,7 +8435,7 @@ msgstr ""
 "variable/v1` 域下加密。这把密钥要和现有的凭据存储一起备份；不经重新加密就换掉它，旧的绑定就读不出来了。Secrets "
 "无法通过所有者的读取或历史 API 拿到。"
 
-#: ../developer/operations.md:4128
+#: ../developer/operations.md:4175
 msgid ""
 "Repository environments are a standard product feature, available without"
 " an admin switch. Settings, task selection and the Environment tab are "
@@ -8391,7 +8451,7 @@ msgstr ""
 "`AGENT_REPOSITORY_ENVIRONMENTS_ENABLED`，都会被忽略，也不再出现在设置编辑器里。没有配置环境的任务，仍按基础环境运行，不做准备；配置了环境的工作区，仍然要求"
 " runner 和 sandbox manager 实际支持 `environment-v1`。"
 
-#: ../developer/operations.md:4136
+#: ../developer/operations.md:4183
 msgid ""
 "Upgrade every control-plane replica before creating any new environment-"
 "bound workspace; mixed old/new admission, Fork and terminal handlers may "
@@ -8403,7 +8463,7 @@ msgstr ""
 "在创建任何新的、绑定了环境的工作区之前，先把每一个控制平面副本都升级好；如果新旧版本混着处理准入、Fork "
 "和终端请求，绑定信息可能会悄悄丢失。一旦出现了第一个绑定，就不要再回滚到读不懂它的二进制版本。如果非要回滚：先关掉这些执行入口，把环境测试和环境准备都排空，并让已绑定的工作区留在兼容的主机上，或者隔离起来。"
 
-#: ../developer/operations.md:4142
+#: ../developer/operations.md:4189
 msgid ""
 "Roll out the environment-capable runner and sandbox manager together. A "
 "claiming replica must attest `environment-v1`, and the actual "
@@ -8420,7 +8480,7 @@ msgstr ""
 "attempt；它绝不能在缺少变量的情况下运行这些任务。环境测试同样遵守部署固定、计算资源准入、副本证明和主机槽位的限制，并且只拿到只读的源码凭据，拿不到推理、MCP"
 " 或仓库写入的授权。"
 
-#: ../developer/operations.md:4150
+#: ../developer/operations.md:4197
 msgid ""
 "Preparation receipts live in the host credential directory under "
 "`environment-preparation`, outside container mounts and source archives. "
@@ -8435,7 +8495,7 @@ msgstr ""
 "重启时，这份主机状态要保留。安装在每个固定的工作区上只会成功一次；startup 在每次实际启动时运行一次。失败的步骤会一直显示在 "
 "Environment 标签页里，可以针对原来的绑定重试。"
 
-#: ../developer/operations.md:4157
+#: ../developer/operations.md:4204
 msgid ""
 "Manual-action receipts live next to preparation state under `environment-"
 "actions`. They reserve the run before launching a command and retain its "
@@ -8453,7 +8513,7 @@ msgstr ""
 " "
 "`unknown`，绝不会自动重放。换一个幂等键开始新的运行之前，先检查一下它在外部已经造成了哪些影响。这些回执并不能保证外部服务里的副作用恰好只发生一次。"
 
-#: ../developer/operations.md:4166
+#: ../developer/operations.md:4213
 msgid ""
 "The output of a test, a preparation or an action is stored masked and "
 "bounded, with each NUL and unpaired surrogate replaced by U+FFFD: "
@@ -8463,7 +8523,7 @@ msgstr ""
 "测试、准备步骤或操作的输出，会经过遮蔽、限制长度后存储，其中每个 NUL 和落单的代理项都会替换为 U+FFFD：这两种字符 Postgres "
 "都存不了，而拒绝这段输出，会让测试或命令一直完不成。"
 
-#: ../developer/operations.md:4170
+#: ../developer/operations.md:4217
 msgid ""
 "Empty bindings still pin the original task's selection, but require "
 "neither `environment-v1` nor preparation. Each environment test reserves "
@@ -8475,7 +8535,7 @@ msgstr ""
 "上占用一个本地槽位，这样其他空闲槽位还能继续认领编码任务。主机上的孤儿查询是只读的，并且限流；租约过期和历史记录的维护，由控制平面的 reaper"
 " 负责。"
 
-#: ../developer/operations.md:4176
+#: ../developer/operations.md:4223
 msgid ""
 "Cancellation fences the result immediately but keeps the leased slot "
 "until cleanup is confirmed or the lease expires. An expired orphan no "
@@ -8493,7 +8553,7 @@ msgstr ""
 "ID，并在确认清理之前，删掉那些确切的、带标签的容器。不要为了腾容量去删无关的沙箱组，也不要绕过租约和容器身份的检查。已经归档、并且没人再引用的版本，30"
 " 天后回收；已有的工作区、测试和发布绑定，会保留它们当时的加密值，用于遮蔽和扫描。"
 
-#: ../developer/operations.md:4185
+#: ../developer/operations.md:4232
 msgid ""
 "Owner-provided credentials can be read and sent outside by user code "
 "through the existing network. Known-value masking and trusted publish "
@@ -8504,7 +8564,7 @@ msgstr ""
 "所有者提供的凭据，可以被用户代码读取，并通过现有的网络发送出去。按已知值做的遮蔽，以及受信任的发布扫描，都覆盖不到编码过的 "
 "secret、所有者原始的终端和文件，或者直接的 Git 推送。平台持有的长期凭据、保留的变量名，以及固定的出口规则，仍然受保护。"
 
-#: ../developer/operations.md:4190
+#: ../developer/operations.md:4237
 msgid ""
 "Environment setup, startup and actions share executable package data in "
 "`/workspace/.cloud-agent-tools`, excluded through Git's local exclude "
@@ -8519,11 +8579,11 @@ msgstr ""
 "目录仍然是私有的。显式刷新运行时会保留安装时的输入，并从下一轮开始生效；已经在运行的服务继续用旧值。startup "
 "恢复只是明确放行接下来的一次人工轮次，绝不是一张永久的成功回执。"
 
-#: ../developer/operations.md:4197
+#: ../developer/operations.md:4244
 msgid "Team environments"
 msgstr "团队环境"
 
-#: ../developer/operations.md:4199
+#: ../developer/operations.md:4246
 msgid ""
 "A team's owner and admins can create environments for the team: in "
 "Settings → Environments, **New environment** or **Copy** offers the teams"
@@ -8541,7 +8601,7 @@ msgstr ""
 " 403。创建、编辑和移除团队环境，都会记在团队的审计日志里。设计见[团队](../agents/specs/2026-10-15-team-"
 "shared-workspace-design.zh-CN.md) §6。"
 
-#: ../developer/operations.md:4208
+#: ../developer/operations.md:4255
 msgid ""
 "**Each member's own container.** A team environment is shared "
 "configuration, not a shared workspace. A member's task runs in that "
@@ -8555,7 +8615,7 @@ msgstr ""
 "团队环境共享的是配置，而不是工作区。成员的任务在这个成员自己的容器里运行，用的是团队的变量和脚本、这个成员自己的模型连接和 MCP "
 "连接；这个成员个人的全局变量只在运行时使用（只用于安装的那些会被排除；如果名字相同，以团队的定义为准）。所以安装结果对每位成员都一样，团队才能共享快照。"
 
-#: ../developer/operations.md:4215
+#: ../developer/operations.md:4262
 msgid ""
 "**Secrets are shared.** Every member who can run a task with a team "
 "environment can read its Secrets from inside that task; the dialog says "
@@ -8565,7 +8625,7 @@ msgstr ""
 "**Secrets 是共享的。** 只要能用团队环境运行任务，成员就能在任务里读到它的 "
 "Secrets，对话框里也会说明这一点。请把它们当作整个团队都知道的内容；如果某位成员离开后不应该再持有某个 Secret，就把它轮换掉。"
 
-#: ../developer/operations.md:4219
+#: ../developer/operations.md:4266
 msgid ""
 "**Leaving.** A binding records the team and the member's access "
 "generation. When a member leaves, is removed, or the team is deleted, "
@@ -8584,14 +8644,14 @@ msgstr ""
 " "
 "409；遮蔽和发布扫描仍然会读取它的值。重新加入团队也不会让旧对话恢复，因为代次已经往前走了。如果成员的仓库默认设置指向一个他已经不能再用的团队环境，下次他开始任务时，这个默认设置会被清掉。"
 
-#: ../developer/operations.md:4230
+#: ../developer/operations.md:4277
 msgid ""
 "**Removal.** Removing a team environment clears every member's default "
 "that names it. Conversations already bound keep their fixed "
 "configuration, as with a personal environment."
 msgstr "**移除环境。** 移除一个团队环境，会清掉所有指向它的成员默认设置。已经绑定的对话，和个人环境一样，保持它们固定下来的配置。"
 
-#: ../developer/operations.md:4233
+#: ../developer/operations.md:4280
 msgid ""
 "**Rollback.** Downgrading below `0082_team_environments` is refused while"
 " any team environment exists, archived ones included."

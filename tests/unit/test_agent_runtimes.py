@@ -29,6 +29,7 @@ from cloud_agent_host.runtimes import (
     RuntimeMCPUnavailableError,
     get_runtime,
 )
+from cloud_agent_host.runtimes.codex import NATIVE_LAUNCHER
 from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES, TRUNCATION_NOTICE
 from cloud_agent_shared.runtime_catalog import runtime_reasoning_efforts, runtimes_supporting_mcp
 
@@ -941,7 +942,7 @@ def test_codex_config_targets_the_gateway():
         model_base_url="http://localhost:8000",
         credential="ajt.a.b",
     )
-    assert argv[0] == "codex"
+    assert argv[: len(NATIVE_LAUNCHER) + 1] == [*NATIVE_LAUNCHER, "codex"]
     assert argv[-1] == "app-server"
     assert env["CODEX_API_KEY"] == "ajt.a.b"
 

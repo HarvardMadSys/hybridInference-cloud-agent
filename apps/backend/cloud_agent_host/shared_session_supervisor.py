@@ -34,7 +34,8 @@ from cloud_agent_host.chat_sandbox import (
     SandboxRestoreFailed,
 )
 from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
-from cloud_agent_host.environment_preparation import runs_no_script
+from cloud_agent_host.environment_preparation import prepared_in, runs_no_script
+from cloud_agent_host.environment_ready_boot import ready_boot
 from cloud_agent_host.guarded_workloads import (
     GuardedWorkload,
     exact_stop_unguarded,
@@ -50,6 +51,7 @@ from cloud_agent_host.guest_observer import (
     GuestObservation,
     GuestObserverCursor,
 )
+from cloud_agent_host.idle_host_rules import IdleHostRules
 from cloud_agent_host.member_resources import (
     MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
     RUNNING_CHECKPOINT_INTERVAL_S,
@@ -456,6 +458,7 @@ class SharedChatSessionSupervisor:
         self._sample_tick_s = min(0.25, self._sample_interval_s / 4)
         self._sampler_thread: threading.Thread | None = None
         self._manager = manager
+        self._idle_host_rules = IdleHostRules(manager)
         self._idle_timeout_s = idle_timeout_s
         self._sweep_interval_s = sweep_interval_s
         self._clock = clock
@@ -3407,6 +3410,9 @@ class SharedChatSessionSupervisor:
         """
         if start_seq is None and activation_owner is not None:
             start_seq = _SAME_RUN
+        ready = ready_boot(self, thread_id, environment, preparer, activation_owner)
+        if ready is not None:
+            return ready
         with self._lock:
             group, _ = self._member(thread_id)
         self._ensure_running(group, start_seq=start_seq)
@@ -3428,7 +3434,7 @@ class SharedChatSessionSupervisor:
                 self._accept_inspection_locked(group, current)
             elif group.container_lost:
                 raise RetainedChatLost("shared sandbox container identity was lost")
-            if receipt.get("ready"):
+            if receipt.get("ready") and prepared_in(receipt, group.inspection):
                 return receipt
             self._require_mutation_admission(group)
             if group.operation_tokens or any(
@@ -3464,13 +3470,16 @@ class SharedChatSessionSupervisor:
         try:
             # Writers are frozen only around a script: preparing a boot that
             # runs none only makes the tool home and records the start.
-            if not runs_no_script(receipt, environment, expected):
-                manifest = self._manager.freeze_shared_writers(
+            manifest = (
+                None
+                if runs_no_script(receipt, environment, expected)
+                else self._manager.freeze_shared_writers(
                     group.spec,
                     slot_ids=slots,
                     token=secrets.token_hex(16),
                     expected_container_id=expected,
                 )
+            )
             result = preparer.prepare(backend, environment, cancel=cancelled)
             self._require_current_inspection(group)
             if cancelled.is_set():
@@ -5097,6 +5106,7 @@ class SharedChatSessionSupervisor:
         with self._lock:
             workloads = workloads_with_known(inventory, self._groups.values())
         if not workloads and inventory.complete and not inventory.unresolved_container_ids:
+            self._idle_host_rules.renew()
             return []
         failure = host_rule_failure(self._manager, workloads)
         if failure is None:
