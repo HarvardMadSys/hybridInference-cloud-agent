@@ -486,6 +486,91 @@ describe('ContextDashboard', () => {
     }
   });
 
+  it('keeps the exact request while the chart highlights its turn column', async () => {
+    const data = view();
+    // 130 turns of two requests each, so the default window (last 120) hides
+    // the early turns.
+    data.requests = Array.from({ length: 260 }, (_, i) =>
+      point(i, {
+        turn_no: 1 + Math.floor(i / 2),
+        job_id: `t${1 + Math.floor(i / 2)}`,
+        attempt_id: 1 + Math.floor(i / 2),
+        event_id: 100 + i,
+        usage_id: null,
+      }),
+    );
+    data.latest = { ...data.latest!, point: data.requests[259] };
+    function Jump() {
+      const [selected, setSelected] = useState<number | null>(null);
+      return (
+        <>
+          <button type="button" onClick={() => setSelected(4)}>
+            jump
+          </button>
+          <ContextDashboard
+            jobId="j"
+            conversationKey="k"
+            view={data}
+            nowMs={0}
+            selected={selected}
+            onSelect={setSelected}
+            onOpenPoint={vi.fn()}
+            onOpenTurn={vi.fn()}
+          />
+        </>
+      );
+    }
+    render(
+      <LocaleProvider>
+        <Jump />
+      </LocaleProvider>,
+    );
+    const trend = card('Context Trend');
+    fireEvent.click(within(trend).getByRole('button', { name: 'Turn' }));
+    expect(within(trend).getByText('Showing 11–130 of 130')).toBeInTheDocument();
+    // Request 5 is turn 3's first request, not the turn's last (request 6).
+    fireEvent.click(screen.getByRole('button', { name: 'jump' }));
+    expect(within(trend).getByText('Showing 3–122 of 130')).toBeInTheDocument();
+    expect(within(trend).getByText(/Turn 3 · 2 requests/)).toBeInTheDocument();
+    const strip = within(trend).getByRole('group', { name: 'Request details' });
+    expect(within(strip).getByText('Request 5 · turn 3 · 5,000')).toBeInTheDocument();
+    // Arrow keys move turn columns, and select that turn's own last request.
+    fireEvent.keyDown(within(trend).getByRole('group', { name: /Context of 130 columns/ }), {
+      key: 'ArrowRight',
+    });
+    expect(within(trend).getByText(/Turn 4 · 2 requests/)).toBeInTheDocument();
+    expect(within(strip).getByText('Request 8 · turn 4 · 8,000')).toBeInTheDocument();
+    // The browser shows the same exact request.
+    expect(
+      await within(card('Context Browser')).findByText('Request 8 · turn 4'),
+    ).toBeInTheDocument();
+  });
+
+  it('navigates by request in Turn mode, and the turnaround follows its turn', async () => {
+    show();
+    const trend = card('Context Trend');
+    fireEvent.click(within(trend).getByRole('button', { name: 'Turn' }));
+    const strip = within(trend).getByRole('group', { name: 'Request details' });
+    const browser = card('Context Browser');
+    // Turn 2's column stands for request 4 (its last); going back one request
+    // keeps the chart on turn 2 but shows request 3 exactly.
+    fireEvent.click(within(browser).getByRole('button', { name: 'Previous request' }));
+    expect(within(strip).getByText('Request 3 · turn 2 · 3,000')).toBeInTheDocument();
+    expect(within(trend).getByText(/Turn 2 · 2 requests/)).toBeInTheDocument();
+    fireEvent.click(within(browser).getByRole('button', { name: 'Previous request' }));
+    expect(within(strip).getByText('Request 2 · turn 1 · 2,000')).toBeInTheDocument();
+    expect(within(trend).getByText(/Turn 1 · 2 requests/)).toBeInTheDocument();
+    // Nothing to move along on an empty chart: no selection is made.
+    cleanup();
+    show({ data: { ...view(), requests: [], latest: null, peak: null } });
+    const empty = card('Context Trend');
+    expect(within(empty).getByRole('group', { name: /Context of 0 columns/ })).toBeInTheDocument();
+    fireEvent.keyDown(within(empty).getByRole('group', { name: /Context of 0 columns/ }), {
+      key: 'ArrowLeft',
+    });
+    expect(screen.queryByRole('group', { name: 'Request details' })).not.toBeInTheDocument();
+  });
+
   it('answers in Chinese', async () => {
     window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     show();

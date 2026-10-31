@@ -476,6 +476,65 @@ describe('ContextView', () => {
     expect(rows[0]).toHaveTextContent('Requests observed around it: 60K → 8,010');
   });
 
+  it('links a compaction to its turn column when its request is not the turn’s last', async () => {
+    const data = view();
+    // 130 turns of two requests each: request 5 is turn 3's first, and the
+    // default window of 120 turn columns would not show turn 3.
+    data.requests = Array.from({ length: 260 }, (_, i) =>
+      point(i, 1_000 + i * 10, {
+        job_id: `t${1 + Math.floor(i / 2)}`,
+        turn_no: 1 + Math.floor(i / 2),
+        attempt_id: 1 + Math.floor(i / 2),
+        seq: i + 1,
+        event_id: 500 + i,
+      }),
+    );
+    data.latest = { ...data.latest!, point: data.requests[259] };
+    data.peak = data.requests[259];
+    data.events = [];
+    data.event_counts = { compaction: 1 };
+    data.compactions = [
+      {
+        job_id: 't3',
+        turn_no: 3,
+        attempt_id: 3,
+        seq: 4,
+        event_id: 900,
+        at: '2026-10-15T11:30:00Z',
+        source: 'cli_compact_boundary',
+        trigger: 'auto',
+        pre_tokens: 90_000,
+        post_tokens: 9_000,
+        completed: true,
+        observed_before: 1_040,
+        observed_after: 1_040,
+      },
+    ];
+    vi.mocked(getAgentThreadContext).mockResolvedValue(data);
+    // The browser's composition is not the subject here; its reply is absent.
+    vi.mocked(getRequestComposition).mockResolvedValue(null);
+    show();
+    const trend = await vi.waitFor(() => card('Context Trend'));
+    fireEvent.click(within(trend).getByRole('button', { name: 'Turn' }));
+    expect(within(trend).getByText('Showing 11–130 of 130')).toBeInTheDocument();
+    const events = card('Context events');
+    fireEvent.click(await within(events).findByRole('button', { name: 'Show in trend' }));
+    // The containing turn column comes into view and is highlighted; the strip
+    // and browser keep the exact request the compaction selects (request 5).
+    expect(within(trend).getByText('Showing 3–122 of 130')).toBeInTheDocument();
+    expect(within(trend).getByText(/Turn 3 · 2 requests/)).toBeInTheDocument();
+    const strip = within(trend).getByRole('group', { name: 'Request details' });
+    expect(within(strip).getByText('Request 5 · turn 3 · 1,040')).toBeInTheDocument();
+    expect(
+      await within(card('Context Browser')).findByText('Request 5 · turn 3'),
+    ).toBeInTheDocument();
+    // Arrow keys move turn columns from the containing turn, not from the end.
+    fireEvent.keyDown(within(trend).getByRole('group', { name: /Context of 130 columns/ }), {
+      key: 'ArrowRight',
+    });
+    expect(within(strip).getByText('Request 8 · turn 4 · 1,070')).toBeInTheDocument();
+  });
+
   it('opens the selected request’s step and turn from the strip under the trend', async () => {
     const { onOpenPoint, onOpenTurn } = show();
     await screen.findByText('Context Browser');

@@ -25,6 +25,9 @@ import { DashCard, Toggle } from './DashCard';
 import { labelOf, swatchOf } from './palette';
 import {
   clampWindow,
+  columnOf,
+  localOf,
+  stepColumn,
   dnaDelta,
   deltaColumns,
   initialWindow,
@@ -112,8 +115,11 @@ export function ContextTrend({
   const [win, setWin] = useState(() => initialWindow(n));
   // A new conversation, a new granularity or new requests: show the latest.
   useEffect(() => setWin(initialWindow(n)), [n, conversationKey, state.granularity]);
-  // A request picked elsewhere (the browser, an event, the keys) is brought into view.
-  const selectedAt = columns.findIndex((c) => c.index === selected);
+  // A request picked elsewhere (the browser, an event, the keys) is brought into
+  // view. By turn a column stands for the turn's last request, so a request
+  // inside that turn resolves to its containing column; the exact request
+  // stays what the browser and the strip show.
+  const selectedAt = columnOf(columns, points, selected);
   useEffect(() => {
     setWin((current) => windowAround(current.from, current.to, selectedAt, n));
   }, [selectedAt, n]);
@@ -123,13 +129,14 @@ export function ContextTrend({
   const dnaAllowed = state.granularity === 'step' && visible.length <= DNA_MAX_COLUMNS;
   const dnaOn = state.view === 'dna' && dnaAllowed;
   const dna = useDnaBands(jobId, conversationKey, dnaOn ? visible.map((c) => c.index) : []);
-  const selectedLocal = visible.findIndex((c) => c.index === selected);
+  const selectedLocal = localOf(selectedAt, from, to);
   const shown = hover ?? (selectedLocal >= 0 ? selectedLocal : null);
   const onKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const next = stepColumn(selectedAt, n, event.key === 'ArrowRight' ? 1 : -1);
+    // Nothing is drawn to move along; leave the key to the page.
+    if (next < 0) return;
     event.preventDefault();
-    const step = event.key === 'ArrowRight' ? 1 : -1;
-    const next = Math.max(0, Math.min(n - 1, (selectedAt < 0 ? n - 1 : selectedAt) + step));
     onSelect(columns[next].index);
   };
   const controls = (

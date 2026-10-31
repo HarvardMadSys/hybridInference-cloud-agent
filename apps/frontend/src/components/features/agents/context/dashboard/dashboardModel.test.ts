@@ -20,6 +20,9 @@ import {
   maxima,
   stackedRuns,
   trendColumns,
+  columnOf,
+  localOf,
+  stepColumn,
   windowAround,
   zoomWindow,
 } from './trendModel';
@@ -171,6 +174,47 @@ describe('trend model', () => {
     expect(zoomWindow(9, 26, 35, false)).toEqual({ from: 0, to: 34 });
     expect(zoomWindow(30, 33, 35, true)).toEqual({ from: 30, to: 33 });
     expect(zoomWindow(28, 34, 35, false)).toEqual({ from: 21, to: 34 });
+  });
+
+  it('resolves a selected request to its own column, or its containing turn column', () => {
+    const points = [
+      { index: 0, turn_no: 1 },
+      { index: 1, turn_no: 1 },
+      { index: 2, turn_no: 2 },
+      { index: 3, turn_no: 2 },
+    ] as ContextPointApi[];
+    const steps = trendColumns(points, 'step', new Map());
+    const turns = trendColumns(points, 'turn', new Map());
+    // Step: the exact request. Turn: the column of the turn containing it,
+    // whose own index is that turn's last request.
+    expect(columnOf(steps, points, 1)).toBe(1);
+    expect(columnOf(turns, points, 1)).toBe(0);
+    expect(columnOf(turns, points, 3)).toBe(1);
+    expect(columnOf(turns, points, 2)).toBe(1);
+    // Not in this chart, and nothing selected.
+    expect(columnOf(turns, points, 9)).toBe(-1);
+    expect(columnOf(turns, points, null)).toBe(-1);
+  });
+
+  it('moves one column with the arrow keys, and nowhere on an empty chart', () => {
+    // From a selection, bounded at both ends.
+    expect(stepColumn(3, 10, 1)).toBe(4);
+    expect(stepColumn(3, 10, -1)).toBe(2);
+    expect(stepColumn(0, 10, -1)).toBe(0);
+    expect(stepColumn(9, 10, 1)).toBe(9);
+    // No selection starts from the latest column.
+    expect(stepColumn(-1, 10, 1)).toBe(9);
+    expect(stepColumn(-1, 10, -1)).toBe(8);
+    // Nothing drawn: no column to move to.
+    expect(stepColumn(-1, 0, 1)).toBe(-1);
+  });
+
+  it('locates the shown column inside the window, or -1 outside it', () => {
+    expect(localOf(12, 10, 20)).toBe(2);
+    expect(localOf(10, 10, 20)).toBe(0);
+    expect(localOf(9, 10, 20)).toBe(-1);
+    expect(localOf(21, 10, 20)).toBe(-1);
+    expect(localOf(-1, 10, 20)).toBe(-1);
   });
 
   it('moves the window just far enough to show a selection made elsewhere', () => {

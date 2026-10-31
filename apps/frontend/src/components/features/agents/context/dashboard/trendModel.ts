@@ -128,6 +128,39 @@ export function clampWindow(from: number, to: number, n: number): { from: number
   return { from: start, to: start + span - 1 };
 }
 
+/**
+ * The column a selected request is shown at: its own column by step, or the
+ * turn column that contains it. A turn column stands for that turn's last
+ * request, so an earlier request of the turn is not an exact column index.
+ * -1 when the request is not in this chart.
+ */
+export function columnOf(
+  columns: TrendColumn[],
+  points: Pick<ContextPointApi, 'index' | 'turn_no'>[],
+  selected: number | null,
+): number {
+  if (selected === null) return -1;
+  const exact = columns.findIndex((column) => column.index === selected);
+  if (exact >= 0) return exact;
+  const point = points.find((candidate) => candidate.index === selected);
+  if (!point) return -1;
+  // Turn columns keep their turn's last request index, at or after every
+  // request of that turn.
+  return columns.findIndex((column) => column.turnNo === point.turn_no && column.index >= selected);
+}
+
+/** The column an arrow key moves to, or -1 when there is nothing to move along. */
+export function stepColumn(selectedAt: number, n: number, step: number): number {
+  if (n === 0) return -1;
+  const from = selectedAt < 0 ? n - 1 : selectedAt;
+  return Math.max(0, Math.min(n - 1, from + step));
+}
+
+/** Where column `at` sits inside the shown window; -1 when it is outside it. */
+export function localOf(at: number, from: number, to: number): number {
+  return at >= from && at <= to ? at - from : -1;
+}
+
 /** The window moved, at its size, just far enough to show column `at`. */
 export function windowAround(
   from: number,
