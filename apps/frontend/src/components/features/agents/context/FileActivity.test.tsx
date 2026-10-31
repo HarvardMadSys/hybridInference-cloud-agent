@@ -352,6 +352,42 @@ describe('FileActivity', () => {
     ).toBeInTheDocument();
   });
 
+  it('keeps a long basename inside the row instead of overflowing it', async () => {
+    const longName = `${'extremely_long_generated_module_name_'.repeat(3)}.tsx`;
+    mockedActivity.mockResolvedValue(
+      view({
+        files: [
+          {
+            ...view().files[0],
+            path: `/workspace/src/deep/nested/${longName}`,
+            name: longName,
+          },
+        ],
+      }),
+    );
+    renderSection();
+    const name = await screen.findByText(longName);
+    // The name is allowed to truncate and shrink within the row, never to
+    // force the row (and the page) wider than the panel.
+    expect(name.className).toContain('truncate');
+    // The bound is what keeps one huge name from widening the row.
+    expect(name.className).toContain('max-w-full');
+    expect(name.className).toContain('shrink-0');
+    const row = name.closest('button');
+    expect(row).not.toBeNull();
+    expect(row?.getAttribute('title')).toBe(`/workspace/src/deep/nested/${longName}`);
+  });
+
+  it('keeps directory and name adjacent rather than stretching the directory', async () => {
+    renderSection();
+    const name = await screen.findByText('app.ts');
+    const directory = name.previousElementSibling as HTMLElement | null;
+    // A full-width directory would insert a gap before the name on desktop.
+    expect(directory?.textContent).toBe('/workspace/src/');
+    expect(directory?.className).toContain('truncate');
+    expect(directory?.className).not.toContain('flex-1');
+  });
+
   it('keeps the full path addressable while the row stays one line', async () => {
     renderSection();
     const name = await screen.findByText('app.ts');

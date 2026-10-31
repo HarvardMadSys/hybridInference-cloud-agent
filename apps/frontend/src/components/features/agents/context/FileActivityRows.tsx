@@ -87,14 +87,15 @@ export function FileRow({
         >
           {row.type_label}
         </span>
-        {/* The directory yields space before the name does, so a narrow row
-            still reads as a file name with a shortened parent, never as the
-            front of a path with its name cut off. */}
+        {/* Directory and name sit next to each other at their natural widths.
+            The directory is the only part allowed to shrink, so a narrow row
+            keeps the file name; the name is bounded to the row so a single very
+            long basename truncates instead of pushing the row wide. */}
         <span className="flex min-w-0 flex-1 items-baseline">
           {parts.directory ? (
-            <span className="min-w-0 flex-1 truncate text-muted">{parts.directory}</span>
+            <span className="min-w-0 shrink truncate text-muted">{parts.directory}</span>
           ) : null}
-          <span className="min-w-0 shrink-0 truncate font-medium text-foreground">
+          <span className="min-w-0 max-w-full shrink-0 truncate font-medium text-foreground">
             {parts.name}
           </span>
         </span>
