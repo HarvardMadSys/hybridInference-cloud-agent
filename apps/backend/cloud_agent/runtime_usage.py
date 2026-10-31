@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 #: Every number in a summary is the agent's own report.
-RUNTIME_USAGE_SOURCE = "runtime_reported"
+RUNTIME_USAGE_SOURCE: Literal["runtime_reported"] = "runtime_reported"
 #: Why an attempt has no usage: its agent reported none.
 NO_RUNTIME_REPORT = "not_reported_by_agent"
 #: Agents whose input counter excludes cache reads and writes.

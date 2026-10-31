@@ -58,9 +58,13 @@ def summarize_job_usage(
     """
     events = runtime_inputs["events"]
     return JobUsageResponse(
-        runtime=RuntimeUsage(
-            **reported_token_totals(events),
-            normalized_input_tokens=normalized_runtime_input_tokens(runtime=runtime, events=events),
+        runtime=RuntimeUsage.model_validate(
+            {
+                **reported_token_totals(events),
+                "normalized_input_tokens": normalized_runtime_input_tokens(
+                    runtime=runtime, events=events
+                ),
+            }
         ),
         external_provider=external_provider,
     )
