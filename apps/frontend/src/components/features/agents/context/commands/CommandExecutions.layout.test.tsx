@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
@@ -245,6 +245,63 @@ describe('compact Command Executions card', () => {
     expect(row.textContent).toContain('Completed 0');
     expect(row.textContent).toContain('1s');
     expect(row.textContent).toContain('grep');
+  });
+
+  it('shows an initial read failure and its retry with the rail collapsed', async () => {
+    mocked.mockRejectedValueOnce(new Error('backend down'));
+    mocked.mockResolvedValue(page([execution(0)]));
+    renderSection();
+    // The rail starts collapsed, so the alert must live in the main column.
+    expect(screen.getByRole('button', { name: 'Details' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Command executions could not be read.');
+    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(await screen.findByRole('list', { name: 'Command Executions' })).toBeInTheDocument();
+  });
+
+  it('keeps tool-error, superseded and truncated-command facts once expanded', async () => {
+    const row = execution(0, {
+      status: 'failed',
+      exit_code: 0,
+      tool_error: true,
+      superseded: true,
+      command_truncated: true,
+    });
+    mocked.mockResolvedValue(page([row]));
+    renderSection();
+    const list = await screen.findByRole('list', { name: 'Command Executions' });
+    const item = within(list).getAllByRole('listitem')[0];
+    // Collapsed: the facts are still reachable from the row's tooltip.
+    const toggle = within(item).getByRole('button', { expanded: false });
+    expect(within(item).getByText(/!|↻/)).toHaveAttribute(
+      'title',
+      expect.stringContaining('tool error'),
+    );
+    fireEvent.click(toggle);
+    const details = within(item).getByLabelText('Execution details');
+    expect(within(details).getByText('tool error')).toBeInTheDocument();
+    expect(within(details).getByText(/From an attempt a retry replaced/)).toBeInTheDocument();
+    expect(
+      within(details).getByText('The recorded command is longer than shown.'),
+    ).toBeInTheDocument();
+  });
+
+  it('draws each program share as a thin track inside its row', async () => {
+    mocked.mockResolvedValue(page([execution(0), execution(1)]));
+    renderSection();
+    await screen.findByRole('heading', { name: 'Command Executions' });
+    const programs = screen.getByRole('list', { name: /Programs/ });
+    const first = within(programs).getAllByRole('button')[0];
+    expect(first.className).toContain('relative');
+    const track = first.querySelector('[aria-hidden="true"]') as HTMLElement | null;
+    expect(track).not.toBeNull();
+    expect(track!.className).toContain('absolute');
+    expect(track!.className).toContain('h-px');
+    expect(track!.getAttribute('style')).toContain('width');
   });
 
   it('collapses the rail on a narrow card and keeps the list primary', async () => {

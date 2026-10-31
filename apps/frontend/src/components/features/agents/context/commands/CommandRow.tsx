@@ -8,7 +8,7 @@
 import { useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import { getEventContent, type CommandExecutionApi } from '@/lib/api/agents';
-import type { TranslationKey } from '@/lib/i18n/translate';
+import type { TranslationKey, Translator } from '@/lib/i18n/translate';
 import type { OpenPoint, OpenTurn } from '../ContextSections';
 import { OUTPUT_CLIP, clip, durationLabel, statusTone } from './commandsPresent';
 
@@ -60,9 +60,11 @@ export function CommandRow({
             {t('executions.background')}
           </span>
         ) : null}
-        <span className="shrink-0 text-[10px] text-muted">
+        <span className="shrink-0 text-[10px] text-muted" title={rowFacts(execution, t)}>
           {t(STATUS_LABEL[execution.status])}
           {execution.exit_code != null ? ` ${execution.exit_code}` : ''}
+          {execution.tool_error ? ' !' : ''}
+          {execution.superseded ? ' ↻' : ''}
         </span>
         {duration ? (
           <span
@@ -180,6 +182,7 @@ function CommandDetails({
       className="mb-1 mr-1 ml-4 rounded-md border border-border bg-surface-muted/60 p-1.5 text-[11px]"
     >
       <dl className="grid gap-1">
+        <DetailFacts execution={execution} />
         <div className="min-w-0">
           <dt className="text-[10px] text-muted">{t('executions.details.command')}</dt>
           <dd className="mt-0.5">
@@ -264,4 +267,31 @@ function CommandDetails({
       </div>
     </div>
   );
+}
+
+/** The facts a dense row cannot show inline, kept visible once expanded. */
+function DetailFacts({ execution }: { execution: CommandExecutionApi }) {
+  const { t } = useLocale();
+  const facts: string[] = [];
+  if (execution.tool_error) facts.push(t('executions.toolError'));
+  if (execution.superseded) facts.push(t('executions.superseded'));
+  if (execution.command_truncated) facts.push(t('executions.details.commandTruncated'));
+  if (facts.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted">
+      {facts.map((fact) => (
+        <span key={fact}>{fact}</span>
+      ))}
+    </div>
+  );
+}
+
+/** The secondary facts a dense row hides, named in one tooltip. */
+function rowFacts(execution: CommandExecutionApi, t: Translator): string {
+  const facts: string[] = [t(STATUS_LABEL[execution.status])];
+  if (execution.tool_error) facts.push(t('executions.toolError'));
+  if (execution.superseded) facts.push(t('executions.superseded'));
+  if (execution.command_truncated) facts.push(t('executions.details.commandTruncated'));
+  if (execution.exit_code == null) facts.push(t('executions.noExit'));
+  return facts.join(' · ');
 }
