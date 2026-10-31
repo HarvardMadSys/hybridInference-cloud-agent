@@ -198,9 +198,11 @@ function composition(eventId: number): RequestCompositionApi {
 function Harness({
   jobId = 'j',
   conversationKey = 'k',
+  data = view(),
 }: {
   jobId?: string;
   conversationKey?: string;
+  data?: ThreadContextApi;
 }) {
   // The selection is held as ContextView holds it.
   const [selected, setSelected] = useState<number | null>(null);
@@ -208,7 +210,7 @@ function Harness({
     <ContextDashboard
       jobId={jobId}
       conversationKey={conversationKey}
-      view={view()}
+      view={data}
       nowMs={Date.parse('2026-10-29T12:00:00Z')}
       selected={selected}
       onSelect={setSelected}
@@ -379,6 +381,109 @@ describe('ContextDashboard', () => {
     expect(
       within(selected).getByText('The window size was not reported, so no share is shown.'),
     ).toBeInTheDocument();
+  });
+
+  it('keeps the selected request in a strip of the trend card, following the selection', async () => {
+    show();
+    const trend = card('Context Trend');
+    const strip = within(trend).getByRole('group', { name: 'Request details' });
+    expect(within(strip).getByText('Request 4 · turn 2 · 4,000')).toBeInTheDocument();
+    expect(within(strip).getByText(/0 written · 0 uncached/)).toHaveAttribute(
+      'title',
+      expect.stringMatching(/billing, not more content/),
+    );
+    // The browser's own navigation moves the trend's strip too.
+    const browser = card('Context Browser');
+    fireEvent.click(within(browser).getByRole('button', { name: 'Previous request' }));
+    expect(within(strip).getByText('Request 3 · turn 2 · 3,000')).toBeInTheDocument();
+    expect(await within(browser).findByText('Request 3 · turn 2')).toBeInTheDocument();
+    // No second full-width detail panel.
+    expect(screen.getAllByRole('group', { name: 'Request details' })).toHaveLength(1);
+  });
+
+  it('brings a request selected outside the trend window into view', async () => {
+    const data = view();
+    data.requests = Array.from({ length: 130 }, (_, i) =>
+      point(i, { turn_no: 1 + Math.floor(i / 10), event_id: 100 + i, usage_id: null }),
+    );
+    data.latest = { ...data.latest!, point: data.requests[129] };
+    function Jump() {
+      const [selected, setSelected] = useState<number | null>(null);
+      return (
+        <>
+          <button type="button" onClick={() => setSelected(2)}>
+            jump
+          </button>
+          <ContextDashboard
+            jobId="j"
+            conversationKey="k"
+            view={data}
+            nowMs={0}
+            selected={selected}
+            onSelect={setSelected}
+            onOpenPoint={vi.fn()}
+            onOpenTurn={vi.fn()}
+          />
+        </>
+      );
+    }
+    render(
+      <LocaleProvider>
+        <Jump />
+      </LocaleProvider>,
+    );
+    const trend = card('Context Trend');
+    expect(within(trend).getByText('Showing 11–130 of 130')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'jump' }));
+    expect(within(trend).getByText('Showing 3–122 of 130')).toBeInTheDocument();
+    expect(within(trend).getByText('Request 3 · turn 1 · 3,000')).toBeInTheDocument();
+  });
+
+  it('measures its own width: two columns, the top pair, or one column', () => {
+    const widths = [900, 700, 390];
+    const observers: Array<() => void> = [];
+    class FakeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe() {
+        observers.push(() =>
+          this.callback(
+            [{ contentRect: { width: widths[0] } } as ResizeObserverEntry],
+            this as unknown as ResizeObserver,
+          ),
+        );
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeObserver);
+    try {
+      for (const [width, layout] of [
+        [900, 'wide'],
+        [700, 'medium'],
+        [390, 'narrow'],
+      ] as const) {
+        widths[0] = width;
+        observers.length = 0;
+        const { container, unmount } = show();
+        act(() => observers.forEach((fire) => fire()));
+        const root = container.querySelector('[data-layout]')!;
+        expect(root).toHaveAttribute('data-layout', layout);
+        const browser = card('Context Browser');
+        const trend = card('Context Trend');
+        // Wide: the browser beside the window and trend; otherwise below them.
+        if (layout === 'wide') {
+          expect(browser.parentElement).not.toBe(root);
+          expect(browser.parentElement).toContainElement(trend);
+          expect(browser.parentElement?.className).toMatch(/grid-cols-/);
+        } else {
+          expect(browser.parentElement).toBe(root);
+        }
+        expect(trend.compareDocumentPosition(browser)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+        unmount();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('answers in Chinese', async () => {

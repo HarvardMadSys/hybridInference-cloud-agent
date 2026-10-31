@@ -1,14 +1,15 @@
 'use client';
 
 // The Context dashboard: Token Stats and Timing Stats on top, the selected
-// request's window card and the trend on the left, the browser on the right.
+// request's window card and the trend (with the selected request's strip) on
+// the left, the browser on the right.
 // The arrangement follows bowenliang123/dsh-context's Context tab (Apache-2.0,
 // commit 32982aa6aa2c70fbda6b81281de98a72ea625001). It measures its own width,
 // not the window's (the main area narrows when the workspace is open): two
 // columns from 760 px (the ~850 px sidebar of the reference screenshot), the
 // top cards side by side from 600 px, one column below that.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import {
   getThreadContextTiming,
   type ThreadContextApi,
@@ -17,6 +18,7 @@ import {
 import type { OpenPoint, OpenTurn } from '../ContextSections';
 import { ContextBrowser } from './ContextBrowser';
 import { ContextTrend } from './ContextTrend';
+import { SelectedRequest } from './SelectedRequest';
 import { TimingStats } from './TimingStats';
 import { TokenStats } from './TokenStats';
 import { WindowCard } from './WindowCard';
@@ -60,6 +62,7 @@ export function ContextDashboard({
   onSelect,
   onOpenPoint,
   onOpenTurn,
+  trendRef,
 }: {
   jobId: string;
   conversationKey: string;
@@ -69,6 +72,8 @@ export function ContextDashboard({
   onSelect: (index: number) => void;
   onOpenPoint: OpenPoint;
   onOpenTurn: OpenTurn;
+  /** Where the trend is, for what selects a request from further down. */
+  trendRef?: RefObject<HTMLDivElement>;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -101,15 +106,18 @@ export function ContextDashboard({
   );
   const windowCard = <WindowCard point={point} latest={view.latest} keys={keys} nowMs={nowMs} />;
   const trend = (
-    <ContextTrend
-      jobId={jobId}
-      conversationKey={conversationKey}
-      points={view.requests}
-      keys={keys}
-      latency={latency}
-      selected={point?.index ?? null}
-      onSelect={onSelect}
-    />
+    <div ref={trendRef} className="min-w-0 scroll-mt-3">
+      <ContextTrend
+        jobId={jobId}
+        conversationKey={conversationKey}
+        points={view.requests}
+        keys={keys}
+        latency={latency}
+        selected={point?.index ?? null}
+        onSelect={onSelect}
+        footer={<SelectedRequest point={point} onOpenPoint={onOpenPoint} onOpenTurn={onOpenTurn} />}
+      />
+    </div>
   );
   const browser = (
     <ContextBrowser

@@ -5,8 +5,9 @@
 
 export const contextDashboardEn = {
   'dashboard.selected': 'Request details',
+  'dashboard.selected.providerTip':
+    'As the provider reported this request: the cache split is billing, not more content.',
   'dashboard.browser.noMatch': 'No item in this category matches.',
-  'dashboard.raw': 'Request sizes (as reported)',
   'dashboard.notRecorded': 'not recorded',
   'dashboard.notRecordedTip':
     'Every request carries it, but no stored record says how large it is, so it has no share here.',
@@ -158,8 +159,9 @@ export const contextDashboardEn = {
 
 export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, string> = {
   'dashboard.selected': '请求详情',
+  'dashboard.selected.providerTip':
+    '服务商为这次请求报告的数字：缓存拆分是计费口径，不是更多内容。',
   'dashboard.browser.noMatch': '这一类里没有匹配的条目。',
-  'dashboard.raw': '请求大小（报告值）',
   'dashboard.notRecorded': '未记录',
   'dashboard.notRecordedTip':
     '每次请求都会带上它，但没有任何存储记录说明它有多大，所以这里不给它份额。',

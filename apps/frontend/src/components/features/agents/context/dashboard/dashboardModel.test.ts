@@ -20,6 +20,7 @@ import {
   maxima,
   stackedRuns,
   trendColumns,
+  windowAround,
   zoomWindow,
 } from './trendModel';
 
@@ -170,6 +171,17 @@ describe('trend model', () => {
     expect(zoomWindow(9, 26, 35, false)).toEqual({ from: 0, to: 34 });
     expect(zoomWindow(30, 33, 35, true)).toEqual({ from: 30, to: 33 });
     expect(zoomWindow(28, 34, 35, false)).toEqual({ from: 21, to: 34 });
+  });
+
+  it('moves the window just far enough to show a selection made elsewhere', () => {
+    // Already shown: unchanged.
+    expect(windowAround(10, 19, 15, 100)).toEqual({ from: 10, to: 19 });
+    // Before it: the selection becomes its first column; after it: its last.
+    expect(windowAround(10, 19, 3, 100)).toEqual({ from: 3, to: 12 });
+    expect(windowAround(10, 19, 40, 100)).toEqual({ from: 31, to: 40 });
+    // Never past either end, and a missing selection moves nothing.
+    expect(windowAround(10, 19, 99, 100)).toEqual({ from: 90, to: 99 });
+    expect(windowAround(10, 19, -1, 100)).toEqual({ from: 10, to: 19 });
   });
 
   it('breaks an area where a request has no recorded categories', () => {

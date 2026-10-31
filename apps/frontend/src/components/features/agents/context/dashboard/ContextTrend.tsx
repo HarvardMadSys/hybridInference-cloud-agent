@@ -20,6 +20,7 @@ import { useLocale } from '@/components/providers';
 import type { ContextPointApi } from '@/lib/api/agents';
 import { compactCount } from '@/components/features/settings/usagePresent';
 import { formatDuration } from '../../TurnFooter';
+import { signedTokens } from '../contextPresent';
 import { DashCard, Toggle } from './DashCard';
 import { labelOf, swatchOf } from './palette';
 import {
@@ -37,6 +38,7 @@ import {
   type Mode,
   type TrendColumn,
   MIN_WINDOW,
+  windowAround,
   zoomWindow,
 } from './trendModel';
 import { DNA_MAX_COLUMNS, FOLDED_KEY, useDnaBands } from './useDnaBands';
@@ -78,6 +80,7 @@ export function ContextTrend({
   latency,
   selected,
   onSelect,
+  footer,
 }: {
   jobId: string;
   conversationKey: string;
@@ -86,6 +89,8 @@ export function ContextTrend({
   latency: ReadonlyMap<string, number>;
   selected: number | null;
   onSelect: (index: number) => void;
+  /** The selected request's strip, drawn inside the card under the chart. */
+  footer?: React.ReactNode;
 }) {
   const { t, locale } = useLocale();
   const [state, setState] = useState<TrendState>({
@@ -107,6 +112,11 @@ export function ContextTrend({
   const [win, setWin] = useState(() => initialWindow(n));
   // A new conversation, a new granularity or new requests: show the latest.
   useEffect(() => setWin(initialWindow(n)), [n, conversationKey, state.granularity]);
+  // A request picked elsewhere (the browser, an event, the keys) is brought into view.
+  const selectedAt = columns.findIndex((c) => c.index === selected);
+  useEffect(() => {
+    setWin((current) => windowAround(current.from, current.to, selectedAt, n));
+  }, [selectedAt, n]);
   const { from, to } = clampWindow(win.from, win.to, n);
   const visible = columns.slice(from, to + 1);
   const scale = state.adaptive ? maxima(columns, from, to) : maxima(columns);
@@ -118,11 +128,9 @@ export function ContextTrend({
   const onKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     event.preventDefault();
-    const current = columns.findIndex((c) => c.index === selected);
     const step = event.key === 'ArrowRight' ? 1 : -1;
-    const next = Math.max(0, Math.min(n - 1, (current < 0 ? n - 1 : current) + step));
+    const next = Math.max(0, Math.min(n - 1, (selectedAt < 0 ? n - 1 : selectedAt) + step));
     onSelect(columns[next].index);
-    if (next < from || next > to) setWin(clampWindow(next - (to - from), next, n));
   };
   const controls = (
     <TrendControls
@@ -192,6 +200,7 @@ export function ContextTrend({
         />
       ) : null}
       <p className="mt-1 text-[11px] text-muted">{t('dashboard.trend.note')}</p>
+      {footer}
     </DashCard>
   );
 }
@@ -430,7 +439,7 @@ function TrendTip({
   overlay: Overlay;
 }) {
   const { t } = useLocale();
-  const sign = (v: number) => (delta && v > 0 ? '+' : '') + compactCount(v);
+  const sign = (v: number) => (delta ? signedTokens(v, compactCount) : compactCount(v));
   return (
     <div className="mt-1 rounded-md border border-border bg-surface-raised px-2 py-1 text-[11px] shadow-card">
       <p className="font-medium text-foreground">

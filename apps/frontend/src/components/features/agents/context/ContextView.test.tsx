@@ -302,74 +302,191 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
+function card(title: string): HTMLElement {
+  return screen.getByRole('heading', { name: title }).closest('section')!;
+}
+
+function trendGroup(): HTMLElement {
+  return screen.getByRole('group', { name: /Context of \d+ columns/ });
+}
+
+function strip(): HTMLElement {
+  return screen.getByRole('group', { name: 'Request details' });
+}
+
+/** The blocks the page stacked under the dashboard before it was one flow. */
+const OLD_HEADINGS = [
+  'Compactions',
+  'Largest changes',
+  'Request sizes (as reported)',
+  'Turns',
+  'Request details',
+  'What each agent reports',
+];
+
 describe('ContextView', () => {
+  it('reads top to bottom: counts, tokens and time, window and trend, browser, events', async () => {
+    show();
+    await screen.findByText('Context Browser');
+    const order = [
+      'Token Stats',
+      'Timing Stats',
+      'Latest observed request',
+      'Context Trend',
+      'Context Browser',
+      'Context events',
+    ].map((name) => screen.getByRole('heading', { name }));
+    for (let i = 1; i < order.length; i += 1) {
+      expect(order[i - 1].compareDocumentPosition(order[i])).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    }
+    // The overview line comes first and is one line of facts, not a wall of cards.
+    const requests = await fact('Model requests');
+    expect(requests.compareDocumentPosition(order[0])).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(screen.getAllByRole('term')).toHaveLength(3);
+    for (const name of OLD_HEADINGS) {
+      expect(screen.queryByRole('heading', { name })).not.toBeInTheDocument();
+    }
+    // The old raw chart, KPI facts and turns table are gone, not collapsed.
+    expect(
+      screen.queryByRole('img', { name: 'Input tokens of each model request' }),
+    ).not.toBeInTheDocument();
+    for (const label of ['Latest observed context', 'Context window', 'Compactions']) {
+      expect(screen.queryByText(label, { selector: 'dt' })).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '#1' })).not.toBeInTheDocument();
+  });
+
   it('names the latest request as observed, never as the live window', async () => {
     show();
-    const latest = await fact('Latest observed context');
+    await screen.findByRole('heading', { name: 'Latest observed request' });
+    const latest = card('Latest observed request');
     expect(within(latest).getByText('2,010')).toBeInTheDocument();
-    expect(within(await fact('Live occupancy')).getByText('Not collected')).toBeInTheDocument();
     // No window reported: no share, and no 0%.
-    const window = await fact('Context window');
-    expect(within(window).getByText('—')).toBeInTheDocument();
-    expect(within(window).getByText('Not reported for this request')).toBeInTheDocument();
-    expect(screen.queryByText(/%/, { selector: 'dd' })).not.toBeInTheDocument();
     expect(
-      within(await fact('Model requests')).getByText('3 more by subagents, in their own contexts'),
+      within(latest).getByText('The window size was not reported, so no share is shown.'),
     ).toBeInTheDocument();
+    expect(within(latest).queryByText(/%$/)).not.toBeInTheDocument();
+    expect(within(await fact('Live occupancy')).getByText('Not collected')).toBeInTheDocument();
+    expect(
+      within(await fact('Model requests')).getByText(
+        '4 · 3 more by subagents, in their own contexts',
+      ),
+    ).toBeInTheDocument();
+    expect(within(await fact('Largest request')).getByText('60K · Turn 1')).toBeInTheDocument();
   });
 
   it('shows a reported window as a share of it', async () => {
     const data = view();
-    data.latest = {
-      ...data.latest!,
-      window_share: 0.25,
-      point: { ...data.latest!.point, context_window: 200_000 },
-    };
+    const reported = { ...data.latest!.point, context_window: 200_000 };
+    data.requests = [...data.requests.slice(0, 3), reported];
+    data.latest = { ...data.latest!, window_share: 0.01, point: reported };
     vi.mocked(getAgentThreadContext).mockResolvedValue(data);
     show();
-    expect(within(await fact('Context window')).getByText('25% of 200K')).toBeInTheDocument();
+    const latest = await vi.waitFor(() => card('Latest observed request'));
+    expect(within(latest).getByText('1.0%')).toBeInTheDocument();
+    expect(within(latest).getByText('198K left in the reported window')).toBeInTheDocument();
   });
 
-  it('warns when a compaction came after the latest observation', async () => {
+  it('warns once when a compaction came after the latest observation', async () => {
     const data = view();
     data.latest = { ...data.latest!, compacted_after: true };
     vi.mocked(getAgentThreadContext).mockResolvedValue(data);
     show();
-    // On the window card and in the summary, both about the observed request.
-    expect(await screen.findAllByText(/compacted the context after this request/)).toHaveLength(2);
+    expect(await screen.findAllByText(/compacted the context after this request/)).toHaveLength(1);
   });
 
-  it('marks only reported compactions, and calls a later drop a drop', async () => {
+  it('marks only reported compactions on the trend, and calls a later drop a drop', async () => {
     show();
-    const changes = await screen.findByRole('heading', { name: 'Largest changes' });
-    const list = changes.parentElement!;
-    expect(within(list).getByText(/request 3, turn 2 · after a compaction/)).toBeInTheDocument();
+    await screen.findByText('Context Browser');
+    const trend = card('Context Trend');
+    // One reported compaction, one marker, at request 3; request 4's drop has none.
+    expect(trend.querySelectorAll('path.fill-rose-400')).toHaveLength(1);
+    expect(within(strip()).getByText('Request 4 · turn 2 · 2,010')).toBeInTheDocument();
+    expect(within(strip()).getByText(/−6,000 from the previous request/)).toBeInTheDocument();
+    expect(within(strip()).queryByText(/after a compaction/)).not.toBeInTheDocument();
+    fireEvent.keyDown(trendGroup(), { key: 'ArrowLeft' });
+    expect(within(strip()).getByText('Request 3 · turn 2 · 8,010')).toBeInTheDocument();
+    expect(within(strip()).getByText(/−52K from the previous request/)).toBeInTheDocument();
+    expect(within(strip()).getByText(/after a compaction/)).toBeInTheDocument();
+    // Delta is the signed change, on the same chart: there is no list of changes.
+    fireEvent.click(within(trend).getByRole('button', { name: 'Delta' }));
+    expect(within(trend).getByRole('button', { name: 'Delta' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(trend).getByText(/turn 2 · observed −52K/)).toBeInTheDocument();
+  });
+
+  it('lists the compaction once in the events and selects its request on the trend', async () => {
+    const { onOpenPoint } = show();
+    const events = await vi.waitFor(() => card('Context events'));
+    const filters = within(events).getByRole('group', { name: 'Show events of one kind' });
+    // An older recording: the compaction is in the view's record, not in its events.
+    expect(within(filters).getByRole('button', { name: /Compactions 1/ })).toBeInTheDocument();
+    const rows = within(events).getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('Trigger: Automatic');
+    expect(rows[0]).toHaveTextContent('The CLI reported 60K tokens before');
+    expect(rows[0]).toHaveTextContent('Requests observed around it: 60K → 8,010');
+
+    fireEvent.click(within(rows[0]).getByRole('button', { name: 'Show in trend' }));
+    expect(within(strip()).getByText('Request 3 · turn 2 · 8,010')).toBeInTheDocument();
     expect(
-      within(list).getByText(/request 4, turn 2 · no compaction reported/),
+      await within(card('Context Browser')).findByText('Request 3 · turn 2'),
     ).toBeInTheDocument();
-    const svg = screen.getByRole('img', { name: 'Input tokens of each model request' });
-    expect(svg.querySelectorAll('line title')).toHaveLength(1);
-  });
-
-  it('opens the step a request, a change or a compaction names, and its turn', async () => {
-    const { onOpenPoint, onOpenTurn } = show();
-    fireEvent.click(await screen.findByRole('button', { name: /−52K/ }));
-    fireEvent.click(screen.getAllByRole('button', { name: 'Open step' })[0]);
-    expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j2', turnNo: 2, eventId: 502 });
-    const compactions = screen.getByRole('heading', { name: 'Compactions' }).parentElement!;
-    fireEvent.click(within(compactions).getByRole('button', { name: 'Open step' }));
+    expect(card('Selected request')).toBeInTheDocument();
+    fireEvent.click(within(rows[0]).getByRole('button', { name: 'Open step' }));
     expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j2', turnNo: 2, eventId: 777 });
-    fireEvent.click(screen.getByRole('button', { name: '#1' }));
-    expect(onOpenTurn).toHaveBeenLastCalledWith('j1', 1);
   });
 
-  it('moves along the requests with the keyboard', async () => {
+  it('joins a compaction event to the record of it, listing it once', async () => {
+    const data = view();
+    data.events = [
+      {
+        kind: 'compaction',
+        source: 'cli_compact_boundary',
+        label: 'manual',
+        names: [],
+        items: null,
+        job_id: 'j2',
+        turn_no: 2,
+        attempt_id: 2,
+        seq: 1,
+        event_id: 777,
+        at: '2026-10-15T11:30:00Z',
+        chars: null,
+        tokens: null,
+        tokens_basis: null,
+        before_tokens: 60_000,
+        after_tokens: null,
+        from_value: null,
+        to_value: null,
+        superseded: false,
+        copied: false,
+      },
+    ];
+    data.event_counts = { compaction: 1 };
+    vi.mocked(getAgentThreadContext).mockResolvedValue(data);
     show();
-    const svg = await screen.findByRole('img', { name: 'Input tokens of each model request' });
-    fireEvent.keyDown(svg, { key: 'Home' });
-    expect(screen.getAllByText('Request 1 · turn 1 · 1,010').length).toBeGreaterThan(0);
-    fireEvent.keyDown(svg, { key: 'ArrowRight' });
-    expect(screen.getAllByText('Request 2 · turn 1 · 60K').length).toBeGreaterThan(0);
+    const events = await vi.waitFor(() => card('Context events'));
+    const rows = within(events).getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('Trigger: Manual');
+    expect(rows[0]).toHaveTextContent('Requests observed around it: 60K → 8,010');
+  });
+
+  it('opens the selected request’s step and turn from the strip under the trend', async () => {
+    const { onOpenPoint, onOpenTurn } = show();
+    await screen.findByText('Context Browser');
+    const trend = card('Context Trend');
+    expect(trend).toContainElement(strip());
+    fireEvent.click(within(strip()).getByRole('button', { name: 'Open step' }));
+    expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j2', turnNo: 2, eventId: 503 });
+    fireEvent.keyDown(trendGroup(), { key: 'ArrowLeft' });
+    fireEvent.keyDown(trendGroup(), { key: 'ArrowLeft' });
+    fireEvent.click(within(strip()).getByRole('button', { name: 'Open turn' }));
+    expect(onOpenTurn).toHaveBeenLastCalledWith('j1', 1);
   });
 
   it('has no table of what each agent reports, nor the notes that sat under it', async () => {
@@ -386,23 +503,8 @@ describe('ContextView', () => {
       }),
     );
     show();
-    // The real content is all there: the facts, the request chart, the turns.
-    expect(within(await fact('Latest observed context')).getByText('2,010')).toBeInTheDocument();
+    expect(await screen.findByText('Context Browser')).toBeInTheDocument();
     expect(within(await fact('Live occupancy')).getByText('Not collected')).toBeInTheDocument();
-    expect(
-      within(await fact('Context window')).getByText('Not reported for this request'),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole('heading', { name: 'Request sizes (as reported)' }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Turns' })).toBeInTheDocument();
-    expect(
-      screen.getByRole('img', { name: 'Input tokens of each model request' }),
-    ).toBeInTheDocument();
-    // The section and its diagnostics are gone, not collapsed.
-    expect(
-      screen.queryByRole('heading', { name: 'What each agent reports' }),
-    ).not.toBeInTheDocument();
     for (const text of [
       /What each agent reports/,
       /runs carry observations/,
@@ -419,11 +521,18 @@ describe('ContextView', () => {
     }
   });
 
-  it('has no such table in Chinese either', async () => {
+  it('reads as one flow in Chinese too', async () => {
     window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     show();
-    expect(within(await fact('最近观测到的上下文')).getByText('2,010')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '各轮' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '上下文浏览器' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '上下文趋势' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '上下文事件' })).toBeInTheDocument();
+    expect(within(await fact('实时占用')).getByText('未采集')).toBeInTheDocument();
+    expect(within(await fact('模型请求')).getByText(/^4 · /)).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: '请求详情' })).toBeInTheDocument();
+    for (const name of ['各轮', '压缩记录', '变化最大的请求', '请求大小（报告值）']) {
+      expect(screen.queryByRole('heading', { name })).not.toBeInTheDocument();
+    }
     expect(screen.queryByRole('heading', { name: '各 Agent 报告的内容' })).not.toBeInTheDocument();
     expect(screen.queryByText(/带有观测数据/)).not.toBeInTheDocument();
   });
@@ -446,10 +555,13 @@ describe('ContextView', () => {
     ).toBeGreaterThan(0);
     // No request: no donut, no strip, no window share.
     expect(screen.queryByText(/%/, { selector: 'b' })).not.toBeInTheDocument();
-    expect(within(await fact('Latest observed context')).getByText('—')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Request details' })).not.toBeInTheDocument();
     // Nothing observed: the counts are unknown, not zero.
     expect(within(await fact('Model requests')).getByText('—')).toBeInTheDocument();
-    expect(within(await fact('Compactions')).getByText('—')).toBeInTheDocument();
+    expect(within(await fact('Largest request')).getByText('—')).toBeInTheDocument();
+    expect(
+      screen.getByText('No context events are recorded for this conversation.'),
+    ).toBeInTheDocument();
   });
 
   it('says so when the conversation is not the reader’s', async () => {
@@ -460,13 +572,6 @@ describe('ContextView', () => {
     ).toBeInTheDocument();
   });
 
-  it('answers in Chinese', async () => {
-    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
-    show();
-    expect(await screen.findByText('最近观测到的上下文')).toBeInTheDocument();
-    expect(within(await fact('实时占用')).getByText('未采集')).toBeInTheDocument();
-  });
-
   it('reads the composition of the selected request, the newest by default', async () => {
     show();
     expect(await screen.findByText('Context Browser')).toBeInTheDocument();
@@ -474,8 +579,7 @@ describe('ContextView', () => {
     // The newest request, and the one before it for the change by item.
     expect(getRequestComposition).toHaveBeenCalledWith('j2', 503, expect.anything());
     expect(getRequestComposition).toHaveBeenCalledWith('j2', 502, expect.anything());
-    const svg = screen.getByRole('img', { name: 'Input tokens of each model request' });
-    fireEvent.keyDown(svg, { key: 'Home' });
+    for (let i = 0; i < 3; i += 1) fireEvent.keyDown(trendGroup(), { key: 'ArrowLeft' });
     await vi.waitFor(() =>
       expect(getRequestComposition).toHaveBeenCalledWith('j2', 500, expect.anything()),
     );

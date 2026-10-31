@@ -128,6 +128,20 @@ export function clampWindow(from: number, to: number, n: number): { from: number
   return { from: start, to: start + span - 1 };
 }
 
+/** The window moved, at its size, just far enough to show column `at`. */
+export function windowAround(
+  from: number,
+  to: number,
+  at: number,
+  n: number,
+): { from: number; to: number } {
+  const shown = clampWindow(from, to, n);
+  if (at < 0 || (at >= shown.from && at <= shown.to)) return shown;
+  const size = shown.to - shown.from;
+  const start = at < shown.from ? at : at - size;
+  return clampWindow(start, start + size, n);
+}
+
 /** The window halved (zoom in) or doubled (zoom out) about its middle, kept in range. */
 export function zoomWindow(
   from: number,
