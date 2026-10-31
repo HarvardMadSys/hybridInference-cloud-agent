@@ -260,17 +260,17 @@ FILE_ACTIVITY_EVENT_SQL = rf"""
            -- A structural skeleton of the result, for image evidence. Bulky
            -- string values of the payload fields (a base64 body, a text body)
            -- are replaced by a marker, so the block's own type and media type
-           -- survive without the body moving. The string token respects JSON
-           -- escapes (\\ and \" pairs) and refuses raw control characters,
-           -- so a valid block with escaped quotes stays valid JSON and an
-           -- invalid one stays invalid for the reducer's json.loads.
+           -- survive without the body moving. The string token is JSON's own
+           -- grammar — the valid escape set, or \u plus four hex digits, and
+           -- no raw control characters — so valid input stays valid and
+           -- malformed input stays malformed for the reducer's json.loads.
            left(regexp_replace(regexp_replace(regexp_replace(
                  COALESCE(result.payload->>'content', ''),
-                 '"data"[[:space:]]*:[[:space:]]*"(?:[^"\\[:cntrl:]]|\\.)*"',
+                 '"data"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"',
                  '"data":""', 'g'),
-                 '"text"[[:space:]]*:[[:space:]]*"(?:[^"\\[:cntrl:]]|\\.)*"',
+                 '"text"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"',
                  '"text":""', 'g'),
-                 '"content"[[:space:]]*:[[:space:]]*"(?:[^"\\[:cntrl:]]|\\.)*"',
+                 '"content"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"',
                  '"content":""', 'g'),
                  4000) AS result_skeleton
     FROM agent_job_events e

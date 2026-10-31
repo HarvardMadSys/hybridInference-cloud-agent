@@ -918,3 +918,17 @@ async def test_a_raw_control_character_in_image_data_keeps_it_invalid(db, store)
     """A raw newline inside a JSON string is invalid JSON, so nothing counts."""
     content = '{"type":"image","source":{"media_type":"image/png","data":"AA\nBB"}}'
     assert await _read_result(db, store, "fa_control", content) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    "escaped",
+    [
+        # A backslash escape JSON does not define.
+        '{"type":"image","source":{"media_type":"image/png","data":"AA\\qBB"}}',
+        # A \u escape whose four digits are not hex.
+        '{"type":"image","source":{"media_type":"image/png","data":"AA\\uZZZZBB"}}',
+    ],
+    ids=["invalid-escape", "invalid-unicode-escape"],
+)
+async def test_an_invalid_json_escape_in_image_data_keeps_it_invalid(db, store, escaped):
+    assert await _read_result(db, store, "fa_bad_escape", escaped) == (0, 1)
