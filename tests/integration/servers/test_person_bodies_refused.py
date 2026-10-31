@@ -22,11 +22,10 @@ from tests.integration.servers.test_pending_message_queue import (
     _OWNER,
     _REPO,
     _claim_body,
-    _Gateway,
     pool as pool,
 )
 from tests.support.model_connections import verified_connection
-from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, on_connection
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, FakeOwners, on_connection
 
 from cloud_agent.api import worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
@@ -75,7 +74,7 @@ async def http(pool, monkeypatch):
     monkeypatch.setattr(worker, "_worker_sandbox_manager", no_sandbox_manager)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_owner_directory] = _Gateway
+    app.dependency_overrides[get_owner_directory] = lambda: FakeOwners()
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,

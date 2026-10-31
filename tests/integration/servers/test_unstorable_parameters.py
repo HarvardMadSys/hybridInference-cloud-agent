@@ -3,7 +3,7 @@
 A NUL in a path or query parameter, or an integer too wide for a ``bigint``,
 used to travel to the first query that read it and fail there with a 500.
 These go through the application ``create_app`` builds, over the real store,
-and only the gateway and the caller's identity stand in.
+and only the account directory and the caller's identity stand in.
 """
 
 from __future__ import annotations
@@ -16,11 +16,10 @@ from httpx import ASGITransport, AsyncClient
 from tests.integration.servers.test_pending_message_queue import (
     _OWNER,
     _REPO,
-    _Gateway,
     pool as pool,
 )
 from tests.support.model_connections import verified_connection
-from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, on_connection
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, FakeOwners, on_connection
 
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
@@ -49,7 +48,7 @@ async def http(pool, monkeypatch):
     await verified_connection(store, _OWNER, connection_id=CONNECTION_ID, models=CONNECTION_MODELS)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_owner_directory] = _Gateway
+    app.dependency_overrides[get_owner_directory] = lambda: FakeOwners()
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
