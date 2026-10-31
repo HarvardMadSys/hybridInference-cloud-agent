@@ -87,6 +87,8 @@ export const commandExecutionsEn = {
   'executions.retry': 'Try again',
   'executions.coverage': 'Covering the newest {covered} of {total} recorded executions.',
   'executions.coverageAll': '{total} recorded executions.',
+  'executions.coveragePartial':
+    'Some results were not read within the bound, so a late outcome may be missing.',
   'executions.coverageCopied':
     '{count} fork-copied turns are another conversation’s commands and are not counted here.',
   'executions.unsupported':
@@ -176,6 +178,7 @@ export const commandExecutionsZhCN: Record<keyof typeof commandExecutionsEn, str
   'executions.retry': '重试',
   'executions.coverage': '覆盖最近 {covered} 次执行，共记录 {total} 次。',
   'executions.coverageAll': '共记录 {total} 次执行。',
+  'executions.coveragePartial': '结果读取达到上限，较晚的结果可能遗漏。',
   'executions.coverageCopied': '另有 {count} 个 fork 复制轮次属于其他会话的命令，未计入此处。',
   'executions.unsupported': '无法识别以下运行时的命令格式：{runtimes}。这些执行未显示。',
   'executions.page.showMore': '显示更多',

@@ -318,6 +318,7 @@ beforeEach(() => {
       attempts: 0,
       copied_jobs_excluded: 0,
       unsupported_runtimes: [],
+      results_partial: false,
     },
     counts: { all: 0, failed: 0, slow: 0, background: 0 },
     attention: { slowest: null, failing: null, repeats: null, background: 0 },

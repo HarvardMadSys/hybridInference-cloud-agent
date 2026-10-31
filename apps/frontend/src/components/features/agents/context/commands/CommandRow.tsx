@@ -5,7 +5,7 @@
 // and the navigation back to the step or turn it came from. Long text stays
 // in a <pre> of React text nodes; nothing is ever set as HTML.
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import { getEventContent, type CommandExecutionApi } from '@/lib/api/agents';
 import type { TranslationKey } from '@/lib/i18n/translate';
@@ -112,6 +112,7 @@ export function CommandRow({
       </button>
       {open ? (
         <CommandDetails
+          key={`${jobId}:${execution.id}:${execution.result_event_id ?? 'none'}`}
           execution={execution}
           jobId={jobId}
           onOpenPoint={onOpenPoint}
@@ -134,10 +135,15 @@ function CommandDetails({
   onOpenTurn: OpenTurn;
 }) {
   const { t, locale } = useLocale();
+  // Detail state belongs to one result event. When a refresh gives this same
+  // execution a new result, the old text and offset are dropped rather than
+  // shown against the new outcome or sent as its continuation.
+  const resultKey = `${jobId}:${execution.id}:${execution.result_event_id ?? 'none'}`;
   const [full, setFull] = useState<string | null>(null);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
+  const fetchTicket = useRef(0);
   const command = execution.command;
   const output = full ?? clip(execution.output_preview, OUTPUT_CLIP);
   // Whether more of the stored result exists beyond what is shown, by the
@@ -148,22 +154,31 @@ function CommandDetails({
 
   const load = (offset: number) => {
     if (execution.result_event_id == null) return;
+    const ticket = ++fetchTicket.current;
+    const key = resultKey;
     setLoading(true);
     setFailed(false);
     getEventContent(jobId, execution.result_event_id, offset)
-      .then((content) => {
-        if (!content) {
-          setFailed(true);
-          return;
-        }
-        setFull((previous) =>
-          offset === 0 || previous === null ? content.text : previous + content.text,
-        );
-        setNextOffset(content.next_offset);
-        if (content.next_offset === null && !content.truncated) setNextOffset(null);
+      .then((content) => applyPage(content))
+      .catch(() => {
+        if (ticket === fetchTicket.current && key === resultKey) setFailed(true);
       })
-      .catch(() => setFailed(true))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (ticket === fetchTicket.current && key === resultKey) setLoading(false);
+      });
+
+    function applyPage(content: Awaited<ReturnType<typeof getEventContent>>) {
+      // A different result, or a newer fetch, owns the panel now.
+      if (ticket !== fetchTicket.current || key !== resultKey) return;
+      if (!content) {
+        setFailed(true);
+        return;
+      }
+      setFull((previous) =>
+        offset === 0 || previous === null ? content.text : previous + content.text,
+      );
+      setNextOffset(content.next_offset);
+    }
   };
 
   return (

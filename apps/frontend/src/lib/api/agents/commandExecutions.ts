@@ -84,6 +84,8 @@ export interface CommandCoverageApi {
   attempts: number;
   copied_jobs_excluded: number;
   unsupported_runtimes: string[];
+  /** A batch of results hit its bound: a late outcome may be missing. */
+  results_partial: boolean;
 }
 
 export interface CommandAttentionApi {

@@ -51,6 +51,89 @@ interface Query {
 /** How often a running conversation's commands are read again while visible. */
 export const COMMANDS_REFRESH_MS = 5_000;
 
+/** Read one page and apply it, unless a newer read or an abort won. */
+async function fetchPage(
+  jobId: string,
+  wanted: Query,
+  cursor: string | null,
+  signal: AbortSignal,
+  ticket: number,
+  generation: { current: number },
+  apply: {
+    clear: () => void;
+    append: (page: ThreadCommandsApi, add: boolean) => void;
+    fail: (message: string) => void;
+    fallback: string;
+  },
+  append: boolean,
+) {
+  try {
+    const page = await getThreadContextCommands(
+      jobId,
+      { filter: wanted.filter, sort: wanted.sort, q: wanted.q, program: wanted.program, cursor },
+      signal,
+    );
+    if (signal.aborted || ticket !== generation.current) return;
+    if (page === null) {
+      apply.clear();
+      return;
+    }
+    apply.append(page, append);
+  } catch (cause) {
+    if (signal.aborted || ticket !== generation.current) return;
+    apply.fail(cause instanceof Error && cause.message ? cause.message : apply.fallback);
+  }
+}
+
+/** A query's identity for the refresh effect, without an inline nullish branch. */
+function queryKeyOf(query: Query): string {
+  return [query.filter, query.sort, query.q, query.program].map((part) => part ?? '').join('|');
+}
+
+/** Apply typed search text once the reader pauses. */
+function useDebouncedSearch(text: string, applied: string, apply: (q: string) => void) {
+  useEffect(() => {
+    if (text === applied) return undefined;
+    const timer = window.setTimeout(() => apply(text), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [text, applied, apply]);
+}
+
+/** Re-read a running conversation's first page on a stable cadence. */
+function useCommandRefresh(
+  active: boolean,
+  load: (wanted: Query, cursor: string | null, append: boolean) => Promise<void>,
+  queryRef: { current: Query },
+  busy: { current: boolean },
+  queryKey: string,
+) {
+  // A running turn adds commands and settles running ones: read the first page
+  // again on the shared cadence, only while visible and never overlapping a
+  // read. Nothing the read itself changes is a dependency, so a refresh cannot
+  // abort itself.
+  useEffect(() => {
+    if (!active) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible' || busy.current) return;
+      void load(queryRef.current, null, false);
+    }, COMMANDS_REFRESH_MS);
+    return () => window.clearInterval(timer);
+    // The query is read through a ref; load is stable for one job.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, load, queryKey]);
+
+  // The turn just settled: read once more so a command that finished between
+  // polls does not stay "Running" with no further refresh scheduled.
+  const wasActive = useRef(active);
+  useEffect(() => {
+    const settled = wasActive.current && !active;
+    wasActive.current = active;
+    if (!settled || document.visibilityState !== 'visible') return;
+    void load(queryRef.current, null, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, load, queryKey]);
+}
+
 export function CommandExecutions({
   jobId,
   conversationKey,
@@ -82,73 +165,68 @@ export function CommandExecutions({
 
   // A search is applied after the reader stops typing; the other controls act
   // at once.
-  useEffect(() => {
-    if (text === query.q) return undefined;
-    const timer = window.setTimeout(
-      () => setQuery((previous) => ({ ...previous, q: text })),
-      SEARCH_DEBOUNCE_MS,
-    );
-    return () => window.clearTimeout(timer);
-  }, [text, query.q]);
+  useDebouncedSearch(text, query.q, (q) => setQuery((previous) => ({ ...previous, q })));
+
+  // The request in flight, so a refresh never overlaps another read and its
+  // controller is not tied to an effect that a state change re-runs.
+  const inFlight = useRef<AbortController | null>(null);
+  const busy = useRef(false);
+  const queryRef = useRef(query);
+  queryRef.current = query;
 
   const load = useCallback(
-    async (wanted: Query, cursor: string | null, append: boolean, signal: AbortSignal) => {
+    async (wanted: Query, cursor: string | null, append: boolean) => {
+      if (busy.current) return;
+      const controller = new AbortController();
+      inFlight.current = controller;
+      busy.current = true;
       const ticket = ++generation.current;
       setLoading(true);
       try {
-        const page = await getThreadContextCommands(
+        await fetchPage(
           jobId,
+          wanted,
+          cursor,
+          controller.signal,
+          ticket,
+          generation,
           {
-            filter: wanted.filter,
-            sort: wanted.sort,
-            q: wanted.q,
-            program: wanted.program,
-            cursor,
+            clear: () => {
+              setPages([]);
+              setError(null);
+            },
+            append: (page, add) =>
+              setPages((previous) => (add && previous.length > 0 ? [...previous, page] : [page])),
+            fail: (message) => setError(message),
+            fallback: t('executions.loadError'),
           },
-          signal,
-        );
-        if (signal.aborted || ticket !== generation.current) return;
-        if (page === null) {
-          setPages([]);
-          setError(null);
-          return;
-        }
-        setError(null);
-        setPages((previous) => (append && previous.length > 0 ? [...previous, page] : [page]));
-      } catch (cause) {
-        if (signal.aborted || ticket !== generation.current) return;
-        setError(
-          cause instanceof Error && cause.message ? cause.message : t('executions.loadError'),
+          append,
         );
       } finally {
-        if (!signal.aborted && ticket === generation.current) setLoading(false);
+        if (inFlight.current === controller) inFlight.current = null;
+        busy.current = false;
+        if (!controller.signal.aborted && ticket === generation.current) setLoading(false);
       }
     },
     [jobId, t],
   );
 
-  useEffect(() => {
-    const controller = new AbortController();
-    setPages([]);
-    void load(query, null, false, controller.signal);
-    return () => controller.abort();
-  }, [load, query, conversationKey]);
+  const cancel = useCallback(() => {
+    inFlight.current?.abort();
+    inFlight.current = null;
+    busy.current = false;
+  }, []);
 
-  // A running turn adds commands and settles running ones: read the first page
-  // again on the shared cadence, only while the page is visible, and never
-  // while a paged read is in flight (so the cursor walk stays coherent).
+  // A new conversation or query starts from its first page and cancels the
+  // previous read, so a paged list never mixes two generations.
   useEffect(() => {
-    if (!active) return undefined;
-    const controller = new AbortController();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'visible' || loading) return;
-      void load(query, null, false, controller.signal);
-    }, COMMANDS_REFRESH_MS);
-    return () => {
-      window.clearInterval(timer);
-      controller.abort();
-    };
-  }, [active, load, query, loading]);
+    cancel();
+    setPages([]);
+    void load(query, null, false);
+    return cancel;
+  }, [load, query, conversationKey, cancel]);
+
+  useCommandRefresh(active, load, queryRef, busy, queryKeyOf(query));
 
   const page = pages[0] ?? null;
   const executions = useMemo(
@@ -162,8 +240,7 @@ export function CommandExecutions({
 
   const showMore = () => {
     if (!more) return;
-    const controller = new AbortController();
-    void load(query, more, true, controller.signal);
+    void load(query, more, true);
   };
 
   const selectProgram = (name: string | null) => {
@@ -345,7 +422,9 @@ function SummaryRail({
     summary.failure_rate == null
       ? null
       : `${(summary.failure_rate * 100).toFixed(1).replace(/\.0$/, '')}%`;
-  const cumulative = durationLabel(summary.cumulative_ms);
+  // No measured duration at all is unknown, not a zero sum; a recorded zero is
+  // still 0ms because durations_known counts it.
+  const cumulative = summary.durations_known === 0 ? null : durationLabel(summary.cumulative_ms);
   return (
     <div className="min-w-0 rounded-lg border border-border p-3">
       <h4 className="text-xs font-semibold text-foreground" title={t('executions.rail.summaryTip')}>
@@ -569,6 +648,7 @@ function Coverage({ page, shown }: { page: ThreadCommandsApi; shown: number }) {
           })}
         </p>
       ) : null}
+      {coverage.results_partial ? <p>{t('executions.coveragePartial')}</p> : null}
       {coverage.unsupported_runtimes.length > 0 ? (
         <p>{t('executions.unsupported', { runtimes: coverage.unsupported_runtimes.join(', ') })}</p>
       ) : null}

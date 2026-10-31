@@ -595,3 +595,15 @@ def test_a_zero_duration_is_zero_not_one_millisecond():
     assert page.executions[0].duration_ms == 0
     assert page.summary.cumulative_ms == 0
     assert page.summary.durations_known == 1
+
+
+def test_cumulative_duration_is_absent_when_nothing_was_measured():
+    # A call with no result has no recorded or derivable duration at all.
+    rows = [call(1, call_id="a")]
+    page = command_executions_page(build(rows))
+    assert page.summary.total == 1
+    assert page.summary.durations_known == 0
+    assert page.summary.duration_basis == "none"
+    assert page.summary.cumulative_ms == 0
+    # The count says nothing was measured; the client renders it as unknown.
+    assert page.summary.durations_missing == 1

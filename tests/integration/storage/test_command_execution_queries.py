@@ -489,3 +489,98 @@ async def test_unrelated_results_cannot_crowd_a_commands_result(db, store):
     assert result["executions"][0]["status"] == "completed"
     assert result["executions"][0]["output_preview"] == "ok"
     assert result["coverage"]["truncated"] is False
+
+
+async def test_the_result_bound_crossing_is_reported_partial(db, store, monkeypatch):
+    """More poll/result rows than one batch bound must not be called complete."""
+    from cloud_agent.storage.repositories import command_execution_queries as queries
+
+    monkeypatch.setattr(queries, "RESULTS_BATCH_LIMIT", 8)
+    [turn] = await _conversation(db, store, "athr_bound")
+    rows = [
+        (
+            "tool_use",
+            {
+                "name": "Bash",
+                "id": "c1",
+                "input": {"command": "npm run dev", "run_in_background": True},
+            },
+        )
+    ]
+    rows.append(("tool_result", {"tool_use_id": "c1", "content": "started", "shellId": "s1"}))
+    for index in range(12):
+        rows.append(
+            ("tool_use", {"name": "BashOutput", "id": f"p{index}", "input": {"bash_id": "s1"}})
+        )
+        rows.append(("tool_result", {"tool_use_id": f"p{index}", "content": f"poll {index}"}))
+    rows.append(("tool_result", {"tool_use_id": "p11", "content": "done", "exit_code": 0}))
+    await _events(db, turn["job_id"], turn["attempt_id"], rows)
+    result = await store.command_executions.command_executions(job_id=turn["job_id"], user_id=OWNER)
+    assert result["summary"]["total"] == 1
+    # The batch bound was reached, so the read says some outcomes may be missing.
+    assert result["coverage"]["results_partial"] is True
+
+
+async def test_a_large_native_structured_result_keeps_its_exit_status(db, store):
+    """Over 4 KiB of structured stdout must not truncate the exit code away."""
+    [turn] = await _conversation(db, store, "athr_big_structured")
+    await _events(
+        db,
+        turn["job_id"],
+        turn["attempt_id"],
+        [
+            ("tool_use", {"name": "Bash", "id": "c1", "input": {"command": "pytest -q"}}),
+            (
+                "tool_result",
+                {
+                    "tool_use_id": "c1",
+                    "content": "failed",
+                    "structured_output": {
+                        "stdout": "x" * 20_000,
+                        "stderr": "y" * 8_000,
+                        "exitCode": 7,
+                    },
+                },
+            ),
+        ],
+    )
+    result = await store.command_executions.command_executions(job_id=turn["job_id"], user_id=OWNER)
+    execution = result["executions"][0]
+    assert execution["status"] == "failed"
+    assert execution["exit_code"] == 7
+
+
+async def test_a_large_structured_background_launch_keeps_its_shell_id(db, store):
+    [turn] = await _conversation(db, store, "athr_big_shell")
+    await _events(
+        db,
+        turn["job_id"],
+        turn["attempt_id"],
+        [
+            (
+                "tool_use",
+                {
+                    "name": "Bash",
+                    "id": "c1",
+                    "input": {"command": "npm run dev", "run_in_background": True},
+                },
+            ),
+            (
+                "tool_result",
+                {
+                    "tool_use_id": "c1",
+                    "content": "started",
+                    "structured_output": {
+                        "stdout": "z" * 30_000,
+                        "shellId": "s1",
+                        "background": True,
+                    },
+                },
+            ),
+            ("tool_use", {"name": "BashOutput", "id": "p1", "input": {"bash_id": "s1"}}),
+            ("tool_result", {"tool_use_id": "p1", "content": "done", "exit_code": 0}),
+        ],
+    )
+    result = await store.command_executions.command_executions(job_id=turn["job_id"], user_id=OWNER)
+    assert result["summary"]["total"] == 1
+    assert result["executions"][0]["status"] == "completed"

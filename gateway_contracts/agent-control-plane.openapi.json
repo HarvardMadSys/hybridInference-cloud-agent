@@ -10141,6 +10141,11 @@
             "title": "Executions Total",
             "type": "integer"
           },
+          "results_partial": {
+            "default": false,
+            "title": "Results Partial",
+            "type": "boolean"
+          },
           "truncated": {
             "title": "Truncated",
             "type": "boolean"

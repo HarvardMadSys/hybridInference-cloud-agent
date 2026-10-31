@@ -103,6 +103,7 @@ function page(overrides: Partial<ThreadCommandsApi> = {}): ThreadCommandsApi {
       attempts: 1,
       copied_jobs_excluded: 0,
       unsupported_runtimes: [],
+      results_partial: false,
     },
     counts: { all: 3, failed: 1, slow: 1, background: 1 },
     attention: {
@@ -312,6 +313,7 @@ describe('CommandExecutions', () => {
           attempts: 15,
           copied_jobs_excluded: 2,
           unsupported_runtimes: ['goose'],
+          results_partial: false,
         },
       }),
     );
@@ -461,11 +463,23 @@ it('labels the retry attempt as an attempt, not a tool step', async () => {
   );
 });
 
-it('reads the first page again while a turn is running, and not when it is not', async () => {
+it('refreshes a running turn with a request whose signal stays live, and renders the change', async () => {
+  let signal: AbortSignal | undefined;
+  let resolveSecond: ((value: ThreadCommandsApi) => void) | undefined;
+  mocked.mockImplementationOnce(async (_job, _query, given) => {
+    signal = given;
+    return page();
+  });
+  mocked.mockImplementationOnce(
+    (_job, _query, given) =>
+      new Promise<ThreadCommandsApi>((resolve) => {
+        signal = given;
+        resolveSecond = resolve;
+      }),
+  );
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
-    mocked.mockResolvedValue(page());
-    const { rerender } = render(
+    render(
       <LocaleProvider>
         <CommandExecutions
           jobId="j1"
@@ -478,25 +492,130 @@ it('reads the first page again while a turn is running, and not when it is not',
     );
     await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
     await vi.advanceTimersByTimeAsync(5_100);
-    await waitFor(() => expect(mocked.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(2));
+    // The refresh's own request must not have been aborted by the effect.
+    expect(signal?.aborted).toBe(false);
+    resolveSecond!(
+      page({
+        executions: [execution({ id: '1:c1', status: 'completed', output_preview: 'finished' })],
+      }),
+    );
+    const list = await screen.findByRole('list', { name: 'Command Executions' });
+    await waitFor(() =>
+      expect(
+        within(within(list).getAllByRole('listitem')[0]).getByText('Completed'),
+      ).toBeInTheDocument(),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
-    const calls = mocked.mock.calls.length;
-    rerender(
+it('reads once more when a turn stops running, so a settled command is not left Running', async () => {
+  const props = {
+    jobId: 'j1',
+    conversationKey: 't1',
+    onOpenPoint: vi.fn(),
+    onOpenTurn: vi.fn(),
+  };
+  mocked.mockResolvedValue(page());
+  const { rerender } = render(
+    <LocaleProvider>
+      <CommandExecutions {...props} active />
+    </LocaleProvider>,
+  );
+  await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+  mocked.mockResolvedValue(page({ executions: [execution({ status: 'completed' })] }));
+  rerender(
+    <LocaleProvider>
+      <CommandExecutions {...props} active={false} />
+    </LocaleProvider>,
+  );
+  await waitFor(() => expect(mocked.mock.calls.length).toBeGreaterThanOrEqual(2));
+});
+
+it('drops detail state when a refreshed result replaces the old one', async () => {
+  const first = execution({
+    result_event_id: 2,
+    output_preview: 'old',
+    output_chars: 3,
+    output_truncated: true,
+  });
+  mocked.mockResolvedValueOnce(
+    page({ executions: [first], page: { total: 1, returned: 1, limit: 100, next_cursor: null } }),
+  );
+  let resolveContent: ((value: Awaited<ReturnType<typeof getEventContent>>) => void) | undefined;
+  mockedContent.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveContent = resolve;
+      }),
+  );
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    render(
       <LocaleProvider>
         <CommandExecutions
           jobId="j1"
           conversationKey="t1"
-          active={false}
+          active
           onOpenPoint={vi.fn()}
           onOpenTurn={vi.fn()}
         />
       </LocaleProvider>,
     );
-    await vi.advanceTimersByTimeAsync(15_000);
-    expect(mocked.mock.calls.length).toBe(calls);
+    const list = await screen.findByRole('list', { name: 'Command Executions' });
+    const item = within(list).getAllByRole('listitem')[0];
+    fireEvent.click(within(item).getByRole('button', { expanded: false }));
+    const details = within(item).getByLabelText('Execution details');
+    fireEvent.click(within(details).getByRole('button', { name: 'Load the full result' }));
+
+    // A periodic refresh moves the same execution to a new result while the
+    // old content fetch is still in flight.
+    mocked.mockResolvedValue(
+      page({
+        executions: [execution({ result_event_id: 9, output_preview: 'new', output_chars: 3 })],
+        page: { total: 1, returned: 1, limit: 100, next_cursor: null },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(5_100);
+    await waitFor(() => expect(screen.getByText('new')).toBeInTheDocument());
+    resolveContent?.({
+      event_id: 2,
+      event_type: 'tool_result',
+      phase: null,
+      offset: 0,
+      text: 'stale-old-text',
+      total_chars: 3,
+      truncated: false,
+      next_offset: null,
+    });
+    // The stale page is ignored: no old text under the new result.
+    await waitFor(() => expect(screen.queryByText('stale-old-text')).toBeNull());
   } finally {
     vi.useRealTimers();
   }
+});
+
+it('shows an unknown cumulative duration when nothing was measured', async () => {
+  mocked.mockResolvedValue(
+    page({
+      summary: {
+        ...page().summary,
+        cumulative_ms: 0,
+        durations_known: 0,
+        durations_missing: 19,
+        duration_basis: 'none',
+      },
+    }),
+  );
+  renderSection();
+  const section = (await screen.findByRole('heading', { name: 'Command Executions' })).closest(
+    'section',
+  )!;
+  const facts = within(section).getAllByText('no timing recorded');
+  expect(facts.length).toBeGreaterThan(0);
+  expect(within(section).queryByText('0ms')).toBeNull();
 });
 
 it('continues a long result by offset instead of hiding the rest', async () => {

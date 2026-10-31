@@ -219,6 +219,8 @@ class CommandCoverage(BaseModel):
     attempts: int = Field(ge=0)
     #: Fork-copied turns are another conversation's commands; not counted here.
     copied_jobs_excluded: int = Field(ge=0)
+    #: A batch of results reached its bound: a late outcome may be missing.
+    results_partial: bool = False
     #: Runtimes whose command format this build does not recognize.
     unsupported_runtimes: list[str] = Field(default_factory=list)
 
@@ -612,6 +614,8 @@ class CommandAssembly:
     attempts: int
     copied_jobs_excluded: int
     unsupported_runtimes: list[str] = field(default_factory=list)
+    #: A batch of results hit its bound: some outcome may be missing.
+    results_partial: bool = False
 
 
 def _text(value: Any) -> str | None:
@@ -920,6 +924,7 @@ def assemble_command_executions(
     jobs: Sequence[Mapping[str, Any]],
     rows: Sequence[Mapping[str, Any]],
     executions_total: int | None = None,
+    results_partial: bool = False,
 ) -> CommandAssembly:
     """Match recorded calls to their results and assemble the covered executions.
 
@@ -960,6 +965,7 @@ def assemble_command_executions(
         attempts=attempts,
         copied_jobs_excluded=copied,
         unsupported_runtimes=unsupported,
+        results_partial=results_partial,
     )
 
 
@@ -1198,6 +1204,7 @@ def command_executions_page(
             attempts=assembly.attempts,
             copied_jobs_excluded=assembly.copied_jobs_excluded,
             unsupported_runtimes=list(assembly.unsupported_runtimes),
+            results_partial=assembly.results_partial,
         ),
         counts=counts,
         attention=attention,

@@ -11,6 +11,7 @@ ledger the platform already writes.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,7 @@ from cloud_agent.command_executions import (
 )
 from cloud_agent.storage._sql.command_executions import (
     CALLS_SQL,
+    POLLS_SQL,
     RESULTS_SQL,
     TOTAL_SQL,
     TURNS_SQL,
@@ -34,13 +36,24 @@ from cloud_agent.storage._sql.command_executions import (
 if TYPE_CHECKING:
     import asyncpg
 
-#: Ids one results statement may look for. Postgres binds an array per query,
-#: so the covered identities are read in bounded chunks rather than one huge
-#: statement.
-RESULTS_CHUNK = 500
-#: Every read is bounded in wall time; a large ledger cannot hold a pooled
-#: connection for an unbounded period.
+#: Identities one results statement looks for. A batch is sized so its own
+#: results (a launch acknowledgement and the polls after it) fit the same
+#: bound; identities are read in batches rather than one huge statement.
+RESULTS_CHUNK = 200
+#: Result rows one batch may return. A batch that reaches it is reported as
+#: partial coverage instead of silently dropping a late outcome.
+RESULTS_BATCH_LIMIT = 1_000
+#: Every covered read, acquisition included, is bounded in wall time. A large
+#: ledger cannot hold a pooled connection for an unbounded period.
 COMMAND_READ_TIMEOUT_S = 15.0
+
+
+class CommandReadTimeout(RuntimeError):
+    """A command read exceeded its overall deadline; retrying may succeed."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"The command read did not finish within {seconds:g}s.")
+        self.seconds = seconds
 
 
 class PostgresCommandExecutionQueries:
@@ -69,23 +82,30 @@ class PostgresCommandExecutionQueries:
         Raises:
             ValueError: the cursor is malformed or belongs to another list.
         """
-        async with self._pool.acquire() as conn, conn.transaction():
-            # One optional read never outlives this bound; the setting is LOCAL
-            # so it cannot leak to the pooled connection's next user.
-            await conn.execute(
-                f"SET LOCAL statement_timeout = {int(COMMAND_READ_TIMEOUT_S * 1000)}"
-            )
-            return await self._read(
-                conn,
-                job_id=job_id,
-                user_id=user_id,
-                filter=filter,
-                sort=sort,
-                q=q,
-                program=program,
-                cursor=cursor,
-                limit=limit,
-            )
+        # The deadline covers acquisition and every statement, not each one
+        # separately; the LOCAL timeout is the database's backstop and cannot
+        # leak to the pooled connection's next user.
+        try:
+            async with asyncio.timeout(COMMAND_READ_TIMEOUT_S):
+                async with self._pool.acquire() as conn, conn.transaction():
+                    await conn.execute(
+                        f"SET LOCAL statement_timeout = {int(COMMAND_READ_TIMEOUT_S * 1000)}"
+                    )
+                    return await self._read(
+                        conn,
+                        job_id=job_id,
+                        user_id=user_id,
+                        filter=filter,
+                        sort=sort,
+                        q=q,
+                        program=program,
+                        cursor=cursor,
+                        limit=limit,
+                    )
+        except TimeoutError:
+            # A read that ran out of time is a recoverable failure, not a
+            # conversation error: the caller renders it and the pool is free.
+            raise CommandReadTimeout(COMMAND_READ_TIMEOUT_S) from None
 
     async def _read(
         self,
@@ -111,7 +131,7 @@ class PostgresCommandExecutionQueries:
         attempt_ids = sorted({int(call["attempt_id"]) for call in calls})
         call_ids = sorted({str(call["call_id"]) for call in calls if call.get("call_id")})
         sessions = sorted({str(call["session_id"]) for call in calls if call.get("session_id")})
-        related = await self._results(
+        polls, related, results_partial = await self._results(
             conn,
             attempt_ids=attempt_ids,
             call_ids=call_ids,
@@ -119,13 +139,18 @@ class PostgresCommandExecutionQueries:
             job_id=job_id,
             user_id=user_id,
         )
-        rows = [_call_row(call) for call in calls] + [_related_row(row) for row in related]
+        rows = (
+            [_call_row(call) for call in calls]
+            + [_poll_row(row) for row in polls]
+            + [_related_row(row) for row in related]
+        )
         assembly = assemble_command_executions(
             thread_id=str(turns[0].get("thread_id") or ""),
             generated_at=datetime.now(UTC),
             jobs=_jobs(turns),
             rows=rows,
             executions_total=total,
+            results_partial=results_partial,
         )
         page = command_executions_page(
             assembly, filter=filter, sort=sort, q=q, program=program, cursor=cursor, limit=limit
@@ -141,55 +166,91 @@ class PostgresCommandExecutionQueries:
         sessions: list[str],
         job_id: str,
         user_id: str,
-    ) -> list[dict[str, Any]]:
-        """The results and polls that answer the covered calls, in bounded chunks.
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        """Results for the covered calls, in bounded identity batches.
 
-        Only identities the covered calls name are read, so an unrelated result
-        in the same attempt cannot crowd a command's own result out of the
-        bound. If the total bound is still reached, the caller reports the
-        read as incomplete instead of calling its totals complete.
+        Each batch asks only for the results that name its own calls or one of
+        the sessions a covered call opened, so unrelated rows cannot crowd a
+        command's result out. Polls are read once for their ids, so a poll's
+        result joins even when it repeats no session.
+
+        Returns the rows and whether any batch hit its bound, which the caller
+        reports as partial coverage instead of calling its totals complete.
         """
         if not attempt_ids:
-            return []
+            return [], [], False
+        polls = [
+            dict(row)
+            for row in await conn.fetch(
+                POLLS_SQL,
+                attempt_ids,
+                user_id,
+                job_id,
+                list(poll_tool_names()),
+                RESULTS_BATCH_LIMIT,
+            )
+        ]
+        poll_by_call = {str(p["call_id"]): p for p in polls if p.get("call_id")}
+        poll_ids = sorted(poll_by_call)
+        poll_sessions = {str(p["session_id"]) for p in polls if p.get("session_id")}
+        every_session = sorted(set(sessions) | poll_sessions)
+        # A covered call's result and any poll continuing its session; the poll
+        # ids travel with the batch they belong to.
+        batches: list[tuple[list[str], list[str]]] = []
+        for start in range(0, len(call_ids) or 1, RESULTS_CHUNK):
+            batch = call_ids[start : start + RESULTS_CHUNK]
+            batches.append((batch, every_session))
+        if not call_ids:
+            batches.append(([], every_session))
         found: list[dict[str, Any]] = []
-        chunk = RESULTS_CHUNK
-        ids = call_ids or [""]
-        for start in range(0, len(ids), chunk):
-            batch = ids[start : start + chunk]
-            found.extend(
-                dict(row)
-                for row in await conn.fetch(
-                    RESULTS_SQL,
-                    attempt_ids,
-                    user_id,
-                    job_id,
-                    batch,
-                    sessions or [""],
-                    list(poll_tool_names()),
-                    chunk,
-                )
+        partial = False
+        for batch_calls, batch_sessions in batches:
+            related_calls = list(batch_calls)
+            # Polls that continue a session in this batch own their results.
+            for poll_id in poll_ids:
+                if str(poll_by_call[poll_id].get("session_id") or "") in batch_sessions:
+                    related_calls.append(poll_id)
+            rows = await conn.fetch(
+                RESULTS_SQL,
+                attempt_ids,
+                user_id,
+                job_id,
+                related_calls or [""],
+                batch_sessions or [""],
+                RESULTS_BATCH_LIMIT,
             )
-        # A poll's own id is covered by the session branch; a chunk boundary may
-        # have split a call from its result, so query once more by session only
-        # when there is more than one chunk.
-        if len(ids) > chunk:
-            found.extend(
-                dict(row)
-                for row in await conn.fetch(
-                    RESULTS_SQL,
-                    attempt_ids,
-                    user_id,
-                    job_id,
-                    [""],
-                    sessions or [""],
-                    list(poll_tool_names()),
-                    chunk,
-                )
-            )
+            if len(rows) >= RESULTS_BATCH_LIMIT:
+                partial = True
+            found.extend(dict(row) for row in rows)
         deduped: dict[int, dict[str, Any]] = {}
         for row in found:
             deduped[int(row["event_id"])] = row
-        return list(deduped.values())
+        return polls, list(deduped.values()), partial
+
+
+def _poll_row(row: dict[str, Any]) -> dict[str, Any]:
+    """A poll tool_use in the assembler's row shape: an identity, no command."""
+    return {
+        "event_id": int(row["event_id"]),
+        "attempt_id": int(row["attempt_id"]),
+        "event_type": "tool_use",
+        "job_id": str(row["job_id"]),
+        "seq": row.get("seq"),
+        "at": row.get("at"),
+        "tool_use_id": None,
+        "call_id": row.get("call_id"),
+        "tool_name": row.get("tool_name"),
+        "session_id": row.get("session_id"),
+        "command_text": None,
+        "command_chars": None,
+        "is_error": None,
+        "exit_code": None,
+        "content": None,
+        "content_chars": None,
+        "status": None,
+        "background": None,
+        "structured_output": None,
+    }
 
 
 def _jobs(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -272,4 +333,4 @@ def _structured(value: Any) -> dict[str, Any] | None:
     return None
 
 
-__all__ = ["PostgresCommandExecutionQueries"]
+__all__ = ["CommandReadTimeout", "PostgresCommandExecutionQueries"]
