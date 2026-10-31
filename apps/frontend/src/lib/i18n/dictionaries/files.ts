@@ -12,7 +12,9 @@ export const filesEn = {
   'files.churnPartial': 'some lines unknown',
   'files.churnUnknownTip':
     'At least one recorded write or patch did not carry enough to count its lines; those are unknown, not zero.',
-  'files.unattributed': '{count} without a usable path',
+  'files.unattributed': '{count} without a path',
+  'files.unattributedTip':
+    'Recorded operations whose path was not in the record: counted, not named.',
   'files.filter': 'File filters',
   'files.filter.all': 'All',
   'files.filter.read': 'Read',
@@ -66,7 +68,9 @@ export const filesEn = {
   'files.ops.unknownScope': 'no file named',
   'files.ops.step': 'Step',
   'files.ops.turnLink': 'Turn',
-  'files.coverage.scope':
+  'files.coverage.short': '{events} events scanned',
+  'files.coverage.cappedShort': 'newest part of a long history',
+  'files.coverage.detail':
     'Scanned {events} recorded events over {turns} turns and {attempts} attempts.',
   'files.coverage.capped':
     'This is the newest part of a long history; older operations are not included.',
@@ -82,7 +86,8 @@ export const filesZhCN: Record<keyof typeof filesEn, string> = {
   'files.churnTip': '已记录的写入和补丁中的累计行数。',
   'files.churnPartial': '部分行数未知',
   'files.churnUnknownTip': '至少有一次写入或补丁的记录不足以计算行数；这些是未知，不是 0。',
-  'files.unattributed': '{count} 个没有可用路径',
+  'files.unattributed': '{count} 个无路径',
+  'files.unattributedTip': '记录中没有路径的操作：只计数，不命名。',
   'files.filter': '文件筛选',
   'files.filter.all': '全部',
   'files.filter.read': '读取',
@@ -136,7 +141,9 @@ export const filesZhCN: Record<keyof typeof filesEn, string> = {
   'files.ops.unknownScope': '未指明文件',
   'files.ops.step': '步骤',
   'files.ops.turnLink': '轮次',
-  'files.coverage.scope': '扫描了 {turns} 轮、{attempts} 次尝试中的 {events} 条已记录事件。',
+  'files.coverage.short': '扫描了 {events} 条事件',
+  'files.coverage.cappedShort': '长历史中最新的一部分',
+  'files.coverage.detail': '扫描了 {turns} 轮、{attempts} 次尝试中的 {events} 条已记录事件。',
   'files.coverage.capped': '这是长历史中最新的一部分，更早的操作不在其中。',
   'files.coverage.window': '活动时间从 {from} 到 {to}。',
   'files.coverage.notGit': '这里不读取当前 Git 差异。',

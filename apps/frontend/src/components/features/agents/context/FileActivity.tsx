@@ -19,11 +19,11 @@ import {
   getAgentFileActivity,
   type FileActivityApi,
   type FileActivityFilter,
+  type FileActivityRowApi,
   type FileActivitySort,
 } from '@/lib/api/agents';
-import { Select } from '@/components/ui/Select';
 import type { TranslationKey } from '@/lib/i18n/translate';
-import { compactCount, relativeTime } from '@/components/features/settings/usagePresent';
+import { compactCount } from '@/components/features/settings/usagePresent';
 import type { OpenPoint, OpenTurn } from './ContextSections';
 import { FileRow } from './FileActivityRows';
 import { FILTER_LABEL, SORT_LABEL, filterCount } from './fileActivityPresent';
@@ -238,192 +238,242 @@ export function FileActivity({
       return next;
     });
 
+  // The list is one bounded panel: the header and controls stay put and only
+  // the rows scroll, so a long conversation never grows the page without end.
   return (
     <section className="mt-6" aria-labelledby="file-activity-title">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h3 id="file-activity-title" className="text-sm font-semibold text-foreground">
-          {t('files.title')}
-        </h3>
-        {view ? <Headline view={view} nowMs={nowMs} /> : null}
+      <div className="overflow-hidden rounded-xl border border-border bg-surface-raised">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 pt-2.5">
+          <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-1">
+            <h3 id="file-activity-title" className="text-sm font-semibold text-foreground">
+              {t('files.title')}
+            </h3>
+            {view ? <Headline view={view} /> : null}
+          </div>
+          <div
+            role="group"
+            aria-label={t('files.filter')}
+            className="flex flex-wrap items-center gap-1"
+          >
+            {FILE_ACTIVITY_FILTERS.map((filter) => (
+              <Chip
+                key={filter}
+                active={query.filter === filter}
+                onClick={() => setQuery((q) => ({ ...q, filter }))}
+                label={t(FILTER_LABEL[filter])}
+                count={filterCount(view?.filter_counts ?? {}, filter)}
+                testId={`file-filter-${filter}`}
+              />
+            ))}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 px-3 pt-2 pb-2">
+          <input
+            type="search"
+            value={typed}
+            onChange={(event) => setTyped(event.target.value)}
+            placeholder={t('files.searchPlaceholder')}
+            aria-label={t('files.searchPlaceholder')}
+            className="ui-focus-ring h-7 min-w-0 flex-1 basis-[calc(100%-0.5rem)] rounded-md border border-border bg-surface px-2 text-[11px] text-foreground placeholder:text-muted sm:basis-0"
+          />
+          <div
+            role="group"
+            aria-label={t('files.sort')}
+            className="flex max-w-full flex-wrap items-center rounded-md border border-border p-0.5"
+          >
+            {FILE_ACTIVITY_SORTS.map((sort) => (
+              <button
+                key={sort}
+                type="button"
+                aria-pressed={query.sort === sort}
+                onClick={() => setQuery((q) => ({ ...q, sort }))}
+                data-testid={`file-sort-${sort}`}
+                className={`ui-focus-ring whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] ${
+                  query.sort === sort
+                    ? 'bg-surface font-medium text-foreground shadow-subtle'
+                    : 'text-muted hover:bg-surface-hover'
+                }`}
+              >
+                {t(SORT_LABEL[sort])}
+              </button>
+            ))}
+          </div>
+          <span className="sr-only" aria-live="polite">
+            {t('files.filtered', {
+              count: filterCount(view?.filter_counts ?? {}, query.filter),
+              total: filterCount(view?.filter_counts ?? {}, 'all'),
+            })}
+          </span>
+        </div>
+        <FileList
+          rows={rows}
+          query={query}
+          error={error}
+          loading={loading}
+          pagesError={pagesError}
+          hasMore={hasMore}
+          loadingMore={loadingMore}
+          retry={retry}
+          loadMore={loadMore}
+          expanded={expanded}
+          onToggle={toggle}
+          jobId={jobId}
+          conversationKey={conversationKey}
+          nowMs={nowMs}
+          revision={refreshTick + tick}
+          onOpenPoint={onOpenPoint}
+          onOpenTurn={onOpenTurn}
+        />
+        {view ? <Coverage view={view} /> : null}
       </div>
-      <p className="mt-1 text-xs text-muted">{t('files.note')}</p>
-      <Controls
-        query={query}
-        typed={typed}
-        onTyped={setTyped}
-        onSort={(sort) => setQuery((q) => ({ ...q, sort }))}
-        onFilter={(filter) => setQuery((q) => ({ ...q, filter }))}
-        counts={view?.filter_counts ?? {}}
-      />
-      {error ? (
-        <p className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs text-muted">
-          {t('files.loadError')}
-          <button
-            type="button"
-            onClick={retry}
-            className="ui-button ui-button-ghost min-h-8 px-2 text-[11px] [@media(pointer:coarse)]:min-h-11"
-          >
-            {t('common.retry')}
-          </button>
-        </p>
-      ) : loading ? (
-        <p className="mt-2 px-3 py-2 text-xs text-muted">{t('common.loading')}</p>
-      ) : rows.length === 0 ? (
-        <p className="mt-2 rounded-lg border border-border px-3 py-2 text-xs text-muted">
-          {query.q || query.filter !== 'all' ? t('files.noneMatching') : t('files.none')}
-        </p>
-      ) : (
-        <ul
-          aria-label={t('files.title')}
-          className="mt-2 divide-y divide-border rounded-lg border border-border text-xs"
-        >
-          {rows.map((row) => (
-            <FileRow
-              key={row.path}
-              row={row}
-              jobId={jobId}
-              conversationKey={conversationKey}
-              open={expanded.has(row.path)}
-              onToggle={() => toggle(row.path)}
-              nowMs={nowMs}
-              onOpenPoint={onOpenPoint}
-              onOpenTurn={onOpenTurn}
-              revision={refreshTick + tick}
-            />
-          ))}
-        </ul>
-      )}
-      {hasMore ? (
-        <button
-          type="button"
-          onClick={() => void loadMore()}
-          disabled={loadingMore}
-          className="ui-button ui-button-ghost mt-2 min-h-9 px-2.5 text-xs [@media(pointer:coarse)]:min-h-11"
-        >
-          {loadingMore ? t('files.loadingMore') : t('files.loadMore')}
-        </button>
-      ) : null}
-      {pagesError ? (
-        <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
-          {t('files.moreError')}
-          <button
-            type="button"
-            onClick={() => void loadMore()}
-            className="ui-button ui-button-ghost min-h-8 px-2 text-[11px] [@media(pointer:coarse)]:min-h-11"
-          >
-            {t('common.retry')}
-          </button>
-        </p>
-      ) : null}
-      {view ? <Coverage view={view} nowMs={nowMs} /> : null}
     </section>
   );
 }
 
-/** The one-line summary: files, recorded churn, and what those numbers are. */
-function Headline({ view, nowMs }: { view: FileActivityApi; nowMs: number }) {
-  const { t, locale } = useLocale();
-  const totals = view.totals;
+/** The bounded, internally scrolling list, with its empty, error and more states. */
+function FileList({
+  rows,
+  query,
+  error,
+  loading,
+  pagesError,
+  hasMore,
+  loadingMore,
+  retry,
+  loadMore,
+  expanded,
+  onToggle,
+  jobId,
+  conversationKey,
+  nowMs,
+  revision,
+  onOpenPoint,
+  onOpenTurn,
+}: {
+  rows: FileActivityRowApi[];
+  query: Query;
+  error: boolean;
+  loading: boolean;
+  pagesError: boolean;
+  hasMore: boolean;
+  loadingMore: boolean;
+  retry: () => void;
+  loadMore: () => Promise<void>;
+  expanded: Set<string>;
+  onToggle: (path: string) => void;
+  jobId: string;
+  conversationKey: string;
+  nowMs: number;
+  revision: number;
+  onOpenPoint: OpenPoint;
+  onOpenTurn: OpenTurn;
+}) {
+  const { t } = useLocale();
+  if (error) {
+    return (
+      <p className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2 text-xs text-muted">
+        {t('files.loadError')}
+        <button
+          type="button"
+          onClick={retry}
+          className="ui-button ui-button-ghost min-h-7 px-2 text-[11px] [@media(pointer:coarse)]:min-h-11"
+        >
+          {t('common.retry')}
+        </button>
+      </p>
+    );
+  }
+  if (loading) {
+    return (
+      <p className="border-t border-border px-3 py-2 text-xs text-muted">{t('common.loading')}</p>
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <p className="border-t border-border px-3 py-2 text-xs text-muted">
+        {query.q || query.filter !== 'all' ? t('files.noneMatching') : t('files.none')}
+      </p>
+    );
+  }
   return (
-    <p className="text-xs text-muted">
-      <span className="tabular-nums text-foreground">
-        {t('files.filesCount', { count: compactCount(totals.files) })}
-      </span>
-      {totals.added_unknown_files > 0 || totals.removed_unknown_files > 0 ? (
-        <span title={t('files.churnUnknownTip')}>
-          {' · '}
-          <span className="tabular-nums text-emerald-600 dark:text-emerald-400">
-            +{compactCount(totals.added)}
-          </span>{' '}
-          <span className="tabular-nums text-rose-600 dark:text-rose-400">
-            −{compactCount(totals.removed)}
-          </span>
-          {' · '}
-          {t('files.churnPartial')}
-        </span>
-      ) : (
-        <span title={t('files.churnTip')}>
-          {' · '}
-          <span className="tabular-nums text-emerald-600 dark:text-emerald-400">
-            +{compactCount(totals.added)}
-          </span>{' '}
-          <span className="tabular-nums text-rose-600 dark:text-rose-400">
-            −{compactCount(totals.removed)}
-          </span>
-        </span>
-      )}
-      {totals.unknown_path_operations > 0 || totals.search_unknown_scope > 0 ? (
-        <span>
-          {' · '}
-          {t('files.unattributed', {
-            count: compactCount(totals.unknown_path_operations + totals.search_unknown_scope),
-          })}
-        </span>
+    <ul
+      aria-label={t('files.title')}
+      data-testid="file-list"
+      className="flex max-h-80 flex-col gap-0.5 overflow-y-auto border-t border-border p-1 text-xs"
+    >
+      {rows.map((row) => (
+        <FileRow
+          key={row.path}
+          row={row}
+          jobId={jobId}
+          conversationKey={conversationKey}
+          open={expanded.has(row.path)}
+          onToggle={() => onToggle(row.path)}
+          nowMs={nowMs}
+          onOpenPoint={onOpenPoint}
+          onOpenTurn={onOpenTurn}
+          revision={revision}
+        />
+      ))}
+      {hasMore || pagesError ? (
+        <li className="sticky bottom-0 flex shrink-0 items-center justify-center gap-2 bg-surface-raised/95 px-2 py-1 backdrop-blur">
+          {pagesError ? (
+            <>
+              <span className="text-[11px] text-muted">{t('files.moreError')}</span>
+              {/* A failed page must stay retryable: only the in-flight read
+                  disables the control, never the failure it reported. */}
+              <button
+                type="button"
+                onClick={() => void loadMore()}
+                disabled={loadingMore}
+                data-testid="file-show-more-retry"
+                className="ui-button ui-button-ghost min-h-7 px-2 text-[11px] [@media(pointer:coarse)]:min-h-11"
+              >
+                {loadingMore ? t('files.loadingMore') : t('common.retry')}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void loadMore()}
+              disabled={loadingMore}
+              data-testid="file-show-more"
+              className="ui-button ui-button-ghost min-h-7 px-2 text-[11px] [@media(pointer:coarse)]:min-h-11"
+            >
+              {loadingMore ? t('files.loadingMore') : t('files.loadMore')}
+            </button>
+          )}
+        </li>
       ) : null}
-      <span className="sr-only">{relativeTime(view.generated_at, nowMs, locale)}</span>
-    </p>
+    </ul>
   );
 }
 
-/** Filters (with their counts), the path search and the sort. */
-function Controls({
-  query,
-  typed,
-  onTyped,
-  onSort,
-  onFilter,
-  counts,
-}: {
-  query: Query;
-  typed: string;
-  onTyped: (value: string) => void;
-  onSort: (sort: FileActivitySort) => void;
-  onFilter: (filter: FileActivityFilter) => void;
-  counts: Partial<Record<FileActivityFilter, number>>;
-}) {
-  const { t, locale } = useLocale();
+/** The compact summary: files, recorded churn, and anything unattributed. */
+function Headline({ view }: { view: FileActivityApi }) {
+  const { t } = useLocale();
+  const totals = view.totals;
+  const partial = totals.added_unknown_files > 0 || totals.removed_unknown_files > 0;
+  const unattributed = totals.unknown_path_operations + totals.search_unknown_scope;
   return (
-    <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-      <input
-        type="search"
-        value={typed}
-        onChange={(event) => onTyped(event.target.value)}
-        placeholder={t('files.searchPlaceholder')}
-        aria-label={t('files.searchPlaceholder')}
-        className="ui-focus-ring min-w-0 rounded-md border border-border bg-transparent px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted"
-      />
-      <div className="flex flex-wrap items-center gap-1">
-        <div role="group" aria-label={t('files.filter')} className="flex flex-wrap gap-1">
-          {FILE_ACTIVITY_FILTERS.map((filter) => (
-            <Chip
-              key={filter}
-              active={query.filter === filter}
-              onClick={() => onFilter(filter)}
-              label={t(FILTER_LABEL[filter])}
-              count={filterCount(counts, filter)}
-              testId={`file-filter-${filter}`}
-            />
-          ))}
-        </div>
-        <span className="ml-1 flex items-center gap-1 text-muted">
-          <span className="whitespace-nowrap">{t('files.sort')}</span>
-          <Select<FileActivitySort>
-            value={query.sort}
-            onValueChange={onSort}
-            aria-label={t('files.sort')}
-            className="min-w-[9rem]"
-            options={FILE_ACTIVITY_SORTS.map((sort) => ({
-              value: sort,
-              label: t(SORT_LABEL[sort]),
-            }))}
-          />
+    <p className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px] text-muted">
+      <span className="tabular-nums">{t('files.filesCount', { count: totals.files })}</span>
+      <span
+        className="tabular-nums"
+        title={partial ? t('files.churnUnknownTip') : t('files.churnTip')}
+      >
+        <span className="text-emerald-600 dark:text-emerald-400">
+          +{compactCount(totals.added)}
+        </span>{' '}
+        <span className="text-rose-600 dark:text-rose-400">−{compactCount(totals.removed)}</span>
+        {partial ? <span> ~</span> : null}
+      </span>
+      {unattributed > 0 ? (
+        <span title={t('files.unattributedTip')}>
+          {t('files.unattributed', { count: compactCount(unattributed) })}
         </span>
-        <span className="sr-only" aria-live="polite">
-          {t('files.filtered', { count: counts[query.filter] ?? 0, total: counts.all ?? 0 })}
-        </span>
-        <span className="sr-only">{locale}</span>
-      </div>
-    </div>
+      ) : null}
+    </p>
   );
 }
 
@@ -458,28 +508,25 @@ function Chip({
   );
 }
 
-/** What the totals describe: the bounded window, or the honest cap note. */
-function Coverage({ view, nowMs }: { view: FileActivityApi; nowMs: number }) {
-  const { t, locale } = useLocale();
+/** What the totals describe: one short line, the detail in its tooltip. */
+function Coverage({ view }: { view: FileActivityApi }) {
+  const { t } = useLocale();
   const coverage = view.coverage;
-  const first = coverage.window_first_at;
-  const last = coverage.window_last_at;
-  const windowArgs = {
-    from: first ? relativeTime(first, nowMs, locale) : '',
-    to: last ? relativeTime(last, nowMs, locale) : '',
-  };
-  const window = first && last ? t('files.coverage.window', windowArgs) : null;
-  const scope = t('files.coverage.scope', {
+  const detail = t('files.coverage.detail', {
     events: compactCount(coverage.events_scanned),
     turns: compactCount(coverage.turns),
     attempts: compactCount(coverage.attempts),
   });
   return (
-    <p className="mt-1 text-[11px] text-muted">
-      {coverage.events_capped ? t('files.coverage.capped') : null}
-      {coverage.events_capped ? ' ' : null}
-      {scope}
-      {window ? ` ${window}` : null} {t('files.coverage.notGit')}
+    <p className="flex flex-wrap items-center gap-x-2 border-t border-border px-3 py-1 text-[10px] text-muted">
+      {coverage.events_capped ? (
+        <span className="text-amber-600 dark:text-amber-400">
+          {t('files.coverage.cappedShort')}
+        </span>
+      ) : null}
+      <span title={`${detail} ${t('files.coverage.notGit')}`}>
+        {t('files.coverage.short', { events: compactCount(coverage.events_scanned) })}
+      </span>
     </p>
   );
 }

@@ -284,13 +284,16 @@ describe('FileActivity', () => {
     expect(onOpenTurn).toHaveBeenCalledWith('job-2', 2);
   });
 
-  it('says which bounded window the totals describe', async () => {
+  it('says which bounded window the totals describe, in a tooltip', async () => {
     renderSection();
     await screen.findByText('app.ts');
-    expect(
-      screen.getByText(/Scanned 40 recorded events over 2 turns and 2 attempts/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Net Git diff is not read here/)).toBeInTheDocument();
+    expect(screen.getByText('40 events scanned')).toBeInTheDocument();
+    // The long explanation is available on hover, not printed in the panel.
+    const detail = screen.getByTitle(
+      /Scanned 40 recorded events over 2 turns and 2 attempts\. Net Git diff is not read here\./,
+    );
+    expect(detail).toBeInTheDocument();
+    expect(screen.queryByText(/Net Git diff is not read here/)).not.toBeInTheDocument();
   });
 
   it('discloses a capped scan instead of calling it the whole history', async () => {
@@ -308,7 +311,7 @@ describe('FileActivity', () => {
     );
     renderSection();
     await screen.findByText('app.ts');
-    expect(screen.getByText(/This is the newest part of a long history/)).toBeInTheDocument();
+    expect(screen.getByText('newest part of a long history')).toBeInTheDocument();
   });
 
   it('explains an empty conversation without inventing files', async () => {
@@ -349,12 +352,17 @@ describe('FileActivity', () => {
     ).toBeInTheDocument();
   });
 
-  it('keeps a long path wrappable and a lone name whole', async () => {
+  it('keeps the full path addressable while the row stays one line', async () => {
     renderSection();
     const name = await screen.findByText('app.ts');
-    expect(name.closest('p')).toHaveAttribute('title', '/workspace/src/app.ts');
+    const row = name.closest('button');
+    // The toggle carries the whole path for hover, a long-press and a reader.
+    expect(row).toHaveAttribute('title', '/workspace/src/app.ts');
+    expect(row).toHaveAttribute('aria-label', 'Show operations on app.ts');
     const long = screen.getByText('notes 深い.md');
-    expect(long.closest('p')?.textContent).toContain('/workspace/docs/');
+    expect(long.closest('button')?.textContent).toContain('/workspace/docs/');
+    // A directory is dimmed and the name is what stands out.
+    expect(long.className).toContain('font-medium');
   });
 
   it('draws the Chinese strings under the Chinese locale', async () => {
@@ -372,7 +380,9 @@ describe('FileActivity', () => {
     renderSection();
     await screen.findByText('app.ts');
     fireEvent.click(screen.getByLabelText('Show operations on app.ts'));
-    expect(await screen.findByText(/by a delegated agent/)).toBeInTheDocument();
+    const detail = await screen.findByTitle(/by a delegated agent/);
+    expect(detail).toBeInTheDocument();
+    expect(screen.queryByText(/by a delegated agent/)).not.toBeInTheDocument();
   });
 
   it('groups one multi-file patch by its section inside the file', async () => {
@@ -391,7 +401,7 @@ describe('FileActivity', () => {
     renderSection();
     await screen.findByText('app.ts');
     fireEvent.click(screen.getByLabelText('Show operations on app.ts'));
-    expect(await screen.findByText(/part 2 of 3 in one patch/)).toBeInTheDocument();
+    expect(await screen.findByTitle(/part 2 of 3 in one patch/)).toBeInTheDocument();
     const ops = within(
       screen.getByRole('list', { name: 'Recorded operations on /workspace/src/app.ts' }),
     ).getAllByRole('listitem');
@@ -702,5 +712,184 @@ describe('Operations ownership and terminal settlement', () => {
     fireEvent.click(screen.getByLabelText('Hide operations on app.ts'));
     await waitFor(() => expect(signal?.aborted).toBe(true));
     release(page());
+  });
+});
+
+describe('compact bounded panel', () => {
+  /** Many files, so the list must scroll instead of growing the page. */
+  function manyFiles(count: number) {
+    const base = view().files[0];
+    return view({
+      files: Array.from({ length: count }, (_, index) => ({
+        ...base,
+        path: `/workspace/src/module_${String(index).padStart(2, '0')}.ts`,
+        name: `module_${String(index).padStart(2, '0')}.ts`,
+        last_at: '2026-10-31T08:00:00Z',
+      })),
+      totals: { ...view().totals, files: count, operations: count },
+      has_more: true,
+      next_cursor: 'next-page',
+    });
+  }
+
+  it('keeps the list in one bounded scroll area with every row inside it', async () => {
+    mockedActivity.mockResolvedValue(manyFiles(40));
+    renderSection();
+    await screen.findByText('module_00.ts');
+    const list = screen.getByTestId('file-list');
+    // The panel scrolls internally, so a long conversation cannot grow the page.
+    expect(list.className).toContain('overflow-y-auto');
+    expect(list.className).toContain('max-h-80');
+    // Every loaded row is a child of that one scroller, and none is dropped.
+    const rows = within(list).getAllByRole('listitem');
+    expect(rows.length).toBeGreaterThanOrEqual(40);
+    for (const row of rows) expect(list.contains(row)).toBe(true);
+  });
+
+  it('keeps the show-more control inside the scroll area and reachable', async () => {
+    mockedActivity.mockResolvedValue(manyFiles(40));
+    renderSection();
+    await screen.findByText('module_00.ts');
+    const list = screen.getByTestId('file-list');
+    const more = screen.getByTestId('file-show-more');
+    // Reachable by a reader and by the keyboard, without leaving the panel.
+    expect(list.contains(more)).toBe(true);
+    expect(more).toBeEnabled();
+    more.focus();
+    expect(more).toHaveFocus();
+  });
+
+  it('loads a later page from inside the same scroller', async () => {
+    mockedActivity.mockResolvedValue(manyFiles(2));
+    const second = manyFiles(2);
+    mockedActivity.mockResolvedValueOnce(manyFiles(2)).mockResolvedValueOnce({
+      ...second,
+      files: [{ ...second.files[0], path: '/workspace/src/later.ts', name: 'later.ts' }],
+      has_more: false,
+      next_cursor: null,
+    });
+    renderSection();
+    await screen.findByText('module_00.ts');
+    fireEvent.click(screen.getByTestId('file-show-more'));
+    expect(await screen.findByText('later.ts')).toBeInTheDocument();
+    expect(screen.getByTestId('file-list').contains(screen.getByText('later.ts'))).toBe(true);
+  });
+
+  it('puts the filters on the title row and the search with the sort below', async () => {
+    renderSection();
+    await screen.findByText('app.ts');
+    const title = screen.getByRole('heading', { name: 'File Activity' });
+    const filters = screen.getByTestId('file-filter-all').closest('[role="group"]');
+    const search = screen.getByPlaceholderText('Filter by path…');
+    const sort = screen.getByTestId('file-sort-active').closest('[role="group"]');
+    // The title and its chips share the first row; search and sort the second.
+    expect(title.parentElement?.parentElement?.contains(filters)).toBe(true);
+    expect(search.parentElement?.contains(sort)).toBe(true);
+    expect(filters?.contains(sort as Node)).toBe(false);
+  });
+
+  it('offers the sort as pressed buttons, not a native select', async () => {
+    renderSection();
+    await screen.findByText('app.ts');
+    const active = screen.getByTestId('file-sort-active');
+    expect(active).toHaveAttribute('aria-pressed', 'true');
+    const byLines = screen.getByTestId('file-sort-lines');
+    fireEvent.click(byLines);
+    await waitFor(() =>
+      expect(mockedActivity).toHaveBeenLastCalledWith(
+        'job-2',
+        expect.objectContaining({ sort: 'lines' }),
+        expect.anything(),
+      ),
+    );
+    // A selection is announced, and the control is a group rather than a menu.
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+  });
+
+  it('keeps an expanded long operation list inside the same bounded scroller', async () => {
+    mockedActivity.mockResolvedValue(manyFiles(6));
+    const long = Array.from({ length: 30 }, (_, index) => ({
+      ...page().operations[0],
+      call_id: `op-${index}`,
+      event_id: 900 + index,
+      patch_index: index + 1,
+      patch_files: 40,
+    }));
+    mockedOperations.mockResolvedValue({ ...page(), operations: long, total: 40 });
+    renderSection();
+    await screen.findByText('module_00.ts');
+    fireEvent.click(screen.getByLabelText('Show operations on module_00.ts'));
+    await screen.findByText(/30 of 40 recorded operations shown/);
+    const list = screen.getByTestId('file-list');
+    const ops = screen.getByRole('list', {
+      name: 'Recorded operations on /workspace/src/module_00.ts',
+    });
+    // Operations sit inside the panel's scroller and stay compact.
+    expect(list.contains(ops)).toBe(true);
+    expect(within(ops).getAllByRole('listitem')).toHaveLength(30);
+    expect(ops.querySelector('li')?.className).toContain('py-0.5');
+  });
+
+  it('keeps the whole row focusable and the toggle keyboard-operable', async () => {
+    renderSection();
+    await screen.findByText('app.ts');
+    const toggle = screen.getByLabelText('Show operations on app.ts');
+    toggle.focus();
+    expect(toggle).toHaveFocus();
+    fireEvent.keyDown(toggle, { key: 'Enter', code: 'Enter' });
+    fireEvent.click(toggle);
+    expect(
+      await screen.findByRole('list', {
+        name: 'Recorded operations on /workspace/src/app.ts',
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Hide operations on app.ts')).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
+});
+
+describe('a failed later page stays retryable', () => {
+  function paged(count: number, cursor: string | null) {
+    const base = view().files[0];
+    return view({
+      files: Array.from({ length: count }, (_, index) => ({
+        ...base,
+        path: `/workspace/src/page_${String(index).padStart(2, '0')}.ts`,
+        name: `page_${String(index).padStart(2, '0')}.ts`,
+      })),
+      has_more: cursor !== null,
+      next_cursor: cursor,
+    });
+  }
+
+  it('re-enables loading after page 2 fails, then loads it', async () => {
+    mockedActivity
+      .mockResolvedValueOnce(paged(25, 'page-2'))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(
+        view({
+          files: [
+            { ...view().files[0], path: '/workspace/src/recovered.ts', name: 'recovered.ts' },
+          ],
+          has_more: false,
+          next_cursor: null,
+        }),
+      );
+    renderSection();
+    await screen.findByText('page_00.ts');
+    fireEvent.click(screen.getByTestId('file-show-more'));
+
+    // The failure is shown with a control that is actually pressable.
+    const retry = await screen.findByTestId('file-show-more-retry');
+    expect(retry).toBeEnabled();
+    expect(screen.getByText('The rest of the list could not be read.')).toBeInTheDocument();
+
+    fireEvent.click(retry);
+    expect(await screen.findByText('recovered.ts')).toBeInTheDocument();
+    expect(mockedActivity).toHaveBeenCalledTimes(3);
+    // The retry read the failed page's cursor, not the first page again.
+    expect(mockedActivity.mock.calls[2][1]).toMatchObject({ cursor: 'page-2' });
   });
 });

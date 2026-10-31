@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
+import type { Translator } from '@/lib/i18n/translate';
 import {
   getAgentFileOperations,
   type FileActivityRowApi,
@@ -52,39 +53,46 @@ export function FileRow({
   const { t, locale } = useLocale();
   const parts = splitPath(row.path);
   return (
-    <li className="min-w-0">
-      <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1 px-3 py-2">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          className="ui-focus-ring mt-0.5 shrink-0 rounded px-1 text-muted"
-          aria-label={t(open ? 'files.collapse' : 'files.expand', { name: row.name })}
-        >
-          <span
-            aria-hidden="true"
-            className={`inline-block transition-transform ${open ? 'rotate-90' : ''}`}
-          >
-            ›
-          </span>
-        </button>
+    <li
+      // Alternating rows, like the reference list: the stripe is what lets the
+      // eye follow one file across its counts without a rule on every row.
+      // ``shrink-0`` is what makes the bounded list scroll: a flex column would
+      // otherwise squeeze many loaded or expanded children to fit 320px.
+      className={`min-w-0 shrink-0 rounded-md [&:nth-child(even)]:bg-surface-muted/60 ${
+        open ? 'bg-surface-hover' : ''
+      }`}
+      data-open={open ? 'true' : 'false'}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        title={row.path}
+        aria-label={t(open ? 'files.collapse' : 'files.expand', { name: row.name })}
+        className="ui-focus-ring flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left hover:bg-surface-hover [@media(max-width:380px)]:flex-wrap"
+      >
         <span
-          className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${
+          aria-hidden="true"
+          className={`w-3 shrink-0 text-[10px] text-muted transition-transform ${
+            open ? 'rotate-90' : ''
+          }`}
+        >
+          ›
+        </span>
+        <span
+          aria-hidden="true"
+          className={`inline-flex h-4 min-w-6 shrink-0 items-center justify-center rounded px-1 text-[9px] font-bold leading-none ${
             KIND_MARK[row.file_kind] ?? KIND_MARK.other
           }`}
-          title={t('files.typeLabelTip')}
         >
           {row.type_label}
         </span>
-        <div className="min-w-0 flex-1">
-          <p className="break-words font-medium text-foreground" title={row.path}>
-            {parts.directory ? <span className="text-muted">{parts.directory}</span> : null}
-            <span>{parts.name}</span>
-          </p>
-          <Unsettled row={row} />
-        </div>
+        <span className="min-w-0 flex-1 truncate [@media(max-width:380px)]:basis-[calc(100%-46px)]">
+          {parts.directory ? <span className="text-muted">{parts.directory}</span> : null}
+          <span className="font-medium text-foreground">{parts.name}</span>
+        </span>
         <RowSummary row={row} nowMs={nowMs} locale={locale} />
-      </div>
+      </button>
       {open ? (
         <Operations
           jobId={jobId}
@@ -100,21 +108,7 @@ export function FileRow({
   );
 }
 
-/** The failed and unanswered operations a file carries, when it has any. */
-function Unsettled({ row }: { row: FileActivityRowApi }) {
-  const { t } = useLocale();
-  if (!rowHasUnsettled(row)) return null;
-  const unsettled = row.pending + row.not_recorded;
-  return (
-    <p className="mt-0.5 text-muted">
-      {row.failed > 0 ? t('files.row.failed', { count: row.failed }) : null}
-      {row.failed > 0 && unsettled > 0 ? ' · ' : null}
-      {unsettled > 0 ? t('files.row.unsettled', { count: unsettled }) : null}
-    </p>
-  );
-}
-
-/** A file's counts, recorded churn and last activity, in one row. */
+/** A file's counts, recorded churn and last activity, inline on its row. */
 function RowSummary({
   row,
   nowMs,
@@ -128,15 +122,33 @@ function RowSummary({
   // Only a file something wrote to has line churn; a read-only file has none,
   // and a pair of zeros would read as a measured result rather than absence.
   const churn = row.writes > 0 ? lineChurn(row) : null;
+  const unsettled = row.pending + row.not_recorded;
   return (
-    <span className="flex w-full min-w-0 flex-wrap items-center gap-1.5 pl-7 tabular-nums sm:ml-auto sm:w-auto sm:shrink-0 sm:pl-0">
+    <span className="flex shrink-0 items-center gap-1.5 tabular-nums">
+      {rowHasUnsettled(row) ? (
+        <span
+          className="text-amber-600 dark:text-amber-400"
+          title={
+            row.failed > 0
+              ? t('files.row.failed', { count: row.failed })
+              : t('files.row.unsettled', { count: unsettled })
+          }
+        >
+          <span aria-hidden="true">!</span>
+          <span className="sr-only">
+            {row.failed > 0
+              ? t('files.row.failed', { count: row.failed })
+              : t('files.row.unsettled', { count: unsettled })}
+          </span>
+        </span>
+      ) : null}
       <Count icon="●" value={row.reads} label={t('files.filter.read')} tone="read" />
       <Count icon="●" value={row.writes} label={t('files.filter.written')} tone="write" />
       {row.searches > 0 ? (
-        <Count icon="⌕" value={row.searches} label={t('files.filter.searched')} tone="search" />
+        <Count icon="●" value={row.searches} label={t('files.filter.searched')} tone="search" />
       ) : null}
       {row.images > 0 ? (
-        <Count icon="▣" value={row.images} label={t('files.filter.images')} tone="image" />
+        <Count icon="●" value={row.images} label={t('files.filter.images')} tone="image" />
       ) : null}
       {churn ? (
         <span
@@ -147,7 +159,10 @@ function RowSummary({
           <span className="text-rose-600 dark:text-rose-400">{churn.removed}</span>
         </span>
       ) : null}
-      <time dateTime={row.last_at ?? undefined} className="whitespace-nowrap text-muted">
+      <time
+        dateTime={row.last_at ?? undefined}
+        className="whitespace-nowrap text-[10px] text-muted"
+      >
         {row.last_at ? relativeTime(row.last_at, nowMs, locale) : t('files.noTime')}
       </time>
     </span>
@@ -174,10 +189,12 @@ function Count({
   }[tone];
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] ${colour}`}
+      className={`inline-flex h-4 min-w-4 items-center justify-center gap-0.5 rounded-full px-1 text-[10px] font-semibold ${colour}`}
       title={label}
     >
-      <span aria-hidden="true">{icon}</span>
+      <span aria-hidden="true" className="text-[7px]">
+        {icon}
+      </span>
       {value.toLocaleString('en-US')}
       <span className="sr-only">{label}</span>
     </span>
@@ -318,11 +335,11 @@ function Operations({
     return <p className="border-t border-border px-3 py-2 text-muted">{t('common.loading')}</p>;
   }
   return (
-    <div className="border-t border-border bg-surface/40 px-3 py-2">
+    <div className="mb-1 ml-4 mr-1 border-l-2 border-border py-1 pl-2">
       {operations.length === 0 ? (
-        <p className="text-muted">{t('files.ops.none')}</p>
+        <p className="text-[11px] text-muted">{t('files.ops.none')}</p>
       ) : (
-        <ol aria-label={t('files.ops.label', { name: path })} className="grid gap-1.5">
+        <ol aria-label={t('files.ops.label', { name: path })} className="grid gap-px">
           {operations.map((operation) => (
             <OperationRow
               key={operationKey(operation)}
@@ -334,38 +351,66 @@ function Operations({
           ))}
         </ol>
       )}
-      {hasEarlier && earlierCursor ? (
-        <button
-          type="button"
-          onClick={() => void loadEarlier()}
-          disabled={loadingMore}
-          className="ui-button ui-button-ghost mt-1 min-h-9 px-2.5 text-[11px] [@media(pointer:coarse)]:min-h-11"
-        >
-          {loadingMore ? t('files.loadingMore') : t('files.ops.earlier')}
-        </button>
-      ) : null}
-      {moreError ? (
-        <p className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-          {t('files.moreError')}
+      <p className="flex flex-wrap items-center gap-2 text-[10px] text-muted">
+        {current.page ? (
+          <span>
+            {t('files.ops.recorded', {
+              shown: operations.length.toLocaleString(locale),
+              total: current.page.total.toLocaleString(locale),
+            })}
+          </span>
+        ) : null}
+        {hasEarlier && earlierCursor ? (
           <button
             type="button"
             onClick={() => void loadEarlier()}
-            className="ui-button ui-button-ghost min-h-8 px-2 text-[11px] [@media(pointer:coarse)]:min-h-11"
+            disabled={loadingMore}
+            className="ui-button ui-button-ghost min-h-6 px-1.5 text-[10px] [@media(pointer:coarse)]:min-h-11"
           >
-            {t('common.retry')}
+            {loadingMore ? t('files.loadingMore') : t('files.ops.earlier')}
           </button>
-        </p>
-      ) : null}
-      {current.page ? (
-        <p className="mt-1 text-muted">
-          {t('files.ops.recorded', {
-            shown: operations.length.toLocaleString(locale),
-            total: current.page.total.toLocaleString(locale),
-          })}
-        </p>
-      ) : null}
+        ) : null}
+        {moreError ? (
+          <>
+            <span>{t('files.moreError')}</span>
+            <button
+              type="button"
+              onClick={() => void loadEarlier()}
+              className="ui-button ui-button-ghost min-h-6 px-1.5 text-[10px] [@media(pointer:coarse)]:min-h-11"
+            >
+              {t('common.retry')}
+            </button>
+          </>
+        ) : null}
+      </p>
     </div>
   );
+}
+
+/** What a compact operation row cannot show inline, for its tooltip. */
+function operationDetail(operation: FileOperationApi, t: Translator): string {
+  const parts: string[] = [];
+  if (operation.attempt_no > 1) {
+    parts.push(t('files.ops.attempt', { n: operation.attempt_no }));
+  }
+  if (operation.patch_index !== null && operation.patch_files !== null) {
+    parts.push(
+      t('files.ops.patchPart', {
+        index: operation.patch_index,
+        total: operation.patch_files,
+      }),
+    );
+  }
+  if (operation.renamed_to) {
+    parts.push(t('files.ops.renamedTo', { path: operation.renamed_to }));
+  }
+  if (operation.clipped) parts.push(t('files.ops.clipped'));
+  if (operation.subagent) parts.push(t('files.ops.subagent'));
+  if (operation.superseded) parts.push(t('files.ops.superseded'));
+  if (operation.path === null) {
+    parts.push(`${t('files.ops.unknownScope')} (${t(BASIS_LABEL[operation.path_basis])})`);
+  }
+  return parts.join(' · ');
 }
 
 function OperationRow({
@@ -385,67 +430,34 @@ function OperationRow({
   const step = operation.result_event_id ?? operation.event_id;
   return (
     <li
-      className={`flex min-w-0 flex-wrap items-start gap-x-2 gap-y-0.5 rounded px-1 py-0.5 ${
+      className={`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded px-1 py-0.5 text-[11px] hover:bg-surface-hover ${
         operation.superseded ? 'opacity-70' : ''
       }`}
+      data-status={operation.status}
     >
-      <span className="w-14 shrink-0 whitespace-nowrap text-muted" title={operation.action}>
+      <span className="w-9 shrink-0 text-muted" title={operation.action}>
         {t(KIND_LABEL[operation.kind])}
       </span>
-      <span className="min-w-0 flex-1 basis-48 break-words">
-        <span className="text-foreground">{operation.tool || operation.action}</span>
-        <span className="text-muted">
-          {' · '}
-          {t('files.ops.turn', { turn: operation.turn_no })}
-          {operation.attempt_no > 1
-            ? ` · ${t('files.ops.attempt', { n: operation.attempt_no })}`
-            : ''}
-          {' · '}
-          {at}
-        </span>
-        {operation.patch_index !== null && operation.patch_files !== null ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.patchPart', {
-              index: operation.patch_index,
-              total: operation.patch_files,
-            })}
-          </span>
-        ) : null}
-        {operation.renamed_to ? (
-          <span className="break-all text-muted">
-            {' · '}
-            {t('files.ops.renamedTo', { path: operation.renamed_to })}
-          </span>
-        ) : null}
+      <span
+        className="max-w-[9rem] shrink-0 truncate rounded-full border border-border px-1.5 text-[10px] text-muted"
+        title={operation.tool || operation.action}
+      >
+        {operation.tool || operation.action}
+      </span>
+      <span
+        className="min-w-0 flex-1 truncate text-muted"
+        title={operationDetail(operation, t) || undefined}
+      >
+        {t('files.ops.turn', { turn: operation.turn_no })}
+        {operation.attempt_no > 1
+          ? ` · ${t('files.ops.attempt', { n: operation.attempt_no })}`
+          : ''}
+        {' · '}
+        {at}
         {operation.status !== 'succeeded' ? (
           <span className="text-amber-600 dark:text-amber-400">
             {' · '}
             {t(STATUS_LABEL[operation.status])}
-          </span>
-        ) : null}
-        {operation.clipped ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.clipped')}
-          </span>
-        ) : null}
-        {operation.subagent ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.subagent')}
-          </span>
-        ) : null}
-        {operation.superseded ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.superseded')}
-          </span>
-        ) : null}
-        {operation.path === null ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.unknownScope')} ({t(BASIS_LABEL[operation.path_basis])})
           </span>
         ) : null}
       </span>
@@ -455,20 +467,20 @@ function OperationRow({
           <span className="text-rose-600 dark:text-rose-400">{churn.removed}</span>
         </span>
       ) : null}
-      <span className="ml-auto flex shrink-0 gap-1">
+      <span className="ml-auto flex shrink-0 gap-0.5">
         <button
           type="button"
           onClick={() =>
             onOpenPoint({ jobId: operation.job_id, turnNo: operation.turn_no, eventId: step })
           }
-          className="ui-button ui-button-ghost min-h-8 px-1.5 text-[11px] [@media(pointer:coarse)]:min-h-11"
+          className="ui-focus-ring rounded px-1 text-[10px] text-muted hover:bg-surface-raised hover:text-foreground [@media(pointer:coarse)]:min-h-11"
         >
           {t('files.ops.step')}
         </button>
         <button
           type="button"
           onClick={() => onOpenTurn(operation.job_id, operation.turn_no)}
-          className="ui-button ui-button-ghost min-h-8 px-1.5 text-[11px] [@media(pointer:coarse)]:min-h-11"
+          className="ui-focus-ring rounded px-1 text-[10px] text-muted hover:bg-surface-raised hover:text-foreground [@media(pointer:coarse)]:min-h-11"
         >
           {t('files.ops.turnLink')}
         </button>
