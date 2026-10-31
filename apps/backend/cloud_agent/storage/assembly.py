@@ -29,6 +29,7 @@ from cloud_agent.storage.repositories import (
     PostgresAttemptCommands,
     PostgresAuditLogRepository,
     PostgresAuditRepository,
+    PostgresCommandExecutionQueries,
     PostgresComputeResourceRepository,
     PostgresContextQueries,
     PostgresConversationCommands,
@@ -79,6 +80,7 @@ if TYPE_CHECKING:
         AttemptCommands,
         AuditLogQueries,
         AuditRepository,
+        CommandExecutionQueries,
         ComputeResourceRepository,
         ContextQueries,
         ConversationCommands,
@@ -164,6 +166,7 @@ class Storage:
         )
         self.owner_usage: OwnerUsageQueries = PostgresOwnerUsageRepository(pool)
         self.context_queries: ContextQueries = PostgresContextQueries(pool)
+        self.command_executions: CommandExecutionQueries = PostgresCommandExecutionQueries(pool)
         self.pending_messages: PendingMessageRepository = PostgresPendingMessageRepository(pool)
         self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)
         self.residency: ResidencyRepository = PostgresResidencyRepository(pool)

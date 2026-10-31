@@ -13,6 +13,7 @@ from cloud_agent.ports.attachments import AttachmentRepository
 from cloud_agent.ports.attempt_commands import AttemptCommands
 from cloud_agent.ports.audit import AuditRepository
 from cloud_agent.ports.audit_log import AuditLogQueries
+from cloud_agent.ports.command_executions import CommandExecutionQueries
 from cloud_agent.ports.compute_resources import ComputeResourceRepository
 from cloud_agent.ports.context_queries import ContextQueries
 from cloud_agent.ports.conversation_commands import ConversationCommands
@@ -74,6 +75,7 @@ __all__ = [
     "AttemptCommands",
     "AuditLogQueries",
     "AuditRepository",
+    "CommandExecutionQueries",
     "ComputeResourceRepository",
     "ContextQueries",
     "ConversationCommands",

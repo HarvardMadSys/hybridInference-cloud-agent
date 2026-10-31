@@ -178,7 +178,7 @@ class PostgresFileActivityQueries:
             result.attempts = len({int(row["attempt_id"]) for row in rows})
         return result
 
-    async def _read(
+    async def _read_file_activity(
         self, conn: Any, *, thread_id: str, user_id: str, preview_chars: int, deadline: float
     ) -> ScanResult:
         """One scan with the read's own statement timeout and the shared deadline."""
@@ -204,7 +204,7 @@ class PostgresFileActivityQueries:
         """
         async with asyncio.timeout_at(deadline):
             async with self._pool.acquire() as conn, conn.transaction():
-                return await self._read(
+                return await self._read_file_activity(
                     conn,
                     thread_id=thread_id,
                     user_id=user_id,

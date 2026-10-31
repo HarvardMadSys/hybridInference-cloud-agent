@@ -5,6 +5,7 @@
 // agent CLI reported for one request, the latest of those (never the live
 // window), a window the CLI reported, and an estimate from stored text.
 
+import { commandExecutionsEn, commandExecutionsZhCN } from './commandExecutions';
 import { contextDashboardEn, contextDashboardZhCN } from './contextDashboard';
 import { filesEn, filesZhCN } from './files';
 import { contextParityEn, contextParityZhCN } from './contextParity';
@@ -12,6 +13,7 @@ import { contextRequestEn, contextRequestZhCN } from './contextRequest';
 
 export const contextEn = {
   ...contextRequestEn,
+  ...commandExecutionsEn,
   ...contextParityEn,
   ...contextDashboardEn,
   ...filesEn,
@@ -143,6 +145,7 @@ export const contextEn = {
 
 export const contextZhCN: Record<keyof typeof contextEn, string> = {
   ...contextRequestZhCN,
+  ...commandExecutionsZhCN,
   ...contextParityZhCN,
   ...contextDashboardZhCN,
   ...filesZhCN,

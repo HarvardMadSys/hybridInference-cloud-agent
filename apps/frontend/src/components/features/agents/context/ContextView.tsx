@@ -14,6 +14,7 @@ import { useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { AgentJob } from '../types';
 import type { ThreadContextApi } from '@/lib/api/agents';
+import { CommandExecutions } from './commands/CommandExecutions';
 import { ContextEvents } from './ContextEvents';
 import { FileActivity } from './FileActivity';
 import { ContextGrowthChart } from './ContextGrowthChart';
@@ -133,6 +134,14 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         // its own touching the conversation.
         refreshTick={settledRevision(view)}
         active={view.latest?.turn_active === true}
+      />
+      <CommandExecutions
+        key={key}
+        jobId={job.id}
+        conversationKey={key}
+        active={Boolean(view.latest?.turn_active)}
+        onOpenPoint={onOpenPoint}
+        onOpenTurn={onOpenTurn}
       />
       <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <LargestChanges changes={view.largest_changes} points={points} onSelect={setSelected} />

@@ -18,6 +18,14 @@ from cloud_agent.admin_observability import decode_cursor, encode_cursor
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_grant_client, get_storage, require_store
 from cloud_agent.api.owner_usage import resolve_period, usage_unavailable
+from cloud_agent.command_executions import (
+    DEFAULT_COMMAND_PAGE,
+    MAX_COMMAND_PAGE,
+    MAX_COMMAND_SEARCH,
+    CommandExecutions,
+    CommandFilter,
+    CommandSort,
+)
 from cloud_agent.context_dna import MAX_DNA_REQUESTS, DnaBands
 from cloud_agent.context_insights import (
     DEFAULT_CONTEXT_PAGE,
@@ -50,7 +58,7 @@ from cloud_agent.usage_range import RangePreset  # noqa: TC001 — FastAPI resol
 
 if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
-    from cloud_agent.ports import ContextQueries, OwnerUsageQueries
+    from cloud_agent.ports import CommandExecutionQueries, ContextQueries, OwnerUsageQueries
     from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 
 logger = get_logger(__name__)
@@ -60,6 +68,7 @@ class _ContextStorage(Protocol):
     """The capabilities these reads reach for; every call names the owner."""
 
     context_queries: ContextQueries
+    command_executions: CommandExecutionQueries
     ledger: Any
     owner_usage: OwnerUsageQueries
     admin_usage: AdminUsageQueries
@@ -161,6 +170,64 @@ async def get_thread_context_dna(
     if bands is None:
         raise _not_found(job_id)
     return bands
+
+
+@router.get(
+    "/jobs/{job_id}/thread/context/commands",
+    response_model=CommandExecutions,
+)
+async def get_thread_context_commands(
+    job_id: str,
+    filter: CommandFilter = Query(
+        "all",
+        description="all, failed, slow, or background; says what it means.",
+    ),
+    sort: CommandSort = Query("latest"),
+    q: str = Query(
+        "",
+        max_length=MAX_COMMAND_SEARCH,
+        description="Command text, recorded working directory or parsed program.",
+    ),
+    program: str | None = Query(
+        None, max_length=MAX_COMMAND_SEARCH, description="One parsed program's executions."
+    ),
+    cursor: str | None = Query(None, max_length=2048),
+    limit: int = Query(DEFAULT_COMMAND_PAGE, ge=1, le=MAX_COMMAND_PAGE),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _ContextStorage | None = Depends(get_storage),
+) -> CommandExecutions:
+    """One page of the caller's conversation's command executions.
+
+    The summary and the program histogram cover every covered execution; the
+    counts and the list follow the search, the program and the filter. A
+    bounded read says how many executions exist in total, so a page is never
+    presented as the whole conversation. Search and filters are resolved
+    here, before the cursor is accepted, and the cursor is bound to them.
+
+    Raises:
+        HTTPException: 404 when the conversation is not the caller's, 422 for
+            a cursor from another list.
+    """
+    context_store: _ContextStorage = require_store(store)
+    try:
+        page = await context_store.command_executions.command_executions(
+            job_id=job_id,
+            user_id=user["user_id"],
+            filter=filter,
+            sort=sort,
+            q=q,
+            program=program,
+            cursor=cursor,
+            limit=limit,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"type": "invalid_cursor", "message": str(error)}},
+        ) from None
+    if page is None:
+        raise _not_found(job_id)
+    return CommandExecutions.model_validate(page)
 
 
 #: Characters of one stored event a content read returns.
