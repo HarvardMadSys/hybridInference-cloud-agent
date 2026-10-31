@@ -553,8 +553,8 @@ def test_environment_script_starts_in_the_workspace_without_importing_from_it(tm
     # Its script still starts there, with the owner's variables.
     assert helper.stdout == f"{workspace.resolve()} src"
     assert status.read_text() == "0"
-    # The helpers that reap and prepare its identity run isolated as well.
-    assert [argv[:2] for argv in commands if argv[0] == "python3"] == [["python3", "-I"]] * 3
+    # The one exec that reaps and prepares its identity runs isolated as well.
+    assert [argv[:2] for argv in commands if argv[0] == "python3"] == [["python3", "-I"]] * 2
 
 
 def test_runtime_refresh_preserves_setup_and_scans_both_secret_generations():

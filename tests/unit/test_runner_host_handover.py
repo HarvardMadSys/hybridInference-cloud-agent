@@ -20,9 +20,9 @@ from typing import Any
 import pytest
 from tests.unit.test_runner_host_service import (
     FakeHandle,
-    FakeQualification,
     _delivered_job,
     _job,
+    _qualifications,
     service,  # noqa: F401 - the pytest fixture
 )
 
@@ -433,9 +433,7 @@ def test_the_host_hands_each_turn_the_guard_its_startup_check_verified(service, 
     monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
     monkeypatch.setattr(backend, "version_stamp", lambda: {})
     monkeypatch.setattr(backend, "check_gateway_reachable", lambda _url: None)
-    monkeypatch.setattr(
-        runner_mod, "HostQualification", lambda actual: FakeQualification(actual, [False], events)
-    )
+    monkeypatch.setattr(runner_mod, "HostQualification", _qualifications([False], events))
 
     def claim(**_kwargs):
         runner_mod._STOPPING.set()

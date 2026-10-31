@@ -44,6 +44,7 @@ from cloud_agent_host.runtimes import (
     RuntimeConnectionUnsupportedError,
     connection_base_url,
 )
+from cloud_agent_host.runtimes.codex import NATIVE_LAUNCHER
 from cloud_agent_shared.model_connections import ModelConnectionAccess
 from cloud_agent_shared.protocol_compat import ORIGIN_PLACEHOLDER, TOKEN_PLACEHOLDER
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -74,7 +75,11 @@ def test_translated_codex_runs_behind_the_helper_with_only_a_token():
         credential=_KEY,
         session_state_dir="/state/codex",
     )
-    assert argv[: len(LAUNCHER)] == list(LAUNCHER) and argv[len(LAUNCHER)] == "codex"
+    assert argv[: len(LAUNCHER) + len(NATIVE_LAUNCHER) + 1] == [
+        *LAUNCHER,
+        *NATIVE_LAUNCHER,
+        "codex",
+    ]
     joined = " ".join(argv)
     assert _KEY not in joined and TOKEN_PLACEHOLDER not in joined
     assert f'base_url="{ORIGIN_PLACEHOLDER}/v1"' in joined
@@ -96,7 +101,8 @@ def test_direct_codex_is_unchanged_by_translation():
         gateway_base_url=ExactBaseUrl("https://api.example.com/v1"),
         credential=_KEY,
     )
-    assert argv[0] == "codex" and "web_search" not in " ".join(argv)
+    assert argv[: len(NATIVE_LAUNCHER) + 1] == [*NATIVE_LAUNCHER, "codex"]
+    assert "web_search" not in " ".join(argv)
     assert env["CODEX_API_KEY"] == _KEY
     assert not any(name.startswith("AGENT_COMPAT_") for name in env)
 

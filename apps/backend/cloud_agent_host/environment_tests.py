@@ -6,7 +6,7 @@ import contextlib
 import logging
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -22,6 +22,9 @@ from cloud_agent_host.host_control import keepalive_client
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import SecretRedactor
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 #: Snapshot ids per question to the control plane; one Sandbox Manager delete
 #: request takes as many.
@@ -466,11 +469,20 @@ def _delete_retired_snapshots(client: httpx.Client) -> None:
 class EnvironmentTestWorker:
     """Keep test execution and orphan RPCs off the host's coding-task claim loop."""
 
-    def __init__(self, base_url: str, backend: Any) -> None:
+    def __init__(
+        self, base_url: str, backend: Any, *, on_idle: Callable[[], None] | None = None
+    ) -> None:
         self._base_url = base_url
         self._backend = backend
+        #: Called from the poll's thread once its claim or test is over, so a
+        #: claim loop waiting at capacity takes the freed slot at once.
+        self._on_idle = on_idle
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: Set before a poll's thread starts and cleared when its work is done,
+        #: before ``on_idle``: the loop that call wakes must find the slot free,
+        #: and the thread may still be alive for a moment as it exits.
+        self._in_flight = False
         self._next_poll = 0.0
         self._next_cleanup = 0.0
         self._next_snapshot_cleanup = 0.0
@@ -482,7 +494,7 @@ class EnvironmentTestWorker:
     @property
     def busy(self) -> bool:
         """Count an in-flight claim or test as one reserved local slot."""
-        return self._thread is not None and self._thread.is_alive()
+        return self._in_flight
 
     def poll(self, credential: str, attestation: dict[str, Any] | None = None) -> None:
         """Start at most one bounded poll without waiting for its HTTP or script work.
@@ -515,9 +527,19 @@ class EnvironmentTestWorker:
                 )
             except Exception:
                 logging.getLogger(__name__).warning("environment_test_poll_failed")
+            finally:
+                self._in_flight = False
+                if self._on_idle is not None:
+                    self._on_idle()
 
         self._thread = threading.Thread(target=execute, name="environment-test", daemon=True)
-        self._thread.start()
+        self._in_flight = True
+        try:
+            self._thread.start()
+        except BaseException:
+            # No thread started, so nothing holds the slot.
+            self._in_flight = False
+            raise
 
     def _client_for(self, credential: str) -> httpx.Client:
         """The client presenting ``credential``, replacing one made for another.

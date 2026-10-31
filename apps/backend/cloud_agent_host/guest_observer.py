@@ -22,7 +22,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from cloud_agent_host.guest_observer_scripts import DRAIN_SCRIPT, SNAPSHOT_SCRIPT
+from cloud_agent_host.guest_observer_scripts import (
+    BEGIN_SCRIPT,
+    CLEANUP_SCRIPT,
+    DRAIN_SCRIPT,
+    SNAPSHOT_SCRIPT,
+)
 from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolMark
 
 if TYPE_CHECKING:
@@ -96,6 +101,22 @@ class GuestObserverSnapshot:
 
 
 @dataclass(frozen=True)
+class _BeginRead:
+    """A begin's accepted opening read, then its fence and the clock bridge there.
+
+    ``fence`` is ``None`` when the fence failed after the opening read was
+    accepted, and ``problem`` says why: what the opening read calls for, such
+    as a rotation, is still decided on it.
+    """
+
+    opening: GuestObserverSnapshot
+    fence: GuestObserverSnapshot | None = None
+    problem: str = ""
+    mono_offset_ns: int = 0
+    clock_error_ns: int = 0
+
+
+@dataclass(frozen=True)
 class GuestObserverCursor:
     """The exact journal/loss fence captured before a member prompt is sent."""
 
@@ -110,7 +131,7 @@ class GuestObserverCursor:
     journal_ino: int = 0
     guest_mono_ns: int = 0
     # Add this to a guest monotonic timestamp to place it on the sandbox manager host's
-    # monotonic axis.  ``clock_error_ns`` is half the Docker-exec round trip;
+    # monotonic axis.  ``clock_error_ns`` is its error bound (``_clock_bridge``);
     # attribution widens by it rather than claiming false boundary precision.
     mono_offset_ns: int = 0
     clock_error_ns: int = 0
@@ -261,12 +282,8 @@ class GuestObserverController:
         *,
         after_poll_seq: int | None = None,
         wait_s: float = 3.0,
-        boot_id: bool = False,
     ) -> GuestObserverSnapshot:
-        """Read one atomic status/size/guest-clock tuple from the root journal.
-
-        ``boot_id`` also reads the guest's boot identifier in the same exec.
-        """
+        """Read one atomic status/size/guest-clock tuple from the root journal."""
         bounded_wait = min(3.0, max(0.0, wait_s))
         argv = [
             "python3",
@@ -279,8 +296,6 @@ class GuestObserverController:
             str(-1 if after_poll_seq is None else after_poll_seq),
             str(bounded_wait),
         ]
-        if boot_id:
-            argv.append(GUEST_BOOT_ID_PATH)
         result = self._capture(argv, max(5.0, bounded_wait + 2.0))
         if getattr(result, "returncode", 1) != 0:
             raise GuestObserverRuntimeError(
@@ -291,22 +306,70 @@ class GuestObserverController:
         except GuestObserverProtocolError as exc:
             raise GuestObserverRuntimeError(str(exc)) from exc
 
-    def _opening(self, *, restart_if_missing: bool) -> GuestObserverSnapshot:
-        """Read the opening fence, starting the helper first if it is missing.
+    def _opening(self, *, restart_if_missing: bool) -> _BeginRead:
+        """Read the opening fence and the fence after it, starting the helper if it is missing.
 
-        This one read is the liveness and trusted-binary check, the journal
-        size a rotation is decided on, the opening fence and the guest's boot:
-        every question ``begin`` asks before its bracketed read, in one exec.
         A cursor already open on the guest forbids a restart, so that caller
         gets the full wait instead of a recovery attempt.
         """
         if not restart_if_missing:
-            return self.snapshot(boot_id=True)
+            return self._begin_read(opening_wait_s=3.0)
         try:
-            return self.snapshot(wait_s=0, boot_id=True)
+            return self._begin_read(opening_wait_s=0)
         except GuestObserverRuntimeError:
             self.ensure()
-        return self.snapshot(boot_id=True)
+        return self._begin_read(opening_wait_s=3.0)
+
+    def _begin_read(self, *, opening_wait_s: float) -> _BeginRead:
+        """Run the fixed begin script: the opening read, a full poll, then the fence.
+
+        The opening read is the liveness and trusted-binary check, the journal
+        size a rotation is decided on, the opening fence and the guest's boot.
+        Its publication may come from a poll that started before it, so the
+        fence crosses the following complete poll as well: pre-turn ring-buffer
+        events and loss counters are then the baseline's, not the new turn's.
+
+        Only an opening read that failed or was refused raises, which a restart
+        answers. A fence that failed after an accepted one comes back as a read
+        without a fence: a restart would not answer it.
+        """
+        argv = [
+            "python3",
+            "-I",
+            "-c",
+            BEGIN_SCRIPT,
+            GUEST_OBSERVER_STATUS,
+            GUEST_OBSERVER_EVENTS,
+            GUEST_OBSERVER_BINARY,
+            str(opening_wait_s),
+            "3.0",
+            GUEST_BOOT_ID_PATH,
+        ]
+        host_before = time.monotonic_ns()
+        # Both waits, plus the two seconds a single read is allowed.
+        result = self._capture(argv, opening_wait_s + 3.0 + 2.0)
+        host_after = time.monotonic_ns()
+        failed, stderr = getattr(result, "returncode", 1) != 0, self._stderr(result)[-300:]
+        opening_line, _, fence_line = self._stdout(result).partition(b"\n")
+        try:
+            opening = parse_snapshot(opening_line)
+        except GuestObserverProtocolError as exc:
+            detail = stderr if failed else str(exc)
+            raise GuestObserverRuntimeError("guest observer snapshot failed: " + detail) from exc
+        if failed:
+            return _BeginRead(opening, problem="guest observer fence failed: " + stderr)
+        try:
+            fence = parse_snapshot(fence_line)
+        except GuestObserverProtocolError as exc:
+            return _BeginRead(opening, problem=str(exc))
+        # Waited for in the guest and held here as well, as the drain does.
+        if (
+            fence.status.pid != opening.status.pid
+            or fence.status.poll_seq <= opening.status.poll_seq + 1
+        ):
+            return _BeginRead(opening, problem="guest observer fence did not cross a full poll")
+        offset, error = _clock_bridge(host_before, host_after, opening, fence)
+        return _BeginRead(opening, fence, mono_offset_ns=offset, clock_error_ns=error)
 
     def ensure(self) -> None:
         """Start the reviewed eBPF helper and wait until every probe is attached."""
@@ -324,46 +387,12 @@ class GuestObserverController:
 
     def start(self) -> None:
         """Replace one stale singleton; the caller holds the shared start lock."""
-        cleanup = (
-            "import json, os, signal, sys, time\n"
-            "status, events, expected_binary = sys.argv[1:4]\n"
-            "pid = 0\n"
-            "def is_expected_process():\n"
-            "    if pid <= 1:\n"
-            "        return False\n"
-            "    try:\n"
-            "        return os.path.samefile(f'/proc/{pid}/exe', expected_binary)\n"
-            "    except OSError:\n"
-            "        return False\n"
-            "try:\n"
-            "    with open(status, encoding='utf-8') as handle:\n"
-            "        pid = int(json.load(handle).get('pid', 0))\n"
-            "    if is_expected_process():\n"
-            "        os.kill(pid, signal.SIGTERM)\n"
-            "except (OSError, ValueError, TypeError, json.JSONDecodeError):\n"
-            "    pass\n"
-            "deadline = time.monotonic() + 1.0\n"
-            "while is_expected_process() and time.monotonic() < deadline:\n"
-            "    time.sleep(0.01)\n"
-            "if is_expected_process():\n"
-            "    os.kill(pid, signal.SIGKILL)\n"
-            "    deadline = time.monotonic() + 1.0\n"
-            "    while is_expected_process() and time.monotonic() < deadline:\n"
-            "        time.sleep(0.01)\n"
-            "if is_expected_process():\n"
-            "    raise RuntimeError('stale guest observer did not exit')\n"
-            "for item in (status, events):\n"
-            "    try:\n"
-            "        os.unlink(item)\n"
-            "    except FileNotFoundError:\n"
-            "        pass\n"
-        )
         cleaned = self._privileged(
             [
                 "python3",
                 "-I",
                 "-c",
-                cleanup,
+                CLEANUP_SCRIPT,
                 GUEST_OBSERVER_STATUS,
                 GUEST_OBSERVER_EVENTS,
                 GUEST_OBSERVER_BINARY,
@@ -475,28 +504,23 @@ class GuestObserverController:
         being attached afterwards.
         """
         try:
-            opening = self._opening(restart_if_missing=restart_if_missing)
+            read = self._opening(restart_if_missing=restart_if_missing)
             if (
                 restart_if_missing
                 and rotate_threshold is not None
-                and opening.journal_size >= max(1, int(rotate_threshold))
+                and read.opening.journal_size >= max(1, int(rotate_threshold))
             ):
-                # Replaced or not, the helper the opening read described may
-                # be gone now, so the fence is read again after the attempt.
-                self.rotate_if_needed(threshold=rotate_threshold, snapshot=opening)
-                opening = self._opening(restart_if_missing=True)
-            # The publication just read may have been written by a poll that
-            # started before this opening fence. Cross the following complete
-            # poll as well so pre-turn ring-buffer events and loss counters are
-            # part of the baseline rather than the new turn. Only this read is
-            # bracketed, so the clock bridge's error stays half of one short
-            # round trip.
-            host_before = time.monotonic_ns()
-            snapshot = self.snapshot(after_poll_seq=opening.status.poll_seq + 1)
-            host_after = time.monotonic_ns()
+                # Decided before the fence is acted on: nothing else replaces
+                # a helper that answers but has stopped publishing. Replaced or
+                # not, the helper the opening read described may be gone now,
+                # so both reads are taken again after the attempt.
+                self.rotate_if_needed(threshold=rotate_threshold, snapshot=read.opening)
+                read = self._opening(restart_if_missing=True)
         except Exception as exc:
             return GuestObserverCursor.unavailable(user_uid, str(exc))
-        host_midpoint = host_before + (host_after - host_before) // 2
+        snapshot = read.fence
+        if snapshot is None:
+            return GuestObserverCursor.unavailable(user_uid, read.problem)
         return GuestObserverCursor(
             uid=user_uid,
             offset=snapshot.journal_size,
@@ -508,10 +532,10 @@ class GuestObserverController:
             journal_dev=snapshot.status.journal_dev,
             journal_ino=snapshot.status.journal_ino,
             guest_mono_ns=snapshot.guest_mono_ns,
-            mono_offset_ns=host_midpoint - snapshot.guest_mono_ns,
-            clock_error_ns=max(0, (host_after - host_before) // 2),
+            mono_offset_ns=read.mono_offset_ns,
+            clock_error_ns=read.clock_error_ns,
             available=True,
-            guest_boot_id=opening.guest_boot_id,
+            guest_boot_id=read.opening.guest_boot_id,
             measurement_id=measurement_id,
         )
 
@@ -797,6 +821,31 @@ def parse_drain(payload: bytes) -> tuple[GuestObserverSnapshot, GuestObserverSna
     if not isinstance(value, dict):
         raise GuestObserverProtocolError("guest observer drain status is not an object")
     return _snapshot_value(value.get("closing")), _snapshot_value(value.get("flushed")), journal
+
+
+def _clock_bridge(
+    host_before: int, host_after: int, opening: GuestObserverSnapshot, fence: GuestObserverSnapshot
+) -> tuple[int, int]:
+    """The offset from the guest clock to the host's at the fence, and its error.
+
+    The guest read its clock at the opening read and again at the fence, in
+    one exec the host timed. The two clocks run at the same rate, as every
+    later conversion of the turn's events assumes over the whole turn, so the
+    fence was read no sooner than the span between those readings after the
+    exec began, and no later than its return. The wait for a full poll lies
+    inside that span and widens nothing: the error is half of what is left,
+    the exec's start before the opening reading and its return after the
+    fence, as when the fence was read in an exec of its own. A span that does
+    not fit the round trip means the clocks disagree, and then only the whole
+    exec brackets the fence.
+    """
+    span = fence.guest_mono_ns - opening.guest_mono_ns
+    if not 0 <= span <= host_after - host_before:
+        span = 0
+    earliest = host_before + span
+    width = host_after - earliest
+    # Rounded up, so an odd width's far end is still inside the bound.
+    return earliest + width // 2 - fence.guest_mono_ns, (width + 1) // 2
 
 
 def _drain_problem(

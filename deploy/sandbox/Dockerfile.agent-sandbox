@@ -270,24 +270,42 @@ RUN python3 -m venv /opt/uv \
 # last release before pi moved to `@earendil-works/pi-coding-agent`. Admin
 # updates download from the new name (`runtime_catalog.PI`); a pin that moves
 # here moves to the new name with it.
+#
+# Kilo's reviewed build is mounted read-only from its stage for this RUN alone,
+# and install-runtimes.sh copies it into Kilo's prefix. Copied into the image
+# instead, it would be a layer of its own, about 170 MB, that deleting the files
+# in a later layer only hides: every host would still pull it.
 COPY deploy/sandbox/install-runtimes.sh /tmp/install-runtimes.sh
-COPY --from=kilo-build /opt/kilo /opt/kilo
 RUN --mount=type=cache,id=cloud-agent-sandbox-npm,target=/root/.npm,sharing=locked \
+    --mount=type=bind,from=kilo-build,source=/opt/kilo,target=/opt/kilo \
     chmod 0755 /tmp/install-runtimes.sh \
     && /tmp/install-runtimes.sh claude-code @anthropic-ai/claude-code claude "${CLAUDE_CODE_VERSIONS}" \
     && /tmp/install-runtimes.sh codex @openai/codex codex "${CODEX_VERSIONS}" \
     && /tmp/install-runtimes.sh pi @mariozechner/pi-coding-agent pi "${PI_VERSIONS}" \
     && /tmp/install-runtimes.sh opencode opencode-ai opencode "${OPENCODE_VERSIONS}" \
     && /tmp/install-runtimes.sh kilo @kilocode/cli kilo "${KILO_VERSIONS}" \
-    && rm /tmp/install-runtimes.sh && rm -rf /opt/kilo
+    && rm /tmp/install-runtimes.sh
 
 # Claude's CLI has a live stdin transport but no prompt-free public fork RPC.
 # The exact-version Python SDK supplies that native transcript mutation. Keep
 # it in a dedicated immutable venv so the runtime helper never depends on a
 # package from the repository or the host.
+#
+# The wheel also bundles a Claude CLI of its own, about 214 MB, which the SDK
+# starts only for `query()` and `ClaudeSDKClient`. claude-session-fork imports
+# nothing but `fork_session` and `_resolve_session_file_path`, and neither
+# starts it: both work on the transcript files on disk. So the bundled CLI is
+# deleted in the RUN that installs it, before a layer can keep it. The helper's
+# own import lines then run against what is left, so an SDK bump that moves
+# either name fails the build rather than a user's Fork. A unit test keeps those
+# lines equal to the helper's (tests/unit/test_native_fork_helpers.py).
 RUN python3 -m venv /opt/claude-agent-sdk \
     && /opt/claude-agent-sdk/bin/pip install --no-cache-dir \
-        "claude-agent-sdk==0.2.148"
+        "claude-agent-sdk==0.2.148" \
+    && rm /opt/claude-agent-sdk/lib/python3*/site-packages/claude_agent_sdk/_bundled/claude \
+    && /opt/claude-agent-sdk/bin/python -I -c 'from claude_agent_sdk import fork_session' \
+    && /opt/claude-agent-sdk/bin/python -I -c \
+        'from claude_agent_sdk._internal.sessions import _resolve_session_file_path'
 
 # The version stamp the runner reads (issue #54): image labels, keyed by
 # registry id, derived from the pins above so a label can never disagree with

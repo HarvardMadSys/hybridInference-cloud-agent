@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import uuid
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host import runtime_qualification as qualification
-from cloud_agent_host.network_guard import VERIFICATION_KEY
+from cloud_agent_host.network_guard import GUARD_RENEW_S, VERIFICATION_KEY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend, SandboxError
 
 
@@ -292,3 +293,84 @@ def test_runtime_marker_must_be_root_owned():
     observed = SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=1234)
     with pytest.raises(SandboxError, match="ownership"):
         qualification._require_safe_mode(observed, directory=False, root=True)
+
+
+class _Stop:
+    """The renewal's stop event: each wait is recorded, and it stops after ``waits``."""
+
+    def __init__(self, waits: int) -> None:
+        self.waits: list[float] = []
+        self._left = waits
+
+    def wait(self, timeout: float) -> bool:
+        self.waits.append(timeout)
+        self._left -= 1
+        return self._left < 0
+
+
+class _RenewingGuard:
+    def __init__(self, failures: int = 0) -> None:
+        self.ensured: list[float] = []
+        self.failures = failures
+
+    def ensure(self, *, max_age_s: float) -> None:
+        self.ensured.append(max_age_s)
+        if self.failures:
+            self.failures -= 1
+            raise SandboxError("nft failed: Error: Could not process rule")
+
+
+def _renewing(monkeypatch, guard: _RenewingGuard) -> qualification.HostQualification:
+    backend = ContainerBackend(image="fixture@sha256:abc")
+    monkeypatch.setattr(backend, "sandbox_network", object())
+    monkeypatch.setattr(backend, "network_guard", lambda: guard)
+    return qualification.HostQualification(backend)
+
+
+def test_the_host_renews_its_network_verification_before_a_handover_would(monkeypatch):
+    """A handover renews one GUARD_RENEW_S old itself; between claims none gets that old."""
+    guard = _RenewingGuard()
+    stop = _Stop(waits=3)
+
+    _renewing(monkeypatch, guard).renew_network_ahead(stop)  # type: ignore[arg-type]
+
+    age, check = qualification.NETWORK_RENEW_AGE_S, qualification.NETWORK_RENEW_CHECK_S
+    # The first look waits as long as one may age: the startup check just made one.
+    assert stop.waits == [age, check, check, check]
+    assert guard.ensured == [age] * 3
+    assert age + check < GUARD_RENEW_S
+
+
+def test_a_failing_renewal_is_logged_once_and_tried_again_only_later(monkeypatch, caplog):
+    guard = _RenewingGuard(failures=2)
+    stop = _Stop(waits=3)
+
+    with caplog.at_level(logging.WARNING):
+        _renewing(monkeypatch, guard).renew_network_ahead(stop)  # type: ignore[arg-type]
+
+    age, check = qualification.NETWORK_RENEW_AGE_S, qualification.NETWORK_RENEW_CHECK_S
+    assert stop.waits == [age, GUARD_RENEW_S, GUARD_RENEW_S, check]
+    failures = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_network_guard_renewal_failed"
+    ]
+    assert len(failures) == 1, "once per failing streak, not once per look"
+
+
+@pytest.mark.parametrize("network", [True, False])
+def test_only_the_host_service_renews_and_only_where_there_are_rules(monkeypatch, network):
+    started: list[str] = []
+
+    def thread(**kwargs):
+        return SimpleNamespace(start=lambda: started.append(kwargs["name"]))
+
+    monkeypatch.setattr(qualification.threading, "Thread", thread)
+    backend = ContainerBackend(image="fixture@sha256:abc")
+    if network:
+        monkeypatch.setattr(backend, "sandbox_network", object())
+
+    qualification.HostQualification(backend)
+    qualification.HostQualification(backend, renew_network=True)
+
+    assert started == (["network-guard-renewal"] if network else [])

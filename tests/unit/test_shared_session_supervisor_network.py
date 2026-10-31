@@ -1,9 +1,10 @@
 """One network proof per request, and Docker reads the supervisor does not repeat.
 
-Each admitted request -- a turn's lease, an environment preparation, a
-workspace operation or a terminal -- proves its group's network once, and the
-runner's commands stand on that proof. A keystroke reaches a terminal that is
-already open without inspecting the container first.
+Each admitted request -- a turn's lease, an environment preparation that runs
+a script, a workspace operation or a terminal -- proves its group's network
+once, and the runner's commands stand on that proof. A preparation already
+done for the running boot runs nothing and proves nothing. A keystroke reaches
+a terminal that is already open without inspecting the container first.
 
 The core module retains the shared fakes; this file keeps these cases
 independently schedulable without extracting their fixture machinery.
@@ -118,7 +119,8 @@ def test_a_request_after_a_failed_start_completion_is_proved_exactly_once(entryp
         )
         assert lease.network_verified is True, "the runner's commands stand on this proof"
     elif entrypoint == "environment":
-        preparer = SimpleNamespace(status=lambda _backend, _binding_id: {"ready": True})
+        ready = {"ready": True, "container_id": "container-shared", "boot_id": ""}
+        preparer = SimpleNamespace(status=lambda _backend, _binding_id: ready)
         supervisor.prepare_environment(
             "athr_source", SimpleNamespace(binding_id="binding"), preparer
         )

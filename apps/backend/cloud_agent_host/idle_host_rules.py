@@ -1,9 +1,11 @@
-"""Fallback renewal when exact guarded-workload discovery is unavailable.
+"""The running containers behind the host rules, and the rules' renewal on an empty host.
 
-The periodic supervisor normally lists every exact running container, verifies
-the host rules, and fail-stops those containers if repair fails. If Docker
-cannot enumerate or inspect that set, exact stopping cannot be fenced safely;
-this fallback still asks the guard to repair the shared packet boundary.
+The periodic supervisor lists every exact running container, verifies the
+host rules, and fail-stops those containers if repair fails. With nothing
+running there is nothing to verify, but the next start or wake would find the
+verification lapsed and install and read back the rules itself: about a second
+of a cold start. So the sweep renews it while the host is empty too, at the
+cost of the guard's helper runs about every 45 seconds.
 """
 
 from __future__ import annotations
@@ -62,17 +64,12 @@ def running_deployment_container_ids(
     return found
 
 
-def deployment_running(containers: ChatNetworkContainers) -> bool:
-    """Whether Docker shows anything running, treating an unavailable list as running."""
-    found = running_deployment_container_ids(containers)
-    return found is None or bool(found)
-
-
 class IdleHostRules:
-    """Renew host rules when exact workload discovery cannot complete.
+    """Renew the host rules' verification while nothing runs behind them.
 
-    A failure is logged once until a renewal succeeds again. The next
-    activation repeats the same check and refuses on its own.
+    A failure is logged once until a renewal succeeds again, and stops
+    nothing, as nothing runs. The next activation repeats the same check and
+    refuses on its own.
     """
 
     def __init__(self, manager: ChatSandboxManager) -> None:
@@ -80,7 +77,7 @@ class IdleHostRules:
         self._failing = False
 
     def renew(self) -> None:
-        """Ask the network lifecycle to renew, which it does only while anything runs."""
+        """Ask the network lifecycle to renew the verification if it is getting old."""
         try:
             self._manager.network.renew_host_rules()
         except SandboxError as exc:

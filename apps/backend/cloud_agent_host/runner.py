@@ -2395,8 +2395,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                     "workspace_shared": True,
                     "container_id": lease["container_id"],
                     "activation_generation": activation_generation,
-                    **retained.sandbox_metadata(),
-                    **job.started_context_fields(),
+                    **{**retained.sandbox_metadata(), **job.started_context_fields()},
                 },
             )
         )
@@ -2759,18 +2758,18 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                     "prepare" if not has_context else ("base_import" if imported_base else "reuse")
                 ),
             )
+        continuity: tuple[str | None, str] = (None, "new")
+        if context_status == "live":
+            continuity = ("hot", "live")
+        elif has_context:
+            continuity = ("warm_native", "restored")
         control.record_chat_process(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,
             residency_generation=launch.residency_generation,
             process_generation=process_generation,
+            continuity=continuity,
         )
-        if context_status == "live":
-            control.report_continuity("hot", context_status="live")
-        elif has_context:
-            control.report_continuity("warm_native", context_status="restored")
-        else:
-            control.report_context_status("new")
 
         stage = _stage(measurement, "prompt_admission")
         # The last point at which a Stop costs nothing.
@@ -3616,7 +3615,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     # The host proves its runtime here, once, and its children inherit that
     # verdict rather than each booting a probe guest of its own.
     qualification = (
-        HostQualification(backend)
+        HostQualification(backend, renew_network=True)
         if isinstance(backend, ContainerBackend) and spawn_turn is None
         else None
     )
@@ -3696,7 +3695,9 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     from cloud_agent_host.environment_tests import EnvironmentTestWorker
 
     environment_tests = (
-        EnvironmentTestWorker(base_url, backend) if isinstance(backend, ContainerBackend) else None
+        EnvironmentTestWorker(base_url, backend, on_idle=turns.slot_freed)
+        if isinstance(backend, ContainerBackend)
+        else None
     )
     # The limit this host is willing to serve right now. Held across beats so
     # a control plane that is briefly unreachable leaves the host running what
@@ -3950,10 +3951,9 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 continue
             test_slots = int(environment_tests is not None and environment_tests.busy)
             if not turns.may_claim(max(0, limit - test_slots)):
-                # A freed local slot should be noticed promptly. This does
-                # not increase empty-queue polls or retry traffic to the API.
-                slot_wait = min(tick_s, 1.0) if turns.running() >= limit else tick_s
-                time.sleep(slot_wait)
+                # A turn's child exiting or an environment test ending ends this wait at once,
+                # and nothing else does; the tick is the fallback. No API poll or retry is added.
+                turns.wait_for_slot(min(tick_s, 1.0) if turns.running() >= limit else tick_s)
                 continue
             if qualification is not None:
                 try:

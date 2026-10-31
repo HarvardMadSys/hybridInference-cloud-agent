@@ -192,6 +192,11 @@ def service(monkeypatch):
             runner_mod._STOPPING.set()
 
     monkeypatch.setattr(runner_mod.time, "sleep", sleep)
+    # A wait at capacity ends early only when a slot comes free; these fakes free
+    # none, so it is one more scripted sleep (see test_runner_host_slot_wait).
+    monkeypatch.setattr(
+        runner_mod.TurnPool, "wait_for_slot", lambda _p, s: runner_mod.time.sleep(s)
+    )
     # A control plane without the wait endpoint, so an idle host sleeps its
     # interval as these tests expect. The waiting itself is tested below.
     monkeypatch.setattr(runner_mod, "wait_for_work", _no_wait_endpoint)
@@ -456,6 +461,11 @@ class FakeQualification:
         return {}
 
 
+def _qualifications(answers: list[Any], events: list[str]) -> Any:
+    """Stands in for ``HostQualification``: a scripted fake, however ``run_forever`` asks."""
+    return lambda backend, **_asked: FakeQualification(backend, answers, events)
+
+
 def _qualified_backend(monkeypatch, events: list[str]):
     from cloud_agent_host.sandbox import ContainerBackend
 
@@ -476,11 +486,7 @@ def test_the_host_proves_its_runtime_once_at_start(service, monkeypatch, qualifi
     """
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
-    monkeypatch.setattr(
-        runner_mod,
-        "HostQualification",
-        lambda actual: FakeQualification(actual, [qualified], events),
-    )
+    monkeypatch.setattr(runner_mod, "HostQualification", _qualifications([qualified], events))
     monkeypatch.setattr(runner_mod, "claim_payload", lambda **_k: runner_mod._STOPPING.set())
     assert (
         runner_mod.run_forever(
@@ -495,9 +501,7 @@ def test_a_menu_too_long_to_report_keeps_what_this_host_was_told_to_hold(service
     """The version stamp leaves the least needed versions off; targets are needed."""
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
-    monkeypatch.setattr(
-        runner_mod, "HostQualification", lambda actual: FakeQualification(actual, [True], events)
-    )
+    monkeypatch.setattr(runner_mod, "HostQualification", _qualifications([True], events))
     monkeypatch.setattr(runner_mod, "claim_payload", lambda **_k: runner_mod._STOPPING.set())
     held = frozenset({("claude-code", "2.1.300")})
     monkeypatch.setattr(_NoRuntimeDownloads, "targets", lambda _self: held)
@@ -518,7 +522,7 @@ def test_runtime_qualification_failure_pauses_claims_until_recovered(service, mo
     qualification = FakeQualification(
         backend, [True, SandboxError("runtime updating"), True], events
     )
-    monkeypatch.setattr(runner_mod, "HostQualification", lambda _backend: qualification)
+    monkeypatch.setattr(runner_mod, "HostQualification", lambda _backend, **_k: qualification)
 
     def sleep(seconds):
         assert seconds == 5
@@ -561,11 +565,8 @@ def test_a_persisting_qualification_failure_is_reported_once(service, monkeypatc
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
     failure = SandboxError("observer self-test failed")
-    monkeypatch.setattr(
-        runner_mod,
-        "HostQualification",
-        lambda actual: FakeQualification(actual, [True, failure, failure, failure, True], events),
-    )
+    answers = [True, failure, failure, failure, True]
+    monkeypatch.setattr(runner_mod, "HostQualification", _qualifications(answers, events))
     warnings: list[str] = []
     monkeypatch.setattr(runner_mod.logger, "warning", lambda event, *a, **k: warnings.append(event))
     monkeypatch.setattr(runner_mod, "claim_payload", lambda **_k: runner_mod._STOPPING.set())
@@ -579,40 +580,6 @@ def test_a_persisting_qualification_failure_is_reported_once(service, monkeypatc
     assert FakeHeartbeat.last.wakes == 2, "one beat reports the failure and one clears it"
 
 
-@pytest.mark.parametrize("full", [False, True])
-def test_freed_slots_are_detected_without_faster_empty_queue_polling(service, monkeypatch, full):
-    _identity, backend, _released = service
-    waits = []
-    launched = []
-
-    def sleep(seconds):
-        waits.append(seconds)
-        runner_mod._STOPPING.set()
-
-    def launch(_payload):
-        launched.append(FakeHandle())
-        return LaunchResult(LAUNCH_STARTED, launched[-1])
-
-    monkeypatch.setattr(runner_mod.time, "sleep", sleep)
-    monkeypatch.setattr(
-        runner_mod, "claim_payload", lambda **_k: _job(len(launched)) if full else None
-    )
-    assert (
-        runner_mod.run_forever(
-            base_url="http://control",
-            worker_id="runner-a",
-            backend=backend,
-            host="host-a",
-            spawn_turn=launch,
-        )
-        == 0
-    )
-    # Shutdown may sleep while draining live handles; the service's first
-    # sleep is the relevant interval and never triggers an extra API claim.
-    assert waits[0] == (1.0 if full else 5.0)
-    assert len(launched) == (3 if full else 0)
-
-
 @pytest.mark.parametrize("reusable", [False, True])
 def test_repaired_image_is_refreshed_but_claims_always_require_current_attestation(
     service, monkeypatch, reusable
@@ -620,7 +587,7 @@ def test_repaired_image_is_refreshed_but_claims_always_require_current_attestati
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
     qualification = FakeQualification(backend, [reusable] * 3, events)
-    monkeypatch.setattr(runner_mod, "HostQualification", lambda _backend: qualification)
+    monkeypatch.setattr(runner_mod, "HostQualification", lambda _backend, **_k: qualification)
     monkeypatch.setattr(backend, "version_stamp", lambda: {"compatible": qualification.calls >= 3})
 
     def ready(_backend, stamp):
@@ -1229,7 +1196,7 @@ def test_an_empty_claims_proof_is_the_one_its_environment_poll_presents(service,
     class _Worker:
         busy = False
 
-        def __init__(self, _base_url: str, _backend: Any) -> None:
+        def __init__(self, _base_url: str, _backend: Any, **_kwargs: Any) -> None:
             pass
 
         def poll(self, credential: str, attestation: Any = None) -> None:

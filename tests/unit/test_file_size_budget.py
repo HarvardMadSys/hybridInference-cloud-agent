@@ -28,8 +28,8 @@ BASELINE = {
     "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3815,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 3545,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3403,
-    "apps/backend/cloud_agent_host/drivers.py": 2957,
-    "apps/backend/cloud_agent/api/worker.py": 2319,
+    "apps/backend/cloud_agent_host/drivers.py": 2913,
+    "apps/backend/cloud_agent/api/worker.py": 2233,
     "apps/backend/cloud_agent/storage/repositories/host_pool.py": 2267,
     "apps/backend/cloud_agent/application/compute_reconcile.py": 2245,
     "apps/backend/cloud_agent/api/mcp_connections.py": 2220,
@@ -64,8 +64,8 @@ TEST_BASELINE = {
     "tests/unit/test_host_pool_api.py": 3527,
     "tests/unit/test_mcp_connections_api.py": 3079,
     "tests/unit/test_retained_deploy.py": 2236,
-    "tests/unit/test_runner_host_service.py": 2923,
-    "tests/unit/test_shared_session_supervisor.py": 5353,
+    "tests/unit/test_runner_host_service.py": 2890,
+    "tests/unit/test_shared_session_supervisor.py": 5302,
 }
 
 
