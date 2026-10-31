@@ -304,7 +304,6 @@ def test_a_runner_that_ends_early_fails_the_step_it_was_in(tmp_path, capsys):
     assert calls[-1] == ["/bin/sh", "-c", f"touch {after}"]
 
 
-
 def test_kata_executes_member_steps_individually(tmp_path):
     manager = _LocalExec()
     manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
@@ -319,21 +318,20 @@ def test_kata_executes_member_steps_individually(tmp_path):
     assert all(call[0][0] == "/bin/sh" for call in manager.calls)
 
 
-
 def test_kata_reap_failure_stops_all_following_steps(tmp_path):
     manager = _LocalExec()
     manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
     preparation = _preparation(manager)
     after = tmp_path / "after"
     reap = _step(
-        "read line; test \"$line\" = baseline || exit 12; exit 9",
+        'read line; test "$line" = baseline || exit 12; exit 9',
         failure="reap",
         input_bytes=b"baseline\n",
         reaps=True,
     )
     _queue(preparation, reap, _step(f"touch {after}"))
 
-    with pytest.raises(SandboxError, match="^reap:"):
+    with pytest.raises(SandboxError, match=r"^reap:"):
         preparation.run()
 
     assert manager.reaper_ensured == 1
@@ -365,14 +363,18 @@ def test_kata_soft_failure_continues_and_retry_preserves_order(tmp_path, capsys)
     assert secured.exists() and after.exists()
     assert len(manager.calls) == 4
 
+
 def test_successful_runner_with_missing_reports_does_not_blame_next_step():
     def truncated(_spec, argv, **kwargs):
         return subprocess.CompletedProcess(argv, 0, b'{"status": 0, "stderr": ""}\n', b"")
 
     preparation = _preparation(SimpleNamespace(exec_capture=truncated))
     _queue(preparation, _step("true"), _step("true", failure="stale cleanup"))
-    with pytest.raises(SandboxError, match=r"incomplete report \(1 of 2 steps\); outcome is unknown"):
+    with pytest.raises(
+        SandboxError, match=r"incomplete report \(1 of 2 steps\); outcome is unknown"
+    ):
         preparation.run()
+
 
 def test_a_step_for_another_uid_is_refused():
     preparation = _preparation(_LocalExec())
