@@ -519,17 +519,24 @@ function Attention({
 function Coverage({ page, shown }: { page: ThreadCommandsApi; shown: number }) {
   const { t, locale } = useLocale();
   const coverage = page.coverage;
+  const total = coverage.executions_total.toLocaleString(locale);
+  const covered = coverage.executions_covered.toLocaleString(locale);
+  const seen = shown.toLocaleString(locale);
+  const remaining = page.page.total - shown;
+  const rangeLine = t('executions.page.range', {
+    from: '1',
+    to: seen,
+    total: String(page.page.total),
+  });
+  const moreLine = page.page.next_cursor
+    ? ` ${t('executions.page.more', { count: String(remaining) })}`
+    : '';
   return (
     <div className="mt-2 grid gap-1 text-[11px] text-muted">
       <p>
         {coverage.truncated
-          ? t('executions.coverage', {
-              covered: coverage.executions_covered.toLocaleString(locale),
-              total: coverage.executions_total.toLocaleString(locale),
-            })
-          : t('executions.coverageAll', {
-              total: coverage.executions_total.toLocaleString(locale),
-            })}
+          ? t('executions.coverage', { covered, total })
+          : t('executions.coverageAll', { total })}
       </p>
       {coverage.copied_jobs_excluded > 0 ? (
         <p>
@@ -543,16 +550,8 @@ function Coverage({ page, shown }: { page: ThreadCommandsApi; shown: number }) {
       ) : null}
       {page.page.total > 0 ? (
         <p>
-          {t('executions.page.range', {
-            from: (1).toLocaleString(locale),
-            to: shown.toLocaleString(locale),
-            total: page.page.total.toLocaleString(locale),
-          })}
-          {page.page.next_cursor
-            ? ` ${t('executions.page.more', {
-                count: (page.page.total - shown).toLocaleString(locale),
-              })}`
-            : ''}
+          {rangeLine}
+          {moreLine}
         </p>
       ) : null}
     </div>

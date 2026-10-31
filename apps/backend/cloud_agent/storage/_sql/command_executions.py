@@ -12,7 +12,23 @@ from __future__ import annotations
 from cloud_agent.command_executions import (
     MAX_COMMAND_CHARS,
     MAX_OUTPUT_PREVIEW,
+    runtime_command_tools,
 )
+
+#: The exact (runtime, tool name) pairs this build knows as commands. The query
+#: filters by these pairs rather than by tool name alone, so one runtime's name
+#: cannot admit another runtime's call and the database count agrees with what
+#: the assembler accepts.
+_RUNTIME_TOOLS = "VALUES " + ", ".join(
+    f"('{runtime}', '{tool}')"
+    for runtime in ("claude-code", "codex", "pi", "opencode", "kilo")
+    for tool in sorted(runtime_command_tools(runtime) or ())
+)
+
+#: One runtime's own tool name, matched as a pair so a name cannot leak across.
+_RUNTIME_FILTER = f"""(
+    j.runtime, LOWER(COALESCE(e.payload->>'name', ''))
+) IN (SELECT runtime, tool FROM ({_RUNTIME_TOOLS}) AS known(runtime, tool))"""
 
 #: The command text a recorded call carried, in the three shapes the adapters
 #: write: Claude's ``input.command``, Codex's top-level ``command``/``input``
@@ -107,11 +123,10 @@ CALLS_SQL = f"""
     LEFT JOIN agent_tool_call_resources r
            ON r.attempt_id = a.id AND r.tool_use_id = e.payload->>'id'
     WHERE j.fork_source_job_id IS NULL
-      AND j.runtime = ANY($3::text[])
-      AND LOWER(COALESCE(e.payload->>'name', '')) = ANY($4::text[])
+      AND {_RUNTIME_FILTER}
       AND ({COMMAND_TEXT_SQL.strip()}) <> ''
     ORDER BY e.id DESC
-    LIMIT $5
+    LIMIT $3
 """
 
 #: The results and session polls that answer the covered calls. A result is
@@ -165,8 +180,7 @@ TOTAL_SQL = f"""
     JOIN agent_attempts a ON a.job_id = j.id
     JOIN agent_job_events e ON e.attempt_id = a.id AND e.event_type = 'tool_use'
     WHERE j.fork_source_job_id IS NULL
-      AND j.runtime = ANY($3::text[])
-      AND LOWER(COALESCE(e.payload->>'name', '')) = ANY($4::text[])
+      AND {_RUNTIME_FILTER}
       AND ({COMMAND_TEXT_SQL.strip()}) <> ''
 """
 

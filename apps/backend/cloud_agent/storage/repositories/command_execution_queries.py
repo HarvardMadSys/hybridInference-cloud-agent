@@ -22,7 +22,6 @@ from cloud_agent.command_executions import (
     CommandSort,
     assemble_command_executions,
     command_executions_page,
-    command_tool_names,
     poll_tool_names,
 )
 from cloud_agent.storage._sql.command_executions import (
@@ -72,8 +71,6 @@ class PostgresCommandExecutionQueries:
                     CALLS_SQL,
                     job_id,
                     user_id,
-                    sorted({str(turn["runtime"] or "") for turn in turns}),
-                    list(command_tool_names()),
                     MAX_COMMAND_EXECUTIONS,
                 )
             ]
@@ -82,8 +79,6 @@ class PostgresCommandExecutionQueries:
                     TOTAL_SQL,
                     job_id,
                     user_id,
-                    sorted({str(turn["runtime"] or "") for turn in turns}),
-                    list(command_tool_names()),
                 )
                 or 0
             )

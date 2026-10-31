@@ -10035,6 +10035,612 @@
         "title": "CloudLabDefaults",
         "type": "object"
       },
+      "CommandAttention": {
+        "additionalProperties": false,
+        "description": "The executions worth a second look, over the same narrowed set.",
+        "properties": {
+          "background": {
+            "minimum": 0.0,
+            "title": "Background",
+            "type": "integer"
+          },
+          "failing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandProgram"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repeats": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repeats"
+          },
+          "slowest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandExecution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "background"
+        ],
+        "title": "CommandAttention",
+        "type": "object"
+      },
+      "CommandCounts": {
+        "additionalProperties": false,
+        "description": "Filter counts over the searched/program-narrowed executions.",
+        "properties": {
+          "all": {
+            "minimum": 0.0,
+            "title": "All",
+            "type": "integer"
+          },
+          "background": {
+            "minimum": 0.0,
+            "title": "Background",
+            "type": "integer"
+          },
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "slow": {
+            "minimum": 0.0,
+            "title": "Slow",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "all",
+          "failed",
+          "slow",
+          "background"
+        ],
+        "title": "CommandCounts",
+        "type": "object"
+      },
+      "CommandCoverage": {
+        "additionalProperties": false,
+        "description": "What this read covered, so a bounded subset is never the whole story.",
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "copied_jobs_excluded": {
+            "minimum": 0.0,
+            "title": "Copied Jobs Excluded",
+            "type": "integer"
+          },
+          "executions_covered": {
+            "minimum": 0.0,
+            "title": "Executions Covered",
+            "type": "integer"
+          },
+          "executions_total": {
+            "minimum": 0.0,
+            "title": "Executions Total",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "unsupported_runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unsupported Runtimes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "executions_total",
+          "executions_covered",
+          "truncated",
+          "turns",
+          "attempts",
+          "copied_jobs_excluded"
+        ],
+        "title": "CommandCoverage",
+        "type": "object"
+      },
+      "CommandExecution": {
+        "additionalProperties": false,
+        "description": "One command execution, with only what its records carried.",
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "attempt_no": {
+            "minimum": 0.0,
+            "title": "Attempt No",
+            "type": "integer"
+          },
+          "background": {
+            "default": false,
+            "title": "Background",
+            "type": "boolean"
+          },
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "command_chars": {
+            "minimum": 0.0,
+            "title": "Command Chars",
+            "type": "integer"
+          },
+          "command_truncated": {
+            "title": "Command Truncated",
+            "type": "boolean"
+          },
+          "cwd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cwd"
+          },
+          "duration_basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "recorded",
+                  "events"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Basis"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "output_chars": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Output Chars",
+            "type": "integer"
+          },
+          "output_preview": {
+            "default": "",
+            "title": "Output Preview",
+            "type": "string"
+          },
+          "output_truncated": {
+            "default": false,
+            "title": "Output Truncated",
+            "type": "boolean"
+          },
+          "parse_basis": {
+            "enum": [
+              "executable",
+              "shell"
+            ],
+            "title": "Parse Basis",
+            "type": "string"
+          },
+          "program": {
+            "title": "Program",
+            "type": "string"
+          },
+          "result_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result At"
+          },
+          "result_event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Event Id"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "superseded": {
+            "default": false,
+            "title": "Superseded",
+            "type": "boolean"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          },
+          "tool_error": {
+            "default": false,
+            "title": "Tool Error",
+            "type": "boolean"
+          },
+          "turn_no": {
+            "minimum": 0.0,
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "job_id",
+          "turn_no",
+          "attempt_id",
+          "attempt_no",
+          "runtime",
+          "tool",
+          "command",
+          "command_chars",
+          "command_truncated",
+          "status",
+          "program",
+          "parse_basis"
+        ],
+        "title": "CommandExecution",
+        "type": "object"
+      },
+      "CommandExecutions": {
+        "additionalProperties": false,
+        "description": "One conversation's command executions and their cumulative totals.",
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/CommandAttention"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/CommandCounts"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CommandCoverage"
+          },
+          "executions": {
+            "items": {
+              "$ref": "#/components/schemas/CommandExecution"
+            },
+            "title": "Executions",
+            "type": "array"
+          },
+          "filter": {
+            "enum": [
+              "all",
+              "failed",
+              "slow",
+              "background"
+            ],
+            "title": "Filter",
+            "type": "string"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "page": {
+            "$ref": "#/components/schemas/CommandPage"
+          },
+          "program": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Program"
+          },
+          "programs": {
+            "items": {
+              "$ref": "#/components/schemas/CommandProgram"
+            },
+            "title": "Programs",
+            "type": "array"
+          },
+          "q": {
+            "default": "",
+            "title": "Q",
+            "type": "string"
+          },
+          "slow_cutoff_ms": {
+            "default": 10000,
+            "title": "Slow Cutoff Ms",
+            "type": "integer"
+          },
+          "sort": {
+            "enum": [
+              "latest",
+              "slowest"
+            ],
+            "title": "Sort",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/CommandSummary"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "generated_at",
+          "summary",
+          "coverage",
+          "counts",
+          "attention",
+          "programs",
+          "executions",
+          "page",
+          "filter",
+          "sort"
+        ],
+        "title": "CommandExecutions",
+        "type": "object"
+      },
+      "CommandPage": {
+        "additionalProperties": false,
+        "description": "The rows this page carries and how many the narrowed set has.",
+        "properties": {
+          "limit": {
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "returned": {
+            "minimum": 0.0,
+            "title": "Returned",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "returned",
+          "limit"
+        ],
+        "title": "CommandPage",
+        "type": "object"
+      },
+      "CommandProgram": {
+        "additionalProperties": false,
+        "description": "One parsed program and its share of the covered executions.",
+        "properties": {
+          "count": {
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "fallback": {
+            "default": false,
+            "title": "Fallback",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "share": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Share",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "count",
+          "share"
+        ],
+        "title": "CommandProgram",
+        "type": "object"
+      },
+      "CommandSummary": {
+        "additionalProperties": false,
+        "description": "Cumulative totals over every covered execution, independent of filters.",
+        "properties": {
+          "background": {
+            "minimum": 0.0,
+            "title": "Background",
+            "type": "integer"
+          },
+          "cumulative_ms": {
+            "minimum": 0.0,
+            "title": "Cumulative Ms",
+            "type": "integer"
+          },
+          "duration_basis": {
+            "enum": [
+              "recorded",
+              "mixed",
+              "events",
+              "none"
+            ],
+            "title": "Duration Basis",
+            "type": "string"
+          },
+          "durations_known": {
+            "minimum": 0.0,
+            "title": "Durations Known",
+            "type": "integer"
+          },
+          "durations_missing": {
+            "minimum": 0.0,
+            "title": "Durations Missing",
+            "type": "integer"
+          },
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "failure_rate": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Rate"
+          },
+          "running": {
+            "minimum": 0.0,
+            "title": "Running",
+            "type": "integer"
+          },
+          "settled": {
+            "minimum": 0.0,
+            "title": "Settled",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "unknown": {
+            "minimum": 0.0,
+            "title": "Unknown",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "settled",
+          "failed",
+          "running",
+          "unknown",
+          "cumulative_ms",
+          "durations_known",
+          "durations_missing",
+          "duration_basis",
+          "background"
+        ],
+        "title": "CommandSummary",
+        "type": "object"
+      },
       "CompositionBoundary": {
         "additionalProperties": false,
         "description": "The last compaction the CLI reported before this request.",
@@ -36156,6 +36762,158 @@
           }
         },
         "summary": "Get Thread Context",
+        "tags": [
+          "context"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/context/commands": {
+      "get": {
+        "description": "One page of the caller's conversation's command executions.\n\nThe summary and the program histogram cover every covered execution; the\ncounts and the list follow the search, the program and the filter. A\nbounded read says how many executions exist in total, so a page is never\npresented as the whole conversation. Search and filters are resolved\nhere, before the cursor is accepted, and the cursor is bound to them.\n\nRaises:\n    HTTPException: 404 when the conversation is not the caller's, 422 for\n        a cursor from another list.",
+        "operationId": "get_thread_context_commands_v1_agent_jobs__job_id__thread_context_commands_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "all, failed, slow, or background; says what it means.",
+            "in": "query",
+            "name": "filter",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "description": "all, failed, slow, or background; says what it means.",
+              "enum": [
+                "all",
+                "failed",
+                "slow",
+                "background"
+              ],
+              "title": "Filter",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "latest",
+              "enum": [
+                "latest",
+                "slowest"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Command text, recorded working directory or parsed program.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "Command text, recorded working directory or parsed program.",
+              "maxLength": 200,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "description": "One parsed program's executions.",
+            "in": "query",
+            "name": "program",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One parsed program's executions.",
+              "title": "Program"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandExecutions"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Context Commands",
         "tags": [
           "context"
         ]

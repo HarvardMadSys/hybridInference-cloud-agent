@@ -46,14 +46,10 @@ export function statusTone(status: CommandExecutionApi['status']): {
   glyph: string;
   className: string;
 } {
-  switch (status) {
-    case 'running':
-      return { glyph: '◐', className: 'text-sky-600 dark:text-sky-400' };
-    case 'completed':
-      return { glyph: '✓', className: 'text-emerald-600 dark:text-emerald-400' };
-    case 'failed':
-      return { glyph: '✕', className: 'text-rose-600 dark:text-rose-400' };
-    default:
-      return { glyph: '⊘', className: 'text-muted' };
+  if (status === 'running') return { glyph: '◐', className: 'text-sky-600 dark:text-sky-400' };
+  if (status === 'completed') {
+    return { glyph: '✓', className: 'text-emerald-600 dark:text-emerald-400' };
   }
+  if (status === 'failed') return { glyph: '✕', className: 'text-rose-600 dark:text-rose-400' };
+  return { glyph: '⊘', className: 'text-muted' };
 }
