@@ -152,7 +152,7 @@ export function CommandExecutions({
     <Section title={t('executions.title')}>
       <p className="mt-1 text-xs text-muted">{t('executions.note')}</p>
       <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)] lg:items-start">
-        <div className="grid min-w-0 gap-3">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3">
           <SummaryRail
             page={page}
             loading={loading}
@@ -324,7 +324,7 @@ function SummaryRail({
       : `${(summary.failure_rate * 100).toFixed(1).replace(/\.0$/, '')}%`;
   const cumulative = durationLabel(summary.cumulative_ms);
   return (
-    <div className="rounded-lg border border-border p-3">
+    <div className="min-w-0 rounded-lg border border-border p-3">
       <h4 className="text-xs font-semibold text-foreground">{t('executions.rail.summary')}</h4>
       <p className="mt-0.5 text-[11px] text-muted">{t('executions.rail.summaryTip')}</p>
       <dl className="mt-2 grid grid-cols-2 gap-2">
@@ -384,7 +384,7 @@ function Programs({
   const programs = page.programs.filter((program) => program.name.toLowerCase().includes(needle));
   if (page.programs.length === 0) return null;
   return (
-    <div className="rounded-lg border border-border p-3">
+    <div className="min-w-0 rounded-lg border border-border p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="text-xs font-semibold text-foreground">
           {t('executions.rail.programs', { count: page.programs.length.toLocaleString(locale) })}
@@ -494,7 +494,7 @@ function Attention({
   }
   if (rows.length === 0) return null;
   return (
-    <div className="rounded-lg border border-border p-3">
+    <div className="min-w-0 rounded-lg border border-border p-3">
       <h4 className="text-xs font-semibold text-foreground">{t('executions.rail.attention')}</h4>
       <ul className="mt-1.5 grid gap-1">
         {rows.map((row) => (
@@ -505,7 +505,7 @@ function Attention({
               disabled={!row.onClick}
               className="ui-focus-ring flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] enabled:hover:bg-surface-hover disabled:cursor-default"
             >
-              <span className="w-16 shrink-0 text-muted">{row.label}</span>
+              <span className="w-14 shrink-0 text-muted">{row.label}</span>
               <span className="min-w-0 flex-1 truncate font-mono text-foreground">{row.value}</span>
               <span className="shrink-0 tabular-nums text-muted">{row.count}</span>
             </button>
