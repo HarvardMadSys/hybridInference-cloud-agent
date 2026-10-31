@@ -240,9 +240,12 @@ def is_image_result(content: Any) -> bool:
     """Whether a recorded tool result is an image content block.
 
     The adapters flatten a result's blocks into text, so the only structure
-    left is JSON. A result is an image when that JSON is itself an image block,
-    or a list whose blocks include one. A document that happens to contain the
-    word ``image`` is not: it does not parse into that shape.
+    left is JSON. Only two canonical shapes count: a root content block whose
+    ``type`` is ``image``, or a root *list* of content blocks with an image
+    element. A nested document — a schema that describes an image block — is
+    not evidence, and text that does not parse is not either. Keys may be in
+    any order; the projection collapses a huge base64 payload to a marker
+    before this sees it.
     """
     if not isinstance(content, str) or not content.strip():
         return False
@@ -250,22 +253,20 @@ def is_image_result(content: Any) -> bool:
         parsed = json.loads(content)
     except (json.JSONDecodeError, ValueError):
         return False
-    return _has_image_block(parsed)
+    if isinstance(parsed, list):
+        return any(_is_image_block(item) for item in parsed)
+    return _is_image_block(parsed)
 
 
-def _has_image_block(value: Any) -> bool:
-    """An image content block, at the top level or in a list of blocks."""
-    if isinstance(value, list):
-        return any(_has_image_block(item) for item in value)
-    if not isinstance(value, dict):
-        return False
-    if value.get("type") != "image":
+def _is_image_block(value: Any) -> bool:
+    """A single content block that is an image, by its own ``type``."""
+    if not isinstance(value, dict) or value.get("type") != "image":
         return False
     source = value.get("source")
     if isinstance(source, dict):
         media = source.get("media_type") or source.get("mediaType")
-        return isinstance(media, str) and media.startswith("image/")
-    # A URL-bearing image block is still explicit image evidence.
+        if isinstance(media, str):
+            return media.startswith("image/")
     return isinstance(value.get("url"), str) or isinstance(value.get("data"), str)
 
 
@@ -460,14 +461,11 @@ def _file_operation(
     added = removed = None
     if status == "succeeded" and kind in {"write", "edit"}:
         added, removed = _write_edit_deltas(payload, fields, kind)
-    if kind == "read" and (
-        payload.get("result_image") or is_image_result(payload.get("result_content"))
-    ):
-        # The recorded result carried an image content block: this read is
-        # image activity. ``result_image`` is the projection's structural
-        # check, which still holds for a base64 body too large to return; the
-        # parsed check covers a small complete body. A source file that merely
-        # contains the text ``"type": "image"`` is neither.
+    if kind == "read" and is_image_result(payload.get("result_skeleton")):
+        # The recorded result parsed as an image content block: this read is
+        # image activity. The projection collapsed a huge payload to a marker,
+        # so a large image still parses; a document that merely describes one
+        # does not.
         kind, action = "image", "image"
     return FileOperation(
         **_base(

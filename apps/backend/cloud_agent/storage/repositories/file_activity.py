@@ -55,12 +55,6 @@ if TYPE_CHECKING:
 #: timeout is therefore clipped to the time left, and the whole read is wrapped
 #: in one cancellation scope.
 READ_DEADLINE_S = 8.0
-#: A recorded result that is JSON and carries an image content block, in any
-#: key order and with or without a text block before it. Escaped quotes inside
-#: a JSON string do not match, so a document that merely mentions an image
-#: block is not image evidence.
-IMAGE_BLOCK_PATTERN = r'(?:^\s*[\[{])[\s\S]*"type"\s*:\s*"image"'
-#: A page's own timeout, clipped further by the deadline's remaining time.
 STATEMENT_TIMEOUT_MS = 5_000
 
 
@@ -138,7 +132,6 @@ class PostgresFileActivityQueries:
                 preview_chars,
                 before if before is not None else 2**63 - 1,
                 want,
-                IMAGE_BLOCK_PATTERN,
             )
             if not page:
                 break

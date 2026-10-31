@@ -250,18 +250,24 @@ CANDIDATE_SQL = f"""(
     OR {CWD_SQL.strip()}
 )"""
 
-FILE_ACTIVITY_EVENT_SQL = f"""
+FILE_ACTIVITY_EVENT_SQL = rf"""
     /* file_activity_events */
     SELECT e.id, e.event_type, e.attempt_id, e.seq, e.job_id, e.created_at,
            {PAYLOAD_SQL} AS payload,
            result.id AS result_id,
            (result.payload->>'is_error')::boolean AS result_error,
            left(COALESCE(result.payload->>'content', ''), 4000) AS result_content,
-           -- An image result is a JSON content block anchored at the start of
-           -- the recorded text, so a large base64 body (clipped for transport)
-           -- still counts while a document that merely mentions an image does
-           -- not. The first block of a list counts too.
-           (left(COALESCE(result.payload->>'content', ''), 20000) ~ $6::text) AS result_image
+           -- A structural skeleton of the result, for image evidence. Bulky
+           -- string fields (a base64 payload, a text body) are emptied so the
+           -- block's own ``type`` and media type survive without transporting
+           -- the body. The reducer parses this as JSON; invalid text stays
+           -- invalid there and counts for nothing.
+           left(regexp_replace(regexp_replace(regexp_replace(
+                 COALESCE(result.payload->>'content', ''),
+                 '"data"\s*:\s*"[^"]*"', '"data":""', 'g'),
+                 '"text"\s*:\s*"[^"]*"', '"text":""', 'g'),
+                 '"content"\s*:\s*"[^"]*"', '"content":""', 'g'),
+                 4000) AS result_skeleton
     FROM agent_job_events e
     JOIN agent_jobs j ON j.id = e.job_id AND j.thread_id = $1 AND j.user_id = $2
     JOIN agent_threads t ON t.id = j.thread_id AND t.deleted_at IS NULL

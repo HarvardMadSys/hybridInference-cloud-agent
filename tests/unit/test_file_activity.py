@@ -366,7 +366,7 @@ def test_a_read_whose_result_carries_an_image_is_image_activity():
         "input": {"file_path": "shot.dat"},
         "result_id": 2,
         "result_error": False,
-        "result_content": '{"type":"image","source":{"media_type":"image/png"}}',
+        "result_skeleton": '{"type":"image","source":{"media_type":"image/png"}}',
     }
     [operation] = tool_operations(payload, "/w")
     assert operation.kind == "image"
@@ -381,7 +381,7 @@ def test_an_image_extension_alone_is_not_image_activity():
         "input": {"file_path": "logo.png"},
         "result_id": 2,
         "result_error": False,
-        "result_content": '# a document that mentions {"type": "image"}',
+        "result_skeleton": '# a document that mentions {"type": "image"}',
     }
     [operation] = tool_operations(payload, "/w")
     assert operation.kind == "read"
@@ -838,7 +838,7 @@ def test_a_read_of_json_mentioning_an_image_is_not_an_image_operation():
         "input": {"file_path": "schema.json"},
         "result_id": 2,
         "result_error": False,
-        "result_content": '{"description": "a block of type image", "type": "text"}',
+        "result_skeleton": '{"description": "a block of type image", "type": "text"}',
     }
     [operation] = tool_operations(payload, "/w")
     assert operation.kind == "read"
@@ -853,7 +853,7 @@ def test_a_read_whose_result_is_an_image_block_is_image_activity():
         "input": {"file_path": "shot.txt"},
         "result_id": 2,
         "result_error": False,
-        "result_content": '{"type":"image","source":{"media_type":"image/png","data":"AA"}}',
+        "result_skeleton": '{"type":"image","source":{"media_type":"image/png","data":"AA"}}',
     }
     [operation] = tool_operations(payload, "/w")
     assert operation.kind == "image"
