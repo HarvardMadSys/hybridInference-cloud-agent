@@ -87,9 +87,16 @@ export function FileRow({
         >
           {row.type_label}
         </span>
-        <span className="min-w-0 flex-1 truncate [@media(max-width:380px)]:basis-[calc(100%-46px)]">
-          {parts.directory ? <span className="text-muted">{parts.directory}</span> : null}
-          <span className="font-medium text-foreground">{parts.name}</span>
+        {/* The directory yields space before the name does, so a narrow row
+            still reads as a file name with a shortened parent, never as the
+            front of a path with its name cut off. */}
+        <span className="flex min-w-0 flex-1 items-baseline">
+          {parts.directory ? (
+            <span className="min-w-0 flex-1 truncate text-muted">{parts.directory}</span>
+          ) : null}
+          <span className="min-w-0 shrink-0 truncate font-medium text-foreground">
+            {parts.name}
+          </span>
         </span>
         <RowSummary row={row} nowMs={nowMs} locale={locale} />
       </button>
