@@ -8,6 +8,7 @@ import {
   getAgentThreadContext,
   getEventContent,
   getRequestComposition,
+  getThreadContextCommands,
   getThreadContextDna,
   getThreadContextTiming,
   type ContextPointApi,
@@ -25,6 +26,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getEventContent: vi.fn(),
   getThreadContextTiming: vi.fn(),
   getThreadContextDna: vi.fn(),
+  getThreadContextCommands: vi.fn(),
 }));
 
 function point(
@@ -291,6 +293,43 @@ beforeEach(() => {
   vi.mocked(getAgentThreadContext).mockResolvedValue(view());
   vi.mocked(getThreadContextTiming).mockResolvedValue(null);
   vi.mocked(getThreadContextDna).mockResolvedValue(null);
+  vi.mocked(getThreadContextCommands).mockResolvedValue({
+    thread_id: 't',
+    generated_at: '2026-10-29T12:00:00Z',
+    slow_cutoff_ms: 10_000,
+    summary: {
+      total: 0,
+      settled: 0,
+      failed: 0,
+      failure_rate: null,
+      running: 0,
+      unknown: 0,
+      cumulative_ms: 0,
+      durations_known: 0,
+      durations_missing: 0,
+      duration_basis: 'none',
+      background: 0,
+    },
+    coverage: {
+      executions_total: 0,
+      executions_covered: 0,
+      truncated: false,
+      turns: 0,
+      attempts: 0,
+      copied_jobs_excluded: 0,
+      unsupported_runtimes: [],
+      results_partial: false,
+    },
+    counts: { all: 0, failed: 0, slow: 0, background: 0 },
+    attention: { slowest: null, failing: null, repeats: null, background: 0 },
+    programs: [],
+    executions: [],
+    page: { total: 0, returned: 0, limit: 100, next_cursor: null },
+    filter: 'all',
+    sort: 'latest',
+    q: '',
+    program: null,
+  });
   vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
     composition(eventId),
   );

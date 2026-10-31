@@ -13,6 +13,9 @@ from cloud_agent.storage.repositories.attachments import PostgresAttachmentRepos
 from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
 from cloud_agent.storage.repositories.audit import PostgresAuditRepository
 from cloud_agent.storage.repositories.audit_log import PostgresAuditLogRepository
+from cloud_agent.storage.repositories.command_execution_queries import (
+    PostgresCommandExecutionQueries,
+)
 from cloud_agent.storage.repositories.compute_resources import PostgresComputeResourceRepository
 from cloud_agent.storage.repositories.context_queries import PostgresContextQueries
 from cloud_agent.storage.repositories.conversation_commands import PostgresConversationCommands
@@ -64,6 +67,7 @@ __all__ = [
     "PostgresAttemptCommands",
     "PostgresAuditLogRepository",
     "PostgresAuditRepository",
+    "PostgresCommandExecutionQueries",
     "PostgresComputeResourceRepository",
     "PostgresContextQueries",
     "PostgresConversationCommands",

@@ -106,6 +106,25 @@ export {
 } from './agents/context';
 
 export type {
+  CommandAttentionApi,
+  CommandCountsApi,
+  CommandCoverageApi,
+  CommandDurationBasis,
+  CommandExecutionApi,
+  CommandFilter,
+  CommandPageApi,
+  CommandParseBasis,
+  CommandProgramApi,
+  CommandQuery,
+  CommandSort,
+  CommandStatus,
+  CommandSummaryApi,
+  ThreadCommandsApi,
+} from './agents/commandExecutions';
+
+export { getThreadContextCommands } from './agents/commandExecutions';
+
+export type {
   AgentThreadArchiveApi,
   AgentSessionState,
   AgentSessionApi,

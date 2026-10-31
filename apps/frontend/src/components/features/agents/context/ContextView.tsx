@@ -14,6 +14,7 @@ import { useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { AgentJob } from '../types';
 import type { ThreadContextApi } from '@/lib/api/agents';
+import { CommandExecutions } from './commands/CommandExecutions';
 import { ContextEvents } from './ContextEvents';
 import { ContextGrowthChart } from './ContextGrowthChart';
 import { ContextDashboard } from './dashboard/ContextDashboard';
@@ -82,6 +83,14 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         </Section>
       ) : null}
       <ContextEvents key={key} view={view} nowMs={nowMs} onOpenPoint={onOpenPoint} />
+      <CommandExecutions
+        key={key}
+        jobId={job.id}
+        conversationKey={key}
+        active={Boolean(view.latest?.turn_active)}
+        onOpenPoint={onOpenPoint}
+        onOpenTurn={onOpenTurn}
+      />
       <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <LargestChanges changes={view.largest_changes} points={points} onSelect={setSelected} />
       <ReferenceSections
