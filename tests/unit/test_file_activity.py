@@ -26,6 +26,7 @@ from cloud_agent.file_activity.models import (
 )
 from cloud_agent.file_activity.normalize import (
     ACTION_TOOL_NAMES,
+    _diff_deltas,
     classify,
     codex_operations,
     file_labels,
@@ -365,7 +366,7 @@ def test_a_read_whose_result_carries_an_image_is_image_activity():
         "input": {"file_path": "shot.dat"},
         "result_id": 2,
         "result_error": False,
-        "result_image": True,
+        "result_content": '{"type":"image","source":{"media_type":"image/png"}}',
     }
     [operation] = tool_operations(payload, "/w")
     assert operation.kind == "image"
@@ -380,7 +381,7 @@ def test_an_image_extension_alone_is_not_image_activity():
         "input": {"file_path": "logo.png"},
         "result_id": 2,
         "result_error": False,
-        "result_image": False,
+        "result_content": '# a document that mentions {"type": "image"}',
     }
     [operation] = tool_operations(payload, "/w")
     assert operation.kind == "read"
@@ -434,6 +435,7 @@ def test_codex_file_change_reads_only_its_own_notification():
     built = codex_operations(payload, "/w")
     by_path = {o.path: o for o in built}
     assert (by_path["/w/a.py"].added, by_path["/w/a.py"].removed) == (2, 0)
+    # No diff was recorded for the delete: its removed side is unknown.
     assert by_path["/w/b.py"].removed is None
     assert (by_path["/w/c.py"].added, by_path["/w/c.py"].removed) == (1, 1)
     assert by_path["/w/a.py"].kind == "write"
@@ -705,3 +707,191 @@ def test_semantics_never_claim_a_net_git_diff():
     assert view.semantics.net_git_diff == "not_read"
     assert view.semantics.search_scope == "explicit_path_only"
     assert view.semantics.image_evidence == "explicit_only"
+
+
+# ── Review regressions ──────────────────────────────────────────────────────
+
+
+def _codex_row(event_id: int, seq: int, method: str, item: dict) -> dict:
+    notification = {"method": method, "params": {"item": item}}
+    return {
+        "event_type": "raw",
+        "attempt_id": 1,
+        "payload": {
+            "id": event_id,
+            "attempt_id": 1,
+            "seq": seq,
+            "job_id": "j",
+            "file_change_method": method,
+            "file_change": __import__("json").dumps(notification),
+        },
+    }
+
+
+def test_one_codex_item_announced_three_times_is_one_operation():
+    """item/started, item/updated and item/completed are three rows, one item."""
+    item_started = {
+        "id": "fc-1",
+        "type": "fileChange",
+        "status": "inProgress",
+        "changes": [{"path": "a.py", "kind": {"type": "update"}}],
+    }
+    item_updated = {
+        **item_started,
+        "changes": [{"path": "a.py", "kind": {"type": "update"}, "diff": "@@\n-a\n+b\n+c\n"}],
+    }
+    item_completed = {**item_updated, "status": "completed"}
+    rows = [
+        _codex_row(1, 1, "item/started", item_started),
+        _codex_row(2, 2, "item/updated", item_updated),
+        _codex_row(3, 3, "item/completed", item_completed),
+    ]
+    result = scan_operations(rows, thread_id="t")
+    assert len(result.operations) == 1
+    operation = result.operations[0]
+    # The completed notification is the one that counts, with its own churn.
+    assert operation.status == "succeeded"
+    assert (operation.added, operation.removed) == (2, 1)
+
+
+def test_a_duplicated_completed_codex_item_counts_once():
+    item = {
+        "id": "fc-2",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": [{"path": "b.py", "kind": {"type": "add"}, "diff": "+x\n+y\n"}],
+    }
+    rows = [_codex_row(1, 1, "item/completed", item), _codex_row(2, 2, "item/completed", item)]
+    result = scan_operations(rows, thread_id="t")
+    assert len(result.operations) == 1
+    assert result.operations[0].added == 2
+
+
+def test_two_codex_items_with_their_own_ids_stay_two_operations():
+    first = {
+        "id": "fc-a",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": [{"path": "a.py", "kind": {"type": "update"}, "diff": "+1\n"}],
+    }
+    second = {**first, "id": "fc-b", "changes": [{"path": "b.py", "kind": {"type": "update"}}]}
+    rows = [
+        _codex_row(1, 1, "item/completed", first),
+        _codex_row(2, 2, "item/completed", second),
+    ]
+    result = scan_operations(rows, thread_id="t")
+    # No attempt recorded a cwd, so the relative paths stay relative.
+    assert sorted(op.path for op in result.operations if op.path) == ["a.py", "b.py"]
+
+
+def test_a_clipped_codex_notification_is_reported_not_dropped():
+    row = {
+        "event_type": "raw",
+        "attempt_id": 1,
+        "payload": {
+            "id": 9,
+            "attempt_id": 1,
+            "seq": 9,
+            "job_id": "j",
+            "tool_id": "fc-clipped",
+            "file_change_method": "item/completed",
+            "file_change": '{"method":"item/completed","params":{"item":{"id":"fc-cli',
+            "file_change_clipped": True,
+        },
+    }
+    result = scan_operations([row], thread_id="t")
+    assert len(result.operations) == 1
+    # The item is known, its files are not: no path is invented, and the
+    # projection's clip is carried so the UI can say so.
+    assert result.operations[0].path is None
+    assert result.operations[0].status == "succeeded"
+
+
+def test_codex_change_without_a_diff_keeps_both_sides_unknown():
+    item = {
+        "id": "fc-3",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": [{"path": "c.py", "kind": {"type": "update"}}],
+    }
+    [operation] = codex_operations(_codex_row(1, 1, "item/completed", item)["payload"], "/w")
+    assert (operation.added, operation.removed) == (None, None)
+
+
+def test_codex_change_with_an_explicitly_empty_diff_is_zero():
+    item = {
+        "id": "fc-4",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": [{"path": "d.py", "kind": {"type": "update"}, "diff": ""}],
+    }
+    [operation] = codex_operations(_codex_row(1, 1, "item/completed", item)["payload"], "/w")
+    assert (operation.added, operation.removed) == (0, 0)
+
+
+def test_a_read_of_json_mentioning_an_image_is_not_an_image_operation():
+    payload = {
+        "id": 1,
+        "attempt_id": 1,
+        "job_id": "j",
+        "tool": "Read",
+        "input": {"file_path": "schema.json"},
+        "result_id": 2,
+        "result_error": False,
+        "result_content": '{"description": "a block of type image", "type": "text"}',
+    }
+    [operation] = tool_operations(payload, "/w")
+    assert operation.kind == "read"
+
+
+def test_a_read_whose_result_is_an_image_block_is_image_activity():
+    payload = {
+        "id": 1,
+        "attempt_id": 1,
+        "job_id": "j",
+        "tool": "Read",
+        "input": {"file_path": "shot.txt"},
+        "result_id": 2,
+        "result_error": False,
+        "result_content": '{"type":"image","source":{"media_type":"image/png","data":"AA"}}',
+    }
+    [operation] = tool_operations(payload, "/w")
+    assert operation.kind == "image"
+
+
+def test_an_apply_patch_keeps_lines_that_start_with_plus_or_minus():
+    patch = (
+        "*** Begin Patch\n"
+        "*** Update File: a.py\n"
+        "@@\n"
+        "++++ four pluses\n"
+        "----- five minuses\n"
+        "+ordinary\n"
+        "-ordinary\n"
+        "*** End Patch\n"
+    )
+    sections = parse_patch(patch)
+    assert len(sections) == 1
+    # The ++++/----- lines are content, not file headers: all counted.
+    assert (sections[0].added, sections[0].removed) == (2, 2)
+
+
+def test_a_unified_diff_with_file_headers_counts_only_hunk_content():
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "index 111..222 100644\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        "--- content beginning with two dashes\n"
+        "+++ content beginning with two pluses\n"
+        " context\n"
+    )
+    assert _diff_deltas(diff) == (1, 1)
+
+
+def test_a_bare_codex_diff_without_a_hunk_header_still_counts():
+    assert _diff_deltas("+one\n+two\n") == (2, 0)
+    assert _diff_deltas("-one\n") == (0, 1)
+    # An explicitly empty diff really is zero.
+    assert _diff_deltas("") == (0, 0)

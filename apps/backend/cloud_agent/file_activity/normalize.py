@@ -31,6 +31,7 @@ import json
 import posixpath
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from cloud_agent.file_activity.models import (
@@ -235,6 +236,39 @@ def file_labels(path: str) -> tuple[str, FileKind]:
     return _EXTENSIONS.get(extension, (extension.upper()[:6] or "FILE", "other"))
 
 
+def is_image_result(content: Any) -> bool:
+    """Whether a recorded tool result is an image content block.
+
+    The adapters flatten a result's blocks into text, so the only structure
+    left is JSON. A result is an image when that JSON is itself an image block,
+    or a list whose blocks include one. A document that happens to contain the
+    word ``image`` is not: it does not parse into that shape.
+    """
+    if not isinstance(content, str) or not content.strip():
+        return False
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return _has_image_block(parsed)
+
+
+def _has_image_block(value: Any) -> bool:
+    """An image content block, at the top level or in a list of blocks."""
+    if isinstance(value, list):
+        return any(_has_image_block(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if value.get("type") != "image":
+        return False
+    source = value.get("source")
+    if isinstance(source, dict):
+        media = source.get("media_type") or source.get("mediaType")
+        return isinstance(media, str) and media.startswith("image/")
+    # A URL-bearing image block is still explicit image evidence.
+    return isinstance(value.get("url"), str) or isinstance(value.get("data"), str)
+
+
 def _usable_path(value: Any) -> str | None:
     """A recorded path string that names something, or None."""
     if not isinstance(value, str):
@@ -303,7 +337,11 @@ def parse_patch(text: str) -> list[PatchSection]:
             current.rename_to = move.group(1).strip()
             current.action = "rename"
             continue
-        if line.startswith(("+++", "---", "@@")):
+        # An ``apply_patch`` body marks hunks with ``@@`` and files with
+        # ``***``. A line beginning ``+++`` or ``---`` here is hunk content —
+        # an added line whose text starts with ``++``, or a removed one whose
+        # text starts with ``--`` — not a file header, so it is counted.
+        if line.startswith("@@"):
             continue
         if line.startswith("+"):
             current.added += 1
@@ -422,8 +460,10 @@ def _file_operation(
     added = removed = None
     if status == "succeeded" and kind in {"write", "edit"}:
         added, removed = _write_edit_deltas(payload, fields, kind)
-    if kind == "read" and payload.get("result_image"):
-        # The recorded result carried an image: this read is image activity.
+    if kind == "read" and is_image_result(payload.get("result_content")):
+        # The recorded result carried an image content block: this read is
+        # image activity. The check is structural — a source file that merely
+        # contains the text ``"type": "image"`` is not an image.
         kind, action = "image", "image"
     return FileOperation(
         **_base(
@@ -547,20 +587,36 @@ def tool_operations(payload: Mapping[str, Any], cwd: str | None) -> list[FileOpe
     return [_file_operation(payload, cwd, kind, action)]
 
 
-def _diff_deltas(diff: str) -> tuple[int | None, int | None]:
-    """Count a unified diff's own added and removed lines."""
+def _diff_deltas(diff: str) -> tuple[int, int]:
+    """Count a unified diff's own added and removed lines.
+
+    ``diff --git``, ``index``, ``---``, ``+++`` and ``@@`` are headers: they are
+    read only before the first hunk, because inside a hunk a line beginning
+    ``+++``/``---`` is content. Once a hunk starts, only a hunk header ends it,
+    so ``+++x`` counts as one added line and ``---x`` as one removed.
+    """
     added = removed = 0
-    seen = False
+    in_hunk = False
     for line in diff.splitlines():
-        if line.startswith(("@@", "+++", "---")):
+        if line.startswith("@@"):
+            in_hunk = True
             continue
+        if not in_hunk:
+            # Before any hunk header: ``diff --git``, ``index``, ``---``/``+++``
+            # file headers and metadata are not content.
+            if line.startswith(("--- ", "+++ ")):
+                continue
+            # A bare body without a hunk header is still content once a
+            # +/- line appears; Codex's fileChange diff can be exactly that.
+            if line.startswith(("+", "-,", "-")):
+                in_hunk = True
+            else:
+                continue
         if line.startswith("+"):
             added += 1
-            seen = True
         elif line.startswith("-"):
             removed += 1
-            seen = True
-    return (added, removed) if seen else (0, 0)
+    return added, removed
 
 
 def _change_kind(value: Any) -> str:
@@ -569,48 +625,169 @@ def _change_kind(value: Any) -> str:
     return str(value or "update")
 
 
-def _codex_changes(payload: Mapping[str, Any]) -> tuple[list[Any], str | None]:
-    """The ``changes`` list of a Codex ``fileChange`` row, and its item status."""
+@dataclass
+class CodexChange:
+    """One native ``fileChange`` item as a notification recorded it.
+
+    Codex's app-server announces the same item at ``item/started``, may update
+    it, and ends it at ``item/completed``. The platform stores each
+    notification as its own raw row, so the item's own id — not the ledger
+    event id — is what makes those rows one change.
+    """
+
+    item_id: str
+    event_id: int
+    seq: int
+    at: Any
+    status: OperationStatus
+    changes: list[Any]
+
+
+def _codex_item(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The native item one raw notification row carries, if it carries one."""
     raw = payload.get("file_change")
     if not isinstance(raw, str):
-        return [], None
+        return None
     try:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        return [], None
+        return None
     if not isinstance(parsed, dict):
-        return [], None
+        return None
     params = parsed.get("params")
     item = params.get("item") if isinstance(params, dict) else None
-    if not isinstance(item, dict) or item.get("type") != "fileChange":
-        return [], None
+    if not isinstance(item, dict):
+        return None
+    return item
+
+
+def _codex_status(method: str, item_status: Any) -> OperationStatus | None:
+    """What one notification proves about the item's outcome."""
+    if method.endswith("item/completed"):
+        return "failed" if item_status in {"failed", "declined"} else "succeeded"
+    if method.endswith(("item/started", "item/updated")):
+        return "pending"
+    return None
+
+
+def _codex_item_id(item: Mapping[str, Any], payload: Mapping[str, Any]) -> str:
+    """The native item's identity, scoped to its attempt by the caller.
+
+    A pinned app-server names every item. A shape that somehow does not falls
+    back to its call id, then to its own ledger event, so it is still one
+    change rather than none.
+    """
+    for value in (item.get("id"), payload.get("tool_id")):
+        if isinstance(value, str) and value:
+            return value[:512]
+    return f"event:{payload['id']}"
+
+
+def codex_changes(payload: Mapping[str, Any]) -> tuple[str, str, CodexChange] | None:
+    """The native item a raw row records: its id, method, and this row's status.
+
+    ``None`` when the row is not a ``fileChange`` notification. A notification
+    whose stored text the projection had to clip still yields its identity and
+    its own (empty) change list, so the caller can report the gap rather than
+    silently drop the whole item.
+    """
+    method = str(payload.get("file_change_method") or "")
+    status = _codex_status(method, None)
+    if status is None:
+        return None
+    item = _codex_item(payload)
+    if item is None or item.get("type") != "fileChange":
+        # The projection clipped this notification's text, so the item cannot
+        # be read at all. The method still says what it was, and the row keeps
+        # its own identity, so the loss is reported rather than hidden.
+        if item is not None:
+            # A well-formed notification for another item kind is not a file
+            # change at all: nothing was lost.
+            return None
+        if not payload.get("file_change_clipped"):
+            return None
+        item_id = str(payload.get("tool_id") or f"event:{payload['id']}")[:512]
+        return (
+            item_id,
+            method,
+            CodexChange(
+                item_id=item_id,
+                event_id=int(payload["id"]),
+                seq=int(payload.get("seq") or 0),
+                at=payload.get("created_at"),
+                status=status,
+                changes=[],
+            ),
+        )
+    status = _codex_status(method, item.get("status"))
+    assert status is not None
     changes = item.get("changes")
-    if not isinstance(changes, list):
-        return [], None
-    status = item.get("status")
-    return changes, status if isinstance(status, str) else None
+    item_id = _codex_item_id(item, payload)
+    return (
+        item_id,
+        method,
+        CodexChange(
+            item_id=item_id,
+            event_id=int(payload["id"]),
+            seq=int(payload.get("seq") or 0),
+            at=payload.get("created_at"),
+            status=status,
+            changes=changes if isinstance(changes, list) else [],
+        ),
+    )
+
+
+def _change_without_diff(
+    action: str, added: int | None, removed: int | None
+) -> tuple[int | None, int | None]:
+    """A change's line counts, keeping what its kind proves without a diff."""
+    if action == "write":
+        # An added file removes nothing; its added side needs the diff.
+        return added, 0
+    if action == "delete":
+        # A delete removes the whole file; its removed lines need the diff.
+        return 0, removed
+    return added, removed
 
 
 def codex_operations(payload: Mapping[str, Any], cwd: str | None) -> list[FileOperation]:
-    """The file changes one recorded Codex ``fileChange`` notification proves.
+    """The file changes one recorded ``fileChange`` notification proves.
 
     Codex's app-server reports file changes outside its tool-call items, so the
-    host stores the notification as a raw row. Only that item is read; a shell
+    host stores each notification as a raw row. Only that item is read; a shell
     command's text is never scanned for paths.
+
+    A missing ``diff`` stays unknown: only a diff the notification really
+    carried — including an explicitly empty one — is counted as zero.
     """
-    changes, item_status = _codex_changes(payload)
-    if not changes:
+    parsed = codex_changes(payload)
+    if parsed is None:
         return []
-    method = str(payload.get("file_change_method") or "")
-    if method.endswith("item/completed"):
-        status: OperationStatus = "failed" if item_status in {"failed", "declined"} else "succeeded"
-    elif method.endswith(("item/started", "item/updated")):
-        status = "pending"
-    else:
-        return []
-    total = len(changes)
+    _item_id, _method, record = parsed
+    if not record.changes:
+        # The notification was clipped: its item is known, its files are not.
+        return [
+            FileOperation(
+                event_id=record.event_id,
+                attempt_id=int(payload["attempt_id"]),
+                attempt_no=int(payload.get("attempt_no") or 0),
+                job_id=str(payload["job_id"]),
+                turn_no=int(payload.get("turn_no") or 0),
+                seq=record.seq,
+                at=record.at,
+                tool="fileChange",
+                action="edit",
+                kind="edit",
+                status=record.status,
+                path=None,
+                path_basis="unknown",
+                subagent=bool(payload.get("subagent")),
+                superseded=bool(payload.get("superseded")),
+            )
+        ]
+    total = len(record.changes)
     built: list[FileOperation] = []
-    for index, change in enumerate(changes, start=1):
+    for index, change in enumerate(record.changes, start=1):
         if not isinstance(change, dict):
             continue
         raw = _usable_path(change.get("path"))
@@ -619,30 +796,27 @@ def codex_operations(payload: Mapping[str, Any], cwd: str | None) -> list[FileOp
         path, basis = normalize_path(raw, cwd)
         kind, action = _CHANGE_KIND.get(_change_kind(change.get("kind")), ("edit", "edit"))
         raw_diff = change.get("diff")
-        added, removed = _diff_deltas(raw_diff if isinstance(raw_diff, str) else "")
-        if action == "write":
-            added, removed = (added, 0) if added is not None else (None, None)
-        elif action == "delete":
-            # A delete removes the whole file. The notification carries the
-            # removed lines only when it included a diff; without one that side
-            # is unknown, not zero.
-            added = 0
-            removed = removed if removed else None
-        if status != "succeeded":
+        if isinstance(raw_diff, str):
+            added, removed = _diff_deltas(raw_diff)
+        else:
+            # No diff was recorded: neither side is known.
+            added, removed = None, None
+        added, removed = _change_without_diff(action, added, removed)
+        if record.status != "succeeded":
             added = removed = None
         built.append(
             FileOperation(
-                event_id=int(payload["id"]),
+                event_id=record.event_id,
                 attempt_id=int(payload["attempt_id"]),
                 attempt_no=int(payload.get("attempt_no") or 0),
                 job_id=str(payload["job_id"]),
                 turn_no=int(payload.get("turn_no") or 0),
-                seq=int(payload.get("seq") or 0),
-                at=payload.get("created_at"),
+                seq=record.seq,
+                at=record.at,
                 tool="fileChange",
                 action=action,
                 kind=kind,
-                status=status,
+                status=record.status,
                 path=path,
                 name=posixpath.basename(path),
                 path_basis=basis,

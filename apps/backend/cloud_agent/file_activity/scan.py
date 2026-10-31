@@ -23,7 +23,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.file_activity.normalize import codex_operations, tool_operations
+from cloud_agent.file_activity.normalize import codex_changes, codex_operations, tool_operations
 
 if TYPE_CHECKING:
     from cloud_agent.file_activity.models import FileOperation
@@ -63,13 +63,31 @@ def _payload_job(row: Mapping[str, Any]) -> str | None:
 def _operation_key(operation: FileOperation, index: int) -> tuple[Any, ...]:
     """An operation's stable identity inside its attempt.
 
-    A call id is unique per runtime stream; a Codex ``fileChange`` has none, so
-    it is keyed by its event and the change's position. The section index keeps
-    two files of one patch apart.
+    A call id is unique per runtime stream. A Codex ``fileChange`` names its
+    own item, which every notification for that item repeats — so the key is
+    the native item id and the change's position, never the ledger event id
+    (``item/started``, ``item/updated`` and ``item/completed`` are three rows).
     """
     if operation.tool == "fileChange":
-        return ("fileChange", operation.attempt_id, operation.event_id, operation.patch_index)
+        return (
+            "fileChange",
+            operation.attempt_id,
+            operation.call_id or f"event:{operation.event_id}",
+            operation.patch_index,
+        )
     return ("call", operation.attempt_id, operation.call_id or f"event:{operation.event_id}", index)
+
+
+def _codex_precedes(current: Mapping[str, Any], candidate: Mapping[str, Any]) -> bool:
+    """Whether ``candidate`` is a later notification than ``current``.
+
+    Order is the ledger's own: the higher sequence (then event id) is newer.
+    A ``completed`` row therefore wins over the ``started``/``updated`` rows
+    that announced the same item.
+    """
+    current_key = (int(current.get("seq") or 0), int(current["id"]))
+    candidate_key = (int(candidate.get("seq") or 0), int(candidate["id"]))
+    return candidate_key > current_key
 
 
 def scan_operations(rows: Iterable[Mapping[str, Any]], *, thread_id: str) -> ScanResult:
@@ -83,6 +101,8 @@ def scan_operations(rows: Iterable[Mapping[str, Any]], *, thread_id: str) -> Sca
     cwds = _cwd_rows(materialized)
     result = ScanResult(thread_id=thread_id)
     seen: set[tuple[Any, ...]] = set()
+    #: Each native Codex item's newest notification, by attempt and item id.
+    _newest_codex: dict[tuple[int, str], Mapping[str, Any]] = {}
     for row in materialized:
         attempt_id = int(row["attempt_id"])
         payload = row.get("payload")
@@ -93,15 +113,34 @@ def scan_operations(rows: Iterable[Mapping[str, Any]], *, thread_id: str) -> Sca
             "created_at": row.get("created_at") or payload.get("created_at"),
             "result_id": row.get("result_id"),
             "result_error": row.get("result_error"),
-            "result_image": row.get("result_image"),
+            "result_content": row.get("result_content"),
         }
         if row.get("event_type") == "lifecycle":
             continue
         if row.get("event_type") == "raw":
-            built = codex_operations(payload, cwds.get(attempt_id))
-        else:
-            built = tool_operations(payload, cwds.get(attempt_id))
+            # A Codex file change is one item announced across several rows.
+            # Only its newest notification for the attempt is read, so a
+            # pending item that later completes is counted once, as complete,
+            # with the churn its final diff carries.
+            native = codex_changes(payload)
+            if native is None:
+                continue
+            item_id = native[0]
+            if (attempt_id, item_id) not in _newest_codex or _codex_precedes(
+                _newest_codex[(attempt_id, item_id)], payload
+            ):
+                _newest_codex[(attempt_id, item_id)] = payload
+            continue
+        built = tool_operations(payload, cwds.get(attempt_id))
         for index, operation in enumerate(built):
+            key = _operation_key(operation, index)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.operations.append(operation)
+    for payload in _newest_codex.values():
+        attempt_id = int(payload["attempt_id"])
+        for index, operation in enumerate(codex_operations(payload, cwds.get(attempt_id))):
             key = _operation_key(operation, index)
             if key in seen:
                 continue

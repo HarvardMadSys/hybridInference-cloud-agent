@@ -398,3 +398,123 @@ describe('FileActivity', () => {
     expect(ops).toHaveLength(1);
   });
 });
+
+describe('pagination and refresh', () => {
+  function threePages() {
+    return [0, 1, 2].map((index) => ({
+      ...page(),
+      path: '/workspace/src/app.ts',
+      operations: [
+        {
+          ...page().operations[0],
+          call_id: `c${index}`,
+          event_id: 100 + index,
+          at: `2026-10-31T09:0${index}:00Z`,
+        },
+      ],
+      total: 3,
+      has_earlier: index < 2,
+      next_cursor: index < 2 ? `cursor-${index}` : null,
+    }));
+  }
+
+  it('reaches a third page without repeating or losing an operation', async () => {
+    const [first, second, third] = threePages();
+    mockedOperations.mockResolvedValueOnce(first);
+    mockedOperations.mockResolvedValueOnce(second);
+    mockedOperations.mockResolvedValueOnce(third);
+    renderSection();
+    await screen.findByText('app.ts');
+    fireEvent.click(screen.getByLabelText('Show operations on app.ts'));
+    await screen.findByText(/of 3 recorded operations shown/);
+    fireEvent.click(screen.getByRole('button', { name: 'Show earlier operations' }));
+    await waitFor(() => expect(mockedOperations).toHaveBeenCalledTimes(2));
+    // The second page's cursor must still be offered, or page three is lost.
+    fireEvent.click(await screen.findByRole('button', { name: 'Show earlier operations' }));
+    await waitFor(() => expect(mockedOperations).toHaveBeenCalledTimes(3));
+    expect(mockedOperations.mock.calls[2][2]).toMatchObject({ cursor: 'cursor-1' });
+    const items = within(
+      screen.getByRole('list', { name: 'Recorded operations on /workspace/src/app.ts' }),
+    ).getAllByRole('listitem');
+    expect(items).toHaveLength(3);
+  });
+
+  it('offers a retry when a later operations page fails', async () => {
+    const [first, second] = threePages();
+    mockedOperations.mockResolvedValueOnce(first);
+    mockedOperations.mockRejectedValueOnce(new Error('offline'));
+    mockedOperations.mockResolvedValueOnce(second);
+    renderSection();
+    await screen.findByText('app.ts');
+    fireEvent.click(screen.getByLabelText('Show operations on app.ts'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show earlier operations' }));
+    expect(await screen.findByText('The rest of the list could not be read.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(mockedOperations).toHaveBeenCalledTimes(3));
+  });
+
+  it('drops a file page that resolves after the search changed', async () => {
+    let release: (value: FileActivityApi | null) => void = () => {};
+    const delayed = new Promise<FileActivityApi | null>((resolve) => {
+      release = resolve;
+    });
+    mockedActivity.mockResolvedValueOnce(view());
+    mockedActivity.mockReturnValueOnce(delayed);
+    renderSection();
+    await screen.findByText('app.ts');
+    const input = screen.getByPlaceholderText('Filter by path…');
+    fireEvent.change(input, { target: { value: 'zzz' } });
+    // Answer the *second* read (the searched one) before the first resolves.
+    mockedActivity.mockResolvedValueOnce(
+      view({
+        files: [],
+        q: 'zzz',
+        filter_counts: { all: 0, read: 0, written: 0, searched: 0, images: 0 },
+      }),
+    );
+    release(view({ files: [view().files[1]], q: '' }));
+    await waitFor(() => expect(screen.queryByText('notes 深い.md')).not.toBeInTheDocument());
+  });
+
+  it('re-reads when the conversation view asks it to refresh', async () => {
+    // Independent of the queue earlier cases left behind.
+    mockedActivity.mockReset();
+    mockedActivity.mockResolvedValue(view());
+    const { rerender } = render(
+      <LocaleProvider>
+        <FileActivity
+          jobId="job-2"
+          conversationKey="thread-1"
+          onOpenPoint={vi.fn()}
+          onOpenTurn={vi.fn()}
+          refreshTick={1}
+        />
+      </LocaleProvider>,
+    );
+    await screen.findByText('app.ts');
+    const before = mockedActivity.mock.calls.length;
+    rerender(
+      <LocaleProvider>
+        <FileActivity
+          jobId="job-2"
+          conversationKey="thread-1"
+          onOpenPoint={vi.fn()}
+          onOpenTurn={vi.fn()}
+          refreshTick={2}
+        />
+      </LocaleProvider>,
+    );
+    await waitFor(() => expect(mockedActivity.mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it('offers a retry when the first page fails', async () => {
+    mockedActivity.mockRejectedValueOnce(new Error('offline'));
+    mockedActivity.mockResolvedValueOnce(view());
+    renderSection();
+    expect(
+      await screen.findByText('File activity could not be read. The conversation is unchanged.'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('app.ts')).toBeInTheDocument();
+  });
+});

@@ -5,10 +5,12 @@ view uses — and every statement names the owner: a conversation that is not
 the caller's, or is deleted, reads as absent rather than as empty.
 
 The scan follows the conversation's whole event ledger in pages of
-:data:`EVENT_PAGE` rows, with two bounds that are reported rather than hidden:
-:data:`MAX_SCAN_EVENTS` stored rows in total, and the projection's own text
-bound per record. A capped read says so on its coverage, so a caller can never
-label what it holds the conversation's whole history.
+:data:`EVENT_PAGE` rows, with three bounds that are reported rather than
+hidden: :data:`MAX_SCAN_EVENTS` stored rows in total, the projection's own text
+bound per record, and :data:`READ_DEADLINE_S` of wall time for the whole read.
+A capped read says so on its coverage, so a caller can never label what it
+holds the conversation's whole history, and a read that runs out of time
+reports the events it did scan.
 
 Nothing here writes, and nothing is derived at send, settlement, cancellation
 or fork time: the read happens when a page asks for it.
@@ -16,6 +18,7 @@ or fork time: the read happens when a page asks for it.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.file_activity.aggregate import (
@@ -41,6 +44,14 @@ from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
     import asyncpg
+
+#: Wall time one whole File Activity read may take, across every page of its
+#: scan and the coverage statement. The per-statement timeout alone is not
+#: enough: a scan can issue many pages while holding one pooled connection, and
+#: this keeps a pathological ledger from occupying the shared pool for minutes.
+READ_DEADLINE_S = 8.0
+#: Each statement's own timeout, so one slow page cannot outlast the deadline.
+STATEMENT_TIMEOUT_MS = 5_000
 
 
 def _decoded(row: Any) -> dict[str, Any]:
@@ -74,13 +85,25 @@ class PostgresFileActivityQueries:
         )
 
     async def _scan(
-        self, conn: Any, *, thread_id: str, user_id: str, preview_chars: int
+        self,
+        conn: Any,
+        *,
+        thread_id: str,
+        user_id: str,
+        preview_chars: int,
+        deadline: float,
     ) -> ScanResult:
-        """Every recorded file operation of the conversation, within the bounds."""
+        """Every recorded file operation of the conversation, within the bounds.
+
+        ``deadline`` is a :func:`time.monotonic` instant. The loop checks it
+        before each page, so a ledger long enough to exhaust it stops with the
+        rows already read, exactly like the row cap: the view then reports that
+        it holds a bounded window rather than pretending to be complete.
+        """
         rows: list[dict[str, Any]] = []
         after = 0
         capped = False
-        while True:
+        while time.monotonic() < deadline:
             page = await conn.fetch(
                 FILE_ACTIVITY_EVENT_SQL,
                 thread_id,
@@ -98,14 +121,36 @@ class PostgresFileActivityQueries:
             if len(rows) >= MAX_SCAN_EVENTS:
                 capped = True
                 break
+        else:
+            # The deadline passed between pages: the scan is incomplete.
+            capped = True
         result = scan_operations(rows, thread_id=thread_id)
         result.events_scanned = len(rows)
         result.capped = capped
-        coverage = await conn.fetchrow(FILE_ACTIVITY_COVERAGE_SQL, thread_id, user_id)
-        if coverage is not None:
-            result.turns = int(coverage["turns"])
-            result.attempts = int(coverage["attempts"])
+        if time.monotonic() < deadline:
+            coverage = await conn.fetchrow(FILE_ACTIVITY_COVERAGE_SQL, thread_id, user_id)
+            if coverage is not None:
+                result.turns = int(coverage["turns"])
+                result.attempts = int(coverage["attempts"])
+        if not result.turns:
+            result.turns = len({str(row["job_id"]) for row in rows if row.get("job_id")})
+        if not result.attempts:
+            result.attempts = len({int(row["attempt_id"]) for row in rows})
         return result
+
+    async def _read(
+        self, conn: Any, *, thread_id: str, user_id: str, preview_chars: int
+    ) -> ScanResult:
+        """One scan with the read's own statement timeout and overall deadline."""
+        deadline = time.monotonic() + READ_DEADLINE_S
+        await conn.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
+        return await self._scan(
+            conn,
+            thread_id=thread_id,
+            user_id=user_id,
+            preview_chars=preview_chars,
+            deadline=deadline,
+        )
 
     async def file_activity(
         self,
@@ -133,16 +178,13 @@ class PostgresFileActivityQueries:
             thread_id = await self._thread_id(conn, job_id, user_id)
             if thread_id is None:
                 return None
-            await conn.execute("SET statement_timeout = '10s'")
-            try:
-                result = await self._scan(
+            async with conn.transaction():
+                result = await self._read(
                     conn,
                     thread_id=thread_id,
                     user_id=user_id,
                     preview_chars=MAX_RECORDED_TEXT,
                 )
-            finally:
-                await conn.execute("RESET statement_timeout")
         view = build_view(
             thread_id=thread_id,
             operations=result.operations,
@@ -178,16 +220,13 @@ class PostgresFileActivityQueries:
             thread_id = await self._thread_id(conn, job_id, user_id)
             if thread_id is None:
                 return None
-            await conn.execute("SET statement_timeout = '10s'")
-            try:
-                result = await self._scan(
+            async with conn.transaction():
+                result = await self._read(
                     conn,
                     thread_id=thread_id,
                     user_id=user_id,
                     preview_chars=MAX_RECORDED_TEXT,
                 )
-            finally:
-                await conn.execute("RESET statement_timeout")
         return build_operations_page(
             thread_id=thread_id,
             path=path,

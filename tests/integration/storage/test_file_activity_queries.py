@@ -290,6 +290,79 @@ async def test_multi_file_patch_add_delete_rename_and_duplicate_results(db, stor
     assert page.operations[0].patch_files == 3
 
 
+def _codex_notification(method: str, item: dict) -> tuple[str, dict]:
+    notification = {"method": method, "params": {"item": item}}
+    return (
+        "raw",
+        {
+            "protocol": "codex-app-server",
+            "text": json.dumps(notification)[:4000],
+            "notification": notification,
+        },
+    )
+
+
+async def test_one_codex_item_announced_across_rows_counts_once(db, store):
+    """item/started and item/completed are two rows for one native item."""
+    [job] = await conversation(db, store, "fa_codex_merge")
+    item = {
+        "id": "fc-merge",
+        "type": "fileChange",
+        "status": "inProgress",
+        "changes": [{"path": "app/a.py", "kind": {"type": "update"}}],
+    }
+    completed = {
+        **item,
+        "status": "completed",
+        "changes": [
+            {"path": "app/a.py", "kind": {"type": "update"}, "diff": "@@\n-old\n+new\n+guard\n"}
+        ],
+    }
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/workspace"}),
+            _codex_notification("item/started", item),
+            _codex_notification("item/completed", completed),
+            # A duplicate of the completed notification must not double it.
+            _codex_notification("item/completed", completed),
+        ],
+    )
+    view = await _view(store, job)
+    assert view is not None
+    rows = {row.path: row for row in view.files}
+    assert set(rows) == {"/workspace/app/a.py"}
+    assert rows["/workspace/app/a.py"].writes == 1
+    assert rows["/workspace/app/a.py"].added == 2
+    assert rows["/workspace/app/a.py"].removed == 1
+    assert view.totals.pending == 0
+
+
+async def test_a_codex_change_without_a_diff_has_no_line_count(db, store):
+    [job] = await conversation(db, store, "fa_codex_no_diff")
+    item = {
+        "id": "fc-nodiff",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": [{"path": "app/b.py", "kind": {"type": "update"}}],
+    }
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/workspace"}),
+            _codex_notification("item/completed", item),
+        ],
+    )
+    view = await _view(store, job)
+    assert view is not None
+    row = view.files[0]
+    # Absent data stays unknown: not zero.
+    assert (row.added, row.removed) == (0, 0)
+    assert (row.added_unknown_ops, row.removed_unknown_ops) == (1, 1)
+
+
 async def test_a_multiedit_reads_its_pairs_from_the_real_projection(db, store):
     [job] = await conversation(db, store, "fa_multiedit")
     await events(

@@ -52,6 +52,16 @@ export function ContextView(props: ContextViewProps) {
   );
 }
 
+/**
+ * Changes once per conversation read, after a turn settles.
+ *
+ * The section keys its read on this instead of polling: a new operation, or a
+ * pending call that completed, appears when the Context view is read again.
+ */
+function settledTick(view: ThreadContextApi): number {
+  return view.turns.length;
+}
+
 function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
   const { t } = useLocale();
   const { key, view, missing, error, retry } = useThreadContextData(true);
@@ -89,6 +99,11 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         conversationKey={key}
         onOpenPoint={onOpenPoint}
         onOpenTurn={onOpenTurn}
+        // The Context view's own read already refreshes while a turn runs; a
+        // settled read bumps this, so the section re-reads without a poll of
+        // its own touching the conversation.
+        refreshTick={settledTick(view)}
+        active={view.latest?.turn_active === true}
       />
       <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <LargestChanges changes={view.largest_changes} points={points} onSelect={setSelected} />

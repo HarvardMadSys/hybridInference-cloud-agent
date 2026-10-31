@@ -11,43 +11,29 @@
 // current Git diff), a bounded scan window (never all history), and a delta
 // the record did not carry, which is a dash, never a zero.
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import {
   FILE_ACTIVITY_FILTERS,
   FILE_ACTIVITY_SORTS,
   getAgentFileActivity,
-  getAgentFileOperations,
   type FileActivityApi,
   type FileActivityFilter,
-  type FileActivityRowApi,
   type FileActivitySort,
-  type FileOperationApi,
-  type FileOperationsPageApi,
 } from '@/lib/api/agents';
 import { Select } from '@/components/ui/Select';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import { compactCount, relativeTime } from '@/components/features/settings/usagePresent';
 import type { OpenPoint, OpenTurn } from './ContextSections';
-import {
-  BASIS_LABEL,
-  FILTER_LABEL,
-  KIND_LABEL,
-  KIND_MARK,
-  SORT_LABEL,
-  STATUS_LABEL,
-  filterCount,
-  lineChurn,
-  operationChurn,
-  operationKey,
-  rowHasUnsettled,
-  splitPath,
-} from './fileActivityPresent';
+import { FileRow } from './FileActivityRows';
+import { FILTER_LABEL, SORT_LABEL, filterCount } from './fileActivityPresent';
 
 /** Rows one page reads; the column scrolls, the totals stay the scan's own. */
 const PAGE = 25;
 /** A search is sent once typing has paused, as the other lists do. */
 export const FILE_SEARCH_DEBOUNCE_MS = 250;
+/** How often a shown section re-reads while its conversation has a running turn. */
+export const ACTIVE_REFRESH_MS = 60_000;
 
 interface Query {
   sort: FileActivitySort;
@@ -57,56 +43,112 @@ interface Query {
 
 const DEFAULT_QUERY: Query = { sort: 'active', filter: 'all', q: '' };
 
-/** Read one page, and the pages after it as the reader asks. */
-function useFileActivity(jobId: string, stateKey: string, query: Query) {
+/** Which read a state belongs to: the conversation, the filters, and a tick. */
+interface LoadKey {
+  key: string;
+  generation: number;
+}
+
+/**
+ * Read the first page, and later pages as the reader asks.
+ *
+ * Every request is fenced twice: an effect-local `AbortController` cancels it
+ * when the query or conversation changes or the section unmounts, and a
+ * generation token makes a late response a no-op even if the transport ignored
+ * the abort. A failed page is surfaced with a retry rather than swallowed.
+ * `refreshTick` is bumped by the parent when the conversation settles, so a
+ * running turn's new operations and a pending call that later completed become
+ * visible without polling anything.
+ */
+function useFileActivity(
+  jobId: string,
+  conversationKey: string,
+  query: Query,
+  refreshTick: number,
+) {
+  const [loadKey, setLoadKey] = useState<LoadKey>({ key: conversationKey, generation: 0 });
   const [loaded, setLoaded] = useState<{
     key: string;
+    generation: number;
     view: FileActivityApi | null;
     error: boolean;
   } | null>(null);
   const [more, setMore] = useState<FileActivityApi[]>([]);
+  const [pagesError, setPagesError] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const current = loaded?.key === stateKey ? loaded : null;
+  const stateKey = `${conversationKey}\u0000${query.sort}\u0000${query.filter}\u0000${query.q}`;
+  const current =
+    loaded && loaded.key === stateKey && loaded.generation === loadKey.generation ? loaded : null;
+  const abortPages = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
+    const generation = loadKey.generation;
     setMore([]);
+    setPagesError(false);
     getAgentFileActivity(jobId, { ...query, limit: PAGE }, controller.signal).then(
       (view) => {
-        if (!controller.signal.aborted) setLoaded({ key: stateKey, view, error: false });
+        if (controller.signal.aborted || generation !== loadKey.generation) return;
+        setLoaded({ key: stateKey, generation, view, error: false });
       },
       () => {
-        if (!controller.signal.aborted) setLoaded({ key: stateKey, view: null, error: true });
+        if (controller.signal.aborted || generation !== loadKey.generation) return;
+        setLoaded({ key: stateKey, generation, view: null, error: true });
       },
     );
     return () => controller.abort();
-  }, [jobId, stateKey, query.sort, query.filter, query.q, query]);
+  }, [jobId, stateKey, query, loadKey.generation, refreshTick]);
 
-  const loadMore = async () => {
+  // A refreshed first page replaces the pages read from the older scan.
+  useEffect(() => {
+    setMore([]);
+    setPagesError(false);
+    abortPages.current?.abort();
+  }, [refreshTick]);
+
+  const retry = useCallback(() => {
+    setLoaded(null);
+    setLoadKey((value) => ({ key: conversationKey, generation: value.generation + 1 }));
+  }, [conversationKey]);
+
+  const loadMore = useCallback(async () => {
     const tail = more.length > 0 ? more[more.length - 1] : current?.view;
     if (!tail?.next_cursor || loadingMore) return;
+    const generation = loadKey.generation;
+    const controller = new AbortController();
+    abortPages.current?.abort();
+    abortPages.current = controller;
     setLoadingMore(true);
+    setPagesError(false);
     try {
       const next = await getAgentFileActivity(jobId, {
         ...query,
         limit: PAGE,
         cursor: tail.next_cursor,
       });
-      if (next) setMore((pages) => [...pages, next]);
+      // A page that resolved after the query changed belongs to the old list.
+      if (controller.signal.aborted || generation !== loadKey.generation) return;
+      if (!next) return;
+      setMore((pages) => [...pages, next]);
+    } catch {
+      if (!controller.signal.aborted && generation === loadKey.generation) setPagesError(true);
     } finally {
-      setLoadingMore(false);
+      if (generation === loadKey.generation) setLoadingMore(false);
     }
-  };
+  }, [jobId, more, current, query, loadKey.generation, loadingMore]);
 
   // Later pages repeat the same totals; the first page's are the scan's own.
   const pages = current?.view ? [current.view, ...more] : more;
   const rows = pages.flatMap((page) => page.files);
+  const lastPage = pages[pages.length - 1];
   return {
     view: current?.view ?? null,
     rows,
     error: current?.error ?? false,
     loading: current === null,
-    hasMore: pages.length > 0 && Boolean(pages[pages.length - 1]?.next_cursor),
+    pagesError,
+    retry,
+    hasMore: Boolean(lastPage?.next_cursor),
     loadMore,
     loadingMore,
   };
@@ -117,11 +159,17 @@ export function FileActivity({
   conversationKey,
   onOpenPoint,
   onOpenTurn,
+  refreshTick = 0,
+  active = false,
 }: {
   jobId: string;
   conversationKey: string;
   onOpenPoint: OpenPoint;
   onOpenTurn: OpenTurn;
+  /** Bumped by the page when the conversation's own view is read again. */
+  refreshTick?: number;
+  /** A turn is running: read again on a slow clock, never faster than a minute. */
+  active?: boolean;
 }) {
   const { t } = useLocale();
   const [query, setQuery] = useState<Query>(DEFAULT_QUERY);
@@ -134,12 +182,16 @@ export function FileActivity({
     );
     return () => window.clearTimeout(timer);
   }, [typed, query.q]);
-  const stateKey = `${conversationKey}\u0000${query.sort}\u0000${query.filter}\u0000${query.q}`;
-  const { view, rows, error, loading, hasMore, loadMore, loadingMore } = useFileActivity(
-    jobId,
-    stateKey,
-    query,
-  );
+  // A running turn adds operations; a slow re-read keeps the section current
+  // without polling, without touching the conversation, and only while shown.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return undefined;
+    const timer = window.setInterval(() => setTick((value) => value + 1), ACTIVE_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  const { view, rows, error, loading, pagesError, retry, hasMore, loadMore, loadingMore } =
+    useFileActivity(jobId, conversationKey, query, refreshTick + tick);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const nowMs = view ? Date.parse(view.generated_at) : Date.now();
 
@@ -169,8 +221,15 @@ export function FileActivity({
         counts={view?.filter_counts ?? {}}
       />
       {error ? (
-        <p className="mt-2 rounded-lg border border-border px-3 py-2 text-xs text-muted">
+        <p className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs text-muted">
           {t('files.loadError')}
+          <button
+            type="button"
+            onClick={retry}
+            className="ui-button ui-button-ghost min-h-8 px-2 text-[11px] [@media(pointer:coarse)]:min-h-11"
+          >
+            {t('common.retry')}
+          </button>
         </p>
       ) : loading ? (
         <p className="mt-2 px-3 py-2 text-xs text-muted">{t('common.loading')}</p>
@@ -207,6 +266,18 @@ export function FileActivity({
         >
           {loadingMore ? t('files.loadingMore') : t('files.loadMore')}
         </button>
+      ) : null}
+      {pagesError ? (
+        <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
+          {t('files.moreError')}
+          <button
+            type="button"
+            onClick={() => void loadMore()}
+            className="ui-button ui-button-ghost min-h-8 px-2 text-[11px] [@media(pointer:coarse)]:min-h-11"
+          >
+            {t('common.retry')}
+          </button>
+        </p>
       ) : null}
       {view ? <Coverage view={view} nowMs={nowMs} /> : null}
     </section>
@@ -348,373 +419,6 @@ function Chip({
       {label}
       <span className="text-[11px] opacity-80">{count.toLocaleString('en-US')}</span>
     </button>
-  );
-}
-
-/** One file: type badge, path, its counts, recorded churn and last activity. */
-function FileRow({
-  row,
-  jobId,
-  conversationKey,
-  open,
-  onToggle,
-  nowMs,
-  onOpenPoint,
-  onOpenTurn,
-}: {
-  row: FileActivityRowApi;
-  jobId: string;
-  conversationKey: string;
-  open: boolean;
-  onToggle: () => void;
-  nowMs: number;
-  onOpenPoint: OpenPoint;
-  onOpenTurn: OpenTurn;
-}) {
-  const { t, locale } = useLocale();
-  const parts = splitPath(row.path);
-  return (
-    <li className="min-w-0">
-      <div className="flex min-w-0 flex-wrap items-start gap-2 px-3 py-2">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          className="ui-focus-ring mt-0.5 shrink-0 rounded px-1 text-muted"
-          aria-label={t(open ? 'files.collapse' : 'files.expand', { name: row.name })}
-        >
-          <span
-            aria-hidden="true"
-            className={`inline-block transition-transform ${open ? 'rotate-90' : ''}`}
-          >
-            ›
-          </span>
-        </button>
-        <span
-          className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${
-            KIND_MARK[row.file_kind] ?? KIND_MARK.other
-          }`}
-          title={t('files.typeLabelTip')}
-        >
-          {row.type_label}
-        </span>
-        <div className="min-w-0 flex-1 basis-64">
-          <p className="break-words font-medium text-foreground" title={row.path}>
-            {parts.directory ? <span className="text-muted">{parts.directory}</span> : null}
-            <span>{parts.name}</span>
-          </p>
-          <Unsettled row={row} />
-        </div>
-        <RowSummary row={row} nowMs={nowMs} locale={locale} />
-      </div>
-      {open ? (
-        <Operations
-          jobId={jobId}
-          conversationKey={conversationKey}
-          path={row.path}
-          nowMs={nowMs}
-          onOpenPoint={onOpenPoint}
-          onOpenTurn={onOpenTurn}
-        />
-      ) : null}
-    </li>
-  );
-}
-
-/** The failed and unanswered operations a file carries, when it has any. */
-function Unsettled({ row }: { row: FileActivityRowApi }) {
-  const { t } = useLocale();
-  if (!rowHasUnsettled(row)) return null;
-  const unsettled = row.pending + row.not_recorded;
-  return (
-    <p className="mt-0.5 text-muted">
-      {row.failed > 0 ? t('files.row.failed', { count: row.failed }) : null}
-      {row.failed > 0 && unsettled > 0 ? ' · ' : null}
-      {unsettled > 0 ? t('files.row.unsettled', { count: unsettled }) : null}
-    </p>
-  );
-}
-
-/** A file's counts, recorded churn and last activity, in one row. */
-function RowSummary({
-  row,
-  nowMs,
-  locale,
-}: {
-  row: FileActivityRowApi;
-  nowMs: number;
-  locale: string;
-}) {
-  const { t } = useLocale();
-  // Only a file something wrote to has line churn; a read-only file has none,
-  // and a pair of zeros would read as a measured result rather than absence.
-  const churn = row.writes > 0 ? lineChurn(row) : null;
-  return (
-    <span className="ml-auto flex shrink-0 flex-wrap items-center gap-1.5 tabular-nums">
-      <Count icon="●" value={row.reads} label={t('files.filter.read')} tone="read" />
-      <Count icon="●" value={row.writes} label={t('files.filter.written')} tone="write" />
-      {row.searches > 0 ? (
-        <Count icon="⌕" value={row.searches} label={t('files.filter.searched')} tone="search" />
-      ) : null}
-      {row.images > 0 ? (
-        <Count icon="▣" value={row.images} label={t('files.filter.images')} tone="image" />
-      ) : null}
-      {churn ? (
-        <span
-          className="whitespace-nowrap"
-          title={churn.unknown ? t('files.churnUnknownTip') : t('files.churnTip')}
-        >
-          <span className="text-emerald-600 dark:text-emerald-400">{churn.added}</span>{' '}
-          <span className="text-rose-600 dark:text-rose-400">{churn.removed}</span>
-        </span>
-      ) : null}
-      <time dateTime={row.last_at ?? undefined} className="whitespace-nowrap text-muted">
-        {row.last_at ? relativeTime(row.last_at, nowMs, locale) : t('files.noTime')}
-      </time>
-    </span>
-  );
-}
-
-function Count({
-  icon,
-  value,
-  label,
-  tone,
-}: {
-  icon: string;
-  value: number;
-  label: string;
-  tone: 'read' | 'write' | 'search' | 'image';
-}) {
-  if (value <= 0) return null;
-  const colour = {
-    read: 'bg-slate-500/15 text-slate-600 dark:bg-slate-400/20 dark:text-slate-300',
-    write: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300',
-    search: 'bg-amber-500/15 text-amber-600 dark:text-amber-300',
-    image: 'bg-pink-500/15 text-pink-600 dark:text-pink-300',
-  }[tone];
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] ${colour}`}
-      title={label}
-    >
-      <span aria-hidden="true">{icon}</span>
-      {value.toLocaleString('en-US')}
-      <span className="sr-only">{label}</span>
-    </span>
-  );
-}
-
-/** One file's recorded operations, newest first, with their source steps. */
-function Operations({
-  jobId,
-  conversationKey,
-  path,
-  nowMs,
-  onOpenPoint,
-  onOpenTurn,
-}: {
-  jobId: string;
-  conversationKey: string;
-  path: string;
-  nowMs: number;
-  onOpenPoint: OpenPoint;
-  onOpenTurn: OpenTurn;
-}) {
-  const { t, locale } = useLocale();
-  const [state, setState] = useState<{
-    key: string;
-    page: FileOperationsPageApi | null;
-    error: boolean;
-  } | null>(null);
-  const [more, setMore] = useState<FileOperationApi[]>([]);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const key = `${conversationKey}\u0000${path}`;
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setMore([]);
-    getAgentFileOperations(jobId, path, { limit: 40 }, controller.signal).then(
-      (page) => {
-        if (!controller.signal.aborted) setState({ key, page, error: false });
-      },
-      () => {
-        if (!controller.signal.aborted) setState({ key, page: null, error: true });
-      },
-    );
-    return () => controller.abort();
-  }, [jobId, path, key]);
-
-  const current = state?.key === key ? state : null;
-  const operations = current?.page ? [...current.page.operations, ...more] : more;
-  const hasEarlier =
-    more.length > 0
-      ? Boolean(more[more.length - 1] && current?.page?.has_earlier)
-      : Boolean(current?.page?.has_earlier);
-  const earlierCursor = more.length > 0 ? null : (current?.page?.next_cursor ?? null);
-
-  const loadEarlier = async () => {
-    if (!earlierCursor || loadingMore) return;
-    setLoadingMore(true);
-    try {
-      const page = await getAgentFileOperations(jobId, path, { limit: 40, cursor: earlierCursor });
-      if (page) setMore((pages) => [...pages, ...page.operations]);
-    } finally {
-      setLoadingMore(false);
-    }
-  };
-
-  if (current?.error) {
-    return <p className="border-t border-border px-3 py-2 text-muted">{t('files.loadError')}</p>;
-  }
-  if (!current) {
-    return <p className="border-t border-border px-3 py-2 text-muted">{t('common.loading')}</p>;
-  }
-  return (
-    <div className="border-t border-border bg-surface/40 px-3 py-2">
-      {operations.length === 0 ? (
-        <p className="text-muted">{t('files.ops.none')}</p>
-      ) : (
-        <ol aria-label={t('files.ops.label', { name: path })} className="grid gap-1.5">
-          {operations.map((operation) => (
-            <OperationRow
-              key={operationKey(operation)}
-              operation={operation}
-              nowMs={nowMs}
-              onOpenPoint={onOpenPoint}
-              onOpenTurn={onOpenTurn}
-            />
-          ))}
-        </ol>
-      )}
-      {hasEarlier && earlierCursor ? (
-        <button
-          type="button"
-          onClick={() => void loadEarlier()}
-          disabled={loadingMore}
-          className="ui-button ui-button-ghost mt-1 min-h-9 px-2.5 text-[11px] [@media(pointer:coarse)]:min-h-11"
-        >
-          {loadingMore ? t('files.loadingMore') : t('files.ops.earlier')}
-        </button>
-      ) : null}
-      {current.page ? (
-        <p className="mt-1 text-muted">
-          {t('files.ops.recorded', {
-            shown: operations.length.toLocaleString(locale),
-            total: current.page.total.toLocaleString(locale),
-          })}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-function OperationRow({
-  operation,
-  nowMs,
-  onOpenPoint,
-  onOpenTurn,
-}: {
-  operation: FileOperationApi;
-  nowMs: number;
-  onOpenPoint: OpenPoint;
-  onOpenTurn: OpenTurn;
-}) {
-  const { t, locale } = useLocale();
-  const churn = operationChurn(operation);
-  const at = operation.at ? relativeTime(operation.at, nowMs, locale) : t('files.noTime');
-  const step = operation.result_event_id ?? operation.event_id;
-  return (
-    <li
-      className={`flex min-w-0 flex-wrap items-start gap-x-2 gap-y-0.5 rounded px-1 py-0.5 ${
-        operation.superseded ? 'opacity-70' : ''
-      }`}
-    >
-      <span className="w-14 shrink-0 whitespace-nowrap text-muted" title={operation.action}>
-        {t(KIND_LABEL[operation.kind])}
-      </span>
-      <span className="min-w-0 flex-1 basis-48 break-words">
-        <span className="text-foreground">{operation.tool || operation.action}</span>
-        <span className="text-muted">
-          {' · '}
-          {t('files.ops.turn', { turn: operation.turn_no })}
-          {operation.attempt_no > 1
-            ? ` · ${t('files.ops.attempt', { n: operation.attempt_no })}`
-            : ''}
-          {' · '}
-          {at}
-        </span>
-        {operation.patch_index !== null && operation.patch_files !== null ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.patchPart', {
-              index: operation.patch_index,
-              total: operation.patch_files,
-            })}
-          </span>
-        ) : null}
-        {operation.renamed_to ? (
-          <span className="break-all text-muted">
-            {' · '}
-            {t('files.ops.renamedTo', { path: operation.renamed_to })}
-          </span>
-        ) : null}
-        {operation.status !== 'succeeded' ? (
-          <span className="text-amber-600 dark:text-amber-400">
-            {' · '}
-            {t(STATUS_LABEL[operation.status])}
-          </span>
-        ) : null}
-        {operation.clipped ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.clipped')}
-          </span>
-        ) : null}
-        {operation.subagent ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.subagent')}
-          </span>
-        ) : null}
-        {operation.superseded ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.superseded')}
-          </span>
-        ) : null}
-        {operation.path === null ? (
-          <span className="text-muted">
-            {' · '}
-            {t('files.ops.unknownScope')} ({t(BASIS_LABEL[operation.path_basis])})
-          </span>
-        ) : null}
-      </span>
-      {churn ? (
-        <span className="shrink-0 whitespace-nowrap tabular-nums">
-          <span className="text-emerald-600 dark:text-emerald-400">{churn.added}</span>{' '}
-          <span className="text-rose-600 dark:text-rose-400">{churn.removed}</span>
-        </span>
-      ) : null}
-      <span className="ml-auto flex shrink-0 gap-1">
-        <button
-          type="button"
-          onClick={() =>
-            onOpenPoint({ jobId: operation.job_id, turnNo: operation.turn_no, eventId: step })
-          }
-          className="ui-button ui-button-ghost min-h-8 px-1.5 text-[11px] [@media(pointer:coarse)]:min-h-11"
-        >
-          {t('files.ops.step')}
-        </button>
-        <button
-          type="button"
-          onClick={() => onOpenTurn(operation.job_id, operation.turn_no)}
-          className="ui-button ui-button-ghost min-h-8 px-1.5 text-[11px] [@media(pointer:coarse)]:min-h-11"
-        >
-          {t('files.ops.turnLink')}
-        </button>
-      </span>
-    </li>
   );
 }
 

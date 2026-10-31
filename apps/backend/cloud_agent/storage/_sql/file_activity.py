@@ -185,6 +185,11 @@ jsonb_strip_nulls(jsonb_build_object(
     'file_change_method', e.payload->'notification'->>'method',
     'file_change', CASE WHEN {FILE_CHANGE_SQL.strip()}
                         THEN left((e.payload->'notification')::text, $3::integer) END,
+    -- The stored text was longer than the bound: its changes are incomplete,
+    -- and the reducer reports that rather than reading it as an empty item.
+    'file_change_clipped', CASE WHEN {FILE_CHANGE_SQL.strip()}
+                                THEN length((e.payload->'notification')::text) > $3::integer
+                                END,
     'input', {_INPUT_JSON},
     'input_text', CASE WHEN jsonb_typeof(e.payload->'input') = 'string'
                        THEN left(e.payload->>'input', $3::integer) END,
@@ -245,9 +250,7 @@ FILE_ACTIVITY_EVENT_SQL = f"""
            {PAYLOAD_SQL} AS payload,
            result.id AS result_id,
            (result.payload->>'is_error')::boolean AS result_error,
-           (COALESCE(result.payload->>'content', '') LIKE '%"type":"image"%'
-            OR COALESCE(result.payload->>'content', '') LIKE '%"type": "image"%')
-               AS result_image
+           left(COALESCE(result.payload->>'content', ''), 4000) AS result_content
     FROM agent_job_events e
     JOIN agent_jobs j ON j.id = e.job_id AND j.thread_id = $1 AND j.user_id = $2
     JOIN agent_threads t ON t.id = j.thread_id AND t.deleted_at IS NULL
