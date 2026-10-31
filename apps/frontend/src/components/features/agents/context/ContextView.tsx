@@ -18,7 +18,6 @@ import { ContextEvents } from './ContextEvents';
 import { ContextGrowthChart } from './ContextGrowthChart';
 import { ContextDashboard } from './dashboard/ContextDashboard';
 import {
-  Capabilities,
   Compactions,
   ContextSummary,
   LargestChanges,
@@ -96,7 +95,7 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
   );
 }
 
-/** The reference sections below the dashboard: totals, the raw chart, turns, capabilities. */
+/** The reference sections below the dashboard: totals, the raw chart and turns. */
 function ReferenceSections({
   view,
   nowMs,
@@ -125,7 +124,6 @@ function ReferenceSections({
         </Section>
       ) : null}
       <Turns turns={view.turns} onOpenTurn={onOpenTurn} />
-      <Capabilities view={view} />
     </>
   );
 }

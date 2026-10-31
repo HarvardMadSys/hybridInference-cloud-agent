@@ -5,9 +5,7 @@ import type {
   ContextChangeApi,
   ContextCompactionApi,
   ContextPointApi,
-  ContextSupport,
   ContextTurnApi,
-  RuntimeContextCapabilityApi,
   ThreadContextApi,
 } from '@/lib/api/agents';
 import type { TranslationKey } from '@/lib/i18n/translate';
@@ -26,14 +24,6 @@ const TRIGGER: Record<string, TranslationKey> = {
   manual: 'context.trigger.manual',
   threshold: 'context.trigger.threshold',
   overflow: 'context.trigger.overflow',
-};
-
-const SUPPORT: Record<ContextSupport | 'names_only' | 'not_collected', TranslationKey> = {
-  reported: 'context.support.reported',
-  partly_reported: 'context.support.partly_reported',
-  names_only: 'context.support.names_only',
-  not_reported: 'context.support.not_reported',
-  not_collected: 'context.support.not_collected',
 };
 
 export function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -374,109 +364,6 @@ export function Turns({ turns, onOpenTurn }: { turns: ContextTurnApi[]; onOpenTu
           </tbody>
         </table>
       </div>
-    </Section>
-  );
-}
-
-const CAPABILITY_ROWS: Array<
-  [
-    TranslationKey,
-    (cap: RuntimeContextCapabilityApi) => ContextSupport | 'names_only' | 'not_collected',
-  ]
-> = [
-  ['context.cap.requestUsage', (cap) => cap.request_usage],
-  ['context.cap.compactionEvents', (cap) => cap.compaction_events],
-  ['context.cap.compactionSizes', (cap) => cap.compaction_sizes],
-  ['context.cap.window', (cap) => cap.context_window],
-  ['context.cap.nativeComposition', (cap) => cap.native_composition],
-  ['context.cap.live', (cap) => cap.live_occupancy],
-];
-
-/** How many of a runtime's turns carry a fact it reports only sometimes. */
-function CapabilityCoverage({
-  label,
-  cap,
-}: {
-  label: TranslationKey;
-  cap: RuntimeContextCapabilityApi;
-}) {
-  const { t } = useLocale();
-  let text: string | null = null;
-  if (label === 'context.cap.window' && cap.context_window !== 'not_reported') {
-    text = t('context.windowCoverage', { count: cap.window_reported_turns, turns: cap.turns });
-  } else if (
-    label === 'context.cap.nativeComposition' &&
-    cap.native_composition !== 'not_reported'
-  ) {
-    text = t('context.snapshotCoverage', { count: cap.snapshot_turns, turns: cap.turns });
-  }
-  return text ? <span className="block text-muted">{text}</span> : null;
-}
-
-/** What each runtime of this conversation can report, and how much of it is here. */
-export function Capabilities({ view }: { view: ThreadContextApi }) {
-  const { t, locale } = useLocale();
-  const coverage = view.coverage;
-  const notes: string[] = [
-    t('context.coverage.observed', {
-      observed: coverage.attempts_observed.toLocaleString(locale),
-      attempts: coverage.attempts.toLocaleString(locale),
-    }),
-  ];
-  if (coverage.points_omitted > 0)
-    notes.push(
-      t('context.coverage.omitted', { count: coverage.points_omitted.toLocaleString(locale) }),
-    );
-  if (coverage.unparsed_raw > 0)
-    notes.push(
-      t('context.coverage.unparsed', { count: coverage.unparsed_raw.toLocaleString(locale) }),
-    );
-  if (coverage.compactions_unknown_outcome > 0)
-    notes.push(
-      t('context.coverage.unknownOutcome', {
-        count: coverage.compactions_unknown_outcome.toLocaleString(locale),
-      }),
-    );
-  return (
-    <Section title={t('context.capabilities')}>
-      <div className="mt-2 overflow-x-auto">
-        <table className="w-full min-w-[28rem] text-left text-xs">
-          <thead className="text-muted">
-            <tr className="border-b border-border">
-              <th scope="col" className="py-1.5 pr-3 font-medium" />
-              {view.capabilities.map((cap) => (
-                <th
-                  key={cap.runtime}
-                  scope="col"
-                  className="py-1.5 pr-3 font-medium text-foreground"
-                >
-                  {cap.runtime}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {CAPABILITY_ROWS.map(([label, read]) => (
-              <tr key={label} className="border-b border-border last:border-0">
-                <th scope="row" className="py-1.5 pr-3 font-normal text-muted">
-                  {t(label)}
-                </th>
-                {view.capabilities.map((cap) => (
-                  <td key={cap.runtime} className="py-1.5 pr-3 text-foreground">
-                    {t(SUPPORT[read(cap)])}
-                    <CapabilityCoverage label={label} cap={cap} />
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <ul className="mt-2 space-y-0.5 text-xs text-muted">
-        {notes.map((note) => (
-          <li key={note}>{note}</li>
-        ))}
-      </ul>
     </Section>
   );
 }

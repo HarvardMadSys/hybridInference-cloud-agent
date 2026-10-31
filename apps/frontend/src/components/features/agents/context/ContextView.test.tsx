@@ -372,21 +372,60 @@ describe('ContextView', () => {
     expect(screen.getAllByText('Request 2 · turn 1 · 60K').length).toBeGreaterThan(0);
   });
 
-  it('says what each runtime reports, and how much of it this conversation has', async () => {
+  it('has no table of what each agent reports, nor the notes that sat under it', async () => {
+    // Every count that once added a note under that table is non-zero here.
+    vi.mocked(getAgentThreadContext).mockResolvedValue(
+      view({
+        coverage: {
+          ...view().coverage,
+          attempts_observed: 1,
+          points_omitted: 4,
+          unparsed_raw: 2,
+          compactions_unknown_outcome: 1,
+        },
+      }),
+    );
     show();
-    const table = (await screen.findByRole('heading', { name: 'What each agent reports' }))
-      .parentElement!;
-    expect(within(table).getByText('Compaction sizes').closest('tr')).toHaveTextContent(
+    // The real content is all there: the facts, the request chart, the turns.
+    expect(within(await fact('Latest observed context')).getByText('2,010')).toBeInTheDocument();
+    expect(within(await fact('Live occupancy')).getByText('Not collected')).toBeInTheDocument();
+    expect(
+      within(await fact('Context window')).getByText('Not reported for this request'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Request sizes (as reported)' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Turns' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('img', { name: 'Input tokens of each model request' }),
+    ).toBeInTheDocument();
+    // The section and its diagnostics are gone, not collapsed.
+    expect(
+      screen.queryByRole('heading', { name: 'What each agent reports' }),
+    ).not.toBeInTheDocument();
+    for (const text of [
+      /What each agent reports/,
+      /runs carry observations/,
+      /earlier requests are not drawn/,
+      /stored records were clipped too short/,
+      /compactions have no recorded outcome/,
+      /Window reported for \d+ of \d+ turns/,
+      /Read for \d+ of \d+ turns/,
+      'Tool and MCP names, no sizes',
       'Reported from this release on',
-    );
-    expect(within(table).getByText('Window reported for 0 of 2 turns')).toBeInTheDocument();
-    // Claude is never asked for sizes: its own account is the names it starts with.
-    const account = within(table).getByText('CLI’s own account of a request').closest('tr');
-    expect(account).toHaveTextContent('Tool and MCP names, no sizes');
-    expect(account).toHaveTextContent('Read for 1 of 2 turns');
-    expect(within(table).getByText('Live occupancy').closest('tr')).toHaveTextContent(
-      'Not collected',
-    );
+      'Per-request input and output',
+    ]) {
+      expect(screen.queryByText(text)).not.toBeInTheDocument();
+    }
+  });
+
+  it('has no such table in Chinese either', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    show();
+    expect(within(await fact('最近观测到的上下文')).getByText('2,010')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '各轮' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '各 Agent 报告的内容' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/带有观测数据/)).not.toBeInTheDocument();
   });
 
   it('is honestly empty for a conversation without request sizes', async () => {
