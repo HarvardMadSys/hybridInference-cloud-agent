@@ -4,7 +4,7 @@
 // into. Split from the section so each module stays within the file budget and
 // the row's own layout can be read on its own.
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import {
   getAgentFileOperations,
@@ -211,32 +211,51 @@ function Operations({
   // Each later page is kept whole: its own cursor and ``has_earlier`` are what
   // reach page three. Flattening them into operations loses both.
   const [earlier, setEarlier] = useState<FileOperationsPageApi[]>([]);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState(false);
   const [generation, setGeneration] = useState(0);
-  const abortMore = useRef<AbortController | null>(null);
+  //: The page-request generation and the controller that owns the live page
+  //: read. Both are refs so a late request compares against the current value
+  //: rather than the one its closure captured.
+  const pageGeneration = useRef(0);
+  const pageAbort = useRef<AbortController | null>(null);
+  const [loading, setLoading] = useState<{ generation: number; on: boolean }>({
+    generation: -1,
+    on: false,
+  });
   const key = `${conversationKey}\u0000${path}`;
 
-  useEffect(() => {
-    const controller = new AbortController();
+  /** Replace the list: stop the live page read and clear its loading state. */
+  const replace = useCallback(() => {
+    pageGeneration.current += 1;
+    pageAbort.current?.abort();
+    pageAbort.current = null;
     setEarlier([]);
     setMoreError(false);
-    getAgentFileOperations(jobId, path, { limit: OPERATIONS_PAGE }, controller.signal).then(
-      (page) => {
-        if (!controller.signal.aborted) setState({ key, page, error: false });
-      },
-      () => {
-        if (!controller.signal.aborted) setState({ key, page: null, error: true });
-      },
-    );
-    return () => controller.abort();
-  }, [jobId, path, key, generation, revision]);
+    setLoading({ generation: pageGeneration.current, on: false });
+    return pageGeneration.current;
+  }, []);
 
   useEffect(() => {
-    setEarlier([]);
-    setMoreError(false);
-    abortMore.current?.abort();
-  }, [key, generation, revision]);
+    const mine = replace();
+    const controller = new AbortController();
+    const listController = controller;
+    getAgentFileOperations(jobId, path, { limit: OPERATIONS_PAGE }, listController.signal).then(
+      (page) => {
+        if (listController.signal.aborted || pageGeneration.current !== mine) return;
+        setState({ key, page, error: false });
+      },
+      () => {
+        if (listController.signal.aborted || pageGeneration.current !== mine) return;
+        setState({ key, page: null, error: true });
+      },
+    );
+    return () => {
+      listController.abort();
+      // A page read in flight when this row collapses or unmounts is cancelled.
+      pageAbort.current?.abort();
+      pageAbort.current = null;
+    };
+  }, [jobId, path, key, generation, revision, replace]);
 
   const current = state?.key === key ? state : null;
   const operations = [
@@ -246,6 +265,7 @@ function Operations({
   const lastPage = earlier.length > 0 ? earlier[earlier.length - 1] : current?.page;
   const earlierCursor = lastPage?.next_cursor ?? null;
   const hasEarlier = Boolean(lastPage?.has_earlier);
+  const loadingMore = loading.generation === pageGeneration.current && loading.on;
 
   const retry = () => {
     setState(null);
@@ -254,22 +274,29 @@ function Operations({
 
   const loadEarlier = async () => {
     if (!earlierCursor || loadingMore) return;
+    const mine = pageGeneration.current;
     const controller = new AbortController();
-    abortMore.current?.abort();
-    abortMore.current = controller;
-    setLoadingMore(true);
+    pageAbort.current?.abort();
+    pageAbort.current = controller;
+    setLoading({ generation: mine, on: true });
     setMoreError(false);
     try {
-      const page = await getAgentFileOperations(jobId, path, {
-        limit: OPERATIONS_PAGE,
-        cursor: earlierCursor,
-      });
-      if (controller.signal.aborted) return;
+      const page = await getAgentFileOperations(
+        jobId,
+        path,
+        { limit: OPERATIONS_PAGE, cursor: earlierCursor },
+        controller.signal,
+      );
+      if (controller.signal.aborted || pageGeneration.current !== mine) return;
       if (page) setEarlier((pages) => [...pages, page]);
     } catch {
-      if (!controller.signal.aborted) setMoreError(true);
+      if (!controller.signal.aborted && pageGeneration.current === mine) setMoreError(true);
     } finally {
-      if (!controller.signal.aborted) setLoadingMore(false);
+      // Only the request that still owns this list may clear its loading flag.
+      if (pageGeneration.current === mine) {
+        setLoading({ generation: mine, on: false });
+        if (pageAbort.current === controller) pageAbort.current = null;
+      }
     }
   };
 

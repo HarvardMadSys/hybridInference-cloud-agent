@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import {
   getAgentFileActivity,
   getAgentFileOperations,
+  type FileActivityApi,
   getAgentThreadContext,
   getEventContent,
   getRequestComposition,
@@ -640,4 +641,131 @@ describe('ContextView', () => {
     // System prompt and tool schemas are never recorded: said so, never 0.
     expect(screen.getAllByText('not recorded').length).toBeGreaterThan(0);
   });
+});
+
+describe("File Activity follows the Context view's settlement", () => {
+  function fileView(status: string): FileActivityApi {
+    return {
+      thread_id: 't',
+      generated_at: '2026-10-31T09:00:00Z',
+      sort: 'active',
+      filter: 'all',
+      q: '',
+      totals: {
+        files: 1,
+        operations: 1,
+        reads: 0,
+        writes: status === 'succeeded' ? 1 : 0,
+        searches: 0,
+        images: 0,
+        added: 0,
+        removed: 0,
+        added_unknown_files: 0,
+        removed_unknown_files: 0,
+        failed: status === 'failed' ? 1 : 0,
+        pending: status === 'pending' ? 1 : 0,
+        not_recorded: status === 'not_recorded' ? 1 : 0,
+        unknown_path_operations: 0,
+        search_unknown_scope: 0,
+        subagent_operations: 0,
+      },
+      filter_counts: { all: 1, read: 0, written: 1, searched: 0, images: 0 },
+      coverage: {
+        turns: 1,
+        attempts: 1,
+        events_scanned: 2,
+        events_capped: false,
+        window_first_at: null,
+        window_last_at: null,
+      },
+      semantics: {
+        line_changes: 'cumulative_recorded',
+        net_git_diff: 'not_read',
+        search_scope: 'explicit_path_only',
+        image_evidence: 'explicit_only',
+        counts: 'successful_operations',
+      },
+      files: [
+        {
+          path: '/workspace/a.ts',
+          name: 'a.ts',
+          type_label: 'TS',
+          file_kind: 'code',
+          reads: 0,
+          writes: status === 'succeeded' ? 1 : 0,
+          searches: 0,
+          images: 0,
+          failed: status === 'failed' ? 1 : 0,
+          pending: status === 'pending' ? 1 : 0,
+          not_recorded: status === 'not_recorded' ? 1 : 0,
+          added: 0,
+          removed: 0,
+          added_unknown_ops: 0,
+          removed_unknown_ops: 0,
+          operations: 1,
+          events: 2,
+          subagent_operations: 0,
+          attempts: 1,
+          first_at: null,
+          last_at: '2026-10-31T09:00:00Z',
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    };
+  }
+
+  function contextWithState(state: string) {
+    const base = view();
+    return {
+      ...base,
+      turns: base.turns.map((item, index) =>
+        index === base.turns.length - 1 ? { ...item, state } : item,
+      ),
+    };
+  }
+
+  it.each([
+    ['failed', 'not_recorded'],
+    ['cancelled', 'not_recorded'],
+    ['succeeded', 'succeeded'],
+  ])(
+    'notices a turn becoming %s with the same turns and requests',
+    async (state, expectedStatus) => {
+      vi.mocked(getAgentThreadContext)
+        .mockResolvedValueOnce(contextWithState('running'))
+        .mockResolvedValue(contextWithState(state));
+      vi.mocked(getAgentFileActivity).mockReset();
+      vi.mocked(getAgentFileActivity)
+        .mockResolvedValueOnce(fileView('pending'))
+        .mockResolvedValue(fileView(expectedStatus));
+      // The page mounts while the turn runs, then the same turn settles: the
+      // job state is what changes, and the provider re-reads on it.
+      const runningJob = {
+        ...JOB,
+        state: 'running',
+        conversationState: 'running',
+      } as unknown as AgentJob;
+      const settledJob = { ...JOB, state, conversationState: 'idle' } as unknown as AgentJob;
+      const { rerender } = render(
+        <LocaleProvider>
+          <ContextView job={runningJob} onOpenPoint={vi.fn()} onOpenTurn={vi.fn()} />
+        </LocaleProvider>,
+      );
+      await screen.findByText('File Activity');
+      await waitFor(() => expect(vi.mocked(getAgentFileActivity).mock.calls.length).toBe(1));
+      rerender(
+        <LocaleProvider>
+          <ContextView job={settledJob} onOpenPoint={vi.fn()} onOpenTurn={vi.fn()} />
+        </LocaleProvider>,
+      );
+      await waitFor(() =>
+        expect(vi.mocked(getAgentFileActivity).mock.calls.length).toBeGreaterThan(1),
+      );
+      expect(contextWithState(state).turns.length).toBe(contextWithState('running').turns.length);
+      expect(contextWithState(state).requests.length).toBe(
+        contextWithState('running').requests.length,
+      );
+    },
+  );
 });

@@ -623,3 +623,84 @@ describe('fencing across queries and settlement', () => {
     expect(mockedOperations).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('Operations ownership and terminal settlement', () => {
+  it('keeps page 2 usable when a revision arrives while it is loading', async () => {
+    let releasePage2: (value: FileOperationsPageApi | null) => void = () => {};
+    const delayed = new Promise<FileOperationsPageApi | null>((resolve) => {
+      releasePage2 = resolve;
+    });
+    const first = page();
+    const second = {
+      ...page(),
+      operations: [{ ...page().operations[0], call_id: 'c2', event_id: 500 }],
+    };
+    const third = {
+      ...page(),
+      operations: [{ ...page().operations[0], call_id: 'c3', event_id: 501 }],
+    };
+    mockedOperations.mockResolvedValueOnce({ ...first, has_earlier: true, next_cursor: 'p2' });
+    mockedOperations.mockReturnValueOnce(delayed);
+    const onOpenPoint = vi.fn();
+    const onOpenTurn = vi.fn();
+    const { rerender } = render(
+      <LocaleProvider>
+        <FileActivity
+          jobId="job-2"
+          conversationKey="thread-1"
+          onOpenPoint={onOpenPoint}
+          onOpenTurn={onOpenTurn}
+          refreshTick={1}
+        />
+      </LocaleProvider>,
+    );
+    await screen.findByText('app.ts');
+    fireEvent.click(screen.getByLabelText('Show operations on app.ts'));
+    await screen.findByText(/recorded operations shown/);
+    fireEvent.click(screen.getByRole('button', { name: 'Show earlier operations' }));
+    await waitFor(() => expect(mockedOperations).toHaveBeenCalledTimes(2));
+
+    // A refresh replaces the list: the first page is read again.
+    mockedOperations.mockResolvedValueOnce({ ...first, has_earlier: true, next_cursor: 'p2' });
+    rerender(
+      <LocaleProvider>
+        <FileActivity
+          jobId="job-2"
+          conversationKey="thread-1"
+          onOpenPoint={onOpenPoint}
+          onOpenTurn={onOpenTurn}
+          refreshTick={2}
+        />
+      </LocaleProvider>,
+    );
+    await waitFor(() => expect(mockedOperations).toHaveBeenCalledTimes(3));
+    // The stale page resolves now: it must not append, and loading must clear.
+    releasePage2(second);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Show earlier operations' })).toBeEnabled(),
+    );
+    // Page 2 is still usable afterwards.
+    mockedOperations.mockResolvedValueOnce(third);
+    fireEvent.click(screen.getByRole('button', { name: 'Show earlier operations' }));
+    await waitFor(() => expect(mockedOperations).toHaveBeenCalledTimes(4));
+  });
+
+  it('cancels an in-flight page when the row collapses', async () => {
+    let release: (value: FileOperationsPageApi | null) => void = () => {};
+    const delayed = new Promise<FileOperationsPageApi | null>((resolve) => {
+      release = resolve;
+    });
+    mockedOperations.mockResolvedValueOnce({ ...page(), has_earlier: true, next_cursor: 'p2' });
+    mockedOperations.mockReturnValueOnce(delayed);
+    renderSection();
+    await screen.findByText('app.ts');
+    fireEvent.click(screen.getByLabelText('Show operations on app.ts'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show earlier operations' }));
+    await waitFor(() => expect(mockedOperations).toHaveBeenCalledTimes(2));
+    const signal = mockedOperations.mock.calls[1][3];
+    expect(signal).toBeInstanceOf(AbortSignal);
+    fireEvent.click(screen.getByLabelText('Hide operations on app.ts'));
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    release(page());
+  });
+});

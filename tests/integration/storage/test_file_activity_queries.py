@@ -14,6 +14,7 @@ What only Postgres can settle:
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -773,3 +774,115 @@ async def test_a_well_formed_codex_item_with_no_changes_is_not_an_unknown_edit(d
     # An explicit empty change list records no file operation, and invents none.
     assert view.totals.operations == 0
     assert view.totals.files == 0
+
+
+async def test_an_image_block_with_source_first_and_a_text_block_counts(db, store):
+    """Key order and a leading text block must not hide a real image block."""
+    [job] = await conversation(db, store, "fa_image_order")
+    big = json.dumps(
+        [
+            {"type": "text", "text": "Here is the screenshot."},
+            {
+                "source": {"media_type": "image/png", "data": "B" * 12_000},
+                "type": "image",
+            },
+        ]
+    )
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/workspace"}),
+            call("Read", "img-order", file_path="docs/diagram.png"),
+            result("img-order", big),
+        ],
+    )
+    view = await _view(store, job)
+    assert view is not None
+    assert (view.files[0].images, view.files[0].reads) == (1, 0)
+
+
+async def test_source_text_that_mentions_an_image_block_is_not_image_activity(db, store):
+    [job] = await conversation(db, store, "fa_image_source")
+    source = 'const block = {"type": "image", "source": {"media_type": "image/png"}};\n'
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/workspace"}),
+            call("Read", "src-1", file_path="src/blocks.ts"),
+            result("src-1", source),
+        ],
+    )
+    view = await _view(store, job)
+    assert view is not None
+    assert (view.files[0].images, view.files[0].reads) == (0, 1)
+
+
+async def test_a_read_past_its_deadline_is_cancelled_and_releases_its_connection(db, store):
+    """The whole read is bounded, and a cancelled one returns its connection.
+
+    The deadline is forced to expire before the scan: the scoped read must
+    raise rather than run on, and the pool must be fully idle afterwards —
+    which proves the connection was released rather than leaked by work that
+    outlived its caller.
+    """
+    [job] = await conversation(db, store, "fa_deadline")
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/w"}),
+            call("Read", "d1", file_path="a.py"),
+            result("d1"),
+        ],
+    )
+    deadline = time.monotonic() - 1  # already expired
+    with pytest.raises(TimeoutError):
+        await store.file_activity_queries._read_scoped(
+            thread_id="fa_deadline",
+            user_id=OWNER,
+            preview_chars=60_000,
+            deadline=deadline,
+        )
+    pool = store.file_activity_queries._pool
+    assert pool.get_size() == pool.get_idle_size()
+
+
+async def test_a_read_waits_for_a_connection_inside_its_deadline(db, store):
+    """Acquisition counts against the deadline rather than sitting outside it."""
+    [job] = await conversation(db, store, "fa_acquire")
+    await events(db, job, [("lifecycle", {"phase": "started", "cwd": "/w"})])
+    deadline = time.monotonic() - 1
+    with pytest.raises(TimeoutError):
+        await store.file_activity_queries._read_scoped(
+            thread_id="fa_acquire",
+            user_id=OWNER,
+            preview_chars=60_000,
+            deadline=deadline,
+        )
+    pool = store.file_activity_queries._pool
+    assert pool.get_size() == pool.get_idle_size()
+
+
+async def test_a_finished_read_leaves_the_pool_reusable(db, store):
+    """A normal read returns its connection and leaves no session settings."""
+    [job] = await conversation(db, store, "fa_pool")
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/w"}),
+            call("Read", "p1", file_path="a.py"),
+            result("p1"),
+        ],
+    )
+    first = await _view(store, job)
+    assert first is not None
+    pool = store.file_activity_queries._pool
+    assert pool.get_size() == pool.get_idle_size()
+    # The next read on a possibly reused connection still sees its own rows.
+    second = await _view(store, job)
+    assert second is not None
+    assert second.totals.files == first.totals.files
+    assert pool.get_size() == pool.get_idle_size()

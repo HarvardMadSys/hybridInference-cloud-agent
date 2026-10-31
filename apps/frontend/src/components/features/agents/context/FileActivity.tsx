@@ -106,7 +106,12 @@ function useFileActivity(
         setLoaded({ key: stateKey, generation: mine, view: null, error: true });
       },
     );
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // A next page in flight belongs to the list this effect replaced.
+      pagesAbort.current?.abort();
+      pagesAbort.current = null;
+    };
   }, [jobId, stateKey, query, refreshTick, retryCount]);
 
   const retry = useCallback(() => {
@@ -192,12 +197,33 @@ export function FileActivity({
     return () => window.clearTimeout(timer);
   }, [typed, query.q]);
   // A running turn adds operations; a slow re-read keeps the section current
-  // without polling, without touching the conversation, and only while shown.
+  // without polling the conversation. Hidden pages are skipped, and one read
+  // is queued for when the page becomes visible again so the time spent hidden
+  // is not lost. The timer is cleaned up when the turn ends.
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!active) return undefined;
-    const timer = window.setInterval(() => setTick((value) => value + 1), ACTIVE_REFRESH_MS);
-    return () => window.clearInterval(timer);
+    let pending = false;
+    const bump = () => {
+      if (document.visibilityState === 'visible') {
+        pending = false;
+        setTick((value) => value + 1);
+      } else {
+        pending = true;
+      }
+    };
+    const timer = window.setInterval(bump, ACTIVE_REFRESH_MS);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && pending) {
+        pending = false;
+        setTick((value) => value + 1);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [active]);
   const { view, rows, error, loading, pagesError, retry, hasMore, loadMore, loadingMore } =
     useFileActivity(jobId, conversationKey, query, refreshTick + tick);

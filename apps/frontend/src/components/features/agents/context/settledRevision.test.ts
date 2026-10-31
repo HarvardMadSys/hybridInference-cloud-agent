@@ -96,6 +96,18 @@ describe('settledRevision', () => {
     expect(settledRevision(after)).not.toBe(settledRevision(before));
   });
 
+  it.each(['failed', 'cancelled', 'aborted'])(
+    'moves on a %s turn even though its counts are unchanged',
+    (state) => {
+      const running = view();
+      const ended = view({ turns: [turn({ state })] });
+      // The turn row already existed while running: neither count moves.
+      expect(ended.turns.length).toBe(running.turns.length);
+      expect(ended.requests.length).toBe(running.requests.length);
+      expect(settledRevision(ended)).not.toBe(settledRevision(running));
+    },
+  );
+
   it('changes when a new turn is recorded', () => {
     const one = view({ turns: [turn({ state: 'succeeded' })] });
     const two = view({

@@ -261,7 +261,7 @@ FILE_ACTIVITY_EVENT_SQL = f"""
            -- the recorded text, so a large base64 body (clipped for transport)
            -- still counts while a document that merely mentions an image does
            -- not. The first block of a list counts too.
-           (COALESCE(result.payload->>'content', '') ~ $6::text) AS result_image
+           (left(COALESCE(result.payload->>'content', ''), 20000) ~ $6::text) AS result_image
     FROM agent_job_events e
     JOIN agent_jobs j ON j.id = e.job_id AND j.thread_id = $1 AND j.user_id = $2
     JOIN agent_threads t ON t.id = j.thread_id AND t.deleted_at IS NULL

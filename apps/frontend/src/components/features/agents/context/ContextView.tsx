@@ -55,22 +55,40 @@ export function ContextView(props: ContextViewProps) {
 /**
  * A revision of the conversation's recorded history, for the File Activity read.
  *
- * It must change when a turn settles, not when one starts: the turn row is
- * created at the start, so its count (and its state, which flips while the
- * request list grows) would either not move at settlement or move on every
- * refresh. The latest request's sequence and time are recorded history and
- * stop moving once the turn ends, and the generated timestamp raises a final
- * read after it. A running turn still refreshes through ``active``.
+ * It must move when a turn ends, whatever its outcome: the turn row exists
+ * from the start, so its count does not change at settlement, and a revision
+ * that only noticed success would leave a failed or cancelled turn's pending
+ * file actions pending until something else changed. The last turn's state
+ * (running or terminal) and its recorded request count are part of the value,
+ * together with the newest request's sequence.
  */
 export function settledRevision(view: ThreadContextApi): number {
   const last = view.turns[view.turns.length - 1];
   const seq = view.requests.length > 0 ? view.requests[view.requests.length - 1].seq : 0;
+  const terminal = last !== undefined && last.state !== null && last.state !== 'running';
   return (
     view.turns.length * 1_000_000 +
     (last?.requests ?? 0) * 1_000 +
     seq +
-    (last?.state === 'succeeded' ? 500_000_000 : 0)
+    (terminal ? 500_000_000 : 0) +
+    // A stable per-state component, so failed -> cancelled -> succeeded each
+    // change the revision on its own.
+    stateCode(last?.state)
   );
+}
+
+/** A small stable number per terminal turn state, so each transition differs. */
+const STATE_CODES: Record<string, number> = {
+  running: 0,
+  succeeded: 100_000,
+  failed: 200_000,
+  cancelled: 300_000,
+  stopped: 400_000,
+};
+
+function stateCode(state: string | null | undefined): number {
+  if (state === null || state === undefined) return 50_000;
+  return STATE_CODES[state] ?? 50_000;
 }
 
 function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {

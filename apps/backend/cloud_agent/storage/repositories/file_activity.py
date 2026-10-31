@@ -55,10 +55,11 @@ if TYPE_CHECKING:
 #: timeout is therefore clipped to the time left, and the whole read is wrapped
 #: in one cancellation scope.
 READ_DEADLINE_S = 8.0
-#: A recorded tool result whose text begins with an image content block. The
-#: body itself may be clipped; this stays a structural check on the recorded
-#: text rather than a search for the word inside a document.
-IMAGE_BLOCK_PATTERN = r'^\s*(\[\s*)?\{\s*"type"\s*:\s*"image"\s*[,}]'
+#: A recorded result that is JSON and carries an image content block, in any
+#: key order and with or without a text block before it. Escaped quotes inside
+#: a JSON string do not match, so a document that merely mentions an image
+#: block is not image evidence.
+IMAGE_BLOCK_PATTERN = r'(?:^\s*[\[{])[\s\S]*"type"\s*:\s*"image"'
 #: A page's own timeout, clipped further by the deadline's remaining time.
 STATEMENT_TIMEOUT_MS = 5_000
 
