@@ -38,6 +38,7 @@ from cloud_agent.file_activity.models import (
 from cloud_agent.file_activity.scan import ScanResult, scan_operations
 from cloud_agent.storage._sql.file_activity import (
     FILE_ACTIVITY_COVERAGE_SQL,
+    FILE_ACTIVITY_CWD_SQL,
     FILE_ACTIVITY_EVENT_SQL,
 )
 from cloud_agent.storage._sql.rows import load_json
@@ -101,22 +102,33 @@ class PostgresFileActivityQueries:
         it holds a bounded window rather than pretending to be complete.
         """
         rows: list[dict[str, Any]] = []
-        after = 0
+        # The window is the newest operations: pages descend from the newest
+        # stored event, so a conversation longer than the bound keeps its
+        # recent activity (and Latest sorting stays meaningful). The rows are
+        # reversed into ledger order before reducing, so identity and ordering
+        # are the reducer's usual ones.
+        before: int | None = None
         capped = False
         while time.monotonic() < deadline:
+            # Never ask for more than the bound allows, so a single page can
+            # not overshoot it.
+            want = min(EVENT_PAGE, MAX_SCAN_EVENTS - len(rows))
+            if want <= 0:
+                capped = True
+                break
             page = await conn.fetch(
                 FILE_ACTIVITY_EVENT_SQL,
                 thread_id,
                 user_id,
                 preview_chars,
-                after,
-                EVENT_PAGE,
+                before if before is not None else 2**63 - 1,
+                want,
             )
             if not page:
                 break
             rows.extend(_decoded(row) for row in page)
-            after = int(page[-1]["id"])
-            if len(page) < EVENT_PAGE:
+            before = int(page[-1]["id"])
+            if len(page) < want:
                 break
             if len(rows) >= MAX_SCAN_EVENTS:
                 capped = True
@@ -124,8 +136,27 @@ class PostgresFileActivityQueries:
         else:
             # The deadline passed between pages: the scan is incomplete.
             capped = True
+        rows.reverse()
+        scanned = len(rows)
+        if rows:
+            attempt_ids = sorted({int(row["attempt_id"]) for row in rows})
+            cwds = await conn.fetch(FILE_ACTIVITY_CWD_SQL, thread_id, user_id, attempt_ids)
+            for row in cwds:
+                rows.insert(
+                    0,
+                    {
+                        "event_type": "lifecycle",
+                        "attempt_id": int(row["attempt_id"]),
+                        "payload": {
+                            "id": 0,
+                            "attempt_id": int(row["attempt_id"]),
+                            "cwd": row["cwd"],
+                        },
+                    },
+                )
         result = scan_operations(rows, thread_id=thread_id)
-        result.events_scanned = len(rows)
+        # The synthetic cwd rows are read to resolve paths, not scanned events.
+        result.events_scanned = scanned
         result.capped = capped
         if time.monotonic() < deadline:
             coverage = await conn.fetchrow(FILE_ACTIVITY_COVERAGE_SQL, thread_id, user_id)

@@ -590,3 +590,39 @@ async def test_large_history_scan_is_bounded_and_says_so(db, store):
     assert len(view.files) == 25
     assert view.totals.files == 2_000
     assert view.has_more is True
+
+
+async def test_a_capped_scan_keeps_the_newest_operations_and_says_so(db, store, monkeypatch):
+    """The bound retains recent activity, and coverage reports the window.
+
+    The cap is lowered for this test so a real ledger crosses it; the scanned
+    window must still hold the newest operations, the newest turn's cwd must
+    still resolve its relative paths, and coverage must say it was capped.
+    """
+    [job] = await conversation(db, store, "fa_cap")
+    rows: list[tuple[str, dict]] = [("lifecycle", {"phase": "started", "cwd": "/workspace"})]
+    for index in range(40):
+        rows.append(call("Read", f"cap-{index}", file_path=f"file_{index:02d}.py"))
+        rows.append(result(f"cap-{index}"))
+    await events(db, job, rows)
+    monkeypatch.setattr("cloud_agent.storage.repositories.file_activity.MAX_SCAN_EVENTS", 20)
+    view = await _view(store, job, sort="latest")
+    assert view is not None
+    assert view.coverage.events_capped is True
+    assert view.coverage.events_scanned <= 20
+    # Only the newest operations are in the window: the included names are a
+    # high-numbered run, and the earliest ones are gone entirely.
+    paths = {row.path for row in view.files}
+    indices = sorted(int(path.rsplit("_", 1)[-1].removesuffix(".py")) for path in paths)
+    assert max(indices) == 39
+    assert min(indices) >= 20
+    assert "/workspace/file_00.py" not in paths
+    # The attempt's cwd was read even though its ``started`` row fell outside
+    # the window, so these are absolute rather than bare relative names.
+    assert all(path.startswith("/workspace/") for path in paths)
+    # Latest ordering is meaningful precisely because the window is recent: no
+    # file older than the window can appear ahead of one inside it. Ties in
+    # recorded time are broken by path, so only the window's membership is
+    # asserted here rather than one exact first row.
+    assert view.files[0].last_at is not None
+    assert min(indices) >= 20

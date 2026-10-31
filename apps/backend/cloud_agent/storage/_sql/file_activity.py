@@ -265,9 +265,26 @@ FILE_ACTIVITY_EVENT_SQL = f"""
         LIMIT 1
     ) result ON TRUE
     WHERE {CANDIDATE_SQL}
-      AND e.id > $4
-    ORDER BY e.id
+      AND e.id < $4
+    ORDER BY e.id DESC
     LIMIT $5
+"""
+
+#: The cwd each attempt recorded, for the attempts a recent window holds.
+#: A turn's ``started`` row is older than its tool calls, so a newest-first
+#: window can cut it off; reading these few rows by attempt keeps relative
+#: paths resolvable without widening the window.
+FILE_ACTIVITY_CWD_SQL = """
+    /* file_activity_cwds */
+    SELECT DISTINCT ON (e.attempt_id) e.attempt_id, e.payload->>'cwd' AS cwd
+    FROM agent_job_events e
+    JOIN agent_jobs j ON j.id = e.job_id AND j.thread_id = $1 AND j.user_id = $2
+    JOIN agent_threads t ON t.id = j.thread_id AND t.deleted_at IS NULL
+    WHERE e.event_type = 'lifecycle'
+      AND e.attempt_id = ANY($3::bigint[])
+      AND jsonb_typeof(e.payload->'cwd') = 'string'
+      AND length(e.payload->>'cwd') <= 4096
+    ORDER BY e.attempt_id, e.id
 """
 
 FILE_ACTIVITY_COVERAGE_SQL = """
@@ -283,6 +300,7 @@ FILE_ACTIVITY_COVERAGE_SQL = """
 __all__ = [
     "ACTION_TOOL_NAMES",
     "FILE_ACTIVITY_COVERAGE_SQL",
+    "FILE_ACTIVITY_CWD_SQL",
     "FILE_ACTIVITY_EVENT_SQL",
     "PREVIEW_CHARS",
     "line_count_sql",
