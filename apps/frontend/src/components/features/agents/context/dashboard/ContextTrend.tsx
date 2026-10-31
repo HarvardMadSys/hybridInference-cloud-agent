@@ -334,10 +334,12 @@ function TrendControls({
     : overview
       ? t('dashboard.trend.overviewTip')
       : t('dashboard.trend.dnaDisabled', { max: DNA_MAX_COLUMNS });
-  const adaptiveClass = state.adaptive
-    ? 'bg-accent-subtle font-semibold text-accent'
-    : 'bg-surface-muted text-muted';
-  const buttonClass = `ui-focus-ring rounded-md px-2 py-0.5 text-[11px] [@media(pointer:coarse)]:min-h-11 ${adaptiveClass}`;
+  const onClass = 'bg-accent-subtle font-semibold text-accent';
+  const offClass = 'bg-surface-muted text-muted';
+  const buttonClass = (on: boolean) =>
+    `ui-focus-ring rounded-md px-2 py-0.5 text-[11px] [@media(pointer:coarse)]:min-h-11 ${
+      on ? onClass : offClass
+    }`;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Toggle
@@ -387,7 +389,7 @@ function TrendControls({
         disabled={!hasPoints}
         onClick={() => onOverview(!overview)}
         title={t('dashboard.trend.overviewTip')}
-        className={`${buttonClass} disabled:cursor-not-allowed disabled:opacity-50`}
+        className={`${buttonClass(overview)} disabled:cursor-not-allowed disabled:opacity-50`}
       >
         {t('dashboard.trend.overview')}
       </button>
@@ -397,7 +399,7 @@ function TrendControls({
         disabled={overview}
         onClick={() => update({ adaptive: !state.adaptive })}
         title={overview ? t('dashboard.trend.overviewTip') : t('dashboard.trend.adaptiveTip')}
-        className={`${buttonClass} disabled:cursor-not-allowed disabled:opacity-50`}
+        className={`${buttonClass(state.adaptive)} disabled:cursor-not-allowed disabled:opacity-50`}
       >
         {t('dashboard.trend.adaptive')}
       </button>
