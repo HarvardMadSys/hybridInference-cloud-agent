@@ -6,19 +6,33 @@
 // record carried one, and says whose number it is: the CLI's own count for a
 // compaction, an estimate from characters for an injection. A token rise or
 // drop with no record behind it is not an event, and is not listed here.
+//
+// It is the view's one list of compactions: each is joined to the view's
+// record of it (the requests observed around it) by evidence identity, a
+// compaction the events do not carry is listed from that record, and each one
+// selects its request on the trend.
 
 import { useState } from 'react';
 import { useLocale } from '@/components/providers';
 import {
   CONTEXT_EVENT_KINDS,
+  type ContextCompactionApi,
   type ContextEventApi,
   type ContextEventKind,
+  type ContextPointApi,
   type ThreadContextApi,
 } from '@/lib/api/agents';
 import type { TranslationKey, Translator } from '@/lib/i18n/translate';
 import { compactCount, relativeTime } from '@/components/features/settings/usagePresent';
-import { Section, type OpenPoint } from './ContextSections';
-import { eventSourceKey, filterEvents, supportReasonKey } from './contextEventsPresent';
+import type { OpenPoint } from './ContextSections';
+import {
+  compactionRequest,
+  eventSourceKey,
+  filterEvents,
+  mergeCompactions,
+  supportReasonKey,
+} from './contextEventsPresent';
+import { DashCard } from './dashboard/DashCard';
 
 /** Events drawn before "show all". */
 const FIRST_EVENTS = 40;
@@ -40,6 +54,13 @@ const ONE_KIND: Record<ContextEventKind, TranslationKey> = {
   mode: 'context.events.one.mode',
 };
 
+const TRIGGER: Record<string, TranslationKey> = {
+  auto: 'context.trigger.auto',
+  manual: 'context.trigger.manual',
+  threshold: 'context.trigger.threshold',
+  overflow: 'context.trigger.overflow',
+};
+
 const KIND_MARK: Record<ContextEventKind, string> = {
   injection: 'bg-yellow-500/70',
   compaction: 'bg-rose-400/80',
@@ -52,22 +73,29 @@ export function ContextEvents({
   view,
   nowMs,
   onOpenPoint,
+  onSelect,
 }: {
   view: ThreadContextApi;
   nowMs: number;
   onOpenPoint: OpenPoint;
+  /** Selects a request on the trend (and in the browser). */
+  onSelect?: (index: number) => void;
 }) {
   const { t, locale } = useLocale();
   const [kind, setKind] = useState<ContextEventKind | null>(null);
   const [all, setAll] = useState(false);
-  const events = view.events ?? [];
-  const counts = view.event_counts ?? {};
-  const shown = filterEvents(events, kind);
+  const merged = mergeCompactions(view.events ?? [], view.compactions ?? []);
+  const counts = {
+    ...view.event_counts,
+    // An older recording's compactions are counted even where no event lists them.
+    compaction: Math.max(view.event_counts?.compaction ?? 0, merged.compactions),
+  };
+  const shown = filterEvents(merged.items, kind);
   const drawn = all ? shown : shown.slice(-FIRST_EVENTS);
   const total = CONTEXT_EVENT_KINDS.reduce((sum, key) => sum + (counts[key] ?? 0), 0);
   return (
-    <Section title={t('context.events')}>
-      <p className="mt-1 text-xs text-muted">{t('context.events.note')}</p>
+    <DashCard title={t('context.events')}>
+      <p className="text-xs text-muted">{t('context.events.note')}</p>
       <div
         role="group"
         aria-label={t('context.events.filter')}
@@ -108,12 +136,19 @@ export function ContextEvents({
               </button>
             </li>
           ) : null}
-          {drawn.map((event) => (
+          {drawn.map(({ event, compaction }) => (
             <EventRow
               key={`${event.kind}:${event.job_id}:${event.attempt_id ?? '-'}:${event.seq ?? '-'}:${event.source}`}
               event={event}
+              compaction={compaction}
+              point={
+                event.kind === 'compaction' && onSelect
+                  ? compactionRequest(view.requests ?? [], event)
+                  : null
+              }
               nowMs={nowMs}
               onOpenPoint={onOpenPoint}
+              onSelect={onSelect}
             />
           ))}
         </ol>
@@ -124,7 +159,7 @@ export function ContextEvents({
         </p>
       ) : null}
       <EventCoverage view={view} />
-    </Section>
+    </DashCard>
   );
 }
 
@@ -155,12 +190,19 @@ function Chip({
 
 function EventRow({
   event,
+  compaction,
+  point,
   nowMs,
   onOpenPoint,
+  onSelect,
 }: {
   event: ContextEventApi;
+  compaction: ContextCompactionApi | null;
+  /** The trend request a compaction selects. */
+  point: ContextPointApi | null;
   nowMs: number;
   onOpenPoint: OpenPoint;
+  onSelect?: (index: number) => void;
 }) {
   const { t, locale } = useLocale();
   const source = eventSourceKey(event.source);
@@ -174,7 +216,8 @@ function EventRow({
         aria-hidden="true"
         className={`mt-1 h-2 w-2 shrink-0 rounded-full ${KIND_MARK[event.kind]}`}
       />
-      <div className="min-w-0 flex-1">
+      {/* A narrow column keeps room for the sentence; its buttons wrap under it. */}
+      <div className="min-w-[12rem] flex-1">
         <p className="text-foreground">
           <span className="font-medium">{t(ONE_KIND[event.kind])}</span>
           <span className="text-muted">
@@ -185,7 +228,7 @@ function EventRow({
             {event.at ? ` · ${relativeTime(event.at, nowMs, locale)}` : ''}
           </span>
         </p>
-        {eventDetail(event, t).map((line) => (
+        {[...eventDetail(event, t), ...observedDetail(compaction, t)].map((line) => (
           <p key={line} className="break-words tabular-nums text-muted">
             {line}
           </p>
@@ -193,13 +236,25 @@ function EventRow({
         {event.superseded ? <p className="text-muted">{t('context.events.superseded')}</p> : null}
         {event.copied ? <p className="text-muted">{t('context.events.copied')}</p> : null}
       </div>
-      <button
-        type="button"
-        onClick={() => onOpenPoint({ jobId: event.job_id, turnNo: event.turn_no, eventId: step })}
-        className="ui-button ui-button-ghost min-h-9 shrink-0 px-2.5 text-xs [@media(pointer:coarse)]:min-h-11"
-      >
-        {t(step === null ? 'context.openTurn' : 'context.openStep')}
-      </button>
+      <div className="flex shrink-0 flex-wrap gap-1">
+        {point && onSelect ? (
+          <button
+            type="button"
+            onClick={() => onSelect(point.index)}
+            title={t('context.events.showInTrendTip', { index: point.index + 1 })}
+            className="ui-button ui-button-secondary min-h-9 px-2.5 text-xs [@media(pointer:coarse)]:min-h-11"
+          >
+            {t('context.events.showInTrend')}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => onOpenPoint({ jobId: event.job_id, turnNo: event.turn_no, eventId: step })}
+          className="ui-button ui-button-ghost min-h-9 px-2.5 text-xs [@media(pointer:coarse)]:min-h-11"
+        >
+          {t(step === null ? 'context.openTurn' : 'context.openStep')}
+        </button>
+      </div>
     </li>
   );
 }
@@ -212,7 +267,12 @@ export function eventDetail(event: ContextEventApi, t: Translator): string[] {
 }
 
 function compactionDetail(event: ContextEventApi, t: Translator): string[] {
-  const lines = event.label ? [t('context.events.trigger', { trigger: event.label })] : [];
+  const trigger = event.label ? TRIGGER[event.label] : undefined;
+  const lines = [
+    event.label
+      ? t('context.events.trigger', { trigger: trigger ? t(trigger) : event.label })
+      : t('context.trigger.unknown'),
+  ];
   const { before_tokens: before, after_tokens: after } = event;
   if (before !== null && after !== null) {
     lines.push(
@@ -223,6 +283,22 @@ function compactionDetail(event: ContextEventApi, t: Translator): string[] {
   } else {
     lines.push(t('context.events.noSizes'));
   }
+  return lines;
+}
+
+/** The requests observed around a compaction, and an outcome never recorded. */
+function observedDetail(compaction: ContextCompactionApi | null, t: Translator): string[] {
+  if (!compaction) return [];
+  const lines: string[] = [];
+  if (compaction.observed_before !== null || compaction.observed_after !== null) {
+    lines.push(
+      t('context.compactionObserved', {
+        before: compactCount(compaction.observed_before),
+        after: compactCount(compaction.observed_after),
+      }),
+    );
+  }
+  if (compaction.completed === null) lines.push(t('context.compactionUnknownOutcome'));
   return lines;
 }
 

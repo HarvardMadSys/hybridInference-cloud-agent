@@ -128,22 +128,120 @@ export function clampWindow(from: number, to: number, n: number): { from: number
   return { from: start, to: start + span - 1 };
 }
 
-/** The window halved (zoom in) or doubled (zoom out) about its middle, kept in range. */
-export function zoomWindow(
-  from: number,
-  to: number,
-  n: number,
-  zoomIn: boolean,
-): { from: number; to: number } {
-  const size = to - from + 1;
-  const next = zoomIn ? Math.max(MIN_WINDOW, Math.ceil(size / 2)) : Math.min(n, size * 2);
-  const middle = (from + to) / 2;
-  const start = Math.round(middle - (next - 1) / 2);
-  return clampWindow(start, start + next - 1, n);
+/**
+ * The column a selected request is shown at: its own column by step, or the
+ * turn column that contains it. A turn column stands for that turn's last
+ * request, so an earlier request of the turn is not an exact column index.
+ * -1 when the request is not in this chart.
+ */
+export function columnOf(
+  columns: TrendColumn[],
+  points: Pick<ContextPointApi, 'index' | 'turn_no'>[],
+  selected: number | null,
+): number {
+  if (selected === null) return -1;
+  const exact = columns.findIndex((column) => column.index === selected);
+  if (exact >= 0) return exact;
+  const point = points.find((candidate) => candidate.index === selected);
+  if (!point) return -1;
+  // Turn columns keep their turn's last request index, at or after every
+  // request of that turn.
+  return columns.findIndex((column) => column.turnNo === point.turn_no && column.index >= selected);
 }
 
-/** The fewest columns a zoomed window shows. */
-export const MIN_WINDOW = 4;
+/** The column an arrow key moves to, or -1 when there is nothing to move along. */
+export function stepColumn(selectedAt: number, n: number, step: number): number {
+  if (n === 0) return -1;
+  const from = selectedAt < 0 ? n - 1 : selectedAt;
+  return Math.max(0, Math.min(n - 1, from + step));
+}
+
+/** Where column `at` sits inside the shown window; -1 when it is outside it. */
+export function localOf(at: number, from: number, to: number): number {
+  return at >= from && at <= to ? at - from : -1;
+}
+
+/** The window moved, at its size, just far enough to show column `at`. */
+export function windowAround(
+  from: number,
+  to: number,
+  at: number,
+  n: number,
+): { from: number; to: number } {
+  const shown = clampWindow(from, to, n);
+  if (at < 0 || (at >= shown.from && at <= shown.to)) return shown;
+  const size = shown.to - shown.from;
+  const start = at < shown.from ? at : at - size;
+  return clampWindow(start, start + size, n);
+}
+
+/**
+ * The browsing range before Overview was turned on, kept as both column and
+ * turn bounds so it can be put back on the other granularity later.
+ */
+export interface SavedRange {
+  granularity: Granularity;
+  fromIndex: number;
+  toIndex: number;
+  fromTurn: number;
+  toTurn: number;
+}
+
+/** Remember the shown columns (inclusive) before the whole history replaces them. */
+export function savedRangeOf(
+  columns: TrendColumn[],
+  from: number,
+  to: number,
+  granularity: Granularity,
+): SavedRange | null {
+  if (columns.length === 0) return null;
+  const last = columns.length - 1;
+  const first = columns[Math.max(0, Math.min(from, last))];
+  const end = columns[Math.max(0, Math.min(to, last))];
+  if (!first || !end || first.index > end.index) return null;
+  return {
+    granularity,
+    fromIndex: first.index,
+    toIndex: end.index,
+    fromTurn: first.turnNo,
+    toTurn: end.turnNo,
+  };
+}
+
+/**
+ * Put a saved browsing range back once Overview is turned off. The same
+ * granularity restores the same columns; another granularity restores the
+ * turns the range covered, or the requests of those turns by step. Requests
+ * appended meanwhile stay outside it. A range that retained history no longer
+ * covers falls back to the latest columns.
+ */
+export function restoreBrowsingWindow(
+  saved: SavedRange | null,
+  columns: TrendColumn[],
+  granularity: Granularity,
+): { from: number; to: number } {
+  const n = columns.length;
+  if (!saved || n === 0) return initialWindow(n);
+  let from: number;
+  let to: number;
+  if (granularity === 'step' && saved.granularity === 'step') {
+    from = columns.findIndex((column) => column.index >= saved.fromIndex);
+    to = lastAtOrBefore(columns, (column) => column.index <= saved.toIndex);
+  } else {
+    // By turn a range covers whole turns, whichever granularity saved it.
+    from = columns.findIndex((column) => column.turnNo >= saved.fromTurn);
+    to = lastAtOrBefore(columns, (column) => column.turnNo <= saved.toTurn);
+  }
+  // No overlap with the retained history (every column is before or after the
+  // saved range, or there are no columns at all): show the latest columns.
+  if (from < 0 || to < 0 || from > to) return initialWindow(n);
+  return clampWindow(from, to, n);
+}
+
+function lastAtOrBefore(columns: TrendColumn[], fits: (column: TrendColumn) => boolean): number {
+  for (let i = columns.length - 1; i >= 0; i -= 1) if (fits(columns[i])) return i;
+  return -1;
+}
 
 /** Stacked areas: per category, the polygon points of each unbroken run. */
 export function stackedRuns(

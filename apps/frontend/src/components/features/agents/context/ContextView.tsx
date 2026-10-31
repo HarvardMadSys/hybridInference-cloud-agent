@@ -1,34 +1,27 @@
 'use client';
 
-// A conversation's Context view: how large the context the model was given
-// was at every request, how it moved between turns, when the CLI compacted
-// it, what entered, left or changed it, and what the stored text is estimated
-// to weigh. Each request, turn, compaction and event opens its step in the
-// trajectory, or its turn when the step has not been read into this page.
+// A conversation's Context view, top to bottom: a line of counts, the
+// conversation's tokens and time, the selected request's window and the trend
+// of every request beside the browser of what it carried, the context events
+// (compactions among them), what the agent read and wrote, and the commands it
+// ran. One selection links the trend, the browser and the events; each request,
+// compaction and event opens its step in the trajectory, or its turn when the
+// step has not been read into this page.
 //
 // It is the conversation's main Context tab, beside Chat and Trajectory, and
 // what `/context` opens; both use the page's one read of the data (see
 // `threadContextData`).
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { AgentJob } from '../types';
 import type { ThreadContextApi } from '@/lib/api/agents';
 import { CommandExecutions } from './commands/CommandExecutions';
 import { ContextEvents } from './ContextEvents';
+import { ContextOverview } from './ContextOverview';
 import { FileActivity } from './FileActivity';
-import { ContextGrowthChart } from './ContextGrowthChart';
 import { ContextDashboard } from './dashboard/ContextDashboard';
-import {
-  Compactions,
-  ContextSummary,
-  LargestChanges,
-  PointDetail,
-  Section,
-  Turns,
-  type OpenPoint,
-  type OpenTurn,
-} from './ContextSections';
+import type { OpenPoint, OpenTurn } from './ContextSections';
 import {
   ThreadContextProvider,
   useHasThreadContextStore,
@@ -93,9 +86,9 @@ function stateCode(state: string | null | undefined): number {
 }
 
 function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
-  const { t } = useLocale();
   const { key, view, missing, error, retry } = useThreadContextData(true);
   const [selection, setSelection] = useState<{ key: string; index: number } | null>(null);
+  const trendRef = useRef<HTMLDivElement>(null);
 
   if (!view) return <ContextState missing={missing} error={error} retry={retry} />;
   const nowMs = Date.parse(view.generated_at);
@@ -105,8 +98,14 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
   const setSelected = (index: number) => setSelection({ key, index });
   const point =
     points.find((candidate) => candidate.index === selected) ?? points[points.length - 1] ?? null;
+  // An event picked far below the trend brings the trend into view.
+  const showInTrend = (index: number) => {
+    setSelected(index);
+    trendRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  };
   return (
-    <div className="mx-auto w-full max-w-6xl pb-8">
+    <div className="mx-auto grid w-full max-w-6xl gap-3 pb-8">
+      <ContextOverview view={view} />
       <ContextDashboard
         jobId={job.id}
         conversationKey={key}
@@ -116,13 +115,15 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         onSelect={setSelected}
         onOpenPoint={onOpenPoint}
         onOpenTurn={onOpenTurn}
+        trendRef={trendRef}
       />
-      {point ? (
-        <Section title={t('dashboard.selected')}>
-          <PointDetail point={point} onOpenPoint={onOpenPoint} onOpenTurn={onOpenTurn} />
-        </Section>
-      ) : null}
-      <ContextEvents key={key} view={view} nowMs={nowMs} onOpenPoint={onOpenPoint} />
+      <ContextEvents
+        key={key}
+        view={view}
+        nowMs={nowMs}
+        onOpenPoint={onOpenPoint}
+        onSelect={showInTrend}
+      />
       <FileActivity
         key={`files:${key}`}
         jobId={job.id}
@@ -136,56 +137,14 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         active={view.latest?.turn_active === true}
       />
       <CommandExecutions
-        key={key}
+        key={`commands:${key}`}
         jobId={job.id}
         conversationKey={key}
         active={Boolean(view.latest?.turn_active)}
         onOpenPoint={onOpenPoint}
         onOpenTurn={onOpenTurn}
       />
-      <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />
-      <LargestChanges changes={view.largest_changes} points={points} onSelect={setSelected} />
-      <ReferenceSections
-        view={view}
-        nowMs={nowMs}
-        selected={point?.index ?? null}
-        onSelect={setSelected}
-        onOpenTurn={onOpenTurn}
-      />
     </div>
-  );
-}
-
-/** The reference sections below the dashboard: totals, the raw chart and turns. */
-function ReferenceSections({
-  view,
-  nowMs,
-  selected,
-  onSelect,
-  onOpenTurn,
-}: {
-  view: ThreadContextApi;
-  nowMs: number;
-  selected: number | null;
-  onSelect: (index: number) => void;
-  onOpenTurn: OpenTurn;
-}) {
-  const { t } = useLocale();
-  return (
-    <>
-      <ContextSummary view={view} nowMs={nowMs} />
-      {view.requests.length > 0 ? (
-        <Section title={t('dashboard.raw')}>
-          <ContextGrowthChart
-            points={view.requests}
-            turns={view.turns}
-            selected={selected}
-            onSelect={onSelect}
-          />
-        </Section>
-      ) : null}
-      <Turns turns={view.turns} onOpenTurn={onOpenTurn} />
-    </>
   );
 }
 

@@ -20,7 +20,12 @@ import {
   maxima,
   stackedRuns,
   trendColumns,
-  zoomWindow,
+  columnOf,
+  localOf,
+  stepColumn,
+  windowAround,
+  restoreBrowsingWindow,
+  savedRangeOf,
 } from './trendModel';
 
 function point(index: number, overrides: Partial<ContextPointApi> = {}): ContextPointApi {
@@ -165,11 +170,95 @@ describe('trend model', () => {
     expect(clampWindow(-3, 1, 10)).toEqual({ from: 0, to: 4 });
   });
 
-  it('zooms about the middle, never below four columns or past the history', () => {
-    expect(zoomWindow(0, 34, 35, true)).toEqual({ from: 9, to: 26 });
-    expect(zoomWindow(9, 26, 35, false)).toEqual({ from: 0, to: 34 });
-    expect(zoomWindow(30, 33, 35, true)).toEqual({ from: 30, to: 33 });
-    expect(zoomWindow(28, 34, 35, false)).toEqual({ from: 21, to: 34 });
+  it('remembers the browsing range, and puts it back after the whole history', () => {
+    const steps = trendColumns(
+      Array.from({ length: 130 }, (_, i) => point(i, { turn_no: 1 + Math.floor(i / 10) })),
+      'step',
+      new Map(),
+    );
+    const saves = savedRangeOf(steps, 10, 129, 'step')!;
+    expect(saves).toMatchObject({ fromIndex: 10, toIndex: 129, fromTurn: 2, toTurn: 13 });
+    expect(restoreBrowsingWindow(saves, steps, 'step')).toEqual({ from: 10, to: 129 });
+    // Requests appended meanwhile stay outside the restored range.
+    const grewPoints = Array.from({ length: 135 }, (_, i) =>
+      point(i, { turn_no: 1 + Math.floor(i / 10) }),
+    );
+    const grown = trendColumns(grewPoints, 'step', new Map());
+    expect(restoreBrowsingWindow(saves, grown, 'step')).toEqual({ from: 10, to: 129 });
+    // A different granularity restores the turns the range covered.
+    const turns = trendColumns(grewPoints, 'turn', new Map());
+    expect(restoreBrowsingWindow(saves, turns, 'turn')).toEqual({ from: 1, to: 12 });
+  });
+
+  it('falls back to the latest columns when the saved range is gone', () => {
+    const steps = trendColumns(
+      Array.from({ length: 200 }, (_, i) => point(i, { turn_no: 1 + i })),
+      'step',
+      new Map(),
+    );
+    expect(restoreBrowsingWindow(null, steps, 'step')).toEqual(initialWindow(200));
+    expect(restoreBrowsingWindow(savedRangeOf(steps, 0, 3, 'step'), [], 'step')).toEqual({
+      from: 0,
+      to: 0,
+    });
+    const kept = savedRangeOf(steps, 2, 4, 'step')!;
+    // 195 retained columns, all after the saved range: the latest 120, not all.
+    expect(restoreBrowsingWindow(kept, steps.slice(5), 'step')).toEqual(initialWindow(195));
+    // Retained history entirely before it, and partially overlapping it.
+    expect(restoreBrowsingWindow(kept, steps.slice(0, 2), 'step')).toEqual(initialWindow(2));
+    expect(restoreBrowsingWindow(kept, steps.slice(3), 'step')).toEqual({ from: 0, to: 1 });
+  });
+
+  it('resolves a selected request to its own column, or its containing turn column', () => {
+    const points = [
+      { index: 0, turn_no: 1 },
+      { index: 1, turn_no: 1 },
+      { index: 2, turn_no: 2 },
+      { index: 3, turn_no: 2 },
+    ] as ContextPointApi[];
+    const steps = trendColumns(points, 'step', new Map());
+    const turns = trendColumns(points, 'turn', new Map());
+    // Step: the exact request. Turn: the column of the turn containing it,
+    // whose own index is that turn's last request.
+    expect(columnOf(steps, points, 1)).toBe(1);
+    expect(columnOf(turns, points, 1)).toBe(0);
+    expect(columnOf(turns, points, 3)).toBe(1);
+    expect(columnOf(turns, points, 2)).toBe(1);
+    // Not in this chart, and nothing selected.
+    expect(columnOf(turns, points, 9)).toBe(-1);
+    expect(columnOf(turns, points, null)).toBe(-1);
+  });
+
+  it('moves one column with the arrow keys, and nowhere on an empty chart', () => {
+    // From a selection, bounded at both ends.
+    expect(stepColumn(3, 10, 1)).toBe(4);
+    expect(stepColumn(3, 10, -1)).toBe(2);
+    expect(stepColumn(0, 10, -1)).toBe(0);
+    expect(stepColumn(9, 10, 1)).toBe(9);
+    // No selection starts from the latest column.
+    expect(stepColumn(-1, 10, 1)).toBe(9);
+    expect(stepColumn(-1, 10, -1)).toBe(8);
+    // Nothing drawn: no column to move to.
+    expect(stepColumn(-1, 0, 1)).toBe(-1);
+  });
+
+  it('locates the shown column inside the window, or -1 outside it', () => {
+    expect(localOf(12, 10, 20)).toBe(2);
+    expect(localOf(10, 10, 20)).toBe(0);
+    expect(localOf(9, 10, 20)).toBe(-1);
+    expect(localOf(21, 10, 20)).toBe(-1);
+    expect(localOf(-1, 10, 20)).toBe(-1);
+  });
+
+  it('moves the window just far enough to show a selection made elsewhere', () => {
+    // Already shown: unchanged.
+    expect(windowAround(10, 19, 15, 100)).toEqual({ from: 10, to: 19 });
+    // Before it: the selection becomes its first column; after it: its last.
+    expect(windowAround(10, 19, 3, 100)).toEqual({ from: 3, to: 12 });
+    expect(windowAround(10, 19, 40, 100)).toEqual({ from: 31, to: 40 });
+    // Never past either end, and a missing selection moves nothing.
+    expect(windowAround(10, 19, 99, 100)).toEqual({ from: 90, to: 99 });
+    expect(windowAround(10, 19, -1, 100)).toEqual({ from: 10, to: 19 });
   });
 
   it('breaks an area where a request has no recorded categories', () => {
