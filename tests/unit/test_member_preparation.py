@@ -234,7 +234,7 @@ def test_each_step_sees_the_environment_its_own_exec_gave_it(tmp_path):
     manager = _LocalExec(exec_environment)
     preparation = _preparation(manager)
     seen = tmp_path / "seen"
-    _queue(preparation, _step("true"), _step(f"env > {seen}"))
+    _queue(preparation, _step("true"), _step(f"exec env > {seen}"))
 
     preparation.run()
 
@@ -313,6 +313,52 @@ def test_kata_executes_member_steps_individually(tmp_path):
     assert len(manager.calls) == 2
     assert all(call[0][0] == "/bin/sh" for call in manager.calls)
 
+
+
+def test_kata_reap_failure_stops_all_following_steps(tmp_path):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    after = tmp_path / "after"
+    reap = _step(
+        "read line; test \"$line\" = baseline || exit 12; exit 9",
+        failure="reap",
+        input_bytes=b"baseline\n",
+        reaps=True,
+    )
+    _queue(preparation, reap, _step(f"touch {after}"))
+
+    with pytest.raises(SandboxError, match="^reap:"):
+        preparation.run()
+
+    assert manager.reaper_ensured == 1
+    assert len(manager.calls) == 1
+    assert manager.calls[0][1]["input_bytes"] == b"baseline\n"
+    assert not after.exists()
+
+
+def test_kata_soft_failure_continues_and_retry_preserves_order(tmp_path, capsys):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    secured = tmp_path / "secured"
+    after = tmp_path / "after"
+    _queue(
+        preparation,
+        _step("echo hooks-error >&2; exit 2", soft="hooks not installed"),
+        _step(
+            f"test -f {secured} || exit 75",
+            retry_status=75,
+            before_retry=lambda: secured.touch(),
+        ),
+        _step(f"touch {after}"),
+    )
+
+    preparation.run()
+
+    assert "hooks not installed: step failed: hooks-error" in capsys.readouterr().err
+    assert secured.exists() and after.exists()
+    assert len(manager.calls) == 4
 
 def test_successful_runner_with_missing_reports_does_not_blame_next_step():
     def truncated(_spec, argv, **kwargs):
