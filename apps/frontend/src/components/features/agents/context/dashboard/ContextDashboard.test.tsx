@@ -565,10 +565,180 @@ describe('ContextDashboard', () => {
     show({ data: { ...view(), requests: [], latest: null, peak: null } });
     const empty = card('Context Trend');
     expect(within(empty).getByRole('group', { name: /Context of 0 columns/ })).toBeInTheDocument();
+    expect(within(empty).getByRole('button', { name: 'Overview' })).toBeDisabled();
     fireEvent.keyDown(within(empty).getByRole('group', { name: /Context of 0 columns/ }), {
       key: 'ArrowLeft',
     });
     expect(screen.queryByRole('group', { name: 'Request details' })).not.toBeInTheDocument();
+  });
+
+  it('replaces the browsing window with the whole conversation, and puts the window back', () => {
+    const data = view();
+    data.requests = Array.from({ length: 130 }, (_, i) =>
+      point(i, {
+        turn_no: 1 + Math.floor(i / 10),
+        event_id: 100 + i,
+        usage_id: null,
+      }),
+    );
+    data.latest = { ...data.latest!, point: data.requests[129] };
+    show({ data });
+    const trend = card('Context Trend');
+    // The old miniature navigator and its buttons are gone before Overview is used.
+    expect(within(trend).queryByRole('button', { name: 'Earlier' })).not.toBeInTheDocument();
+    expect(within(trend).queryByRole('button', { name: 'Later' })).not.toBeInTheDocument();
+    expect(within(trend).queryByRole('button', { name: 'All' })).not.toBeInTheDocument();
+    expect(within(trend).getByText('Showing 11–130 of 130')).toBeInTheDocument();
+    const overview = within(trend).getByRole('button', { name: 'Overview' });
+    expect(overview).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(overview);
+    expect(overview).toHaveAttribute('aria-pressed', 'true');
+    expect(within(trend).getByText('Showing 1–130 of 130')).toBeInTheDocument();
+    // The whole conversation is drawn, but the request count is unchanged: no read.
+    expect(
+      within(trend).getByRole('group', { name: /Context of 130 columns/ }),
+    ).toBeInTheDocument();
+    expect(within(trend).getByRole('button', { name: 'DNA' })).toBeDisabled();
+    expect(within(trend).getByRole('button', { name: 'Adaptive' })).toBeDisabled();
+    // Off restores the range that was being browsed, not the latest one.
+    fireEvent.click(overview);
+    expect(overview).toHaveAttribute('aria-pressed', 'false');
+    expect(within(trend).getByText('Showing 11–130 of 130')).toBeInTheDocument();
+  });
+
+  it('leaves DNA for Overview without reading more items, and keeps the range', async () => {
+    show();
+    const trend = card('Context Trend');
+    fireEvent.click(within(trend).getByRole('button', { name: 'DNA' }));
+    await vi.waitFor(() =>
+      expect(getThreadContextDna).toHaveBeenCalledWith('j', 0, 3, expect.anything()),
+    );
+    expect(getThreadContextDna).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    expect(within(trend).getByRole('button', { name: 'DNA' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    expect(within(trend).getByRole('button', { name: 'DNA' })).toBeDisabled();
+    // Toggling the view read no more items.
+    await act(async () => undefined);
+    expect(getThreadContextDna).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    expect(within(trend).getByText('Showing 1–4 of 4')).toBeInTheDocument();
+  });
+
+  it('keeps the saved range when requests append while Overview is on', () => {
+    const first = view();
+    first.requests = Array.from({ length: 130 }, (_, i) =>
+      point(i, { turn_no: 1 + Math.floor(i / 10), event_id: 100 + i, usage_id: null }),
+    );
+    first.latest = { ...first.latest!, point: first.requests[129] };
+    const grown = view();
+    grown.requests = Array.from({ length: 135 }, (_, i) =>
+      point(i, { turn_no: 1 + Math.floor(i / 10), event_id: 100 + i, usage_id: null }),
+    );
+    grown.latest = { ...grown.latest!, point: grown.requests[134] };
+    const { rerender } = render(
+      <LocaleProvider>
+        <Harness data={first} />
+      </LocaleProvider>,
+    );
+    const trend = card('Context Trend');
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    expect(within(trend).getByText('Showing 1–130 of 130')).toBeInTheDocument();
+    rerender(
+      <LocaleProvider>
+        <Harness data={grown} />
+      </LocaleProvider>,
+    );
+    expect(within(trend).getByText('Showing 1–135 of 135')).toBeInTheDocument();
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    // The saved browsing range stays where it was; the new requests stay outside it.
+    expect(within(trend).getByText('Showing 11–130 of 135')).toBeInTheDocument();
+  });
+
+  it('leaves Overview when the conversation changes', () => {
+    const { rerender } = show();
+    const trend = card('Context Trend');
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    expect(within(trend).getByRole('button', { name: 'Overview' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    rerender(
+      <LocaleProvider>
+        <Harness conversationKey="other" />
+      </LocaleProvider>,
+    );
+    expect(within(card('Context Trend')).getByRole('button', { name: 'Overview' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  it('restores the browsing turns after a granularity change during Overview', () => {
+    const data = view();
+    // 130 turns of two requests: the default step window is 141–260, turns 71–130.
+    data.requests = Array.from({ length: 260 }, (_, i) =>
+      point(i, {
+        turn_no: 1 + Math.floor(i / 2),
+        event_id: 100 + i,
+        usage_id: null,
+      }),
+    );
+    data.latest = { ...data.latest!, point: data.requests[259] };
+    show({ data });
+    const trend = card('Context Trend');
+    expect(within(trend).getByText('Showing 141–260 of 260')).toBeInTheDocument();
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    fireEvent.click(within(trend).getByRole('button', { name: 'Turn' }));
+    expect(within(trend).getByText('Showing 1–130 of 130')).toBeInTheDocument();
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    expect(within(trend).getByText('Showing 71–130 of 130')).toBeInTheDocument();
+  });
+
+  it('restores the range around a request selected outside the trend while Overview is on', async () => {
+    const data = view();
+    data.requests = Array.from({ length: 130 }, (_, i) =>
+      point(i, { turn_no: 1 + Math.floor(i / 10), event_id: 100 + i, usage_id: null }),
+    );
+    data.latest = { ...data.latest!, point: data.requests[129] };
+    function Jump() {
+      const [selected, setSelected] = useState<number | null>(null);
+      return (
+        <>
+          <button type="button" onClick={() => setSelected(2)}>
+            jump
+          </button>
+          <ContextDashboard
+            jobId="j"
+            conversationKey="k"
+            view={data}
+            nowMs={0}
+            selected={selected}
+            onSelect={setSelected}
+            onOpenPoint={vi.fn()}
+            onOpenTurn={vi.fn()}
+          />
+        </>
+      );
+    }
+    render(
+      <LocaleProvider>
+        <Jump />
+      </LocaleProvider>,
+    );
+    const trend = card('Context Trend');
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    fireEvent.click(screen.getByRole('button', { name: 'jump' }));
+    // The whole conversation still shows; the saved range now contains request 3.
+    expect(within(trend).getByText('Showing 1–130 of 130')).toBeInTheDocument();
+    expect(within(trend).getByText('Request 3 · turn 1 · 3,000')).toBeInTheDocument();
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    expect(within(trend).getByText('Showing 3–122 of 130')).toBeInTheDocument();
+    expect(
+      await within(card('Context Browser')).findByText('Request 3 · turn 1'),
+    ).toBeInTheDocument();
   });
 
   it('answers in Chinese', async () => {

@@ -6,7 +6,8 @@
 // (Apache-2.0, commit 32982aa6aa2c70fbda6b81281de98a72ea625001): Step/Turn,
 // Total/Delta, Adaptive (the y-scale fits the visible window), Duration (a
 // curve over the columns), DNA (each request as the items it carried, keyed
-// by identity) and an overview with a draggable window for long histories.
+// by identity) and an Overview toggle that fits the whole conversation in the
+// plot while keeping the browsing window for when it is turned off.
 //
 // Two kinds of number are drawn and labelled apart: the stacked areas are the
 // recorded content before each request (estimate); the line on top is the
@@ -33,6 +34,9 @@ import {
   initialWindow,
   lineRuns,
   maxima,
+  restoreBrowsingWindow,
+  savedRangeOf,
+  type SavedRange,
   stackedRuns,
   trendColumns,
   type DnaItems,
@@ -40,15 +44,12 @@ import {
   type Maxima,
   type Mode,
   type TrendColumn,
-  MIN_WINDOW,
   windowAround,
-  zoomWindow,
 } from './trendModel';
 import { DNA_MAX_COLUMNS, FOLDED_KEY, useDnaBands } from './useDnaBands';
 
 const H = 168;
 const PAD_TOP = 8;
-const OVERVIEW_H = 30;
 
 type Overlay = 'none' | 'duration';
 type View = 'areas' | 'dna';
@@ -73,6 +74,97 @@ function useWidth(ref: React.RefObject<HTMLDivElement>): number {
     return () => observer.disconnect();
   }, [ref]);
   return width;
+}
+
+/**
+ * The browsing window, and Overview as the whole conversation shown over it.
+ * Overview remembers the columns that were being browsed and puts them back,
+ * translated to the current granularity and to a request picked meanwhile.
+ * Appending requests, changing the conversation and changing granularity each
+ * have one consistent effect on what is saved.
+ */
+function useWindowView({
+  columns,
+  points,
+  selected,
+  conversationKey,
+  granularity,
+}: {
+  columns: TrendColumn[];
+  points: ContextPointApi[];
+  selected: number | null;
+  conversationKey: string;
+  granularity: Granularity;
+}) {
+  const n = columns.length;
+  const [win, setWin] = useState(() => initialWindow(n));
+  const [overview, setOverview] = useState(false);
+  // Effects that save or restore the window read these refs, so toggling
+  // Overview itself never looks like an append, a pick or a granularity change.
+  const overviewRef = useRef(overview);
+  overviewRef.current = overview;
+  const granularityRef = useRef(granularity);
+  granularityRef.current = granularity;
+  const saved = useRef<SavedRange | null>(null);
+  // A new conversation starts over, with no overview borrowed from the last one.
+  useEffect(() => {
+    saved.current = null;
+    setWin(initialWindow(columns.length));
+    setOverview(false);
+    // `columns.length` is deliberately not a dependency: appending requests in a
+    // conversation must not discard the window saved before Overview was on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationKey]);
+  // New requests show the latest, unless Overview is holding the whole history.
+  useEffect(() => {
+    if (!overviewRef.current) setWin(initialWindow(n));
+  }, [n]);
+  // A new granularity starts from the latest columns of that basis.
+  useEffect(() => {
+    setWin(initialWindow(n));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [granularity]);
+  // A request picked elsewhere (the browser, an event, the keys) is brought into
+  // view. By turn a column stands for the turn's last request, so a request
+  // inside that turn resolves to its containing column; the exact request
+  // stays what the browser and the strip show. While Overview is on the whole
+  // conversation is shown, so only the saved range moves, just as far as that
+  // request would have needed: turning Overview off still shows it.
+  const selectedAt = columnOf(columns, points, selected);
+  // A request appended to the conversation becomes the latest default
+  // selection; that is not an outside pick and leaves the saved range alone.
+  const lastSelected = useRef(selectedAt);
+  const lastCount = useRef(n);
+  useEffect(() => {
+    const latestAdvanced =
+      n > lastCount.current &&
+      selectedAt === n - 1 &&
+      lastSelected.current === lastCount.current - 1;
+    lastSelected.current = selectedAt;
+    lastCount.current = n;
+    if (overviewRef.current) {
+      if (latestAdvanced || selectedAt < 0) return;
+      const current = restoreBrowsingWindow(saved.current, columns, granularityRef.current);
+      const around = windowAround(current.from, current.to, selectedAt, n);
+      if (around.from !== current.from || around.to !== current.to)
+        saved.current = savedRangeOf(columns, around.from, around.to, granularityRef.current);
+      return;
+    }
+    setWin((current) => windowAround(current.from, current.to, selectedAt, n));
+  }, [columns, selectedAt, n]);
+  const browsing = clampWindow(win.from, win.to, n);
+  const shown = overview ? { from: 0, to: Math.max(0, n - 1) } : browsing;
+  const toggleOverview = (next: boolean) => {
+    if (next === overviewRef.current) return;
+    if (next) {
+      saved.current = savedRangeOf(columns, browsing.from, browsing.to, granularity);
+    } else {
+      setWin(restoreBrowsingWindow(saved.current, columns, granularity));
+      saved.current = null;
+    }
+    setOverview(next);
+  };
+  return { ...shown, overview, toggleOverview, selectedAt };
 }
 
 export function ContextTrend({
@@ -103,7 +195,6 @@ export function ContextTrend({
     overlay: 'none',
     view: 'areas',
   });
-  const update = (patch: Partial<TrendState>) => setState((current) => ({ ...current, ...patch }));
   const [hover, setHover] = useState<number | null>(null);
   const plotRef = useRef<HTMLDivElement>(null);
   const width = useWidth(plotRef);
@@ -112,21 +203,31 @@ export function ContextTrend({
     return state.mode === 'delta' ? deltaColumns(base) : base;
   }, [points, state.granularity, latency, state.mode]);
   const n = columns.length;
-  const [win, setWin] = useState(() => initialWindow(n));
-  // A new conversation, a new granularity or new requests: show the latest.
-  useEffect(() => setWin(initialWindow(n)), [n, conversationKey, state.granularity]);
-  // A request picked elsewhere (the browser, an event, the keys) is brought into
-  // view. By turn a column stands for the turn's last request, so a request
-  // inside that turn resolves to its containing column; the exact request
-  // stays what the browser and the strip show.
-  const selectedAt = columnOf(columns, points, selected);
-  useEffect(() => {
-    setWin((current) => windowAround(current.from, current.to, selectedAt, n));
-  }, [selectedAt, n]);
-  const { from, to } = clampWindow(win.from, win.to, n);
+  const { from, to, overview, toggleOverview, selectedAt } = useWindowView({
+    columns,
+    points,
+    selected,
+    conversationKey,
+    granularity: state.granularity,
+  });
+  // These two only make sense over a window, so choosing either leaves Overview.
+  const update = (patch: Partial<TrendState>) => {
+    setState((current) => ({ ...current, ...patch }));
+    if (patch.view === 'dna' || patch.adaptive === true) toggleOverview(false);
+  };
+  // The whole conversation replaces the windowed plot, so the window-only view
+  // and scale are left first (as dsh-context's overview does); turning Overview
+  // off restores the browsing range, not those two modes.
+  const showOverview = (next: boolean) => {
+    if (next) setState((current) => ({ ...current, view: 'areas', adaptive: false }));
+    toggleOverview(next);
+  };
   const visible = columns.slice(from, to + 1);
   const scale = state.adaptive ? maxima(columns, from, to) : maxima(columns);
-  const dnaAllowed = state.granularity === 'step' && visible.length <= DNA_MAX_COLUMNS;
+  // DNA draws single requests inside the browsing window. Overview fits every
+  // request in the plot, so it stays off there rather than drawing thousands of
+  // bands or reading more of them.
+  const dnaAllowed = !overview && state.granularity === 'step' && visible.length <= DNA_MAX_COLUMNS;
   const dnaOn = state.view === 'dna' && dnaAllowed;
   const dna = useDnaBands(jobId, conversationKey, dnaOn ? visible.map((c) => c.index) : []);
   const selectedLocal = localOf(selectedAt, from, to);
@@ -145,6 +246,9 @@ export function ContextTrend({
       update={update}
       dnaAllowed={dnaAllowed}
       hasDuration={scale.durationMs > 0}
+      overview={overview}
+      hasPoints={n > 0}
+      onOverview={showOverview}
     />
   );
   return (
@@ -184,6 +288,15 @@ export function ContextTrend({
           />
         ) : null}
       </div>
+      {n > 0 ? (
+        <p className="mt-1 text-[11px] text-muted">
+          {t('dashboard.trend.window', {
+            from: (from + 1).toLocaleString(locale),
+            to: (to + 1).toLocaleString(locale),
+            count: n.toLocaleString(locale),
+          })}
+        </p>
+      ) : null}
       <Legend
         keys={keys}
         missing={visible.filter((c) => !c.cats).length}
@@ -192,20 +305,6 @@ export function ContextTrend({
         folded={dnaOn && [...dna.bands.values()].some((items) => items[0]?.[0] === FOLDED_KEY)}
         overlay={state.overlay}
       />
-      {n > 0 ? (
-        <Overview
-          columns={columns.map((c) => c.observed)}
-          from={from}
-          to={to}
-          onWindow={(a, b) => setWin(clampWindow(a, b, n))}
-          onZoom={(zoomIn) => setWin(zoomWindow(from, to, n, zoomIn))}
-          label={t('dashboard.trend.window', {
-            from: (from + 1).toLocaleString(locale),
-            to: (to + 1).toLocaleString(locale),
-            count: n.toLocaleString(locale),
-          })}
-        />
-      ) : null}
       <p className="mt-1 text-[11px] text-muted">{t('dashboard.trend.note')}</p>
       {footer}
     </DashCard>
@@ -217,19 +316,28 @@ function TrendControls({
   update,
   dnaAllowed,
   hasDuration,
+  overview,
+  hasPoints,
+  onOverview,
 }: {
   state: TrendState;
   update: (patch: Partial<TrendState>) => void;
   dnaAllowed: boolean;
   hasDuration: boolean;
+  overview: boolean;
+  hasPoints: boolean;
+  onOverview: (overview: boolean) => void;
 }) {
   const { t } = useLocale();
   const dnaTip = dnaAllowed
     ? t('dashboard.trend.dnaTip')
-    : t('dashboard.trend.dnaDisabled', { max: DNA_MAX_COLUMNS });
+    : overview
+      ? t('dashboard.trend.overviewTip')
+      : t('dashboard.trend.dnaDisabled', { max: DNA_MAX_COLUMNS });
   const adaptiveClass = state.adaptive
     ? 'bg-accent-subtle font-semibold text-accent'
     : 'bg-surface-muted text-muted';
+  const buttonClass = `ui-focus-ring rounded-md px-2 py-0.5 text-[11px] [@media(pointer:coarse)]:min-h-11 ${adaptiveClass}`;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Toggle
@@ -275,10 +383,21 @@ function TrendControls({
       />
       <button
         type="button"
+        aria-pressed={overview}
+        disabled={!hasPoints}
+        onClick={() => onOverview(!overview)}
+        title={t('dashboard.trend.overviewTip')}
+        className={`${buttonClass} disabled:cursor-not-allowed disabled:opacity-50`}
+      >
+        {t('dashboard.trend.overview')}
+      </button>
+      <button
+        type="button"
         aria-pressed={state.adaptive}
+        disabled={overview}
         onClick={() => update({ adaptive: !state.adaptive })}
-        title={t('dashboard.trend.adaptiveTip')}
-        className={`ui-focus-ring rounded-md px-2 py-0.5 text-[11px] [@media(pointer:coarse)]:min-h-11 ${adaptiveClass}`}
+        title={overview ? t('dashboard.trend.overviewTip') : t('dashboard.trend.adaptiveTip')}
+        className={`${buttonClass} disabled:cursor-not-allowed disabled:opacity-50`}
       >
         {t('dashboard.trend.adaptive')}
       </button>
@@ -586,136 +705,4 @@ function dnaStacks(
     { items: change.up, dir: 1 },
     { items: change.down, dir: -1 },
   ];
-}
-
-const OVERVIEW_BUTTON =
-  'ui-focus-ring rounded px-1.5 hover:text-foreground disabled:opacity-40 [@media(pointer:coarse)]:min-h-11';
-
-/** The whole history in miniature, with the shown window draggable over it. */
-function Overview({
-  columns,
-  from,
-  to,
-  onWindow,
-  onZoom,
-  label,
-}: {
-  columns: number[];
-  from: number;
-  to: number;
-  onWindow: (from: number, to: number) => void;
-  onZoom: (zoomIn: boolean) => void;
-  label: string;
-}) {
-  const { t } = useLocale();
-  const ref = useRef<HTMLDivElement>(null);
-  const drag = useRef<{ start: number; from: number } | null>(null);
-  const n = columns.length;
-  if (n < 2) return null;
-  const max = Math.max(1, ...columns.map((v) => Math.abs(v)));
-  const path = columns
-    .map(
-      (v, i) =>
-        `${((i / (n - 1)) * 100).toFixed(3)},${(OVERVIEW_H - (Math.abs(v) / max) * OVERVIEW_H).toFixed(2)}`,
-    )
-    .join(' ');
-  const left = (from / (n - 1)) * 100;
-  const right = (to / (n - 1)) * 100;
-  const size = to - from;
-  const toIndex = (clientX: number) => {
-    const rect = ref.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return 0;
-    return Math.round(((clientX - rect.left) / rect.width) * (n - 1));
-  };
-  return (
-    <div className="mt-2">
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted">
-        <span>{label}</span>
-        <span className="flex gap-1">
-          <button
-            type="button"
-            className="ui-focus-ring rounded px-1.5 hover:text-foreground [@media(pointer:coarse)]:min-h-11"
-            onClick={() =>
-              onWindow(
-                from - Math.max(1, Math.floor(size / 2)),
-                to - Math.max(1, Math.floor(size / 2)),
-              )
-            }
-          >
-            ‹ {t('dashboard.trend.earlier')}
-          </button>
-          <button
-            type="button"
-            aria-label={t('dashboard.trend.zoomIn')}
-            disabled={size + 1 <= MIN_WINDOW}
-            className={OVERVIEW_BUTTON}
-            onClick={() => onZoom(true)}
-          >
-            +
-          </button>
-          <button
-            type="button"
-            aria-label={t('dashboard.trend.zoomOut')}
-            disabled={size + 1 >= n}
-            className={OVERVIEW_BUTTON}
-            onClick={() => onZoom(false)}
-          >
-            −
-          </button>
-          <button type="button" className={OVERVIEW_BUTTON} onClick={() => onWindow(0, n - 1)}>
-            {t('dashboard.trend.all')}
-          </button>
-          <button
-            type="button"
-            className="ui-focus-ring rounded px-1.5 hover:text-foreground [@media(pointer:coarse)]:min-h-11"
-            onClick={() =>
-              onWindow(
-                from + Math.max(1, Math.floor(size / 2)),
-                to + Math.max(1, Math.floor(size / 2)),
-              )
-            }
-          >
-            {t('dashboard.trend.later')} ›
-          </button>
-        </span>
-      </div>
-      <div
-        ref={ref}
-        className="relative mt-0.5 h-[30px] touch-none select-none rounded bg-surface-muted"
-        onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          const at = toIndex(event.clientX);
-          if (at < from || at > to) onWindow(at - Math.floor(size / 2), at + Math.ceil(size / 2));
-          drag.current = {
-            start: at,
-            from: at < from || at > to ? at - Math.floor(size / 2) : from,
-          };
-        }}
-        onPointerMove={(event) => {
-          if (!drag.current) return;
-          const moved = toIndex(event.clientX) - drag.current.start;
-          onWindow(drag.current.from + moved, drag.current.from + moved + size);
-        }}
-        onPointerUp={() => {
-          drag.current = null;
-        }}
-      >
-        <svg
-          viewBox={`0 0 100 ${OVERVIEW_H}`}
-          preserveAspectRatio="none"
-          className="absolute inset-0 h-full w-full"
-          aria-hidden="true"
-        >
-          <polygon
-            points={`0,${OVERVIEW_H} ${path} 100,${OVERVIEW_H}`}
-            className="fill-slate-400 opacity-60"
-          />
-        </svg>
-        <div
-          className="absolute inset-y-0 rounded border-2 border-accent bg-accent/10"
-          style={{ left: `${left}%`, width: `${Math.max(1, right - left)}%` }}
-        />
-      </div>
-    </div>
-  );
 }

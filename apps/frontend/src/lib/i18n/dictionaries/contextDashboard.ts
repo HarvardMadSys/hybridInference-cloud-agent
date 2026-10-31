@@ -111,16 +111,17 @@ export const contextDashboardEn = {
   'dashboard.trend.areas': 'Areas',
   'dashboard.trend.dnaTip': 'Each request as the stored items it carried, keyed by item.',
   'dashboard.trend.dnaDisabled':
-    'DNA shows single requests (Step), up to {max} at a time: narrow the window below.',
+    'DNA shows single requests (Step), up to {max} at a time: turn Overview off and keep the shown range within that many.',
   'dashboard.trend.extras': 'Overlay',
   'dashboard.trend.noOverlay': 'Tokens',
   'dashboard.trend.duration': 'Duration',
   'dashboard.trend.durationTip':
     'Gateway latency where a request joins one by its id (solid), otherwise the step time between events (dashed).',
   'dashboard.trend.adaptive': 'Adaptive',
-  'dashboard.trend.zoomIn': 'Show fewer requests',
-  'dashboard.trend.zoomOut': 'Show more requests',
   'dashboard.trend.adaptiveTip': 'Fit the scale to the requests shown.',
+  'dashboard.trend.overview': 'Overview',
+  'dashboard.trend.overviewTip':
+    'Fit the whole conversation in the plot. Turning Overview off restores the range you were browsing.',
   'dashboard.trend.aria': 'Context of {count} columns. Left and right arrows choose one.',
   'dashboard.trend.tipStep': 'Request {index} · turn {turn}',
   'dashboard.trend.tipTurn': 'Turn {turn} · {requests} requests',
@@ -135,9 +136,6 @@ export const contextDashboardEn = {
   'dashboard.trend.dnaLoading': 'Reading items…',
   'dashboard.trend.dnaNote': 'Items are recorded estimates.',
   'dashboard.trend.window': 'Showing {from}–{to} of {count}',
-  'dashboard.trend.earlier': 'Earlier',
-  'dashboard.trend.later': 'Later',
-  'dashboard.trend.all': 'All',
   'dashboard.trend.note':
     'Areas: stored text before each request, estimated. Line: the input the provider reported. A rise or drop alone is not an event.',
 
@@ -262,16 +260,17 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.trend.view': '面积或条目',
   'dashboard.trend.areas': '面积',
   'dashboard.trend.dnaTip': '每次请求画成它带上的存储条目，按条目对应。',
-  'dashboard.trend.dnaDisabled': 'DNA 只按步显示单次请求，每次最多 {max} 个：请在下方缩小范围。',
+  'dashboard.trend.dnaDisabled':
+    'DNA 只按步显示单次请求，每次最多 {max} 个：请关闭总览，并让显示范围不超过这个数量。',
   'dashboard.trend.extras': '叠加',
   'dashboard.trend.noOverlay': 'Token',
   'dashboard.trend.duration': '时长',
   'dashboard.trend.durationTip':
     '能按 id 对上 Gateway 记录的请求画 Gateway 延迟（实线），否则画事件之间的步骤时间（虚线）。',
   'dashboard.trend.adaptive': '自适应',
-  'dashboard.trend.zoomIn': '放大：显示更少的请求',
-  'dashboard.trend.zoomOut': '缩小：显示更多的请求',
   'dashboard.trend.adaptiveTip': '让刻度适应当前显示的请求。',
+  'dashboard.trend.overview': '总览',
+  'dashboard.trend.overviewTip': '把整段对话铺满图表。关闭总览会恢复之前浏览的范围。',
   'dashboard.trend.aria': '{count} 列的上下文。用左右方向键选择。',
   'dashboard.trend.tipStep': '第 {index} 次请求 · 第 {turn} 轮',
   'dashboard.trend.tipTurn': '第 {turn} 轮 · {requests} 次请求',
@@ -286,9 +285,6 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.trend.dnaLoading': '正在读取条目…',
   'dashboard.trend.dnaNote': '条目大小为记录估算。',
   'dashboard.trend.window': '显示 {count} 个中的 {from}–{to}',
-  'dashboard.trend.earlier': '更早',
-  'dashboard.trend.later': '更晚',
-  'dashboard.trend.all': '全部',
   'dashboard.trend.note':
     '面积：每次请求之前存下的文字，估算值。线：服务商报告的输入。单纯的升降不算事件。',
 

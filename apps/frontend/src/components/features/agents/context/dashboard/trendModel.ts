@@ -175,22 +175,75 @@ export function windowAround(
   return clampWindow(start, start + size, n);
 }
 
-/** The window halved (zoom in) or doubled (zoom out) about its middle, kept in range. */
-export function zoomWindow(
-  from: number,
-  to: number,
-  n: number,
-  zoomIn: boolean,
-): { from: number; to: number } {
-  const size = to - from + 1;
-  const next = zoomIn ? Math.max(MIN_WINDOW, Math.ceil(size / 2)) : Math.min(n, size * 2);
-  const middle = (from + to) / 2;
-  const start = Math.round(middle - (next - 1) / 2);
-  return clampWindow(start, start + next - 1, n);
+/**
+ * The browsing range before Overview was turned on, kept as both column and
+ * turn bounds so it can be put back on the other granularity later.
+ */
+export interface SavedRange {
+  granularity: Granularity;
+  fromIndex: number;
+  toIndex: number;
+  fromTurn: number;
+  toTurn: number;
 }
 
-/** The fewest columns a zoomed window shows. */
-export const MIN_WINDOW = 4;
+/** Remember the shown columns (inclusive) before the whole history replaces them. */
+export function savedRangeOf(
+  columns: TrendColumn[],
+  from: number,
+  to: number,
+  granularity: Granularity,
+): SavedRange | null {
+  if (columns.length === 0) return null;
+  const last = columns.length - 1;
+  const first = columns[Math.max(0, Math.min(from, last))];
+  const end = columns[Math.max(0, Math.min(to, last))];
+  if (!first || !end || first.index > end.index) return null;
+  return {
+    granularity,
+    fromIndex: first.index,
+    toIndex: end.index,
+    fromTurn: first.turnNo,
+    toTurn: end.turnNo,
+  };
+}
+
+/**
+ * Put a saved browsing range back once Overview is turned off. The same
+ * granularity restores the same columns; another granularity restores the
+ * turns the range covered, or the requests of those turns by step. Requests
+ * appended meanwhile stay outside it. A range that retained history no longer
+ * covers falls back to the latest columns.
+ */
+export function restoreBrowsingWindow(
+  saved: SavedRange | null,
+  columns: TrendColumn[],
+  granularity: Granularity,
+): { from: number; to: number } {
+  const n = columns.length;
+  if (!saved || n === 0) return initialWindow(n);
+  let from: number;
+  let to: number;
+  if (granularity === 'step' && saved.granularity === 'step') {
+    from = columns.findIndex((column) => column.index >= saved.fromIndex);
+    to = lastAtOrBefore(columns, (column) => column.index <= saved.toIndex);
+  } else {
+    // By turn a range covers whole turns, whichever granularity saved it.
+    from = columns.findIndex((column) => column.turnNo >= saved.fromTurn);
+    to = lastAtOrBefore(columns, (column) => column.turnNo <= saved.toTurn);
+  }
+  // The retained history no longer covers the saved range at all: show the latest.
+  if (from < 0 && to < 0) return initialWindow(n);
+  if (from < 0) from = 0;
+  if (to < 0) to = n - 1;
+  if (from > to) [from, to] = [to, from];
+  return clampWindow(from, to, n);
+}
+
+function lastAtOrBefore(columns: TrendColumn[], fits: (column: TrendColumn) => boolean): number {
+  for (let i = columns.length - 1; i >= 0; i -= 1) if (fits(columns[i])) return i;
+  return -1;
+}
 
 /** Stacked areas: per category, the polygon points of each unbroken run. */
 export function stackedRuns(

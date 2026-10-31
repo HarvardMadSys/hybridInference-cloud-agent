@@ -24,7 +24,8 @@ import {
   localOf,
   stepColumn,
   windowAround,
-  zoomWindow,
+  restoreBrowsingWindow,
+  savedRangeOf,
 } from './trendModel';
 
 function point(index: number, overrides: Partial<ContextPointApi> = {}): ContextPointApi {
@@ -169,11 +170,39 @@ describe('trend model', () => {
     expect(clampWindow(-3, 1, 10)).toEqual({ from: 0, to: 4 });
   });
 
-  it('zooms about the middle, never below four columns or past the history', () => {
-    expect(zoomWindow(0, 34, 35, true)).toEqual({ from: 9, to: 26 });
-    expect(zoomWindow(9, 26, 35, false)).toEqual({ from: 0, to: 34 });
-    expect(zoomWindow(30, 33, 35, true)).toEqual({ from: 30, to: 33 });
-    expect(zoomWindow(28, 34, 35, false)).toEqual({ from: 21, to: 34 });
+  it('remembers the browsing range, and puts it back after the whole history', () => {
+    const steps = trendColumns(
+      Array.from({ length: 130 }, (_, i) => point(i, { turn_no: 1 + Math.floor(i / 10) })),
+      'step',
+      new Map(),
+    );
+    const saves = savedRangeOf(steps, 10, 129, 'step')!;
+    expect(saves).toMatchObject({ fromIndex: 10, toIndex: 129, fromTurn: 2, toTurn: 13 });
+    expect(restoreBrowsingWindow(saves, steps, 'step')).toEqual({ from: 10, to: 129 });
+    // Requests appended meanwhile stay outside the restored range.
+    const grewPoints = Array.from({ length: 135 }, (_, i) =>
+      point(i, { turn_no: 1 + Math.floor(i / 10) }),
+    );
+    const grown = trendColumns(grewPoints, 'step', new Map());
+    expect(restoreBrowsingWindow(saves, grown, 'step')).toEqual({ from: 10, to: 129 });
+    // A different granularity restores the turns the range covered.
+    const turns = trendColumns(grewPoints, 'turn', new Map());
+    expect(restoreBrowsingWindow(saves, turns, 'turn')).toEqual({ from: 1, to: 12 });
+  });
+
+  it('falls back to the latest columns when the saved range is gone', () => {
+    const steps = trendColumns(
+      Array.from({ length: 10 }, (_, i) => point(i, { turn_no: 1 + i })),
+      'step',
+      new Map(),
+    );
+    expect(restoreBrowsingWindow(null, steps, 'step')).toEqual(initialWindow(10));
+    expect(restoreBrowsingWindow(savedRangeOf(steps, 0, 3, 'step'), [], 'step')).toEqual({
+      from: 0,
+      to: 0,
+    });
+    const kept = savedRangeOf(steps, 2, 4, 'step')!;
+    expect(restoreBrowsingWindow(kept, steps.slice(5), 'step')).toEqual(initialWindow(5));
   });
 
   it('resolves a selected request to its own column, or its containing turn column', () => {
