@@ -571,7 +571,7 @@ def test_docker_build_context_excludes_local_dependency_trees():
 def test_the_relay_network_is_internal(compose: dict):
     """The relay discovery network needs no route, and holds no sandbox.
 
-    Group lifecycle reads the two relays' identities there and attaches them
+    Group lifecycle reads the MCP relay's identity there and attaches it
     to each group's own bridge; the runner refuses to start if it is routable.
     """
     assert compose["networks"]["agent-relays"]["internal"] is True

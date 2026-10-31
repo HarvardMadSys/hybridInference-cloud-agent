@@ -237,7 +237,7 @@ function UsageView({
       <section className={ADMIN_PAGE}>
         <AdminPageHeader
           section="Usage"
-          description="Review the token usage agents reported across users, sessions, and agent turns. Each owner’s model provider bills its own connection; costs are not tracked here."
+          description="Review the token usage agents reported across users, sessions, and agent turns. Only calls an agent can tie to a turn are counted (Codex subagent work that outlives its turn is not), so providers may bill more. Each owner’s provider bills its own connection; costs are not tracked here."
         />
         <AdminNavigation current="usage" />
 

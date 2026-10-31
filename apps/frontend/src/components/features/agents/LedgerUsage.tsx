@@ -185,7 +185,9 @@ export function LedgerUsage({ usage }: { usage: LoadedUsage | null }) {
       {totals && hasValues ? (
         <>
           <UsageSummary totals={totals} label="Run usage" />
-          <span>Reported by agent.</span>
+          <span title="Only model calls the agent can tie to this turn are counted; Codex subagent work that continues after the turn is not.">
+            Reported by agent.
+          </span>
         </>
       ) : null}
       <span>{t('modelSource.usageExternal')}</span>

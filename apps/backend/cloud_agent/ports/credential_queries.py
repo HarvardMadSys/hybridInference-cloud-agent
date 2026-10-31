@@ -1,7 +1,7 @@
 """Port: resolving the model credential an attempt runs with.
 
 One operation, because the credential lookup is the only piece of the store
-the inference relay needs.
+the MCP relay needs.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.
@@ -33,9 +33,9 @@ class CredentialQueries(Protocol):
         The relay uses that owner to resolve stored MCP connections and checks
         the admitted binding before forwarding a request.
 
-        Only Agent-owned execution and connection state participates. Gateway account roles
-        and status do not belong to this database. Inference authorization
-        uses Gateway-issued grants separately from this MCP lookup.
+        Only Agent-owned execution and connection state participates. The
+        model connection's key reaches a member through its claim and
+        residency, not through this MCP lookup.
 
         The bindings are read fresh on every call rather than carried on the
         job, so narrowing a session takes effect on its next tool call instead

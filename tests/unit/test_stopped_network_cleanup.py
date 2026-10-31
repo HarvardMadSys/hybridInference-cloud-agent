@@ -102,7 +102,7 @@ class _StoppedDocker(FakeDocker):
 
 
 def _world(monkeypatch, spec):
-    """A stopped group whose bridge holds only its two relays, as after ``docker stop``."""
+    """A stopped group whose bridge holds only its relay, as after ``docker stop``."""
     config = _config()
     backend = ContainerBackend(image="img", sandbox_network=config, sandbox_namespace=_NAMESPACE)
     backend._network_guard = FakeGuard()  # type: ignore[assignment]

@@ -1,58 +1,63 @@
-# Local accounts and the waiting list
+# Accounts and the waiting list
 
-Cloud Agent can run with its own accounts instead of HybridInference Gateway
-sign-in. Set `AGENT_AUTH_MODE=local` and people sign up with an email address
-and a password, or with a phone number and a code, verify the address, sign
-in, and apply for Agent use through a waiting list that administrators review.
-Local accounts have every account feature HybridInference has: login names,
-phone codes, several accounts in one browser, changing the password and the
-email, deleting the account, a sign-up policy, first-run setup, administrator
-mail and the rest (see the
+Cloud Agent has one account system, its own. People sign up with an email
+address and a password, or with a phone number and a code, verify the address,
+sign in, and apply for Agent use through a waiting list that administrators
+review. Accounts have login names, phone codes, several accounts in one
+browser, password and email changes, account deletion, a sign-up policy,
+first-run setup, administrator mail and the rest (see the
 [feature parity table](../agents/specs/2026-10-29-account-feature-parity.zh-CN.md)).
-Gateway mode remains the default, and nothing in this page changes it.
+There is no other sign-in and no mode to choose: HybridInference Gateway
+sign-in, admission and inference were removed
+([cutover](upgrade-notes.md#independent-accounts-cutover)).
 
 The design is
-[independent accounts and waiting list](../agents/specs/2026-10-27-independent-accounts-and-waitlist-design.zh-CN.md).
+[independent accounts and waiting list](../agents/specs/2026-10-27-independent-accounts-and-waitlist-design.zh-CN.md),
+and the decision to keep only this system is
+[independent accounts only](../agents/specs/2026-10-30-independent-accounts-only.md).
 This page describes what is implemented.
 
-## What local mode changes
+## How a request is admitted
 
-| Concern | Gateway mode (default) | Local mode |
-|---|---|---|
-| Sign-in | PKCE round trip to the Gateway (`/v1/session/login`) | `POST /v1/auth/login`; Gateway sign-in routes answer 404 |
-| Session | HS256 cookie `__Host-cloud_agent_session`, not revocable | Server-side row, cookie `__Host-cloud_agent_local_session`, revocable |
-| Identity and admission | Gateway `agent-access` lookup | This database, read on every check, with no cache |
-| Profile and team emails | Gateway user status | The local account's email |
-| Administration | `ADMIN_TOKEN` or Gateway `agent.admin` | `ADMIN_TOKEN` or a local account with `agent.admin` |
-| Inference | Gateway grants and catalog, or an owner's model connection | The owner's model connection only (see [Models](#models)) |
+| Concern | How it works |
+|---|---|
+| Sign-in | `POST /v1/auth/login` (or a phone code); `/v1/session/login` and the Gateway callback no longer exist |
+| Session | A server-side row; the cookie `__Host-cloud_agent_local_session` (the plain `cloud_agent_local_session` only where cookies are not `Secure`) holds a token whose HMAC is stored. Sessions are revocable |
+| Identity and admission | This database, read on every check, with no cache |
+| Profile and team emails | The account's email |
+| Administration | `ADMIN_TOKEN`, or an account with `agent.admin` |
+| Inference | The owner's own model connection only (see [Models](#models)) |
 
-In local mode `app.state.gateway` is `LocalModeGateway`
-(`cloud_agent/accounts/directory.py`). It has the methods the Gateway client
-has. Identity and admission are answered from this database, and each
-Gateway-only method is refused with a typed error, without a network call.
-Every existing owner check therefore reads the local decision: request
+The account directory (`cloud_agent/accounts/directory.py`,
+`app.state.owners`) answers every owner check from this database: request
 admission, claims, goal rounds, waiting messages, team approval and ownership
-transfer, the on-call service account, Profile and team rosters. A local
-account ID never reaches the Gateway.
+transfer, Profile and team rosters. No account ID leaves the service.
 
 ## Enabling it
 
-Local mode needs its own database. At startup it binds an empty database to
-local identity (`agent_local_identity_namespace`). It refuses a database bound
-to a Gateway issuer, or one that holds owner data without a binding. Gateway
-mode, in turn, refuses a database bound to local identity. Both checks take the
-same table lock, so two listeners that start in different modes cannot each
-bind the database. No setting skips these checks. Moving an existing
-Gateway-bound database to local accounts is a separate identity migration
-(phase A3 in the design), and it is not implemented.
+A deployment needs its own, empty database. At startup the control plane
+binds an empty database to the account system
+(`agent_local_identity_namespace`). It refuses a database bound to a Gateway
+issuer, or one that holds owner data without a binding, as every Gateway-era
+database does, and names the cutover runbook. Both checks take the same table
+lock, so two listeners starting together cannot each bind the database. No
+setting skips these checks, and nothing adopts, maps or migrates Gateway
+owners. `python -m cloud_agent.identity_namespace --check` answers the same
+question read-only, on any schema revision.
+
+Startup also refuses any configuration left from the Gateway integration
+(`AGENT_AUTH_MODE`, `GATEWAY_*`, `IDENTITY_*`, `AGENT_SESSION_REDIRECT_URI`,
+`AGENT_GATEWAY_URL`, `AGENT_WEB_GATEWAY_URL`, `AGENT_WEB_FEATURE_RAG` and the
+rest of `RETIRED_GATEWAY_VARIABLES` in `cloud_agent/accounts/config.py`), and
+so does `deploy/control-plane/deploy.sh` before it pulls anything.
 
 | Variable | Purpose |
 |---|---|
-| `AGENT_AUTH_MODE=local` | Selects local accounts. Set it on both listeners. |
 | `AGENT_LOCAL_SESSION_SECRET` | At least 32 random bytes, different from `AGENT_SESSION_SECRET`. Keys the stored hashes of sessions, emailed tokens and abuse counters. |
-| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Required at local-mode startup. Encrypts personal model keys and other stored credentials in separate domains. |
-| `AGENT_MODEL_CONNECTIONS_ENABLED=true` | Enables personal model setup and new turns. Local mode respects this explicit rollout gate; leaving it off does not enable shared inference. |
+| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Required at startup. Encrypts personal model keys and other stored credentials in separate domains. |
+| `AGENT_MODEL_CONNECTIONS_ENABLED=true` | Enables personal model setup and new turns. Leaving it off does not enable any shared inference; nothing runs. |
 | `AGENT_WEB_BASE_URL` | The only base used for emailed links. A request's `Host` is never used. |
+| `AGENT_PUBLIC_API_URL` | This API's public address, which OAuth callbacks name. |
 
 Everything else is in **Admin → Settings → Accounts**, saved in the database
 and imported once from its environment variable (see
@@ -68,29 +73,19 @@ closed while verification is required, and recovery answers 503; with
 verification turned off, sign-up works without SMTP.
 
 The web server must reach the same control plane (`AGENT_CONTROL_PLANE_URL`).
-The web app reads `GET /v1/auth/config` to choose its sign-in pages and
-`GET /v1/auth/options` for what they offer.
+The web app reads `GET /v1/auth/config` and `GET /v1/auth/options` for what
+its sign-in pages offer.
 
-### Hosts without a Gateway
+### Hosts
 
-Set `AGENT_AUTH_MODE=local` in each host's deployment environment as well as
-the control plane. Keep `AGENT_GATEWAY_URL` empty. The supported
-`deploy/host/sandbox_host.sh` recipe removes the unused inference tunnel
-before Compose resolves required settings; it needs no Gateway SSH address,
-key or health check. Source deployments need Python with PyYAML to render
-this recipe; artifact deployments use their deployment Python environment.
+Hosts need the control-plane and MCP tunnels and their separate credentials,
+and nothing else from a Gateway: there is no inference tunnel or relay.
+Personal model calls use the existing public HTTPS egress. No sandbox gains
+access to the management API, private networks or another group. A host
+environment that still sets a Gateway variable is refused.
 
-The host still requires the control-plane and MCP tunnels and their separate
-credentials. Personal model calls use the existing public HTTPS egress. No
-sandbox gains access to the management API, private networks or another
-group. Gateway-mode hosts retain their inference relay and its checks; an
-empty URL never turns a Gateway host into a local one.
-
-In **Servers → deployment setup**, local administrators enter only the
-control-plane machine. Setup derives the host mode from the control plane,
-omits Gateway provisioning, and discards stale Gateway form values. Gateway
-deployments still require the Gateway machine. A manually supplied managed
-host profile must agree with the control plane's mode.
+In **Servers → deployment setup**, administrators enter only the
+control-plane machine.
 
 ### The first administrator
 
@@ -107,10 +102,10 @@ also work from the command line, without mail. The password is read from
 standard input or a terminal prompt, never from the command line:
 
 ```bash
-AGENT_AUTH_MODE=local python -m cloud_agent.accounts.bootstrap_admin --create-login-name ops < password.txt
-AGENT_AUTH_MODE=local python -m cloud_agent.accounts.bootstrap_admin --create-email a@lab.edu --member
-AGENT_AUTH_MODE=local python -m cloud_agent.accounts.bootstrap_admin --find-email admin@example.org
-AGENT_AUTH_MODE=local python -m cloud_agent.accounts.bootstrap_admin --account-id <id> --approve
+python -m cloud_agent.accounts.bootstrap_admin --create-login-name ops < password.txt
+python -m cloud_agent.accounts.bootstrap_admin --create-email a@lab.edu --member
+python -m cloud_agent.accounts.bootstrap_admin --find-email admin@example.org
+python -m cloud_agent.accounts.bootstrap_admin --account-id <id> --approve
 ```
 
 `--create-*` makes a verified, approved account, an administrator unless
@@ -122,7 +117,7 @@ versioned action the administration API uses, with the actor
 
 An account whose **proven** email is one of the **administrator email
 addresses** setting is approved and made an administrator when it signs in,
-as HybridInference's `ADMIN_EMAILS` does. Proven means a link sent to the
+as HybridInference's `ADMIN_EMAILS` does (`AGENT_LOCAL_ADMIN_EMAILS` seeds the list). Proven means a link sent to the
 address was followed (verification, an address change or a password reset)
 or the operator created the account. An address accepted while email
 verification is off is not proven, so listing one does not hand the console
@@ -149,7 +144,7 @@ only, so a 422 never repeats a password or a token.
 | `GET /v1/auth/accounts`, `POST /v1/auth/switch`, `DELETE /v1/auth/accounts/{id}`, `POST /v1/auth/logout-all` | The accounts signed in on this browser: list, switch, sign one out, sign all out. |
 | `GET /v1/auth/account`, `POST /v1/auth/account/password`, `/email`, `/phone`, `/delete`, `PUT /v1/auth/account/locale` | The signed-in account's own changes; see [The owner's own changes](#the-owners-own-changes). |
 | `POST /v1/auth/setup/admin` | First-run setup. |
-| `GET /v1/session/me` | Adds `auth_mode`, `email`, `waitlist`, `identity` and `is_local_admin` for a local account. The Gateway-mode body is unchanged. |
+| `GET /v1/session/me` | The account: `id`, `agent_access`, `email`, `waitlist`, `identity` and `is_local_admin`. There is no `auth_mode`. |
 | `POST /v1/session/logout` | Signs the browser's active account out; the cookie goes with its last account. |
 | `GET`/`POST /v1/waitlist` | Needs a verified, signed-in account only. Submitting again while pending changes nothing. A rejected or revoked application is submitted again only when its owner asks. |
 | `GET /v1/admin/accounts` | `q` (email, login name, phone or name anywhere, or an id prefix), `status`, `account_status`, `sort` (`created` or `last_login`); the answer has counts per state. |
@@ -248,8 +243,8 @@ nothing (`actor_not_admin`).
   64 hashes may wait, and beyond that a request is refused with 503 instead of
   being queued.
 - A session value is `cals1.` followed by 256 random bits. The database keeps
-  only an HMAC of it, keyed from `AGENT_LOCAL_SESSION_SECRET`. A Gateway-mode
-  cookie or JWT is never read in local mode.
+  only an HMAC of it, keyed from `AGENT_LOCAL_SESSION_SECRET`. A cookie or JWT
+  from the retired Gateway session (`__Host-cloud_agent_session`) is never read.
 - A session lasts 30 days by default (`accounts.session_ttl_days`) and is
   never extended. Sign-out, a password change or reset, a suspension and a
   deletion revoke it.
@@ -427,31 +422,30 @@ Separate Cloud Agent accounts do not create separate provider quotas: keys
 from the same FreeInference account may still spend that account's shared
 upstream allowance. Cloud Agent's sandbox and concurrency limits are separate.
 
-`GET /v1/agent/config` reports `gateway_inference: false`, an empty Gateway
-catalog, and the owner's usable connections. Without a usable connection it
-sets `model_connection_required: true`; the composer links to setup when the
-feature is enabled and explains when the deployment has disabled it. Gateway
-model-preference requests answer 409 `model_connection_required`. No local
-account ID is sent to the Gateway, and no Gateway grant is minted, including
-for publication titles. Prompt rewriting through the Gateway is unavailable.
+`GET /v1/agent/config` lists the owner's usable connections and no platform
+catalog. Without a usable connection it sets `model_connection_required: true`;
+the composer links to setup when the feature is enabled and explains when the
+deployment has disabled it. Nothing is sent anywhere but the owner's provider:
+no platform credential is minted, and there is no prompt rewriting, model pin
+or title generation.
 
 A task records both the model ID and connection ID. Follow-ups, queued turns,
 goals, Fork and residency keep that source; an unavailable connection never
-falls back to a same-named Gateway model or another connection. Saving,
-disabling or deleting a connection refreshes open composers, which retain an
-unavailable selection and block submission until the owner chooses a usable
-source. See [owner model connections](operations.md#owner-model-connections)
-for verification, key handling and rollout requirements.
-
-The Gateway-only per-request usage views (`/admin/agent/runs/{id}/llm-requests`,
-`/admin/agent/steps`, and an owner's per-message request detail) answer 503
-`gateway_feature_unavailable` in local mode, without a Gateway call.
+falls back to a same-named model on another connection. Saving, disabling or
+deleting a connection refreshes open composers, which retain an unavailable
+selection and block submission until the owner chooses a usable source. A turn
+on a connection runs at its provider's default reasoning effort: a request
+naming an effort is refused (`model_connection_unusable`, reason
+`effort_unsupported`), and the composer offers no effort control. See
+[owner model connections](operations.md#owner-model-connections) for
+verification, key handling and rollout requirements, and
+[usage](operations.md#usage) for what the Usage pages count.
 
 ## Data model
 
 Migration `0107_local_accounts`, after `0106_user_model_connections`, adds the
 tables; `0108_local_account_parity` splits sign-in identities from passwords
-(carrying every account over) and adds the rest. Gateway mode never writes them.
+(carrying every account over) and adds the rest.
 
 | Table | Holds |
 |---|---|
@@ -476,23 +470,28 @@ tables; `0108_local_account_parity` splits sign-in identities from passwords
 - `tests/unit/test_local_account_rules.py` and
   `tests/unit/test_local_account_credentials.py` cover the rules, the password
   policy, credentials, configuration and mail.
-- `tests/servers/test_local_auth_surface.py` checks that Gateway mode is
-  unchanged, and covers the cross-site guard, JSON-only bodies, 422 bodies
-  without secrets, the refusal of Gateway sessions in local mode, and the
-  Gateway-only views.
-- The real-Postgres tier (`make test-db-local`) covers local accounts in six
+- `tests/servers/test_local_auth_surface.py` covers the cross-site guard,
+  JSON-only bodies, 422 bodies without secrets, the refusal of retired Gateway
+  sessions, and that the Gateway sign-in and usage routes are gone.
+- `tests/unit/test_independent_accounts_only.py` pins the removal: no Gateway
+  module, client or retired variable survives, and each retired variable is
+  refused at startup.
+- The real-Postgres tier (`make test-db-local`) covers accounts in seven
   files: `tests/integration/storage/test_local_account_store.py` (races, replay,
   versions, the reset and suspension barriers, shared counters and the
   namespace), `tests/integration/servers/test_local_access_termination.py`
   (stopping work, the residency fence, cleanup barriers and delayed passes),
   `tests/integration/servers/test_local_accounts_flow.py` (the whole flow over
   HTTP), `tests/integration/storage/test_independent_accounts_acceptance.py`
-  (the public account lifecycle through the real application with Gateway HTTP
-  forbidden), `tests/integration/storage/test_local_session_reset_race.py`
+  (the public account lifecycle through the real application with outbound
+  HTTP forbidden), `tests/integration/storage/test_local_session_reset_race.py`
   (a login waiting on a password reset cannot open a session with the old
-  password), and
+  password),
   `tests/integration/storage/test_local_cleanup_lock_acceptance.py` (cancelling
-  a cleanup lock acquisition before its result arrives releases the lock).
+  a cleanup lock acquisition before its result arrives releases the lock), and
+  `tests/integration/storage/test_identity_namespace.py` (an empty database is
+  bound once; a Gateway-bound or unbound owner database is refused, and
+  `--check` leaves a Gateway-era 0025 schema exactly as it was).
 - `tests/unit/test_local_account_parity.py`,
   `tests/integration/storage/test_local_account_parity_store.py` and
   `tests/integration/servers/test_local_account_parity_flow.py` cover the
@@ -515,12 +514,12 @@ tables; `0108_local_account_parity` splits sign-in identities from passwords
   `test_local_model_onboarding.py` exercise approval, verified connection
   setup, task creation, follow-ups, owner isolation, unavailable sources and
   the explicit feature gate with real accounts and Postgres. They use a fake
-  provider transport and forbid Gateway calls; they are not live-provider or
+  provider transport and forbid any other outbound call; they are not live-provider or
   Kata-host acceptance.
 
 ## Reused code
 
-The administration pages for local accounts follow the administrator's
+The administration pages for accounts follow the administrator's
 language (English or Simplified Chinese); the rest of the console is English.
 
 The password hashing and policy, the sign-up, sign-in, verification and

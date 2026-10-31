@@ -250,7 +250,11 @@ describe('admin usage page', () => {
     // Agents report neither a cost nor model calls; their providers bill them.
     expect(screen.queryByText('Cost')).not.toBeInTheDocument();
     expect(screen.queryByText('Model calls')).not.toBeInTheDocument();
-    expect(screen.getByText(/model provider bills its own connection/)).toBeInTheDocument();
+    expect(screen.getByText(/provider bills its own connection/)).toBeInTheDocument();
+    // Totals are attributable reports only, and say so.
+    expect(
+      screen.getByText(/Codex subagent work that outlives its turn is not/),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/\$/)).not.toBeInTheDocument();
   });
 

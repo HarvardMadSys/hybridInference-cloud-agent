@@ -465,6 +465,8 @@ describe('UsageSettings', () => {
     expect(await tile('推理 Token')).toBe('—');
     expect(screen.getByText('仅 Codex 上报此项')).toBeInTheDocument();
     expect(await screen.findByText(/^每天从 UTC 零点开始算/)).toBeInTheDocument();
+    // Attributable reports only, and the provider may bill more.
+    expect(screen.getByText(/部分调用不计入.*Codex 子智能体/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '今天' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '全部' })).toBeInTheDocument();
   });

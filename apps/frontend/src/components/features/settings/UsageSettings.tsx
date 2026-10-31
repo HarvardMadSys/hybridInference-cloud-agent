@@ -425,6 +425,7 @@ function History() {
           ? t('settings.usage.utcNoteLocal', { time: dayStart })
           : t('settings.usage.utcNote')}
       </p>
+      <p className="mt-1 text-xs text-muted">{t('settings.usage.reportedNote')}</p>
     </Card>
   );
 }

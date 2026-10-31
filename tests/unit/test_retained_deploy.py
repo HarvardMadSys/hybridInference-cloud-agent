@@ -187,7 +187,7 @@ def _host(
 
 
 def _add_required_host_paths(env: dict[str, str], tmp_path: Path) -> None:
-    """Populate the two relays and reverse sandbox manager path used by ``up``."""
+    """Populate the two tunnels and reverse sandbox manager path used by ``up``."""
     app_dir = Path(env["APP_DIR"])
     values = ["AGENT_SANDBOX_MANAGER_TOKEN=test-sandbox-manager-token"]
     for index, prefix in enumerate(

@@ -3,9 +3,10 @@
 Cloud Agent runs coding agents against a user's repository inside retained
 sandbox containers. Users work from a web interface, while enrolled hosts run
 Claude Code, Codex, pi, OpenCode, or Kilo. The control plane coordinates jobs,
-sessions, and publication to source control. Model access and account identity
-come from a [HybridInference gateway](https://github.com/HarvardMadSys/hybridInference),
-over HTTP only.
+sessions, and publication to source control. Accounts are its own: people sign
+up, apply through a waiting list and are approved by an administrator. Every
+task runs on a model connection its owner adds with their own provider key,
+such as a FreeInference key.
 
 This is the documentation for the software itself: running it locally,
 operating a deployment, understanding how it works, and contributing to it. The
@@ -18,7 +19,7 @@ under the MIT license; bugs and questions go to its
 
 | If you want to | Start here |
 |---|---|
-| Run the browser, API, gateway fixture, hosts, and sandboxes on one machine | [Local Docker stack](local-stack.md) |
+| Run the browser, API, hosts, and sandboxes on one machine | [Local Docker stack](local-stack.md) |
 | Set up a checkout, find the code that owns a change, and run checks | [Developer guide](development.md) |
 | Find the module that owns a responsibility and follow its dependencies | [Code structure](code-structure.md) |
 | Change the owner web app, and see the rules and APIs behind each feature | [The owner web app](web-app.md) |
@@ -29,7 +30,7 @@ under the MIT license; bugs and questions go to its
 | Look up a configuration name, default, or owning component | [Configuration reference](configuration.md) |
 | Build release artifacts and deploy them in the required order | [Releases](releases.md) |
 | Understand the sandbox trust model before deploying | [Security](security.md) |
-| See which gateway APIs Cloud Agent consumes | [Gateway contracts](gateway-contracts.md) |
+| See the API this service serves, as its committed contract | [API contract](api-contracts.md) |
 
 ## Scope of this site
 
@@ -57,8 +58,7 @@ translations
 context-recall
 agent-access-policy
 local-accounts
-minimal-identity
-gateway-contracts
+api-contracts
 security
 web-app
 ```

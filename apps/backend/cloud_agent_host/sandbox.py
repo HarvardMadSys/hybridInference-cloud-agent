@@ -530,7 +530,7 @@ class ContainerBackend(SandboxBackend):
 
     Networking is fixed rather than chosen: every chat group gets its own
     routable bridge, guarded on the host by one rule set (public IPv4 TCP
-    80/443, the named resolver, the group's two relays, and nothing else; see
+    80/443, the named resolver, the group's MCP relay, and nothing else; see
     :mod:`cloud_agent_shared.egress`). ``sandbox_network`` carries this
     deployment's pool, resolver and relays; event reporting stays in the
     trusted runner.
@@ -927,8 +927,8 @@ class ContainerBackend(SandboxBackend):
         """Refuse to accept work until this host enforces the sandbox network.
 
         Two things are checked. The relay discovery network must be
-        ``internal``: it is where the two relays are found, never a route a
-        sandbox could use, and nothing but the relays belong on it. Then the
+        ``internal``: it is where the MCP relay is found, never a route a
+        sandbox could use, and nothing but relays belong on it. Then the
         guard installs this deployment's rules and reads them back from the
         kernel, so a host that cannot enforce the boundary never claims.
 
@@ -965,7 +965,7 @@ class ContainerBackend(SandboxBackend):
         if probe.stdout.strip().lower() != "true":
             raise SandboxError(
                 f"the relay network {network.relay_network!r} is not `internal`. It is "
-                "where the two relays are discovered, and must not route anywhere."
+                "where the MCP relay is discovered, and must not route anywhere."
             )
         if self._rules_handed_over:
             self.network_guard().ensure()

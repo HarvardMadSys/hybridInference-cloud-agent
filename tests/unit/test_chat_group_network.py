@@ -2,7 +2,7 @@
 
 Setup, the agent and every fork member use one routable bridge named from the
 group's identity. The host's rules (``cloud_agent_shared.egress``) decide what
-it reaches; this lifecycle keeps the bridge, its two relays and the host's
+it reaches; this lifecycle keeps the bridge, its relay and the host's
 per-bridge relay exceptions consistent through create, wake, stop, relay
 rollouts and pruning, and refuses the per-phase topology it replaced.
 

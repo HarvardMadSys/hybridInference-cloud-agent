@@ -24,7 +24,7 @@ Stored API tokens and management SSH keys are encrypted with
 value in its persistent `.env` when none is configured; other deployment
 systems must provide equivalent stable key material. Back it up with the
 encrypted database: restoring the database without this key cannot recover
-compute connections. Do not reuse gateway, session, enrollment or sandbox manager keys.
+compute connections. Do not reuse account, settings, enrollment or sandbox manager keys.
 Compute management credentials never enter sandboxes or the deployed Host.
 
 The Host separately needs purpose-scoped tunnel credentials and
@@ -129,36 +129,32 @@ use the operator profile's `data_mount` configuration.
 Open **Admin → Servers → Server setup** and use **Automatic setup**. The
 control-plane image includes the Host source bundle for its own release; the
 application supplies the revision, environment and existing sandbox manager
-token, generates three separate tunnel keys per setup slot, and discovers the
+token, generates two separate tunnel keys per setup slot, and discovers the
 control-plane listener ports and Docker bridge.
 
 Supply the infrastructure inputs once:
 
-1. Add and validate management SSH connections for the stable gateway machine
-   and control-plane machine, including independently verified host keys.
-2. Select those connections and confirm the machines' SSH addresses and users.
-   The gateway address defaults to the saved Gateway API URL's hostname.
-   The supported control-plane deployer
-   supplies the service node's FQDN as the control-plane address. Override these
-   with `AGENT_GATEWAY_SSH_HOST` and `AGENT_CONTROL_PLANE_SSH_HOST` when SSH uses
-   different addresses; other deployers must supply the control-plane value.
-   Saved and pending setup inputs take precedence over these first-time defaults.
-   Both machines need Python 3 and passwordless `sudo`. The control machine
-   must run the supported Docker Compose deployment, and the gateway must
-   already listen on the selected inference port.
+1. Add and validate a management SSH connection for the stable control-plane
+   machine, including its independently verified host key.
+2. Select that connection and confirm the machine's SSH address and user. The
+   supported control-plane deployer supplies the service node's FQDN as the
+   address; override it with `AGENT_CONTROL_PLANE_SSH_HOST` when SSH uses a
+   different address. Other deployers must supply it. Saved and pending setup
+   inputs take precedence over this first-time default. The machine needs
+   Python 3 and passwordless `sudo`, and must run the supported Docker Compose
+   deployment.
 3. Enter an approved private IPv4 pool for chat networks, a reachable DNS
    resolver outside that pool, and the protected infrastructure CIDRs. These
    values depend on your network and require an administrator's decision.
 4. Choose the number of setup slots and prepare the setups. Two slots allow
    separate sandbox manager routes for a current node and its replacement.
 
-The application creates dedicated restricted SSH accounts on the two stable
-machines. Inference and MCP credentials permit only their respective local
-service destinations; the control credential permits the main API and its
-assigned reverse sandbox manager route. Management credentials stay in the control
-plane. Existing SSH policies must permit these restricted accounts; setup
-refuses incompatible policies instead of broadening them. Co-located gateway
-and control services must use separate inference, MCP and main API ports.
+The application creates dedicated restricted SSH accounts on the control-plane
+machine. The MCP credential permits only the MCP-only listener; the control
+credential permits the main API and its assigned reverse sandbox manager
+route. Management credentials stay in the control plane. Existing SSH
+policies must permit these restricted accounts; setup refuses incompatible
+policies instead of broadening them.
 
 Generated keys and configuration are encrypted in Postgres before remote
 authorization begins. A setup becomes selectable only after all its slots
@@ -207,7 +203,7 @@ Host bundle, or use advanced manual setup.
 
 **Advanced manual setup** retains the existing form: upload a reviewed source
 archive, enter its exact 40-character revision and installation directory, paste the
-Host environment, and provide the three tunnel keys and verified known-hosts
+Host environment, and provide the two tunnel keys and verified known-hosts
 files. The control plane validates the archive, encrypts all environment and
 credential values, and stores them in Postgres. Profile read APIs expose only
 IDs and labels, never generated credentials. Create a new profile to replace
@@ -278,15 +274,15 @@ per-group nftables policy. Environment values must be single-line dotenv data;
 they are never sourced as shell code. Supported substitutions are
 `{deploy_root}`, `{host}`, `{node_id}` and `{allocation_id}`.
 
-### Three tunnels and the sandbox manager route
+### Two tunnels and the sandbox manager route
 
-Provision tunnel authorization on the stable gateway/control-plane machines
-before adding a server. Bootstrap cannot grant access to them. Use three
-distinct keys with no shell authority and narrowly permitted forwarding:
+Provision tunnel authorization on the stable control-plane machine before
+adding a server. Bootstrap cannot grant access to it. Use two distinct keys
+with no shell authority and narrowly permitted forwarding. There is no
+inference tunnel: model calls go to each owner's provider over public HTTPS.
 
 | Tunnel | Remote destination | Audience |
 | --- | --- | --- |
-| Inference | Gateway inference port, default `127.0.0.1:8080` | Runner and sandbox relay |
 | MCP | Control plane's **MCP-only** listener, default `127.0.0.1:8001` | Sandbox tool relay |
 | Host control | Main API, default `127.0.0.1:8000` | Trusted runner only |
 

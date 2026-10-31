@@ -50,11 +50,13 @@ Gateway sign-in, Gateway admission and Gateway inference are removed. Inference 
 - **Deleted**:
   - the Gateway grant client and grant minting on claims (`grants.py`);
   - grant renewal and revocation (`workers/attempts.py` grant paths);
-  - usage readback (`grant_usage.py`, `ledger.py`, `api/usage.py`);
   - Gateway TTFT (`model_ttft.py`) and admin request detail (`api/admin_llm_requests.py`);
-  - the Gateway catalog (`visible_models.py`) and Gateway model preferences (`model_preference.py`, `api/model_preferences.py`);
+  - the Gateway catalog (`visible_models.py`) and Gateway model preferences (`api/model_preferences.py`);
   - Gateway-grant prompt rewrite (`prompt_rewrite.py`, `api/prompt_rewrite.py`);
   - `LocalModeGrantClient`.
+- **Rewritten, not deleted**:
+  - usage (`ledger.py`, `grant_usage.py`, `api/usage.py`) reads only what each agent reported about its own model calls; the Gateway ledger readback is gone;
+  - `model_preference.py` remembers the model and connection of the owner's newest turn.
 - **PR titles** keep local mode's behaviour: no model call, the deterministic title.
 - **Job admission** refuses a turn without a model connection, as local mode already does.
 

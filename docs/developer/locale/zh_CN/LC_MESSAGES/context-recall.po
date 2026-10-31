@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 03:26-0400\n"
+"POT-Creation-Date: 2026-10-30 22:23-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,7 +13,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.10.3\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../developer/context-recall.md:1
 msgid "Native conversation recall"
@@ -362,8 +362,9 @@ msgstr ""
 #: ../developer/context-recall.md:132
 msgid ""
 "Run the opt-in behavior preflight from the target checkout against the "
-"target inference Gateway:"
-msgstr "在目标版本的本地仓库里，对目标推理网关运行这项可选的行为预检："
+"model provider the deployment's owners use, with a test key the tester "
+"holds:"
+msgstr "在目标版本的仓库副本中，针对部署的所有者所用的模型服务商，用测试人员自己持有的测试密钥运行可选的行为预检："
 
 #: ../developer/context-recall.md:141
 msgid ""
@@ -411,13 +412,11 @@ msgstr "在部署好的应用里实际试一遍：新开对话、在运行中发
 #: ../developer/context-recall.md:161
 msgid ""
 "The preflight is opt-in and is not automatically run by deployment "
-"workflows. CI receives no inference key. Repeat it when Gateway model "
+"workflows. CI receives no inference key. Repeat it when provider model "
 "routes, model deployment or CLI pins change. Finite samples test the "
 "reported failure without guaranteeing that a model never makes another "
 "incorrect claim."
-msgstr ""
-"这项预检需要主动运行，部署工作流不会自动跑。CI 拿不到推理密钥。网关的模型路由、模型部署或 CLI "
-"的固定版本变了，就要重新跑一次。有限的样本只能检验已经报告过的那个问题，没法保证模型以后不会再说错。"
+msgstr "预检是可选的，部署流程不会自动运行它。CI 不获得任何推理密钥。服务商的模型路由、模型部署或 CLI 固定版本发生变化时，应重新运行。有限的样本只能检验已报告的故障，不能保证模型不会再给出其他错误的说法。"
 
 #: ../developer/context-recall.md:166
 msgid ""
@@ -435,4 +434,3 @@ msgstr ""
 "实现和检查代码：[`runner.py`](../../apps/backend/cloud_agent_host/runner.py)、[`drivers.py`](../../apps/backend/cloud_agent_host/drivers.py)、[`shared_session_supervisor.py`](../../apps/backend/cloud_agent_host/shared_session_supervisor.py)、[`shared_protocol.py`](../../apps/backend/cloud_agent_shared/shared_protocol.py)、[`check_model_context.py`](../../deploy/preflight/check_model_context.py)"
 " 和 "
 "[`test_claude_driver_context.py`](../../tests/external/test_claude_driver_context.py)。"
-

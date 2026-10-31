@@ -59,7 +59,6 @@ export const usageEn = {
     'This period’s usage is too large to show at once. Choose a shorter period.',
   'settings.usage.error.unavailable': 'Usage cannot be read right now. Try again in a moment.',
   'settings.usage.cost': 'Model cost',
-  'settings.usage.costEstimate': 'Estimate, not a bill',
   'settings.usage.costProvider': 'Your provider',
   'settings.usage.costProviderDetail': 'Each connection’s provider bills and limits its use',
   'settings.usage.tokensReported': 'As your agents reported them',
@@ -100,6 +99,8 @@ export const usageEn = {
   'settings.usage.unknownModel': 'Unknown model',
   'settings.usage.otherModels': 'Other models',
   'settings.usage.noData': 'No turns in this period.',
+  'settings.usage.reportedNote':
+    'Tokens are what each agent reported for model calls it can tie to a turn. Some calls are not counted: Codex subagent work that continues after the turn that started it, or reports from an earlier session. Your provider may bill more than is shown here.',
   'settings.usage.utcNote':
     'Days start at 00:00 UTC. A turn counts on the day it started; CPU and memory count when they were used.',
   'settings.usage.utcNoteLocal':
@@ -158,7 +159,6 @@ export const usageZhCN: Record<keyof typeof usageEn, string> = {
     '这段时间的用量数据太大，无法一次显示。请选择更短的时间范围。',
   'settings.usage.error.unavailable': '暂时无法读取用量，请稍后再试。',
   'settings.usage.cost': '模型费用',
-  'settings.usage.costEstimate': '估算，不是账单',
   'settings.usage.costProvider': '由服务商计费',
   'settings.usage.costProviderDetail': '每个连接的服务商负责计费和额度',
   'settings.usage.tokensReported': '由智能体上报',
@@ -199,6 +199,8 @@ export const usageZhCN: Record<keyof typeof usageEn, string> = {
   'settings.usage.unknownModel': '未知模型',
   'settings.usage.otherModels': '其他模型',
   'settings.usage.noData': '这段时间没有对话轮次。',
+  'settings.usage.reportedNote':
+    'Token 数来自各智能体对能归属到某一轮对话的模型调用的上报。部分调用不计入：例如启动它的那一轮结束后仍在运行的 Codex 子智能体，或来自更早会话的上报。服务商实际计费可能高于此处显示。',
   'settings.usage.utcNote':
     '每天从 UTC 零点开始算。一轮对话计入它开始的那一天；CPU 和内存计入实际使用的那一天。',
   'settings.usage.utcNoteLocal':

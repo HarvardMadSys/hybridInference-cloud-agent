@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-29 13:12-0400\n"
+"POT-Creation-Date: 2026-10-30 22:33-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -286,7 +286,7 @@ msgstr "给这台服务器单独保存的覆盖值；"
 msgid "the global value saved by an administrator;"
 msgstr "管理员保存的全局值；"
 
-#: ../../ENVIRONMENT.md:103 ../../ENVIRONMENT.md:406
+#: ../../ENVIRONMENT.md:103 ../../ENVIRONMENT.md:425
 msgid "the built-in default."
 msgstr "内置默认值。"
 
@@ -345,25 +345,25 @@ msgid ""
 "policy, MCP target policy, and default execution profile. During an "
 "upgrade, the main listener imports only newly migrated fields that are "
 "missing. It never overwrites an existing value, including an empty reset,"
-" and the relay waits for the import to finish. The identity issuer stays "
-"pinned to this database. Existing user/compute encryption keys cannot be "
+" and the relay waits for the import to finish. The database stays bound "
+"to the account system. Existing user/compute encryption keys cannot be "
 "replaced or reset through the settings editor without a separate re-"
 "encryption procedure."
 msgstr ""
 "数据库里还存着控制平面的运行时身份、签名和加密密钥、sandbox manager 凭据、cookie 和代理策略、MCP 目标策略，以及默认的 "
 "execution "
-"profile。升级时，主监听器只导入这次迁移新增、且当前缺失的字段，绝不覆盖已有的值（哪怕是被重置成空的值），中继会等导入完成。身份签发方始终绑定在这个数据库上。已有的用户加密密钥和计算资源加密密钥，不能直接在设置编辑器里替换或重置，必须走单独的重新加密流程。"
+"profile。升级时，主监听器只导入这次迁移新增、且当前缺失的字段，绝不覆盖已有的值（哪怕是被重置成空的值），中继会等导入完成。数据库始终绑定在账号系统上。已有的用户加密密钥和计算资源加密密钥，不能直接在设置编辑器里替换或重置，必须走单独的重新加密流程。"
 
 #: ../../ENVIRONMENT.md:140
 msgid ""
 "The Settings page identifies missing required fields and incomplete "
-"optional integrations. If Gateway sign-in is not ready, an administrator "
-"can open `<web base path>/setup` with `ADMIN_TOKEN`. Setup uses the same "
-"authenticated, audited settings API. The recovery token stays in page "
-"memory and is never saved in browser storage."
+"optional integrations. Before any administrator account exists, an "
+"operator can open `<web base path>/setup` with `ADMIN_TOKEN`. Setup uses "
+"the same authenticated, audited settings API. The recovery token stays in"
+" page memory and is never saved in browser storage."
 msgstr ""
-"设置页面会标出缺失的必填项和没配完整的可选集成。如果网关登录还没准备好，管理员可以用 `ADMIN_TOKEN` 打开 `<web base "
-"path>/setup`。setup 页面用的是同一个带认证、带审计的设置 API。恢复令牌只保存在页面内存里，绝不会写进浏览器存储。"
+"设置页面会标出缺失的必填项和没配完整的可选集成。在还没有任何管理员账号之前，运维人员可以用 `ADMIN_TOKEN` 打开 `<web base"
+" path>/setup`。setup 页面用的是同一个带认证、带审计的设置 API。恢复令牌只保存在页面内存里，绝不会写进浏览器存储。"
 
 #: ../../ENVIRONMENT.md:146
 msgid ""
@@ -387,25 +387,28 @@ msgstr "唯一的硬性规定"
 
 #: ../../ENVIRONMENT.md:156
 msgid ""
-"The gateway's `API_KEY_SECRET` and `JWT_SECRET_KEY` must never appear in "
-"this repository, in its configuration, or on any host that runs it."
-msgstr "网关的 `API_KEY_SECRET` 和 `JWT_SECRET_KEY`，绝不能出现在这个仓库里、它的配置里，或者任何运行它的主机上。"
-
-#: ../../ENVIRONMENT.md:159
-msgid ""
-"The gateway mints and verifies inference grants. Cloud Agent verifies "
-"identity tokens with public JWKS keys and signs its own tokens with "
-"independent secrets. Any proposal to place either gateway signing secret "
-"here requires a design review."
+"The HybridInference Gateway's `API_KEY_SECRET` and `JWT_SECRET_KEY`, and "
+"its database credentials, must never appear in this repository, in its "
+"configuration, or on any host that runs it."
 msgstr ""
-"推理授权由网关签发和校验。Cloud Agent 用公开的 JWKS 密钥校验身份令牌，用自己独立的 secret "
-"给自己的令牌签名。谁要是提议把网关的任何一个签名密钥放到这边来，都必须先经过设计评审。"
+"HybridInference Gateway 的 `API_KEY_SECRET`、`JWT_SECRET_KEY` "
+"及其数据库凭据，绝不能出现在这个仓库里、它的配置里，或者任何运行它的主机上。"
 
-#: ../../ENVIRONMENT.md:164
+#: ../../ENVIRONMENT.md:160
+msgid ""
+"Cloud Agent keeps its own accounts and signs its own tokens with "
+"independent secrets; it has no Gateway dependency. A mail transport "
+"credential an operator chooses to reuse (SMTP) is configuration, kept in "
+"the operator's secret store, never in this repository."
+msgstr ""
+"Cloud Agent 维护自己的账号，用独立的密钥签发自己的令牌；它不依赖 "
+"Gateway。运维人员选择复用的邮件传输凭据（SMTP）属于配置，保存在运维人员的密钥存储中，绝不放进这个仓库。"
+
+#: ../../ENVIRONMENT.md:165
 msgid "Provisioning status"
 msgstr "开通状态"
 
-#: ../../ENVIRONMENT.md:166
+#: ../../ENVIRONMENT.md:167
 msgid ""
 "The original extraction provisioned staging on 2026-08-06 and production "
 "on 2026-08-07; [the cutover record](docs/agents/specs/cutover.md) "
@@ -415,7 +418,7 @@ msgstr ""
 "最初拆分仓库时，staging 在 2026-08-06 开通，production 在 2026-08-07 开通，这段历史记在 "
 "[cutover 记录](docs/agents/specs/cutover.md)里。这些日期说明不了现在的某套部署是否就绪。"
 
-#: ../../ENVIRONMENT.md:170
+#: ../../ENVIRONMENT.md:171
 msgid ""
 "This repository publishes neutral releases. As a downstream operator, you"
 " own your configuration, provisioning status, rollout record, and "
@@ -425,11 +428,11 @@ msgstr ""
 "这个仓库发布的是不绑定任何部署的中立版本。作为下游的运维方，你自己负责配置、开通状态、上线记录和恢复用的证据。secret 不要放进 "
 "Git，并且要和它保护的数据一起备份。"
 
-#: ../../ENVIRONMENT.md:174
+#: ../../ENVIRONMENT.md:175
 msgid "Local development tools"
 msgstr "本地开发工具"
 
-#: ../../ENVIRONMENT.md:176
+#: ../../ENVIRONMENT.md:177
 msgid ""
 "These values are read by local tooling and are not saved application "
 "settings."
@@ -457,15 +460,15 @@ msgstr ""
 "可选的输出目录，由运行 `scripts/ci-local.sh` 的开发者设置。默认每次运行都在仓库里新建一个 `.local-"
 "ci/<tier>.XXXXXX` 目录，已被 git 忽略。里面是检查日志和数据库测试的 JUnit 报告，不需要任何应用 secret。"
 
-#: ../../ENVIRONMENT.md:182
+#: ../../ENVIRONMENT.md:183
 msgid "Control plane (`cloud_agent`)"
 msgstr "控制平面（`cloud_agent`）"
 
-#: ../../ENVIRONMENT.md:184
+#: ../../ENVIRONMENT.md:185
 msgid "Local and CI permission regression"
 msgstr "本地和 CI 的权限回归测试"
 
-#: ../../ENVIRONMENT.md:186
+#: ../../ENVIRONMENT.md:187
 msgid ""
 "`AGENT_PERMISSION_TEST_IMAGE` enables the opt-in Linux UID regression in "
 "`tests/external/test_shared_member_permissions.py`. It names an already-"
@@ -477,7 +480,7 @@ msgstr ""
 "回归测试。它的值是一个已经拉取好的 Docker 镜像，里面要有 Python 3 和 GNU 的 `find`/`stat`，例如 "
 "`python:3.12-slim`。拉好镜像后运行："
 
-#: ../../ENVIRONMENT.md:196
+#: ../../ENVIRONMENT.md:197
 msgid ""
 "The test uses disposable containers without network access or mounts and "
 "runs the production normalizer as separate member UIDs without "
@@ -487,11 +490,11 @@ msgstr ""
 "测试用的是没有网络、没有挂载的一次性容器，以不同的成员 UID、不带任何 capability 的方式运行生产环境的权限规范化程序。CI "
 "会在部署前跑它；它不需要模型 API 密钥，也不依赖任何已部署服务的设置。"
 
-#: ../../ENVIRONMENT.md:200
+#: ../../ENVIRONMENT.md:201
 msgid "Local and CI restore regression"
 msgstr "本地和 CI 的恢复回归测试"
 
-#: ../../ENVIRONMENT.md:202
+#: ../../ENVIRONMENT.md:203
 msgid ""
 "`AGENT_RESTORE_TEST_IMAGE` names the base image for "
 "`tests/external/test_checkpoint_restore_roundtrip.py`, `python:3.12-slim`"
@@ -506,13 +509,13 @@ msgstr ""
 "那样停掉一个对话容器、存下检查点，再把检查点作为更新的一代加载出来，经过归档的启动栅栏把容器启动起来，全程用真实的 Docker，只有 S3 "
 "换成了本地文件。运行："
 
-#: ../../ENVIRONMENT.md:213
+#: ../../ENVIRONMENT.md:214
 msgid ""
 "CI runs it before deployment; it needs no S3 bucket, model API key or "
 "deployed-service setting."
 msgstr "CI 会在部署前跑它；它不需要 S3 桶、模型 API 密钥，也不依赖任何已部署服务的设置。"
 
-#: ../../ENVIRONMENT.md:216
+#: ../../ENVIRONMENT.md:217
 msgid "Database"
 msgstr "数据库"
 
@@ -522,9 +525,15 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"Postgres DSN for a database owned exclusively by Cloud Agent. Do not "
-"share the gateway's database."
-msgstr "Cloud Agent 独占使用的数据库的 Postgres DSN。不要和网关共用数据库。"
+"Postgres DSN for a database owned exclusively by Cloud Agent. A new "
+"deployment starts on an empty one; a database from before the "
+"independent-accounts release is refused and kept as an archive "
+"([cutover](docs/developer/upgrade-notes.md#independent-accounts-"
+"cutover))."
+msgstr ""
+"Cloud Agent 独占的数据库的 Postgres "
+"DSN。新部署从一个空数据库开始；独立账号版本之前的数据库会被拒绝，并作为归档保留（[切换说明](docs/developer/upgrade-"
+"notes.md#independent-accounts-cutover)）。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD`"
@@ -560,11 +569,11 @@ msgstr ""
 "`postgres`。数据库名必须包含 `_test_`，否则夹具会拒绝。用 xdist 并行时，每个 worker 会在名字后面加上自己的 "
 "ID，并需要一个事先建好的数据库。CI 用 `-n 4` 跑，会建好 `<TEST_DB_NAME>_gw0`…`_gw3`。"
 
-#: ../../ENVIRONMENT.md:224
+#: ../../ENVIRONMENT.md:225
 msgid "pgAdmin database administration"
 msgstr "用 pgAdmin 管理数据库"
 
-#: ../../ENVIRONMENT.md:226
+#: ../../ENVIRONMENT.md:227
 msgid ""
 "The optional `pgadmin` Compose profile adds **Admin → Database → Open "
 "pgAdmin**. The private service has no published port. Every request "
@@ -707,149 +716,9 @@ msgstr ""
 "`False`。不管这个值如何，代理都会把 pgAdmin 的 cookie 限定在它的公开路由下，加上 HttpOnly 和 "
 "SameSite=Lax，并在 HTTPS 下要求 Secure。"
 
-#: ../../ENVIRONMENT.md:242
-msgid "Gateway contracts"
-msgstr "网关契约"
-
-#: ../developer/configuration.md:1
-msgid "`GATEWAY_BASE_URL`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Origin of the HybridInference gateway this deployment federates with, "
-"e.g. `https://gateway.example.org`. A new value saved in Admin → Settings"
-" must use HTTPS unless it names localhost, a loopback address or a "
-"single-label name such as a Compose service; the same applies to "
-"`GATEWAY_JWKS_URL` and `GATEWAY_AUTHORIZE_URL`. A value imported or saved"
-" before that rule still loads. Because the dispatch token is sent to "
-"whatever URL is saved, changing this URL while a token is configured is "
-"refused unless the same update supplies the token again or clears it: on "
-"the settings page, clear the token, change the URL, then enter the token "
-"again."
-msgstr ""
-"这套部署所对接的 HybridInference 网关的地址，例如 `https://gateway.example.org`。在 Admin →"
-" Settings 里保存新值时必须用 HTTPS，除非它指向 localhost、回环地址，或者 Compose "
-"服务名这类不带点的单段名称；`GATEWAY_JWKS_URL` 和 `GATEWAY_AUTHORIZE_URL` "
-"也适用同样的规则。这条规则出现之前导入或保存的值，仍然可以加载。因为 dispatch "
-"令牌会发送到这里保存的地址，所以已经配置了令牌时，修改这个地址会被拒绝，除非同一次更新里重新提供令牌或把它清空。在设置页面上的做法是：先清空令牌，改地址，再重新填入令牌。"
-
-#: ../developer/configuration.md:1
-msgid "`GATEWAY_JWKS_URL`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Explicit URL of the gateway's public key set, typically "
-"`<GATEWAY_BASE_URL>/v1/identity/jwks`; it is not derived automatically. "
-"The verifier caches the JWKS set for five minutes and refreshes for an "
-"unknown `kid`. Publish current and retiring public keys through rotation;"
-" removal takes effect when the cache expires."
-msgstr ""
-"网关公钥集合的完整地址，通常是 `<GATEWAY_BASE_URL>/v1/identity/jwks`；不会自动推导。校验器会把 JWKS "
-"缓存五分钟，遇到不认识的 `kid` 时立即刷新。轮换密钥期间，要同时发布当前的公钥和即将退役的公钥；某个公钥撤下后，要等缓存过期才真正生效。"
-
-#: ../developer/configuration.md:1
-msgid "`GATEWAY_GRANT_DISPATCH_TOKEN`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Bearer credential for minting, renewing, revoking and reading usage for "
-"inference grants. Generate random 32 bytes (a new value saved in Admin → "
-"Settings must be at least 32 bytes; a shorter value saved or imported "
-"earlier still loads, and startup logs `agent_weak_credential` until it is"
-" replaced); provision the same value on both sides and a distinct value "
-"for each environment. The saved token is sent only to `GATEWAY_BASE_URL`:"
-" Admin Settings refuses to change that URL while the token is kept, so "
-"clear the token, save the URL, then enter the token again, or save both "
-"in one update."
-msgstr ""
-"用于签发、续期、撤销推理授权和查询用量的 Bearer 凭据。随机生成 32 字节。在 Admin → Settings 里保存的新值至少要 32"
-" 字节；以前保存或导入的较短的值仍然可以加载，但启动时会一直记录 "
-"`agent_weak_credential`，直到换掉为止。两边配置同一个值，每个环境用不同的值。保存的令牌只会发给 "
-"`GATEWAY_BASE_URL`：令牌还在时，Admin Settings "
-"不允许修改那个地址。所以要么先清空令牌、保存地址、再重新填入令牌，要么在一次更新里同时保存两者。"
-
-#: ../developer/configuration.md:1
-msgid "`GATEWAY_GRANT_BASE_PATH`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"*Optional initial import.* Grant service route prefix, default `/internal"
-"/agent-grants`; applies to mint, renew, revoke and usage queries. Use an "
-"absolute URL path without a query or fragment. Change it in Admin "
-"Settings; deployment clients apply it live."
-msgstr ""
-"*可选，仅用于初始导入。* 授权服务的路由前缀，默认 `/internal/agent-"
-"grants`，签发、续期、撤销和用量查询都用它。填一个不带查询参数和片段的绝对路径。要修改的话在 Admin Settings "
-"里改，部署中的客户端会立即生效。"
-
-#: ../developer/configuration.md:1
-msgid "`GATEWAY_GRANT_BINDING_ID`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"*Optional; recommended before the first ledger-enabled deployment.* "
-"Nonsecret identity of the logical gateway installation. When set, usage "
-"snapshots pin this identity across URL, grant-prefix and credential "
-"migrations. Change it when switching installations, including at the same"
-" URL. Without it, the fingerprint uses `GATEWAY_BASE_URL` and "
-"`GATEWAY_GRANT_BASE_PATH`, so changing either prevents refreshing old "
-"snapshots. Credential rotation always preserves the binding. Configure "
-"this only in the control plane; service credentials never enter snapshots"
-" or the browser."
-msgstr ""
-"*可选；建议在第一次启用账本功能的部署之前设置。* 用来标识网关是哪一套安装的非敏感 ID。设置之后，即使网关的 "
-"URL、授权前缀或凭据变了，用量快照仍认这个 ID。切换到另一套网关安装时，要改这个值，即使 URL 没变也一样。不设置的话，指纹由 "
-"`GATEWAY_BASE_URL` 和 `GATEWAY_GRANT_BASE_PATH` "
-"算出，这两个值改了任何一个，旧快照就没法再刷新了。轮换凭据不会影响这个绑定。只在控制平面里配置它；服务凭据绝不会进入快照，也不会出现在浏览器里。"
-
-#: ../developer/configuration.md:1
-msgid "`GATEWAY_ISSUER`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"*Required for Gateway access.* Exact `iss` signed by the Gateway. It "
-"identifies the user namespace and need not equal the HTTP origin. "
-"Recorded in the Agent database; changing it requires a separate database "
-"or an explicit ownership migration. See [minimal identity "
-"migration](docs/developer/minimal-identity.md)."
-msgstr ""
-"*访问网关时必填。* 网关签发令牌时使用的确切 `iss`。它标识的是用户命名空间，不一定和 HTTP 地址相同。这个值会记在 Agent "
-"数据库里；要改它，就得换一个单独的数据库，或者做一次明确的归属迁移。见[最小身份迁移](docs/developer/minimal-"
-"identity.md)。"
-
-#: ../developer/configuration.md:1
-msgid "`GATEWAY_AUTHORIZE_URL`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Explicit consent-page URL, typically `<GATEWAY_BASE_URL>/authorize`; it "
-"is not derived automatically. The control plane performs the PKCE flow. "
-"Unset disables sign-in and reports it unavailable."
-msgstr ""
-"授权确认页的完整地址，通常是 `<GATEWAY_BASE_URL>/authorize`；不会自动推导。PKCE "
-"流程由控制平面执行。不设置的话，登录功能会被关闭，并显示为不可用。"
-
-#: ../developer/configuration.md:1
-msgid "`AGENT_SESSION_REDIRECT_URI`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Public URL of `GET /v1/session/callback`, for example "
-"`https://agents.example.org/api/v1/session/callback`. It must exactly "
-"match an entry in the gateway's `IDENTITY_ALLOWED_REDIRECTS`. It is "
-"configured explicitly, never derived from `Host` or forwarded headers."
-msgstr ""
-"`GET /v1/session/callback` 的公开地址，例如 "
-"`https://agents.example.org/api/v1/session/callback`。它必须和网关 "
-"`IDENTITY_ALLOWED_REDIRECTS` 里的某一项完全一致。这个值必须显式配置，绝不会根据 `Host` 或转发的请求头推导。"
+#: ../../ENVIRONMENT.md:243
+msgid "Public addresses"
+msgstr "公开地址"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_WEB_BASE_URL`"
@@ -858,35 +727,134 @@ msgstr ""
 #: ../developer/configuration.md:1
 msgid ""
 "Public web-app URL, including its base path, for example "
-"`https://agents.example.org/agents`. Sign-in returns here after setting "
-"the cookie; unavailable sign-in returns with "
-"`?sign_in_error=unavailable`. Its origin is also one the main API accepts"
-" session-cookie writes from: a POST, PUT, PATCH or DELETE carrying the "
-"session cookie is refused with 403 when the browser reports it came from "
-"another origin (`Sec-Fetch-Site`, or `Origin` without it) that is neither"
-" this one, the request's own host, nor the pgAdmin public URL's."
+"`https://agents.example.org/agents`. Every emailed link is built from it,"
+" never from a request's `Host`. Its origin is also one the main API "
+"accepts session-cookie writes from: a POST, PUT, PATCH or DELETE carrying"
+" the session cookie is refused with 403 when the browser reports it came "
+"from another origin (`Sec-Fetch-Site`, or `Origin` without it) that is "
+"neither this one, the request's own host, nor the pgAdmin public URL's."
 msgstr ""
-"Web 应用的公开地址，包括 base path，例如 `https://agents.example.org/agents`。登录设置好 "
-"cookie 后会回到这里；登录不可用时，会带着 `?sign_in_error=unavailable` 回到这里。主 API "
-"也只接受来自几个特定来源的、写会话 cookie 的请求，这个地址的源就是其中之一。具体来说：一个带着会话 cookie 的 "
-"POST、PUT、PATCH 或 DELETE 请求，如果浏览器报告它来自别的源（看 `Sec-Fetch-Site`；没有的话看 "
-"`Origin`），而这个源既不是本地址的源，也不是请求本身的主机，也不是 pgAdmin 公开地址的源，就会被以 403 拒绝。"
+"Web 应用的公开地址，包括 base path，例如 "
+"`https://agents.example.org/agents`。每个邮件中的链接都基于它构造，从不使用请求的 `Host`。主 API "
+"也只接受来自几个特定来源的、写会话 cookie 的请求，这个地址的源就是其中之一：一个带着会话 cookie 的 POST、PUT、PATCH "
+"或 DELETE 请求，如果浏览器报告它来自别的源（看 `Sec-Fetch-Site`；没有的话看 "
+"`Origin`），而这个源既不是本地址的源，也不是请求本身的主机，也不是 pgAdmin 公开地址的源，就会以 403 拒绝。"
 
 #: ../developer/configuration.md:1
-msgid "`AGENT_GATEWAY_URL`"
-msgstr ""
+msgid "`AGENT_PUBLIC_API_URL`"
+msgstr "`AGENT_PUBLIC_API_URL`"
 
 #: ../developer/configuration.md:1
 msgid ""
-"Gateway URL as seen *from inside the sandbox* — the relay address, not "
-"the public URL. Differs from `GATEWAY_BASE_URL` by design. Required on a "
-"Gateway-mode host; must be empty on an explicitly local-account host. The"
-" control-plane management URL is never an inference fallback."
+"NEW. This API's public base URL, including its prefix, for example "
+"`https://agents.example.org/api`. OAuth callbacks (MCP sign-in, compute "
+"registration) are built from it. It replaces the address "
+"`AGENT_SESSION_REDIRECT_URI` used to give."
 msgstr ""
-"*在沙箱内部*看到的网关地址，也就是中继地址，而不是公开地址。它和 `GATEWAY_BASE_URL` 本来就不一样。Gateway "
-"模式的主机必须配置；显式使用本地账号的主机必须留空。控制面管理 API 地址绝不会作为推理地址的回退值。"
+"新增。本 API 的公开基础地址，包括前缀，例如 `https://agents.example.org/api`。OAuth 回调（MCP "
+"登录、计算资源注册）都基于它构造。它取代了以前由 `AGENT_SESSION_REDIRECT_URI` 提供的地址。"
 
-#: ../../ENVIRONMENT.md:257
+#: ../../ENVIRONMENT.md:250
+msgid "Retired Gateway variables"
+msgstr "已退役的 Gateway 变量"
+
+#: ../../ENVIRONMENT.md:252
+msgid ""
+"HybridInference Gateway sign-in, admission and inference were removed. "
+"Each of these is refused: the control plane stops at startup naming it, "
+"and `deploy/control-plane/deploy.sh` stops before pulling anything "
+"([cutover](docs/developer/upgrade-notes.md#independent-accounts-"
+"cutover))."
+msgstr ""
+"HybridInference Gateway 的登录、准入和推理已被移除。下列每个变量都会被拒绝：控制平面在启动时停止并指出它，`deploy"
+"/control-plane/deploy.sh` 在拉取任何内容之前就停止（[切换说明](docs/developer/upgrade-"
+"notes.md#independent-accounts-cutover)）。"
+
+#: ../developer/configuration.md:1
+msgid "Status"
+msgstr "状态"
+
+#: ../developer/configuration.md:1
+msgid "~~`GATEWAY_BASE_URL`~~"
+msgstr "~~`GATEWAY_BASE_URL`~~"
+
+#: ../developer/configuration.md:1
+msgid "**removed**, refused"
+msgstr "**已移除**，会被拒绝"
+
+#: ../developer/configuration.md:1
+msgid "~~`GATEWAY_JWKS_URL`~~"
+msgstr "~~`GATEWAY_JWKS_URL`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`GATEWAY_GRANT_DISPATCH_TOKEN`~~"
+msgstr "~~`GATEWAY_GRANT_DISPATCH_TOKEN`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`GATEWAY_GRANT_BASE_PATH`~~"
+msgstr "~~`GATEWAY_GRANT_BASE_PATH`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`GATEWAY_GRANT_BINDING_ID`~~"
+msgstr "~~`GATEWAY_GRANT_BINDING_ID`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`GATEWAY_ISSUER`~~"
+msgstr "~~`GATEWAY_ISSUER`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`GATEWAY_AUTHORIZE_URL`~~"
+msgstr "~~`GATEWAY_AUTHORIZE_URL`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`AGENT_SESSION_REDIRECT_URI`~~"
+msgstr "~~`AGENT_SESSION_REDIRECT_URI`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`AGENT_GATEWAY_URL`~~"
+msgstr "~~`AGENT_GATEWAY_URL`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`AGENT_AUTH_MODE`~~"
+msgstr "~~`AGENT_AUTH_MODE`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`AGENT_GATEWAY_SSH_HOST`~~"
+msgstr "~~`AGENT_GATEWAY_SSH_HOST`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`AGENT_WEB_GATEWAY_URL`~~"
+msgstr "~~`AGENT_WEB_GATEWAY_URL`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`AGENT_WEB_FEATURE_RAG`~~"
+msgstr "~~`AGENT_WEB_FEATURE_RAG`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`AGENT_ONCALL_DISPATCH_TOKEN`~~"
+msgstr "~~`AGENT_ONCALL_DISPATCH_TOKEN`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`AGENT_ONCALL_USER_ID`~~"
+msgstr "~~`AGENT_ONCALL_USER_ID`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`IDENTITY_ISSUER`~~"
+msgstr "~~`IDENTITY_ISSUER`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`IDENTITY_JWT_PRIVATE_KEY`~~"
+msgstr "~~`IDENTITY_JWT_PRIVATE_KEY`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`IDENTITY_JWT_RETIRING_PUBLIC_KEYS`~~"
+msgstr "~~`IDENTITY_JWT_RETIRING_PUBLIC_KEYS`~~"
+
+#: ../developer/configuration.md:1
+msgid "~~`IDENTITY_ALLOWED_REDIRECTS`~~"
+msgstr "~~`IDENTITY_ALLOWED_REDIRECTS`~~"
+
+#: ../../ENVIRONMENT.md:279
 msgid "Own secrets"
 msgstr "本服务自己的 secret"
 
@@ -920,14 +888,13 @@ msgid ""
 "saved or imported earlier still loads, and startup logs "
 "`agent_weak_credential` until it is replaced. Without a key, none store "
 "plaintext; MCP offers an empty picker and value-bearing environment "
-"operations fail closed. Credentials from the pre-extraction gateway key "
-"require re-wrapping, not copying."
+"operations fail closed."
 msgstr ""
 "分别用不同的域分隔符，加密存储的代码托管凭据、每个用户的 MCP 凭据，以及可复用云环境里的变量和覆盖值。随机生成 32 "
 "字节，每个环境都不一样。在 Admin → Settings 里保存的新值至少要 32 "
 "字节；以前保存或导入的较短的值仍然可以加载，但启动时会一直记录 "
 "`agent_weak_credential`，直到换掉为止。没有这把密钥时，上面这些都不会以明文保存：MCP "
-"的选择列表会是空的，涉及具体取值的环境操作一律拒绝执行。拆分仓库之前用网关密钥加密的凭据，需要重新加密封装，不能直接复制过来。"
+"的选择列表会是空的，涉及具体取值的环境操作一律拒绝执行。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_CONTROL_TOKEN_SECRET`"
@@ -936,14 +903,12 @@ msgstr ""
 #: ../developer/configuration.md:1
 msgid ""
 "Signs host/worker control tokens. Generate random 32 bytes, unique per "
-"environment and independent of gateway secrets. A new value saved in "
-"Admin → Settings must be at least 32 bytes; a shorter value saved earlier"
-" still loads, and startup logs `agent_weak_credential` until it is "
-"replaced."
+"environment. A new value saved in Admin → Settings must be at least 32 "
+"bytes; a shorter value saved earlier still loads, and startup logs "
+"`agent_weak_credential` until it is replaced."
 msgstr ""
-"用来给主机和 worker 的控制令牌签名。随机生成 32 字节，每个环境都不一样，并且和网关的 secret 无关。在 Admin → "
-"Settings 里保存的新值至少要 32 字节；以前保存的较短的值仍然可以加载，但启动时会一直记录 "
-"`agent_weak_credential`，直到换掉为止。"
+"用来给主机和 worker 的控制令牌签名。随机生成 32 字节，每个环境都不一样。在 Admin → Settings 里保存的新值至少要 32"
+" 字节；以前保存的较短的值仍然可以加载，但启动时会一直记录 `agent_weak_credential`，直到换掉为止。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_SESSION_SECRET`"
@@ -951,9 +916,14 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"Signs the web session cookie. Generate random 32 bytes, unique per "
-"environment."
-msgstr "给 Web 会话 cookie 签名。随机生成 32 字节，每个环境都不一样。"
+"Legacy. Only the fallback root for `AGENT_SETTINGS_ENCRYPTION_KEY` on an "
+"installation that never set that key; no session uses it. New deployments"
+" set `AGENT_SETTINGS_ENCRYPTION_KEY` instead. If both it and "
+"`AGENT_LOCAL_SESSION_SECRET` are set, they must differ."
+msgstr ""
+"旧配置。仅在从未设置 `AGENT_SETTINGS_ENCRYPTION_KEY` "
+"的安装中作为该密钥的回退根密钥；没有任何会话使用它。新部署请改为设置 `AGENT_SETTINGS_ENCRYPTION_KEY`。如果它和 "
+"`AGENT_LOCAL_SESSION_SECRET` 都已设置，两者必须不同。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_DEFAULT_EXECUTION_PROFILE`"
@@ -975,39 +945,6 @@ msgstr ""
 "持有当前有效的注册凭据；并且正在认领任务的那个副本能证明自己用的是 `io.containerd.kata.v2`，guest "
 "内核也和主机内核不同。受信任的 profile 允许对受信任的内部或开发仓库使用 runc。后续消息和 Fork "
 "都沿用已保存的策略，调用方没法自己选。"
-
-#: ../developer/configuration.md:1
-msgid "`AGENT_ONCALL_DISPATCH_TOKEN`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Authenticates the gateway alert relay on `/v1/agent/service/oncall/*` — "
-"one credential, one door. Random 32 bytes (a new value saved in Admin → "
-"Settings must be at least 32 bytes; a shorter value saved or imported "
-"earlier still loads, and startup logs `agent_weak_credential` until it is"
-" replaced), same value in the relay's `.env.oncall`, distinct per "
-"environment. Unset opens nothing (the door then answers only to "
-"`ADMIN_TOKEN`)."
-msgstr ""
-"用于 `/v1/agent/service/oncall/*` 上网关告警中继的认证：一个凭据，只开这一扇门。随机生成 32 字节。在 Admin"
-" → Settings 里保存的新值至少要 32 字节；以前保存或导入的较短的值仍然可以加载，但启动时会一直记录 "
-"`agent_weak_credential`，直到换掉为止。中继的 `.env.oncall` "
-"里填同样的值，每个环境都不一样。不设置的话，什么都不开放（这扇门只认 `ADMIN_TOKEN`）。"
-
-#: ../developer/configuration.md:1
-msgid "`AGENT_ONCALL_USER_ID`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Gateway user id every on-call job runs as. Its Gateway permissions decide"
-" which models the job's grant may carry, and its quota is what the "
-"analysis spends. Unset: the on-call door answers 503, the rest of the "
-"service is unaffected."
-msgstr ""
-"所有值班（on-call）任务都以这个网关用户 ID "
-"的身份运行。它在网关上的权限决定了任务的授权能用哪些模型，分析消耗的也是它的配额。不设置的话，值班入口返回 503，服务的其他部分不受影响。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_ALERT_WEBHOOK_URL`"
@@ -1036,15 +973,14 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"How long a member's independently fenced live-process residency and "
-"short-lived inference grant survive between host heartbeats. Default "
-"1800. Shared-live uses one residency per chat membership. This is "
-"credential/process ownership, not a second chat lifecycle clock: "
-"`AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox"
-" group is stopped."
+"How long a member's independently fenced live-process residency survives "
+"between host heartbeats. Default 1800. Shared-live uses one residency per"
+" chat membership. This is credential/process ownership, not a second chat"
+" lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a "
+"settled retained sandbox group is stopped."
 msgstr ""
-"在两次主机心跳之间，成员那个独立加了栅栏的常驻进程 residency，以及它的短期推理授权，最多能存活多久。默认 1800。shared-"
-"live 模式下，每个对话成员关系对应一个 "
+"在两次主机心跳之间，成员那个独立加了栅栏的常驻进程 residency 最多能存活多久。默认 1800。shared-live "
+"模式下，每个对话成员关系对应一个 "
 "residency。它管的是凭据和进程的归属，并不是对话生命周期的第二个时钟：已结束的保留沙箱组什么时候停止，只由 "
 "`AGENT_CHAT_IDLE_TIMEOUT_S` 决定。"
 
@@ -1062,45 +998,23 @@ msgstr ""
 "可选的、机器对机器使用的管理凭据。不设置就不开放任何令牌访问；管理员通过会话登录是另一条独立的授权途径。请至少用 32 "
 "个随机字节；值太短的话，启动时会记录 `agent_weak_credential`。"
 
-#: ../../ENVIRONMENT.md:272
-msgid "Local accounts (`AGENT_AUTH_MODE=local`)"
-msgstr "本地账号（`AGENT_AUTH_MODE=local`）"
+#: ../../ENVIRONMENT.md:292
+msgid "Accounts"
+msgstr "账号"
 
-#: ../../ENVIRONMENT.md:274
+#: ../../ENVIRONMENT.md:294
 msgid ""
-"Off by default. `AGENT_AUTH_MODE` and `AGENT_LOCAL_SESSION_SECRET` are "
-"read from the process environment only, never from Admin Settings, by "
-"both listeners. Every other variable here is the initial value of a "
-"setting in Admin → Settings → Accounts: imported once, the first time the"
-" settings registry sees it, and edited there afterwards. Secrets are "
-"stored encrypted and never shown again. See [local "
-"accounts](docs/developer/local-accounts.md)."
+"`AGENT_LOCAL_SESSION_SECRET` is read from the process environment only, "
+"never from Admin Settings, by both listeners. Every other variable here "
+"is the initial value of a setting in Admin → Settings → Accounts: "
+"imported once, the first time the settings registry sees it, and edited "
+"there afterwards. Secrets are stored encrypted and never shown again. See"
+" [accounts](docs/developer/local-accounts.md)."
 msgstr ""
-"默认关闭。两个监听器都只从进程环境读取 `AGENT_AUTH_MODE` 和 "
-"`AGENT_LOCAL_SESSION_SECRET`，从不读取管理设置。这里的其他变量都是 管理 → 设置 → 账号 "
-"中某项设置的初始值：在设置注册表第一次看到它时导入一次，之后在那里编辑。密钥加密保存，保存后不再显示。见[本地账号](docs/developer"
+"两个监听器都只从进程环境读取 `AGENT_LOCAL_SESSION_SECRET`，从不读取管理设置。这里的其他变量都是 管理 → 设置 → "
+"账号 "
+"中某项设置的初始值：在设置注册表第一次看到它时导入一次，之后在那里编辑。密钥加密保存，保存后不再显示。见[账号](docs/developer"
 "/local-accounts.md)。"
-
-#: ../developer/configuration.md:1
-msgid "`AGENT_AUTH_MODE`"
-msgstr "`AGENT_AUTH_MODE`"
-
-#: ../developer/configuration.md:1
-msgid ""
-"`gateway` (default) or `local`. `local` serves Cloud Agent's own "
-"email/password accounts, sessions and waiting list instead of Gateway "
-"sign-in, answers identity and admission from this database, and makes no "
-"Gateway identity, admission, catalog or grant call. It starts only on a "
-"database with no Gateway issuer binding and no owner data; a Gateway-"
-"bound database refuses it. Any other value stops startup. Set the same "
-"value on both control-plane listeners and their hosts. Local hosts omit "
-"the inference tunnel and accept personal model sources only; control-"
-"plane and MCP tunnels remain required. Managed host setup derives this "
-"value from the control plane."
-msgstr ""
-"可选 `gateway`（默认）或 `local`。`local` 使用 Cloud Agent "
-"自己的邮箱/密码账号、会话与等候名单，替代网关登录；身份和准入从本服务数据库读取，不调用网关的身份、准入、模型目录或授权接口。只有数据库未绑定网关签发方且不含所有者数据时才能启动；已绑定网关的数据库会拒绝本地模式。其他取值会阻止启动。控制面的两个监听器及其主机必须设置相同的值。本地主机省略推理隧道，只接受个人模型来源；控制面与"
-" MCP 隧道仍然必需。托管主机配置从控制面获取这个模式。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_LOCAL_SESSION_SECRET`"
@@ -1108,13 +1022,13 @@ msgstr "`AGENT_LOCAL_SESSION_SECRET`"
 
 #: ../developer/configuration.md:1
 msgid ""
-"Required in local mode: at least 32 random bytes, different from "
-"`AGENT_SESSION_SECRET`. Keys the hashes of local session cookies, emailed"
-" tokens and abuse counters. Rotating it ends every local session and "
-"outstanding link."
+"Required: at least 32 random bytes, different from "
+"`AGENT_SESSION_SECRET`. Keys the hashes of session cookies, emailed "
+"tokens and abuse counters. Rotating it ends every session and outstanding"
+" link."
 msgstr ""
-"本地模式必填：至少 32 个随机字节，且与 `AGENT_SESSION_SECRET` 不同。作为密钥，用于计算本地会话 "
-"cookie、邮件令牌和防滥用计数器的哈希。轮换此密钥会使所有本地会话和未使用的链接失效。"
+"必填：至少 32 个随机字节，且与 `AGENT_SESSION_SECRET` 不同。作为密钥，用于计算会话 "
+"cookie、邮件令牌和防滥用计数器的哈希。轮换此密钥会使所有会话和未使用的链接失效。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_LOCAL_SIGNUP_ENABLED`"
@@ -1122,10 +1036,9 @@ msgstr "`AGENT_LOCAL_SIGNUP_ENABLED`"
 
 #: ../developer/configuration.md:1
 msgid ""
-"Defaults to on in local mode. `false` closes public sign-up, by email and"
-" by phone; existing accounts still sign in. Signing up never grants Agent"
-" use."
-msgstr "本地模式下默认开启。`false` 关闭邮箱和手机的公开注册，现有账号仍能登录。注册不会授予 Agent 使用权限。"
+"Defaults to on. `false` closes public sign-up, by email and by phone; "
+"existing accounts still sign in. Signing up never grants Agent use."
+msgstr "默认开启。`false` 关闭邮箱和手机的公开注册，现有账号仍能登录。注册不会授予 Agent 使用权限。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION`"
@@ -1211,10 +1124,8 @@ msgstr ""
 msgid ""
 "NEW. Tencent Cloud CAM credentials of the `tencent` text message provider"
 " (the token only for temporary credentials). This deployment's own; never"
-" the Gateway's, never sent to a host or sandbox."
-msgstr ""
-"新增。`tencent` 短信服务商的腾讯云 CAM 凭据（token "
-"仅用于临时凭据）。这些是本部署自己的凭据，绝不是网关的，也绝不会发送到主机或沙箱。"
+" sent to a host or sandbox."
+msgstr "新增。`tencent` 短信服务商的腾讯云 CAM 凭据（token 仅用于临时凭据）。这些是本部署自己的凭据，绝不会发送到主机或沙箱。"
 
 #: ../developer/configuration.md:1
 msgid ""
@@ -1403,7 +1314,7 @@ msgstr ""
 "账号邮件的发件地址，例如 `Cloud Agent <no-reply@example.org>`。邮件链接只根据 "
 "`AGENT_WEB_BASE_URL` 构建。"
 
-#: ../../ENVIRONMENT.md:308
+#: ../../ENVIRONMENT.md:327
 msgid "Sandbox deletion archives"
 msgstr "沙箱删除前的归档"
 
@@ -1493,7 +1404,7 @@ msgstr ""
 "`control-plane` 服务的私有覆盖文件；基础 Compose 不会转发 AWS 凭据相关的变量。任何长期有效的 AWS 凭据都不会发给"
 " runner 主机、沙箱、Web 应用或 MCP 监听器。"
 
-#: ../../ENVIRONMENT.md:319
+#: ../../ENVIRONMENT.md:338
 msgid ""
 "See [sandbox archive storage](docs/developer/operations.md#sandbox-"
 "archive-storage) for permissions, retention and verification "
@@ -1502,7 +1413,7 @@ msgstr ""
 "权限、保留期和校验方面的要求，见[沙箱归档存储](docs/developer/operations.md#sandbox-archive-"
 "storage)。"
 
-#: ../../ENVIRONMENT.md:322
+#: ../../ENVIRONMENT.md:341
 msgid "Behaviour switches read by the control plane"
 msgstr "控制平面读取的行为开关"
 
@@ -1690,7 +1601,7 @@ msgstr ""
 "导出；上线过程中不要手动改。新的保留沙箱组要被认领，发起轮询的那个副本必须声明一个对应的、已完成的主机标记，所以还在部署中或部署失败的主机，没法借助一个冷启动的"
 " API 认领任务。本地环境会生成一个只属于它自己的标记。"
 
-#: ../../ENVIRONMENT.md:340
+#: ../../ENVIRONMENT.md:359
 msgid "Source control"
 msgstr "代码托管"
 
@@ -1890,17 +1801,17 @@ msgstr ""
 "pull request 的目标分支，默认 `dev`。不要留空：应用直接读配置时，空值会被当成一个空的分支名。Compose 用 `:-dev`"
 " 写法，让空值也取默认值。"
 
-#: ../../ENVIRONMENT.md:360
+#: ../../ENVIRONMENT.md:379
 msgid "MCP"
 msgstr "MCP"
 
-#: ../../ENVIRONMENT.md:362
+#: ../../ENVIRONMENT.md:381
 msgid ""
 "Cloud Agent owns MCP discovery, per-user credentials, authorization and "
-"attempt fencing. The gateway serves inference and has no MCP role."
-msgstr "MCP 的发现、每个用户的凭据、授权和 attempt 栅栏，都由 Cloud Agent 负责。网关只提供推理，和 MCP 无关。"
+"attempt fencing."
+msgstr "MCP 的发现、每个用户的凭据、授权和 attempt 栅栏，都由 Cloud Agent 负责。"
 
-#: ../../ENVIRONMENT.md:365
+#: ../../ENVIRONMENT.md:384
 msgid ""
 "Users add remote URLs, imported `mcpServers` snippets or stdio launch "
 "specs. Templates only prefill the connection form; environment variables "
@@ -2104,45 +2015,23 @@ msgstr ""
 msgid ""
 "Whether owners may add their own model connections (OpenAI Chat "
 "Completions or Responses, Anthropic Messages) and start turns on them. "
-"Off by default. Turn it on only once **every** control-plane replica, and"
-" every host, runs a release that knows connections: a turn on a "
-"connection stores its source in columns an older control plane does not "
-"read, so an older replica would claim, resume or queue it as a Gateway "
-"turn — a host capability cannot stop that, because the older control "
-"plane hands the host a claim that looks like a Gateway one. Once any "
-"owner has used a connection, do not roll the control plane back to an "
-"older release at all, even with this turned off: the conversations that "
-"ran on one keep their source and would continue on the Gateway under "
-"older code. Turning it off again stops new connections, edits that re-"
-"enable one, and new turns on one; turns already admitted still run on "
-"their connection or fail, never on the Gateway. See [owner model "
-"connections](docs/developer/operations.md#owner-model-connections)."
+"Off by default, and nothing runs until it is on: there is no other "
+"inference. Turn it on once every control-plane replica and every host "
+"runs this release. Turning it off stops new connections and new turns on "
+"them; turns already admitted still run on their connection or fail."
 msgstr ""
-"是否允许所有者添加自己的模型连接（OpenAI Chat Completions 或 Responses、Anthropic "
-"Messages），并在其上启动轮次。默认关闭。只有在**每个**控制平面副本和每台主机都运行支持连接的版本之后才能打开：连接上的轮次把来源存放在旧控制平面不读取的列里，旧副本会把它当作网关轮次来领取、恢复或排队——主机能力声明拦不住这一点，因为旧控制平面交给主机的领取结果看起来就是网关轮次。只要有任何所有者用过连接，就完全不要把控制平面回滚到旧版本，即使已经关闭此项也不行：在连接上运行过的会话保留着来源，在旧代码下会改为在网关上继续运行。再次关闭它会停止新建连接、重新启用连接的编辑以及在连接上的新轮次；已经准入的轮次仍在原连接上运行或失败，绝不会转到网关。见[所有者模型连接](docs/developer/operations.md"
-"#owner-model-connections)。"
+"所有者能否添加自己的模型连接（OpenAI Chat Completions 或 Responses、Anthropic "
+"Messages）并在上面开始轮次。默认关闭，在打开之前什么都不会运行：没有其他推理来源。等每个控制平面副本和每台主机都运行本版本后再打开。关闭后，不能再新建连接，也不能在连接上开始新的轮次；已经准入的轮次仍在其连接上运行或失败。"
 
 #: ../developer/configuration.md:1
-msgid "`AGENT_DEFAULT_MODEL`"
-msgstr ""
+msgid "~~`AGENT_DEFAULT_MODEL`~~"
+msgstr "~~`AGENT_DEFAULT_MODEL`~~"
 
 #: ../developer/configuration.md:1
 msgid ""
-"*Optional legacy import.* The model a new task starts on when its owner "
-"has not chosen one — their pinned model in My Settings outranks it, and "
-"so does the model their last task used. A model this deployment's gateway"
-" does not offer to a user is skipped rather than forced, so a value that "
-"is wrong for someone cannot strand them: they are asked to choose "
-"instead. Defaults to `deepseek-v4-flash`, which is what the composer "
-"hardcoded before this setting existed. Empty means this deployment offers"
-" no default and every new owner picks. Imported once; after that, edit it"
-" in Admin Settings → Sandbox execution."
-msgstr ""
-"*可选，用于导入旧值。* 任务所有者自己没选模型时，新任务默认用这个模型。所有者在 My Settings "
-"里固定的模型优先于它，他们上一个任务用的模型也优先于它。如果这个部署的网关不向某位用户提供该模型，就跳过它，不会硬塞给对方；所以就算这个值对某位用户不合适，对方也不会卡住，系统会请对方自己选。默认是"
-" "
-"`deepseek-v4-flash`，也就是这项设置出现之前输入框里写死的模型。设为空表示这个部署不提供默认模型，每位新用户都要自己选。只在首次导入时读取，之后请到"
-" Admin Settings → Sandbox execution 里修改。"
+"**removed**. A new task starts on the model and connection of its owner's"
+" newest turn, or the owner picks one; nothing reads this."
+msgstr "**已移除**。新任务从其所有者最新一轮的模型和连接开始，或由所有者自行选择；没有任何地方读取这个变量。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_MCP_SERVERS`"
@@ -2205,11 +2094,11 @@ msgstr ""
 "和密钥、锁定的模型，以及控制面随领取签发的该成员回环令牌。启动器在变成 CLI 之前读取并移除这五个变量，所以 CLI "
 "从不持有服务商密钥。手动设置它们不会启动任何东西：启动器只在需要转换的成员前运行。"
 
-#: ../../ENVIRONMENT.md:390
+#: ../../ENVIRONMENT.md:409
 msgid "Sandbox settings from the admin pages"
 msgstr "在管理页面上设置的沙箱参数"
 
-#: ../../ENVIRONMENT.md:392
+#: ../../ENVIRONMENT.md:411
 msgid ""
 "Host settings can be set from the admin pages instead of in each host's "
 "`.env`, including `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`, "
@@ -2229,15 +2118,15 @@ msgstr ""
 "/admin/agent/host-settings`）；在 **Servers** 页面某台服务器的详情里设置的值，只对那一台生效（`PUT "
 "/admin/agent/runner-hosts/<host>/settings`）。每一项设置，主机按以下优先级取值，从高到低："
 
-#: ../../ENVIRONMENT.md:404
+#: ../../ENVIRONMENT.md:423
 msgid "the value set for that server;"
 msgstr "单独给这台服务器设置的值；"
 
-#: ../../ENVIRONMENT.md:405
+#: ../../ENVIRONMENT.md:424
 msgid "the value set for every server;"
 msgstr "给所有服务器设置的值；"
 
-#: ../../ENVIRONMENT.md:408
+#: ../../ENVIRONMENT.md:427
 msgid ""
 "The control plane sends complete effective values, including defaults, on"
 " each heartbeat. Host environment values apply only before the first "
@@ -2250,7 +2139,7 @@ msgstr ""
 "控制平面每次心跳都会下发完整的最终生效值，默认值也包括在内。主机上的环境变量只在第一次拿到设置之前生效，之后仍会作为本地的诊断值显示出来。清除单台服务器的值，会退回到全局值或内置默认值；清除全局值，会退回到内置默认值。管理员能设置的上下限写在"
 " `cloud_agent_shared/host_settings.py` 里，它们只是防止手误填错，并不代表机器的实际容量。"
 
-#: ../../ENVIRONMENT.md:415
+#: ../../ENVIRONMENT.md:434
 msgid ""
 "Container CPU, memory, and disk settings apply to new sandbox groups. "
 "Resuming a chat or forking it preserves the group's original limits; all "
@@ -2267,7 +2156,7 @@ msgstr ""
 "`AGENT_SANDBOX_CPU_MILLICORES=2000`、`AGENT_SANDBOX_MEMORY_MIB=4096` 和 "
 "`AGENT_SANDBOX_DISK_MIB=0`。"
 
-#: ../../ENVIRONMENT.md:423
+#: ../../ENVIRONMENT.md:442
 msgid ""
 "A positive disk limit sets Docker's `--storage-opt size=<MiB>M` on the "
 "writable layer, including the workspace, caches, and installed files. It "
@@ -2293,7 +2182,7 @@ msgstr ""
 "的服务器照样接不受信任的任务，只是控制平面和 runner 会记录警告，Servers 页面也会在它旁边显示 **No container "
 "disk quota**。runner 现有的存储证明仍然测量的是主机的文件系统，而不是每个沙箱的配额。"
 
-#: ../../ENVIRONMENT.md:438
+#: ../../ENVIRONMENT.md:457
 msgid ""
 "The same cards also manage workspace and terminal resource limits. These "
 "additional environment names supply initial local values only:"
@@ -2391,7 +2280,7 @@ msgstr ""
 msgid "4 concurrent viewers per terminal."
 msgstr "每个终端最多 4 人同时查看。"
 
-#: ../../ENVIRONMENT.md:455
+#: ../../ENVIRONMENT.md:474
 msgid ""
 "Workspace commands and Git inspection are also bounded in number, by the "
 "Sandbox Manager rather than by a setting: at most 16 run at once on one "
@@ -2401,7 +2290,7 @@ msgstr ""
 "工作区命令和 Git 查看的并发数量也有上限，这个上限由 Sandbox Manager 自己决定，不是设置项：一台主机上最多同时跑 16 "
 "个，一个对话最多 4 个，用的是它们专用的线程池；再多一个就直接返回 429，不会排队等着。"
 
-#: ../../ENVIRONMENT.md:460
+#: ../../ENVIRONMENT.md:479
 msgid ""
 "The values ride the heartbeat answer, so a host applies a change within "
 "one heartbeat (about 30 seconds) with no redeploy. Nothing running is "
@@ -2420,11 +2309,11 @@ msgstr ""
 "`.env` 里的值；主机确认之前，页面上会把这个值显示为 *applying*。更早版本的 runner（没有声明 `host-"
 "settings-v1`）在重新部署之前，会一直用自己 `.env` 里的值，页面上也会注明这一点。"
 
-#: ../../ENVIRONMENT.md:469
+#: ../../ENVIRONMENT.md:488
 msgid "Optional compute-resource management"
 msgstr "可选：计算资源管理"
 
-#: ../../ENVIRONMENT.md:471
+#: ../../ENVIRONMENT.md:490
 msgid ""
 "These values belong only to the stable main control plane, not its MCP-"
 "only listener, any Host, or any sandbox. See [the compute "
@@ -2512,19 +2401,6 @@ msgstr ""
 " 用的是另一个别名，请显式设置一个 SSH 地址。已保存的安装信息优先。"
 
 #: ../developer/configuration.md:1
-msgid "`AGENT_GATEWAY_SSH_HOST`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Optional first-time Server setup gateway address override. Defaults to "
-"the hostname of the saved Gateway API URL, such as `gateway.example.org`;"
-" use an override when SSH uses a different address."
-msgstr ""
-"可选，覆盖首次 Server setup 时的网关地址。默认取已保存的网关 API URL 里的主机名，例如 "
-"`gateway.example.org`；SSH 要用别的地址时，才需要覆盖。"
-
-#: ../developer/configuration.md:1
 msgid "`AGENT_CLOUDLAB_API_URL`"
 msgstr ""
 
@@ -2556,18 +2432,18 @@ msgstr ""
 "推出来（把它末尾的 `/v1/session/callback` 换掉）。只走 "
 "HTTPS：节点发送一次性令牌之前，会先检查控制平面的证书。两个都没有时，就无法创建\"自己登记密钥\"的节点。"
 
-#: ../../ENVIRONMENT.md:486
+#: ../../ENVIRONMENT.md:504
 msgid ""
 "Without this configuration the existing Host management remains "
 "available; resource creation requires configured credentials and "
 "deployment profiles."
 msgstr "没有这些配置时，现有的 Host 管理功能照样能用；只是要新建资源，必须先配好凭据和部署配置。"
 
-#: ../../ENVIRONMENT.md:489
+#: ../../ENVIRONMENT.md:507
 msgid "Repository environments"
 msgstr "仓库环境"
 
-#: ../../ENVIRONMENT.md:491
+#: ../../ENVIRONMENT.md:509
 msgid ""
 "Reusable repository environments are available by default. There is no "
 "feature switch or initial environment-variable import. A legacy "
@@ -2582,7 +2458,7 @@ msgstr ""
 "这个值，都会被忽略。设置页面、创建任务时的选择，以及工作区的 Environment 标签页，始终都会出现。`/config` "
 "也始终会返回环境相关的限制。"
 
-#: ../../ENVIRONMENT.md:493
+#: ../../ENVIRONMENT.md:511
 msgid ""
 "A task with no configured variables or scripts uses the base environment "
 "without environment preparation. Configured workspaces still require an "
@@ -2592,15 +2468,15 @@ msgstr ""
 "没有配置任何变量或脚本的任务，直接用基础环境，不做环境准备。配置过的工作区仍然需要支持环境功能的 runner 和 sandbox "
 "manager；所有者授权、加密和执行隔离照常生效。"
 
-#: ../../ENVIRONMENT.md:495
+#: ../../ENVIRONMENT.md:513
 msgid "Host agent (`cloud_agent_host`)"
 msgstr "主机 agent（`cloud_agent_host`）"
 
-#: ../../ENVIRONMENT.md:497
+#: ../../ENVIRONMENT.md:515
 msgid "The stack's own identity"
 msgstr "这套主机服务自己的身份"
 
-#: ../../ENVIRONMENT.md:499
+#: ../../ENVIRONMENT.md:517
 msgid ""
 "Read by `deploy/host/deploy.sh` and `deploy/host/sandbox_host.sh` rather "
 "than by compose, because they name the stack rather than configure it."
@@ -2686,7 +2562,7 @@ msgstr ""
 "部署脚本等待两边并行上线完成的时间，默认 900 秒。主机在等待冷启动的推理、MCP 和控制端点时，用的也是这个上限；控制平面部署在等待一次按确切"
 " SHA 的新心跳和反向 sandbox manager 探测时，同样用它。这是防止上线卡死的看门狗，不是对话或会话的超时。"
 
-#: ../../ENVIRONMENT.md:510
+#: ../../ENVIRONMENT.md:528
 msgid "Scheduling"
 msgstr "调度"
 
@@ -2758,7 +2634,7 @@ msgstr ""
 "兑换，这台机器跑的每个轮次都共用它。注册完成后，以凭据为准，再改这个值也不会给环境改名。如果只想在显示时把几个环境归到一组，又不想改变已有的身份，就用"
 " `AGENT_PHYSICAL_HOST`。"
 
-#: ../../ENVIRONMENT.md:519
+#: ../../ENVIRONMENT.md:537
 msgid "Sandbox Manager, runtime and reporting"
 msgstr "Sandbox Manager、运行时与上报"
 
@@ -2838,30 +2714,24 @@ msgid ""
 msgstr "这条反向转发在主机这一侧的目标，默认 `sandbox-manager` / `8092`。"
 
 #: ../developer/configuration.md:1
-msgid "`AGENT_TUNNEL_*`"
-msgstr ""
-
-#: ../developer/configuration.md:1
 msgid ""
-"Inference SSH tunnel. Required suffixes: `SSH_DESTINATION`, `SSH_KEY`, "
-"`SSH_KNOWN_HOSTS`. Defaults for `SSH_PORT` / `REMOTE_HOST` / "
-"`REMOTE_PORT` / `LISTEN_PORT`: `22` / `127.0.0.1` / `8080` / `8080`. Use "
-"a dedicated key restricted to this forward, without shell authority."
-msgstr ""
-"推理用的 SSH 隧道。必须设置的后缀有 "
-"`SSH_DESTINATION`、`SSH_KEY`、`SSH_KNOWN_HOSTS`。`SSH_PORT` / `REMOTE_HOST` "
-"/ `REMOTE_PORT` / `LISTEN_PORT` 的默认值分别是 `22` / `127.0.0.1` / `8080` / "
-"`8080`。用一把专用的密钥，只允许这一条转发，不给 shell 权限。"
+"~~`AGENT_TUNNEL_*`~~ (~~`AGENT_TUNNEL_SSH_DESTINATION`~~) "
+"(~~`AGENT_TUNNEL_SSH_PORT`~~) (~~`AGENT_TUNNEL_SSH_KEY`~~) "
+"(~~`AGENT_TUNNEL_SSH_KNOWN_HOSTS`~~) (~~`AGENT_TUNNEL_REMOTE_HOST`~~) "
+"(~~`AGENT_TUNNEL_REMOTE_PORT`~~) (~~`AGENT_TUNNEL_LISTEN_PORT`~~)"
+msgstr "~~`AGENT_TUNNEL_*`~~（~~`AGENT_TUNNEL_SSH_DESTINATION`~~）（~~`AGENT_TUNNEL_SSH_PORT`~~）（~~`AGENT_TUNNEL_SSH_KEY`~~）（~~`AGENT_TUNNEL_SSH_KNOWN_HOSTS`~~）（~~`AGENT_TUNNEL_REMOTE_HOST`~~）（~~`AGENT_TUNNEL_REMOTE_PORT`~~）（~~`AGENT_TUNNEL_LISTEN_PORT`~~）"
 
 #: ../developer/configuration.md:1
-msgid "`AGENT_GATEWAY_HOSTNAME`"
-msgstr ""
+msgid "**removed**, refused by the host: the inference tunnel is gone."
+msgstr "**已移除**，主机会拒绝：推理隧道已不存在。"
 
 #: ../developer/configuration.md:1
-msgid ""
-"Inference relay alias on runner and relay-discovery networks, default "
-"`agent-gateway`."
-msgstr "推理中继在 runner 网络和中继发现网络上的别名，默认 `agent-gateway`。"
+msgid "~~`AGENT_GATEWAY_HOSTNAME`~~"
+msgstr "~~`AGENT_GATEWAY_HOSTNAME`~~"
+
+#: ../developer/configuration.md:1
+msgid "**removed**, refused by the host."
+msgstr "**已移除**，主机会拒绝。"
 
 #: ../developer/configuration.md:1
 msgid ""
@@ -3561,7 +3431,7 @@ msgstr ""
 "都不读，因为一个自己并不掌握的名字，它们也没法据此做什么。值缺失或格式不对时，会退回到 "
 "`default`，而不是拒绝启动；格式不对时还会记一条警告，写明被拒绝的值，因为退回之后，它就和 `default` 共用同一个命名空间了。"
 
-#: ../../ENVIRONMENT.md:561
+#: ../../ENVIRONMENT.md:579
 msgid ""
 "The control-plane, host and local Compose files pass optional profiling "
 "overrides through to their respective producers. An empty MODE reaches "
@@ -3574,7 +3444,7 @@ msgstr ""
 "为空时，会交给共用的解析器处理，效果和不设置一样：不用任何配置就能使用 Admin 控制。常规的 schema "
 "迁移照常执行。只有互相独立的部署共用一个数据库时，才需要设置部署命名空间。"
 
-#: ../../ENVIRONMENT.md:567
+#: ../../ENVIRONMENT.md:585
 msgid ""
 "Collection starts Disabled on a fresh database. The Admin Enable/Disable "
 "button controls the persisted run without editing configuration or "
@@ -3600,7 +3470,7 @@ msgstr ""
 "execution profile 分开统计。2026-09-18 在本地复测的结果是，每次合成启动，采集器自身大约花 30 "
 "微秒；这个数字不包括真实的容器、sandbox manager、网络或数据库。"
 
-#: ../../ENVIRONMENT.md:581
+#: ../../ENVIRONMENT.md:599
 msgid ""
 "Two benchmarks answer two different questions, and neither substitutes "
 "for the other. `scripts/bench_startup_profiling_overhead.py` measures the"
@@ -3622,11 +3492,11 @@ msgstr ""
 "`max(10 ms, baseline p95 × 1%)` 预算得出的结论。引用其中任何一个的结果之前，先看一下脚本里的 "
 "`what`/`not_what` 说明。"
 
-#: ../../ENVIRONMENT.md:593
+#: ../../ENVIRONMENT.md:611
 msgid "Physical servers and execution environments"
 msgstr "物理服务器和执行环境"
 
-#: ../../ENVIRONMENT.md:595
+#: ../../ENVIRONMENT.md:613
 msgid ""
 "`AGENT_RUNNER_HOST` identifies one enrolled execution environment. When "
 "two stacks on the same physical server talk to one control plane, they "
@@ -3637,7 +3507,7 @@ msgstr ""
 "`AGENT_RUNNER_HOST` 标识一个已注册的执行环境。同一台物理服务器上的两套服务连同一个控制平面时，它们的名字、凭据、状态目录和 "
 "sandbox manager 地址都要不一样。不要为了把某个环境保留的对话并到另一个环境里，去给已有的环境改名或重新注册。"
 
-#: ../../ENVIRONMENT.md:600
+#: ../../ENVIRONMENT.md:618
 msgid ""
 "`AGENT_PHYSICAL_HOST` names the physical server for the admin inventory. "
 "Give all environments on that server the same name, unique within the "
@@ -3652,7 +3522,7 @@ msgstr ""
 " 默认用主机的短主机名；直接用 Compose 部署时，必须显式设置。runner 在注册时和每次心跳中都会带上它，保存为 "
 "`labels.physical_host`。旧版 runner 不带这个值也没关系，已有的元数据不会被清掉。不需要数据库迁移。"
 
-#: ../../ENVIRONMENT.md:607
+#: ../../ENVIRONMENT.md:625
 msgid ""
 "The Servers table shows the executor matching the new-chat execution "
 "policy on each physical server. Production Compose defaults to "
@@ -3666,7 +3536,7 @@ msgstr ""
 "kata-v1`；本地 Compose 的 overlay 明确保持 `trusted-v1`。旧的执行器仍留在 API "
 "里，用于保留会话的归属，但不会再分配给新对话。每台物理服务器只保留一个用于放置新对话的执行器；多出来的旧部署，等它们保留的对话都用不着了，就应该退役。"
 
-#: ../../ENVIRONMENT.md:614
+#: ../../ENVIRONMENT.md:632
 msgid ""
 "The global sandbox location selector is always visible, including with "
 "one server. It shows Automatic or the exact selected Host identity; "
@@ -3689,7 +3559,7 @@ msgstr ""
 " 数量，也不是新旧部署加起来的总数。分组显示绝不会改动凭据、sandbox manager "
 "的路由或保留沙箱的归属。服务器名称来自上报的元数据；系统不会去猜运行时的后缀。"
 
-#: ../../ENVIRONMENT.md:626
+#: ../../ENVIRONMENT.md:644
 msgid ""
 "Set `AGENT_PHYSICAL_HOST` before host activation and use the coordinated "
 "release phases in [the rolling-update "
@@ -3702,7 +3572,7 @@ msgstr ""
 "#rolling-deployment-order)里协调好的发布阶段操作。先让正在跑的轮次结束，完成目标主机这一代的部署，并通过控制平面按确切 "
 "SHA 的就绪栅栏，然后再激活 API 和 Web 的新版本。已有的主机凭据和保留沙箱都原样保留。"
 
-#: ../../ENVIRONMENT.md:632
+#: ../../ENVIRONMENT.md:650
 msgid "Sandbox isolation (host agent reads, sandbox inherits)"
 msgstr "沙箱隔离（由主机 agent 读取，沙箱沿用）"
 
@@ -3929,15 +3799,12 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"The route-less network the two relays are discovered on; no sandbox joins"
-" it. Group lifecycle attaches the relays found here, under their aliases,"
-" to each group's bridge. The host stack derives `<COMPOSE_PROJECT>-agent-"
+"The route-less network the MCP relay is discovered on; no sandbox joins "
+"it. Group lifecycle attaches the relay found here, under its alias, to "
+"each group's bridge. The host stack derives `<COMPOSE_PROJECT>-agent-"
 "relays`, so sibling stacks never find each other's relays; set it only to"
 " name an existing network."
-msgstr ""
-"用来发现两个中继的、不带路由的网络；任何沙箱都不会加入它。沙箱组的生命周期管理会把在这里找到的中继，以各自的别名接入每个组的网桥。主机服务会自动得出"
-" `<COMPOSE_PROJECT>-agent-"
-"relays`，所以同一台机器上的几套服务永远找不到彼此的中继；只有要指定一个已有的网络时，才需要设置它。"
+msgstr "用来发现 MCP 中继的、不带路由的网络；任何沙箱都不会加入它。沙箱组的生命周期管理会把在这里找到的中继，以它的别名接入每个组的网桥。主机服务会自动得出 `<COMPOSE_PROJECT>-agent-relays`，所以同一台机器上的几套服务永远找不到彼此的中继；只有要指定一个已有的网络时，才需要设置它。"
 
 #: ../developer/configuration.md:1
 msgid ""
@@ -4033,11 +3900,11 @@ msgstr ""
 "Secrets 生成的 base64 匹配模式，这样一旦快照里多出了某个 Secret，就会被拒绝，而 Secret "
 "的内容不会离开沙箱。运维人员不要设置。"
 
-#: ../../ENVIRONMENT.md:658
+#: ../../ENVIRONMENT.md:676
 msgid "Kata runtime qualification generation"
 msgstr "Kata 运行时资格验证的代次"
 
-#: ../../ENVIRONMENT.md:660
+#: ../../ENVIRONMENT.md:678
 #, python-brace-format
 msgid ""
 "The supported host deployment mounts `/var/lib/freeinference/kata-"
@@ -4060,7 +3927,7 @@ msgstr ""
 "`updating`，重新运行安装脚本即可修复。这台主机上的所有部署看到的都是同一个代次，标记文件被原子替换时也一样。`--check` "
 "仍然只做验证，不做改动。"
 
-#: ../../ENVIRONMENT.md:670
+#: ../../ENVIRONMENT.md:688
 msgid ""
 "For an existing host, deployment verifies Kata and initializes only a "
 "missing marker through a short-lived, networkless runc container with "
@@ -4076,11 +3943,11 @@ msgstr ""
 "证据时，要做完整的探测；证据格式不对或正处于更新中时，一律拒绝。如果要原地更新运行时或配置，必须用官方的安装脚本，这样每个 runner "
 "都会在第一个文件被改动之前，就让资格验证失效。"
 
-#: ../../ENVIRONMENT.md:678
+#: ../../ENVIRONMENT.md:696
 msgid "Complete local stack database recovery"
 msgstr "完整本地环境的数据库恢复"
 
-#: ../../ENVIRONMENT.md:680
+#: ../../ENVIRONMENT.md:698
 msgid ""
 "`deploy/local/dev.sh` stores the local Postgres password and matching "
 "`AGENT_DATABASE_URL` in the gitignored `deploy/local/.env.local`. Back up"
@@ -4096,7 +3963,7 @@ msgstr ""
 "postgres`，脚本会拒绝生成新密码：PostgreSQL 只在初始化空的数据目录时才使用 "
 "`POSTGRES_PASSWORD`，所以新密码打不开旧的卷。"
 
-#: ../../ENVIRONMENT.md:688
+#: ../../ENVIRONMENT.md:706
 msgid ""
 "`up` builds the required images first. It and `start` then bring up only "
 "Postgres, wait for readiness, authenticate from the control-plane image "
@@ -4109,11 +3976,11 @@ msgstr ""
 "认证一次，再运行 Alembic，最后才启动其余的服务。如果认证失败，请把原来的 `AGENT_POSTGRES_PASSWORD` 和 "
 "`AGENT_DATABASE_URL` 找回来。脚本绝不会自动删除卷，也不会自动重置密码。"
 
-#: ../../ENVIRONMENT.md:695
+#: ../../ENVIRONMENT.md:713
 msgid "Claude inference retry policy"
 msgstr "Claude 推理请求的重试策略"
 
-#: ../../ENVIRONMENT.md:697
+#: ../../ENVIRONMENT.md:715
 msgid ""
 "The runtime adapter sets `CLAUDE_CODE_MAX_RETRIES=15` and "
 "`CLAUDE_CODE_RETRY_WATCHDOG=0` for each resident Claude Code process. "
@@ -4133,11 +4000,11 @@ msgstr ""
 "`AGENT_TIMEOUT_S`。重试进度会显示在对话里；重试次数用完时，这一轮会失败，但原生上下文会保留下来。重试间隔的上限和上线时的行为，见[运行时边界](docs/developer/operations.md"
 "#runtime-boundaries)。"
 
-#: ../../ENVIRONMENT.md:708
+#: ../../ENVIRONMENT.md:726
 msgid "Agent CLI version pins (image build)"
 msgstr "Agent CLI 的版本固定（构建镜像时）"
 
-#: ../../ENVIRONMENT.md:710
+#: ../../ENVIRONMENT.md:728
 msgid ""
 "The five default versions live in both `deploy/sandbox/Dockerfile.agent-"
 "sandbox` and `apps/backend/cloud_agent_shared/shared_protocol.py`. They "
@@ -4154,7 +4021,7 @@ msgstr ""
 "`shared-sandbox-v1`。所以它们是写在源码里的版本固定，不是每台主机 `.env` "
 "里的设置。有意修改某个默认版本时，两处要一起改，并重新跑一遍 agent 循环的一致性测试。"
 
-#: ../../ENVIRONMENT.md:719
+#: ../../ENVIRONMENT.md:737
 msgid ""
 "The Dockerfile still verifies every exact version against the installed "
 "binary at build time. A dist-tag (`latest`) or range (`^2.1`) fails the "
@@ -4164,7 +4031,7 @@ msgstr ""
 "构建时，Dockerfile 仍会把每个确切的版本号和实际装上的二进制逐一核对。写 dist-"
 "tag（`latest`）或版本范围（`^2.1`）都会让构建失败，这样镜像标签上写的版本，就不可能和镜像里实际的二进制对不上。"
 
-#: ../../ENVIRONMENT.md:723
+#: ../../ENVIRONMENT.md:741
 msgid ""
 "**Updating an agent without a rebuild.** Claude Code, Codex, OpenCode and"
 " pi can also be updated from the admin Settings page (_Agent versions_ → "
@@ -4208,7 +4075,7 @@ msgstr ""
 "下载这一步运行在哪个 Docker 网络上，默认 `bridge`。那里只运行 "
 "npm，并且禁用了安装脚本；软件包自己的脚本和检查，之后在没有网络的环境里运行。只有主机默认的网桥访问不到 npm 仓库时，才需要指定别的网络。"
 
-#: ../../ENVIRONMENT.md:739
+#: ../../ENVIRONMENT.md:757
 msgid ""
 "Each runtime takes a `*_EXTRA_VERSIONS` deployment setting — comma-"
 "separated, blank by default — naming **additional** versions the same "
@@ -4223,13 +4090,13 @@ msgstr ""
 " _Agent versions_ "
 "里选（`agent_runner_policy.runtime_versions`）。留空的话，镜像里就只有默认版本，所有部署一开始都是这样。"
 
-#: ../../ENVIRONMENT.md:746
+#: ../../ENVIRONMENT.md:764
 msgid ""
 "Every added version must be exact and its event stream must be compatible"
 " with its adapter in `cloud_agent_host/runtimes/`."
 msgstr "每个额外加的版本都必须是确切的版本号，并且它的事件流必须和 `cloud_agent_host/runtimes/` 里对应的适配器兼容。"
 
-#: ../../ENVIRONMENT.md:749
+#: ../../ENVIRONMENT.md:767
 msgid ""
 "`tests/external/test_runtime_stream_conformance.py` is the gate for that "
 "claim, and the way to point it at a candidate is to **put the version on "
@@ -4239,14 +4106,14 @@ msgstr ""
 "`tests/external/test_runtime_stream_conformance.py`；要让它测某个候选版本，办法是**把这个版本写到"
 " Dockerfile 的 `ARG` 行里**："
 
-#: ../../ENVIRONMENT.md:762
+#: ../../ENVIRONMENT.md:780
 msgid ""
 "The suite derives its parametrization from those `ARG` lines "
 "(`test_runtime_stream_conformance.py::_menu`, `_DOCKERFILE`), not from an"
 " environment variable, not from a built image and not from the deployed "
 "`.env`: setting `CLAUDE_CODE_EXTRA_VERSIONS=2.2.0` in the shell changes "
 "nothing about what runs. It then fetches each version with `npx` at "
-"exactly that version and drives it against a fake gateway, so the "
+"exactly that version and drives it against a fake model provider, so the "
 "measurement is of the real binary — but it is a measurement of the "
 "**repository's** Dockerfile, so the candidate must be on that `ARG` line "
 "first."
@@ -4255,14 +4122,14 @@ msgstr ""
 "行里推出来的（`test_runtime_stream_conformance.py::_menu`、`_DOCKERFILE`），不是从环境变量、构建好的镜像，也不是从已部署的"
 " `.env` 里来的：在 shell 里设置 "
 "`CLAUDE_CODE_EXTRA_VERSIONS=2.2.0`，对实际跑什么毫无影响。然后它用 `npx` "
-"按确切版本拉取每个版本，对着一个模拟的网关去驱动，所以测量的是真实的二进制；但测量依据的是**仓库里的** "
+"按确切版本拉取每个版本，对着一个模拟的模型服务商去驱动，所以测量的是真实的二进制；但测量依据的是**仓库里的** "
 "Dockerfile，所以候选版本必须先写进那一行 `ARG`。"
 
-#: ../../ENVIRONMENT.md:771
+#: ../../ENVIRONMENT.md:789
 msgid "Interpret a passing conformance run within these limits:"
 msgstr "一致性测试通过时，要在下面这些前提下理解它的意义："
 
-#: ../../ENVIRONMENT.md:773
+#: ../../ENVIRONMENT.md:791
 msgid ""
 "**`claude-code` only.** This is the one runtime with a stream-conformance"
 " suite; the other four have contract fixtures and their adapters' unit "
@@ -4272,7 +4139,7 @@ msgstr ""
 "**只针对 `claude-code`。** "
 "只有这个运行时有流一致性测试套件；其他四个只有契约夹具和各自适配器的单元测试，没有同等的关卡。所以目前给它们加版本，靠的是评审把关，而不是测试。"
 
-#: ../../ENVIRONMENT.md:777
+#: ../../ENVIRONMENT.md:795
 msgid ""
 "**It proves the parser, not the option.** A pass means the version's "
 "event shape is intelligible to our normalizer. It does not exercise the "
@@ -4281,7 +4148,7 @@ msgstr ""
 "**它证明的是解析器没问题，不是这个选项没问题。** "
 "测试通过，说明这个版本的事件结构能被我们的规范化程序读懂；但它并不会去跑已部署的镜像、沙箱，也不会去点那个下拉菜单。"
 
-#: ../../ENVIRONMENT.md:781
+#: ../../ENVIRONMENT.md:799
 msgid "Verify stream compatibility before offering a version to users."
 msgstr "把某个版本开放给用户之前，先确认它的事件流兼容。"
 
@@ -4325,11 +4192,11 @@ msgstr ""
 msgid "Extra `@kilocode/cli` versions."
 msgstr "额外的 `@kilocode/cli` 版本。"
 
-#: ../../ENVIRONMENT.md:791
+#: ../../ENVIRONMENT.md:809
 msgid "Web (`apps/frontend/`)"
 msgstr "Web（`apps/frontend/`）"
 
-#: ../../ENVIRONMENT.md:793
+#: ../../ENVIRONMENT.md:811
 msgid ""
 "Frontend configuration is public. Build-time routing settings enter the "
 "downloaded bundle and require a rebuild. Appearance settings are saved "
@@ -4340,11 +4207,11 @@ msgstr ""
 "前端配置都是公开的。构建时的路由设置会打进用户下载的前端包里，改了就要重新构建。外观设置通过 Admin → Settings 保存，Web "
 "服务器每次处理请求时读取。部署时间和发布版本信息仍然是运行时的环境元数据。这些公开的值里不能有 secret。"
 
-#: ../../ENVIRONMENT.md:799
+#: ../../ENVIRONMENT.md:817
 msgid "Build-time: the image variant"
 msgstr "构建时决定：镜像变体"
 
-#: ../../ENVIRONMENT.md:801
+#: ../../ENVIRONMENT.md:819
 msgid ""
 "A `NEXT_PUBLIC_*` variable is substituted into the bundle during `next "
 "build`. Each one must therefore be an `ARG` in `deploy/control-"
@@ -4359,7 +4226,7 @@ msgstr ""
 "下的一个键；这里的某一行如果缺了其中一个，这个变量就是运维人员哪里都能设、却什么都改变不了的摆设。每一行都写明了它对应的 compose "
 "参数，任何一行没写，`test_web_build_arguments_are_wired` 都会失败。改其中任何一个，都要重新构建。"
 
-#: ../../ENVIRONMENT.md:808
+#: ../../ENVIRONMENT.md:826
 msgid ""
 "The base path and API prefix must match the reverse proxy. The supported "
 "same-origin layouts use `AGENT_WEB_API_URL=<AGENT_WEB_BASE_PATH>/api`: "
@@ -4389,21 +4256,16 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"Prefix the app is mounted under. `/agents` serves it inside the gateway's"
-" own hostname — same origin, so the session cookie needs no CORS and no "
-"DNS record is involved, and a rollback is a reverse-proxy edit rather "
+"Prefix the app is mounted under. `/agents` serves it inside another "
+"site's hostname — same origin, so the session cookie needs no CORS and no"
+" DNS record is involved, and a rollback is a reverse-proxy edit rather "
 "than a DNS change waiting out a TTL. Empty for a deployment that owns its"
-" hostname. The redirect URI the gateway allowlists is no longer derived "
-"from this: sign-in returns to the control plane's "
-"`AGENT_SESSION_REDIRECT_URI`, not to a page in this app. This value still"
-" has to match `AGENT_WEB_BASE_URL`, which is where the control plane "
-"sends the browser afterwards."
+" hostname. It has to match the path in `AGENT_WEB_BASE_URL`, from which "
+"the control plane builds every emailed link."
 msgstr ""
-"应用挂载的路径前缀。`/agents` 让它直接在网关自己的主机名下提供服务：因为同源，会话 cookie 不需要 CORS，也不涉及任何 DNS"
-" 记录，回滚时只需改一下反向代理，而不用等 DNS 变更熬过 "
-"TTL。独占一个主机名的部署就留空。网关白名单里的重定向地址已经不再由这个值推出：登录会回到控制平面的 "
-"`AGENT_SESSION_REDIRECT_URI`，而不是这个应用里的某个页面。不过这个值仍要和 `AGENT_WEB_BASE_URL` "
-"保持一致，因为控制平面处理完登录后，会把浏览器带到那里。"
+"应用挂载的路径前缀。`/agents` 让它在另一个站点的主机名下提供服务：因为同源，会话 cookie 不需要 CORS，也不涉及任何 DNS "
+"记录，回滚时只需改一下反向代理，而不用等 DNS 变更熬过 TTL。独占一个主机名的部署就留空。它必须与 `AGENT_WEB_BASE_URL`"
+" 中的路径一致，控制平面用后者构造每个邮件中的链接。"
 
 #: ../developer/configuration.md:1
 msgid "`NEXT_PUBLIC_AGENT_API_URL`"
@@ -4451,11 +4313,11 @@ msgstr ""
 msgid "Optional build identity."
 msgstr "可选的构建版本信息。"
 
-#: ../../ENVIRONMENT.md:823
+#: ../../ENVIRONMENT.md:841
 msgid "Runtime: the deployment's identity"
 msgstr "运行时决定：部署的身份信息"
 
-#: ../../ENVIRONMENT.md:825
+#: ../../ENVIRONMENT.md:843
 msgid ""
 "The main control plane imports the first eight appearance variables below"
 " when it initializes the settings document. Set them in its deployment "
@@ -4538,36 +4400,6 @@ msgstr ""
 "或其他参数）。显示在账号菜单 Help 下的 Contact us。留空就不显示这个链接。"
 
 #: ../developer/configuration.md:1
-msgid "`AGENT_WEB_GATEWAY_URL`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-#, python-brace-format
-msgid ""
-"`${GATEWAY_BASE_URL}`. The gateway's origin, for the links this app does "
-"not host itself — nothing to do with sign-in. It replaced "
-"`NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only while "
-"it built the authorize URL and redeemed the code itself; both are the "
-"control plane's job now (`GATEWAY_AUTHORIZE_URL`). A path in this value "
-"is ignored; empty hides the links."
-msgstr ""
-"`${GATEWAY_BASE_URL}`。网关的地址，用于那些不由本应用自己提供的链接，和登录无关。它取代了 "
-"`NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`：后者只在浏览器自己拼授权地址、自己兑换授权码的年代才需要，而现在这两件事都由控制平面负责（`GATEWAY_AUTHORIZE_URL`）。这个值里如果带了路径，会被忽略；留空就不显示这些链接。"
-
-#: ../developer/configuration.md:1
-msgid "`AGENT_WEB_FEATURE_RAG`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"`true` shows the gateway's Docs Assistant link. `false` or empty hides "
-"it; any other value is refused. The page belongs to the gateway, not to "
-"this service."
-msgstr ""
-"设为 `true` 时，显示网关的 Docs Assistant 链接。`false` "
-"或留空就不显示；其他任何值都会被拒绝。那个页面属于网关，不属于本服务。"
-
-#: ../developer/configuration.md:1
 msgid "`AGENT_WEB_DEPLOYED_AT`"
 msgstr ""
 
@@ -4582,7 +4414,7 @@ msgstr ""
 "显示在部署页脚的、带时区的 ISO 时间戳。控制平面的部署脚本会把激活时间以 UTC 写入，健康检查通过后记到 `.deployed-at` "
 "里；再次部署同一个版本时，会保留原来的时间。手动启动 Compose 时，请填写实际的部署时间。留空就显示 `Not available`。"
 
-#: ../../ENVIRONMENT.md:845
+#: ../../ENVIRONMENT.md:861
 msgid ""
 "The web service also receives the existing `AGENT_DEPLOYMENT_SHA` for the"
 " footer's version: the first seven commit characters are visible, with "
@@ -4592,183 +4424,74 @@ msgstr ""
 "Web 服务还会拿到已有的 `AGENT_DEPLOYMENT_SHA`，用来在页脚显示版本：显示 commit 的前七位，鼠标悬停时显示完整的 "
 "commit。这两个值每次请求时都重新读取，和镜像是哪天构建的无关。"
 
-#: ../../ENVIRONMENT.md:850
+#: ../../ENVIRONMENT.md:866
 msgid ""
 "Saved URLs and booleans are validated before an admin update is "
 "committed. The standalone environment fallback validates them when "
-"rendering. The gateway's `/site-config` endpoint is outside the contracts"
-" Cloud Agent consumes; public saved appearance comes from this service's "
-"own endpoint."
+"rendering. Public saved appearance comes from this service's own "
+"endpoint."
 msgstr ""
-"管理员提交更新之前，保存的 URL 和布尔值都会先经过校验。单独运行、退回使用环境变量时，则在渲染页面时校验。网关的 `/site-config`"
-" 接口不在 Cloud Agent 使用的契约范围内；已保存的公开外观信息，来自本服务自己的接口。"
+"管理员提交更新之前，保存的 URL "
+"和布尔值都会先经过校验。单独运行、退回使用环境变量时，则在渲染页面时校验。已保存的公开外观信息，来自本服务自己的接口。"
 
-#: ../../ENVIRONMENT.md:855
-msgid "Set on the HybridInference side — not here"
-msgstr "在 HybridInference 那一侧设置，不在这里"
-
-#: ../../ENVIRONMENT.md:857
-msgid ""
-"These are provisioned in the gateway's environment. Listed so the "
-"contract has one place to be read from end to end."
-msgstr "这些都配置在网关的环境里。之所以列在这里，是为了让这份契约在一个地方就能从头读到尾。"
-
-#: ../developer/configuration.md:1
-msgid "`IDENTITY_JWT_PRIVATE_KEY`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid "RS256 private key, PEM. Public half is served at `/v1/identity/jwks`."
-msgstr "RS256 私钥，PEM 格式。对应的公钥通过 `/v1/identity/jwks` 提供。"
-
-#: ../developer/configuration.md:1
-msgid "`IDENTITY_JWT_RETIRING_PUBLIC_KEYS`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Optional. Public PEMs of previously-active signing keys, concatenated and"
-" published alongside the current key so tokens issued before a rotation "
-"still verify. Keep a key here for at least the maximum token lifetime "
-"plus the JWKS cache window, then drop it. Public halves only — a retiring"
-" key must not be able to sign."
-msgstr ""
-"可选。以前用过的签名密钥的公钥 PEM，和当前密钥拼在一起发布，这样轮换之前签发的令牌仍能通过校验。一把密钥在这里至少要保留\"令牌最长有效期 +"
-" JWKS 缓存时间\"这么久，然后再撤掉。只能放公钥：即将退役的密钥，不能还有签名的能力。"
-
-#: ../developer/configuration.md:1
-msgid "`IDENTITY_ISSUER`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"The `iss` claim in identity tokens. Falls back to the gateway's "
-"`base_url`; unset means issuance is switched off rather than tokens "
-"minted with an empty `iss`. Must equal the value this service verifies "
-"against."
-msgstr ""
-"身份令牌里的 `iss` 声明。不设的话，退而使用网关的 `base_url`；如果连那个也没有，就直接关闭签发，而不是签发 `iss` "
-"为空的令牌。必须和本服务校验时使用的值完全相同。"
-
-#: ../developer/configuration.md:1
-msgid "`IDENTITY_ALLOWED_REDIRECTS`"
-msgstr ""
-
-#: ../developer/configuration.md:1
-msgid ""
-"Comma-separated exact-match redirect URIs. Matching is equality — no "
-"prefix, no suffix — so the agent web callback must be listed verbatim."
-msgstr "用逗号分隔、需要完全匹配的重定向地址。匹配就是判断是否相等，不做前缀或后缀匹配，所以 agent Web 的回调地址必须一字不差地写进去。"
-
-#: ../developer/configuration.md:1
-msgid "Same value as the control plane's copy above."
-msgstr "和上面控制平面那边配置的值相同。"
-
-#: ../../ENVIRONMENT.md:868
+#: ../../ENVIRONMENT.md:870
 msgid "Infrastructure (not environment variables)"
 msgstr "基础设施（不是环境变量）"
 
-#: ../../ENVIRONMENT.md:870
+#: ../../ENVIRONMENT.md:872
 msgid "Recorded here as *what has to be decided*, not as anyone's actual answer."
 msgstr "这里记录的是*需要做出哪些决定*，而不是谁的实际选择。"
 
-#: ../../ENVIRONMENT.md:872
+#: ../../ENVIRONMENT.md:874
 msgid ""
 "**Domains**: one host for the web app and the control-plane API, the API "
 "under `/api` — e.g. `agents.example.org` and a staging sibling. The exact"
-" names go in the overlay, and must match `IDENTITY_ALLOWED_REDIRECTS` on "
-"the gateway exactly."
+" names go in the overlay and in `AGENT_WEB_BASE_URL` and "
+"`AGENT_PUBLIC_API_URL`."
 msgstr ""
 "**域名**：Web 应用和控制平面 API 用同一个主机名，API 放在 `/api` 下，例如 "
-"`agents.example.org`，再加一个 staging 用的兄弟域名。具体的名字写在 overlay 里，并且必须和网关上 "
-"`IDENTITY_ALLOWED_REDIRECTS` 的配置完全一致。"
+"`agents.example.org`，再加一个 staging 用的兄弟域名。具体的名字写在 overlay 里，以及 "
+"`AGENT_WEB_BASE_URL` 和 `AGENT_PUBLIC_API_URL` 中。"
 
-#: ../../ENVIRONMENT.md:876
+#: ../../ENVIRONMENT.md:877
 msgid ""
-"**Reaching the gateway**: the control plane needs a route to "
-"`GATEWAY_BASE_URL`. The sandbox reaches its two relays, the resolver in "
+"**What a sandbox reaches**: its MCP relay, the resolver in "
 "`AGENT_EGRESS_DNS_SERVER` and public IPv4 on TCP 80/443 — the same during"
-" setup and the agent run. Tool calls remain confined to the MCP-only "
-"listener. Inference keeps the existing gateway endpoint "
-"(`AGENT_TUNNEL_REMOTE_PORT` defaults to 8080); a separate inference "
-"listener or credential-substitution relay is not a deployment "
-"prerequisite. Public replay of a leaked inference grant is an [accepted "
-"risk](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md), "
-"subject to its owner's existing model permissions, quota and grant "
-"lifecycle. If a deployment fronts either relay through a tunnel, the port"
-" allocation is overlay detail."
+" setup and the agent run. Model calls go to each owner's provider over "
+"that public HTTPS. Tool calls remain confined to the MCP-only listener. A"
+" sandbox holds its owner's provider key for the turn it runs; that "
+"exposure is [accepted](docs/agents/specs/2026-09-23-agent-public-egress-"
+"design.zh-CN.md) and limited to the owner's own key and quota."
 msgstr ""
-"**连到网关**：控制平面需要有一条到 `GATEWAY_BASE_URL` "
-"的路由。沙箱能访问的是它的两个中继、`AGENT_EGRESS_DNS_SERVER` 指定的 DNS 解析器，以及 TCP 80/443 "
-"上的公网 IPv4；setup 阶段和 agent 运行阶段都一样。工具调用仍然只能走 MCP "
-"专用监听器。推理沿用现有的网关端点（`AGENT_TUNNEL_REMOTE_PORT` 默认 "
-"8080）；单独的推理监听器，或者能替换凭据的中继，都不是部署的必要条件。推理授权泄露后被人在公网上重放，是一项[已接受的风险](docs/agents/specs/2026-09-23"
-"-agent-public-egress-design.zh-"
-"CN.md)，影响范围受限于授权所有者现有的模型权限、配额和授权的生命周期。如果某个部署通过隧道把任一中继放在前面，端口怎么分配属于 "
-"overlay 里的细节。"
+"**沙箱能访问什么**：它的 MCP 中继、`AGENT_EGRESS_DNS_SERVER` 中的解析器，以及 TCP 80/443 上的公网 "
+"IPv4——设置阶段和智能体运行阶段都一样。模型调用经由这条公网 HTTPS 发往各所有者的服务商。工具调用仍然只限于仅 MCP "
+"的监听器。沙箱在运行一轮时持有其所有者的服务商密钥；这一暴露是[已接受的](docs/agents/specs/2026-09-23-agent-"
+"public-egress-design.zh-CN.md)，并且仅限于所有者自己的密钥和配额。"
 
-#: ../../ENVIRONMENT.md:887
+#: ../../ENVIRONMENT.md:884
 msgid ""
 "**Sandbox image registry**: choose where hosts pull `AGENT_SANDBOX_IMAGE`"
 " before deploying them."
 msgstr "**沙箱镜像仓库**：部署主机之前，先定好主机从哪里拉取 `AGENT_SANDBOX_IMAGE`。"
 
-#: ../../ENVIRONMENT.md:889
+#: ../../ENVIRONMENT.md:886
 msgid "Adding a variable"
 msgstr "新增变量时"
 
-#: ../../ENVIRONMENT.md:891
+#: ../../ENVIRONMENT.md:888
 msgid "Add a row here, in the right section."
 msgstr "在这里对应的小节里加一行。"
 
-#: ../../ENVIRONMENT.md:892
+#: ../../ENVIRONMENT.md:889
 msgid "Note who provisions it and whether it differs per environment."
 msgstr "写明由谁提供，以及不同环境之间的值是否不同。"
 
-#: ../../ENVIRONMENT.md:893
+#: ../../ENVIRONMENT.md:890
 msgid "If it is a secret, say where it is stored — never the value itself."
 msgstr "如果是 secret，写明它存在哪里，但绝不要写出它的值。"
 
-#: ../../ENVIRONMENT.md:894
+#: ../../ENVIRONMENT.md:891
 msgid ""
 "The PR checklist enforces this; a new variable without a row is a review "
 "stop."
 msgstr "PR 检查清单会检查这一点；新增了变量却没有对应的一行，评审就不会通过。"
-
-#~ msgid ""
-#~ "Off by default. Read from the "
-#~ "process environment only, never from "
-#~ "Admin Settings, by both listeners. See"
-#~ " [local accounts](docs/developer/local-accounts.md)."
-#~ msgstr ""
-#~ "默认关闭。两个监听器都只从进程环境读取，不从 Admin Settings "
-#~ "读取。见[本地账号](docs/developer/local-accounts.md)。"
-
-#~ msgid ""
-#~ "NEW. Defaults to `true`. `false` treats"
-#~ " a new email account as verified "
-#~ "at sign-up and sends it no "
-#~ "link, so sign-up works without "
-#~ "SMTP. Accounts created while it was "
-#~ "on still verify."
-#~ msgstr ""
-
-#~ msgid ""
-#~ "NEW. Comma-separated, as HybridInference's "
-#~ "`ADMIN_EMAILS`: an account whose **verified**"
-#~ " email is listed is approved and "
-#~ "made an administrator when it signs "
-#~ "in. An address is verified only by"
-#~ " a link sent to it."
-#~ msgstr ""
-
-#~ msgid ""
-#~ "NEW. `manual` (default): every account "
-#~ "waits for an administrator. `domains`: a"
-#~ " verified account whose email domain "
-#~ "is on the signup domain list "
-#~ "(Admin → Accounts) is approved at "
-#~ "once; with an empty list, every "
-#~ "verified account is."
-#~ msgstr ""
-

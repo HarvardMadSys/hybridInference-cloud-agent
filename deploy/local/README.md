@@ -139,8 +139,9 @@ BuildKit caches, which are never mounted into running sandboxes.
 the code from the control plane's log, the session cookie, an administrator
 reading settings, `model_connection_required` in the configuration, the 409 a
 turn gets without a connection, and sign-out. On a stack that already has an
-administrator, setup cannot run again, so it says so and checks only that no
-session exists.
+administrator, setup cannot run again: the smoke passes that step only when the
+server answers `setup_complete`, then checks that no session exists. While
+setup is still pending and the log shows no setup code, it fails.
 
 It runs no turn: the stack has no model, and a sandbox cannot reach one on a
 private address. To exercise the CLIs, add a model connection for a public
