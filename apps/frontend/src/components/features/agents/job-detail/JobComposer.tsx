@@ -5,7 +5,7 @@ import { useApplePlatform } from '@/components/features/settings/keyboardShortcu
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { chordLabel } from '@/lib/keyboardShortcuts';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
-import { Suspense, useState, type FormEvent, type RefObject } from 'react';
+import { Suspense, useId, useState, type FormEvent, type RefObject } from 'react';
 import { ComposerCommandMenu } from '../ComposerCommandMenu';
 import { ComposerDialogLoading } from '../ComposerDialogLoading';
 import { ComposerPlusMenu } from '../ComposerPlusMenu';
@@ -42,6 +42,8 @@ import type { useJobRunActions } from './useJobRunActions';
 /**
  * How a draft can join the running turn: steered in, or, when it chose another
  * model or source, queued as the next turn (never answered on the live one).
+ * The steer chord is standing help, kept with the prompt options; being queued
+ * instead is shown beside the box, since it changes what Send does.
  */
 function steerNote(
   canSendNow: boolean,
@@ -49,9 +51,12 @@ function steerNote(
   apple: boolean,
   t: ReturnType<typeof useT>,
 ): string {
-  if (!canSendNow) return '';
-  if (otherModel) return ` · ${t('modelSource.steerQueued')}`;
+  if (!canSendNow || otherModel) return '';
   return ` · ${t('queue.steerHint', { keys: chordLabel('↵', apple) })}`;
+}
+
+function queuedNote(canSendNow: boolean, otherModel: boolean, t: ReturnType<typeof useT>) {
+  return canSendNow && otherModel ? t('modelSource.steerQueued') : '';
 }
 
 function runtimeNote(job: AgentJob, contextLost: boolean): string {
@@ -176,11 +181,18 @@ export function JobComposer({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
   const options = useComposerOptions(rewriting);
+  const noteId = useId();
+  const queued = queuedNote(queue.canSendNow, otherModel, t);
   return (
     <>
-      {/* No band of its own behind the status, composer and totals: the
-          composer card is the one opaque surface, and the rest sits on the page. */}
-      <div ref={composerRef} hidden={hidden} className="sticky bottom-0 z-10 mt-3 pb-2 pt-2">
+      {/* The transcript scrolls under these sticky controls, so they occlude
+          it with the page's own surface: the same color as the page, never a
+          tint, gradient or blur, so it reads as page rather than a band. */}
+      <div
+        ref={composerRef}
+        hidden={hidden}
+        className="sticky bottom-0 z-10 -mx-1 mt-3 bg-surface px-1 pb-2 pt-2"
+      >
         <LiveAgentStatus job={job} />
         {/* `/goal` on its own is not an objective. It is consumed
                     rather than sent to the model, and this is where the owner
@@ -344,6 +356,7 @@ export function JobComposer({
                     : 'Message or run a task, / commands, @ files or sessions'
                 }
                 aria-label="Add a follow-up"
+                aria-describedby={`${noteId}-note ${noteId}-queued`}
                 className="block max-h-[30vh] min-h-14 w-full resize-y rounded-t-2xl border-0 bg-transparent px-4 pb-1 pt-3 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
               />
               <AttachmentStrip
@@ -367,9 +380,16 @@ export function JobComposer({
                     followUpBox.current?.focus();
                   }}
                 />
+                {/* Standing help for the next message; the box is described by it. */}
+                <p id={`${noteId}-note`} className="px-3 pt-1 text-[11px] leading-4 text-muted">
+                  {runtimeNote(job, contextLost)}
+                  {modelPicker ? '' : ` · ${inheritedLabel}`}
+                  {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
+                  {steerNote(queue.canSendNow, otherModel, apple, t)}
+                </p>
               </ComposerOptionsPanel>
               {/* One surface with the box: no rule between them. */}
-              <div className="flex flex-wrap items-center gap-1 px-2.5 pb-2 pt-1">
+              <div className="flex flex-wrap items-end gap-1 px-2.5 pb-2 pt-1 sm:items-center">
                 <ComposerPlusMenu
                   onFiles={attachments.add}
                   onOpenSkills={() => setSkillsOpen(true)}
@@ -386,7 +406,7 @@ export function JobComposer({
                   disabled={contextLost || submitting}
                 />
                 <ComposerOptionsButton options={options} />
-                <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1">
                   {modelPicker ? (
                     <>
                       {/* The harness stays the thread's; the model is offered
@@ -429,11 +449,12 @@ export function JobComposer({
                   />
                 </div>
               </div>
-              <p className="px-4 pb-2.5 text-[11px] leading-4 text-muted">
-                {runtimeNote(job, contextLost)}
-                {modelPicker ? '' : ` · ${inheritedLabel}`}
-                {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
-                {steerNote(queue.canSendNow, otherModel, apple, t)}
+              <p
+                id={`${noteId}-queued`}
+                hidden={!queued}
+                className="px-4 pb-2.5 text-[11px] leading-4 text-muted"
+              >
+                {queued}
               </p>
               <p
                 role="status"
