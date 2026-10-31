@@ -13,12 +13,16 @@ from cloud_agent.storage.repositories.attachments import PostgresAttachmentRepos
 from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
 from cloud_agent.storage.repositories.audit import PostgresAuditRepository
 from cloud_agent.storage.repositories.audit_log import PostgresAuditLogRepository
+from cloud_agent.storage.repositories.command_execution_queries import (
+    PostgresCommandExecutionQueries,
+)
 from cloud_agent.storage.repositories.compute_resources import PostgresComputeResourceRepository
 from cloud_agent.storage.repositories.context_queries import PostgresContextQueries
 from cloud_agent.storage.repositories.conversation_commands import PostgresConversationCommands
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
+from cloud_agent.storage.repositories.file_activity import PostgresFileActivityQueries
 from cloud_agent.storage.repositories.goal_wakeups import PostgresGoalWakeupRepository
 from cloud_agent.storage.repositories.goals import PostgresGoalRepository
 from cloud_agent.storage.repositories.grants import PostgresGrantRepository
@@ -64,12 +68,14 @@ __all__ = [
     "PostgresAttemptCommands",
     "PostgresAuditLogRepository",
     "PostgresAuditRepository",
+    "PostgresCommandExecutionQueries",
     "PostgresComputeResourceRepository",
     "PostgresContextQueries",
     "PostgresConversationCommands",
     "PostgresConversationQueries",
     "PostgresCredentialQueries",
     "PostgresExecutionQueries",
+    "PostgresFileActivityQueries",
     "PostgresGoalRepository",
     "PostgresGoalWakeupRepository",
     "PostgresGrantRepository",

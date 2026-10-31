@@ -4,7 +4,13 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-import { createAgentJob, getAgentThreadContext, type ThreadContextApi } from '@/lib/api/agents';
+import {
+  createAgentJob,
+  getAgentFileActivity,
+  getAgentFileOperations,
+  getAgentThreadContext,
+  type ThreadContextApi,
+} from '@/lib/api/agents';
 import { submitThreadMessage } from '@/lib/api/pendingMessages';
 import { JobDetail } from './JobDetail';
 import type { AgentJob } from './types';
@@ -29,12 +35,52 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentThreadStats: vi.fn().mockResolvedValue(null),
   getAgentThreadModelTtft: vi.fn().mockResolvedValue(null),
   getAgentThreadContext: vi.fn(),
+  getThreadContextCommands: vi.fn().mockResolvedValue({
+    thread_id: 'thread-a',
+    generated_at: '2026-10-29T12:00:00Z',
+    slow_cutoff_ms: 10_000,
+    summary: {
+      total: 0,
+      settled: 0,
+      failed: 0,
+      failure_rate: null,
+      running: 0,
+      unknown: 0,
+      cumulative_ms: 0,
+      durations_known: 0,
+      durations_missing: 0,
+      duration_basis: 'none',
+      background: 0,
+    },
+    coverage: {
+      executions_total: 0,
+      executions_covered: 0,
+      truncated: false,
+      turns: 0,
+      attempts: 0,
+      copied_jobs_excluded: 0,
+      unsupported_runtimes: [],
+      results_partial: false,
+    },
+    counts: { all: 0, failed: 0, slow: 0, background: 0 },
+    attention: { slowest: null, failing: null, repeats: null, background: 0 },
+    programs: [],
+    executions: [],
+    page: { total: 0, returned: 0, limit: 100, next_cursor: null },
+    filter: 'all',
+    sort: 'latest',
+    q: '',
+    program: null,
+  }),
   getRequestComposition: vi.fn().mockResolvedValue(null),
   // The workspace's own panels read nothing here: unavailable is enough.
   getAgentJobGit: vi.fn().mockRejectedValue(new Error('offline')),
   getAgentJobGitMetadata: vi.fn().mockRejectedValue(new Error('offline')),
   getThreadContextTiming: vi.fn().mockResolvedValue(null),
   getThreadContextDna: vi.fn().mockResolvedValue(null),
+  // The File Activity section reads its own page; absent is enough here.
+  getAgentFileActivity: vi.fn().mockResolvedValue(null),
+  getAgentFileOperations: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => ({
@@ -144,6 +190,9 @@ beforeEach(() => {
   vi.mocked(getAgentThreadContext).mockImplementation(async (jobId: string) =>
     jobId === 'job-b' ? contextOf('thread-b', 8_765) : contextOf('thread-a', 4_321),
   );
+  // The File Activity section reads its own page; absent is enough here.
+  vi.mocked(getAgentFileActivity).mockResolvedValue(null);
+  vi.mocked(getAgentFileOperations).mockResolvedValue(null);
 });
 
 afterEach(() => {

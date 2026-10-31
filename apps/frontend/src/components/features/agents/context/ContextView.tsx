@@ -2,10 +2,11 @@
 
 // A conversation's Context view, top to bottom: a line of counts, the
 // conversation's tokens and time, the selected request's window and the trend
-// of every request beside the browser of what it carried, then the context
-// events (compactions among them). One selection links the trend, the
-// browser and the events; each request, compaction and event opens its step
-// in the trajectory, or its turn when the step has not been read into this page.
+// of every request beside the browser of what it carried, the context events
+// (compactions among them), what the agent read and wrote, and the commands it
+// ran. One selection links the trend, the browser and the events; each request,
+// compaction and event opens its step in the trajectory, or its turn when the
+// step has not been read into this page.
 //
 // It is the conversation's main Context tab, beside Chat and Trajectory, and
 // what `/context` opens; both use the page's one read of the data (see
@@ -14,8 +15,11 @@
 import { useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { AgentJob } from '../types';
+import type { ThreadContextApi } from '@/lib/api/agents';
+import { CommandExecutions } from './commands/CommandExecutions';
 import { ContextEvents } from './ContextEvents';
 import { ContextOverview } from './ContextOverview';
+import { FileActivity } from './FileActivity';
 import { ContextDashboard } from './dashboard/ContextDashboard';
 import type { OpenPoint, OpenTurn } from './ContextSections';
 import {
@@ -40,6 +44,45 @@ export function ContextView(props: ContextViewProps) {
       <ContextViewBody {...props} />
     </ThreadContextProvider>
   );
+}
+
+/**
+ * A revision of the conversation's recorded history, for the File Activity read.
+ *
+ * It must move when a turn ends, whatever its outcome: the turn row exists
+ * from the start, so its count does not change at settlement, and a revision
+ * that only noticed success would leave a failed or cancelled turn's pending
+ * file actions pending until something else changed. The last turn's state
+ * (running or terminal) and its recorded request count are part of the value,
+ * together with the newest request's sequence.
+ */
+export function settledRevision(view: ThreadContextApi): number {
+  const last = view.turns[view.turns.length - 1];
+  const seq = view.requests.length > 0 ? view.requests[view.requests.length - 1].seq : 0;
+  const terminal = last !== undefined && last.state !== null && last.state !== 'running';
+  return (
+    view.turns.length * 1_000_000 +
+    (last?.requests ?? 0) * 1_000 +
+    seq +
+    (terminal ? 500_000_000 : 0) +
+    // A stable per-state component, so failed -> cancelled -> succeeded each
+    // change the revision on its own.
+    stateCode(last?.state)
+  );
+}
+
+/** A small stable number per terminal turn state, so each transition differs. */
+const STATE_CODES: Record<string, number> = {
+  running: 0,
+  succeeded: 100_000,
+  failed: 200_000,
+  cancelled: 300_000,
+  stopped: 400_000,
+};
+
+function stateCode(state: string | null | undefined): number {
+  if (state === null || state === undefined) return 50_000;
+  return STATE_CODES[state] ?? 50_000;
 }
 
 function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
@@ -80,6 +123,26 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         nowMs={nowMs}
         onOpenPoint={onOpenPoint}
         onSelect={showInTrend}
+      />
+      <FileActivity
+        key={`files:${key}`}
+        jobId={job.id}
+        conversationKey={key}
+        onOpenPoint={onOpenPoint}
+        onOpenTurn={onOpenTurn}
+        // The Context view's own read already refreshes while a turn runs; a
+        // settled read bumps this, so the section re-reads without a poll of
+        // its own touching the conversation.
+        refreshTick={settledRevision(view)}
+        active={view.latest?.turn_active === true}
+      />
+      <CommandExecutions
+        key={`commands:${key}`}
+        jobId={job.id}
+        conversationKey={key}
+        active={Boolean(view.latest?.turn_active)}
+        onOpenPoint={onOpenPoint}
+        onOpenTurn={onOpenTurn}
       />
     </div>
   );

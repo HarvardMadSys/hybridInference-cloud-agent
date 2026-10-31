@@ -10035,6 +10035,617 @@
         "title": "CloudLabDefaults",
         "type": "object"
       },
+      "CommandAttention": {
+        "additionalProperties": false,
+        "description": "The executions worth a second look, over the same narrowed set.",
+        "properties": {
+          "background": {
+            "minimum": 0.0,
+            "title": "Background",
+            "type": "integer"
+          },
+          "failing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandProgram"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repeats": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repeats"
+          },
+          "slowest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandExecution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "background"
+        ],
+        "title": "CommandAttention",
+        "type": "object"
+      },
+      "CommandCounts": {
+        "additionalProperties": false,
+        "description": "Filter counts over the searched/program-narrowed executions.",
+        "properties": {
+          "all": {
+            "minimum": 0.0,
+            "title": "All",
+            "type": "integer"
+          },
+          "background": {
+            "minimum": 0.0,
+            "title": "Background",
+            "type": "integer"
+          },
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "slow": {
+            "minimum": 0.0,
+            "title": "Slow",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "all",
+          "failed",
+          "slow",
+          "background"
+        ],
+        "title": "CommandCounts",
+        "type": "object"
+      },
+      "CommandCoverage": {
+        "additionalProperties": false,
+        "description": "What this read covered, so a bounded subset is never the whole story.",
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "copied_jobs_excluded": {
+            "minimum": 0.0,
+            "title": "Copied Jobs Excluded",
+            "type": "integer"
+          },
+          "executions_covered": {
+            "minimum": 0.0,
+            "title": "Executions Covered",
+            "type": "integer"
+          },
+          "executions_total": {
+            "minimum": 0.0,
+            "title": "Executions Total",
+            "type": "integer"
+          },
+          "results_partial": {
+            "default": false,
+            "title": "Results Partial",
+            "type": "boolean"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "unsupported_runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unsupported Runtimes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "executions_total",
+          "executions_covered",
+          "truncated",
+          "turns",
+          "attempts",
+          "copied_jobs_excluded"
+        ],
+        "title": "CommandCoverage",
+        "type": "object"
+      },
+      "CommandExecution": {
+        "additionalProperties": false,
+        "description": "One command execution, with only what its records carried.",
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "attempt_no": {
+            "minimum": 0.0,
+            "title": "Attempt No",
+            "type": "integer"
+          },
+          "background": {
+            "default": false,
+            "title": "Background",
+            "type": "boolean"
+          },
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "command_chars": {
+            "minimum": 0.0,
+            "title": "Command Chars",
+            "type": "integer"
+          },
+          "command_truncated": {
+            "title": "Command Truncated",
+            "type": "boolean"
+          },
+          "cwd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cwd"
+          },
+          "duration_basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "recorded",
+                  "events"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Basis"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "output_chars": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Output Chars",
+            "type": "integer"
+          },
+          "output_preview": {
+            "default": "",
+            "title": "Output Preview",
+            "type": "string"
+          },
+          "output_truncated": {
+            "default": false,
+            "title": "Output Truncated",
+            "type": "boolean"
+          },
+          "parse_basis": {
+            "enum": [
+              "executable",
+              "shell"
+            ],
+            "title": "Parse Basis",
+            "type": "string"
+          },
+          "program": {
+            "title": "Program",
+            "type": "string"
+          },
+          "result_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result At"
+          },
+          "result_event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Event Id"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "superseded": {
+            "default": false,
+            "title": "Superseded",
+            "type": "boolean"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          },
+          "tool_error": {
+            "default": false,
+            "title": "Tool Error",
+            "type": "boolean"
+          },
+          "turn_no": {
+            "minimum": 0.0,
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "job_id",
+          "turn_no",
+          "attempt_id",
+          "attempt_no",
+          "runtime",
+          "tool",
+          "command",
+          "command_chars",
+          "command_truncated",
+          "status",
+          "program",
+          "parse_basis"
+        ],
+        "title": "CommandExecution",
+        "type": "object"
+      },
+      "CommandExecutions": {
+        "additionalProperties": false,
+        "description": "One conversation's command executions and their cumulative totals.",
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/CommandAttention"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/CommandCounts"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CommandCoverage"
+          },
+          "executions": {
+            "items": {
+              "$ref": "#/components/schemas/CommandExecution"
+            },
+            "title": "Executions",
+            "type": "array"
+          },
+          "filter": {
+            "enum": [
+              "all",
+              "failed",
+              "slow",
+              "background"
+            ],
+            "title": "Filter",
+            "type": "string"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "page": {
+            "$ref": "#/components/schemas/CommandPage"
+          },
+          "program": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Program"
+          },
+          "programs": {
+            "items": {
+              "$ref": "#/components/schemas/CommandProgram"
+            },
+            "title": "Programs",
+            "type": "array"
+          },
+          "q": {
+            "default": "",
+            "title": "Q",
+            "type": "string"
+          },
+          "slow_cutoff_ms": {
+            "default": 10000,
+            "title": "Slow Cutoff Ms",
+            "type": "integer"
+          },
+          "sort": {
+            "enum": [
+              "latest",
+              "slowest"
+            ],
+            "title": "Sort",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/CommandSummary"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "generated_at",
+          "summary",
+          "coverage",
+          "counts",
+          "attention",
+          "programs",
+          "executions",
+          "page",
+          "filter",
+          "sort"
+        ],
+        "title": "CommandExecutions",
+        "type": "object"
+      },
+      "CommandPage": {
+        "additionalProperties": false,
+        "description": "The rows this page carries and how many the narrowed set has.",
+        "properties": {
+          "limit": {
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "returned": {
+            "minimum": 0.0,
+            "title": "Returned",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "returned",
+          "limit"
+        ],
+        "title": "CommandPage",
+        "type": "object"
+      },
+      "CommandProgram": {
+        "additionalProperties": false,
+        "description": "One parsed program and its share of the covered executions.",
+        "properties": {
+          "count": {
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "fallback": {
+            "default": false,
+            "title": "Fallback",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "share": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Share",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "count",
+          "share"
+        ],
+        "title": "CommandProgram",
+        "type": "object"
+      },
+      "CommandSummary": {
+        "additionalProperties": false,
+        "description": "Cumulative totals over every covered execution, independent of filters.",
+        "properties": {
+          "background": {
+            "minimum": 0.0,
+            "title": "Background",
+            "type": "integer"
+          },
+          "cumulative_ms": {
+            "minimum": 0.0,
+            "title": "Cumulative Ms",
+            "type": "integer"
+          },
+          "duration_basis": {
+            "enum": [
+              "recorded",
+              "mixed",
+              "events",
+              "none"
+            ],
+            "title": "Duration Basis",
+            "type": "string"
+          },
+          "durations_known": {
+            "minimum": 0.0,
+            "title": "Durations Known",
+            "type": "integer"
+          },
+          "durations_missing": {
+            "minimum": 0.0,
+            "title": "Durations Missing",
+            "type": "integer"
+          },
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "failure_rate": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Rate"
+          },
+          "running": {
+            "minimum": 0.0,
+            "title": "Running",
+            "type": "integer"
+          },
+          "settled": {
+            "minimum": 0.0,
+            "title": "Settled",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "unknown": {
+            "minimum": 0.0,
+            "title": "Unknown",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "settled",
+          "failed",
+          "running",
+          "unknown",
+          "cumulative_ms",
+          "durations_known",
+          "durations_missing",
+          "duration_basis",
+          "background"
+        ],
+        "title": "CommandSummary",
+        "type": "object"
+      },
       "CompositionBoundary": {
         "additionalProperties": false,
         "description": "The last compaction the CLI reported before this request.",
@@ -12887,6 +13498,711 @@
           "reason"
         ],
         "title": "ExtendComputeRequest",
+        "type": "object"
+      },
+      "FileActivityCoverage": {
+        "additionalProperties": false,
+        "description": "What the read covered, so a bounded window is never called the whole.",
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "events_capped": {
+            "default": false,
+            "title": "Events Capped",
+            "type": "boolean"
+          },
+          "events_scanned": {
+            "minimum": 0.0,
+            "title": "Events Scanned",
+            "type": "integer"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "window_first_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window First At"
+          },
+          "window_last_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Last At"
+          }
+        },
+        "required": [
+          "turns",
+          "attempts",
+          "events_scanned"
+        ],
+        "title": "FileActivityCoverage",
+        "type": "object"
+      },
+      "FileActivityRow": {
+        "additionalProperties": false,
+        "description": "One file's recorded activity over the conversation's scanned attempts.",
+        "properties": {
+          "added": {
+            "minimum": 0.0,
+            "title": "Added",
+            "type": "integer"
+          },
+          "added_unknown_ops": {
+            "minimum": 0.0,
+            "title": "Added Unknown Ops",
+            "type": "integer"
+          },
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "events": {
+            "minimum": 0.0,
+            "title": "Events",
+            "type": "integer"
+          },
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "file_kind": {
+            "enum": [
+              "code",
+              "data",
+              "markup",
+              "image",
+              "shell",
+              "text",
+              "other"
+            ],
+            "title": "File Kind",
+            "type": "string"
+          },
+          "first_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First At"
+          },
+          "images": {
+            "minimum": 0.0,
+            "title": "Images",
+            "type": "integer"
+          },
+          "last_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "not_recorded": {
+            "minimum": 0.0,
+            "title": "Not Recorded",
+            "type": "integer"
+          },
+          "operations": {
+            "minimum": 0.0,
+            "title": "Operations",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "pending": {
+            "minimum": 0.0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "reads": {
+            "minimum": 0.0,
+            "title": "Reads",
+            "type": "integer"
+          },
+          "removed": {
+            "minimum": 0.0,
+            "title": "Removed",
+            "type": "integer"
+          },
+          "removed_unknown_ops": {
+            "minimum": 0.0,
+            "title": "Removed Unknown Ops",
+            "type": "integer"
+          },
+          "searches": {
+            "minimum": 0.0,
+            "title": "Searches",
+            "type": "integer"
+          },
+          "subagent_operations": {
+            "minimum": 0.0,
+            "title": "Subagent Operations",
+            "type": "integer"
+          },
+          "type_label": {
+            "title": "Type Label",
+            "type": "string"
+          },
+          "writes": {
+            "minimum": 0.0,
+            "title": "Writes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "name",
+          "type_label",
+          "file_kind",
+          "reads",
+          "writes",
+          "searches",
+          "images",
+          "failed",
+          "pending",
+          "not_recorded",
+          "added",
+          "removed",
+          "added_unknown_ops",
+          "removed_unknown_ops",
+          "operations",
+          "events",
+          "subagent_operations",
+          "attempts"
+        ],
+        "title": "FileActivityRow",
+        "type": "object"
+      },
+      "FileActivitySemantics": {
+        "additionalProperties": false,
+        "description": "What the numbers are — and are not — so nothing implies the rest.",
+        "properties": {
+          "counts": {
+            "const": "successful_operations",
+            "default": "successful_operations",
+            "title": "Counts",
+            "type": "string"
+          },
+          "image_evidence": {
+            "const": "explicit_only",
+            "default": "explicit_only",
+            "title": "Image Evidence",
+            "type": "string"
+          },
+          "line_changes": {
+            "const": "cumulative_recorded",
+            "default": "cumulative_recorded",
+            "title": "Line Changes",
+            "type": "string"
+          },
+          "net_git_diff": {
+            "const": "not_read",
+            "default": "not_read",
+            "title": "Net Git Diff",
+            "type": "string"
+          },
+          "search_scope": {
+            "const": "explicit_path_only",
+            "default": "explicit_path_only",
+            "title": "Search Scope",
+            "type": "string"
+          }
+        },
+        "title": "FileActivitySemantics",
+        "type": "object"
+      },
+      "FileActivityTotals": {
+        "additionalProperties": false,
+        "description": "What the scanned window holds — a window, not a claim about all history.",
+        "properties": {
+          "added": {
+            "minimum": 0.0,
+            "title": "Added",
+            "type": "integer"
+          },
+          "added_unknown_files": {
+            "minimum": 0.0,
+            "title": "Added Unknown Files",
+            "type": "integer"
+          },
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "files": {
+            "minimum": 0.0,
+            "title": "Files",
+            "type": "integer"
+          },
+          "images": {
+            "minimum": 0.0,
+            "title": "Images",
+            "type": "integer"
+          },
+          "not_recorded": {
+            "minimum": 0.0,
+            "title": "Not Recorded",
+            "type": "integer"
+          },
+          "operations": {
+            "minimum": 0.0,
+            "title": "Operations",
+            "type": "integer"
+          },
+          "pending": {
+            "minimum": 0.0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "reads": {
+            "minimum": 0.0,
+            "title": "Reads",
+            "type": "integer"
+          },
+          "removed": {
+            "minimum": 0.0,
+            "title": "Removed",
+            "type": "integer"
+          },
+          "removed_unknown_files": {
+            "minimum": 0.0,
+            "title": "Removed Unknown Files",
+            "type": "integer"
+          },
+          "search_unknown_scope": {
+            "minimum": 0.0,
+            "title": "Search Unknown Scope",
+            "type": "integer"
+          },
+          "searches": {
+            "minimum": 0.0,
+            "title": "Searches",
+            "type": "integer"
+          },
+          "subagent_operations": {
+            "minimum": 0.0,
+            "title": "Subagent Operations",
+            "type": "integer"
+          },
+          "unknown_path_operations": {
+            "minimum": 0.0,
+            "title": "Unknown Path Operations",
+            "type": "integer"
+          },
+          "writes": {
+            "minimum": 0.0,
+            "title": "Writes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "files",
+          "operations",
+          "reads",
+          "writes",
+          "searches",
+          "images",
+          "added",
+          "removed",
+          "added_unknown_files",
+          "removed_unknown_files",
+          "failed",
+          "pending",
+          "not_recorded",
+          "unknown_path_operations",
+          "search_unknown_scope",
+          "subagent_operations"
+        ],
+        "title": "FileActivityTotals",
+        "type": "object"
+      },
+      "FileActivityView": {
+        "additionalProperties": false,
+        "description": "One page of the conversation's File Activity, with its own bounds.",
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/FileActivityCoverage"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/FileActivityRow"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "filter": {
+            "enum": [
+              "all",
+              "read",
+              "written",
+              "searched",
+              "images"
+            ],
+            "title": "Filter",
+            "type": "string"
+          },
+          "filter_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Filter Counts",
+            "type": "object"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "has_more": {
+            "default": false,
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "q": {
+            "title": "Q",
+            "type": "string"
+          },
+          "semantics": {
+            "$ref": "#/components/schemas/FileActivitySemantics"
+          },
+          "sort": {
+            "enum": [
+              "active",
+              "lines",
+              "latest",
+              "path",
+              "name"
+            ],
+            "title": "Sort",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/FileActivityTotals"
+          }
+        },
+        "required": [
+          "thread_id",
+          "generated_at",
+          "sort",
+          "filter",
+          "q",
+          "totals",
+          "filter_counts",
+          "coverage"
+        ],
+        "title": "FileActivityView",
+        "type": "object"
+      },
+      "FileOperation": {
+        "additionalProperties": false,
+        "description": "One recorded operation on one file, or one search of unknown scope.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "added": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Added"
+          },
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "attempt_no": {
+            "title": "Attempt No",
+            "type": "integer"
+          },
+          "call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Call Id"
+          },
+          "clipped": {
+            "default": false,
+            "title": "Clipped",
+            "type": "boolean"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "read",
+              "write",
+              "edit",
+              "search",
+              "image"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "patch_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Files"
+          },
+          "patch_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Index"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "path_basis": {
+            "default": "unknown",
+            "enum": [
+              "absolute",
+              "cwd_relative",
+              "relative",
+              "unknown"
+            ],
+            "title": "Path Basis",
+            "type": "string"
+          },
+          "removed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Removed"
+          },
+          "renamed_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Renamed To"
+          },
+          "result_event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Event Id"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "succeeded",
+              "failed",
+              "pending",
+              "not_recorded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subagent": {
+            "default": false,
+            "title": "Subagent",
+            "type": "boolean"
+          },
+          "superseded": {
+            "default": false,
+            "title": "Superseded",
+            "type": "boolean"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "event_id",
+          "attempt_id",
+          "attempt_no",
+          "job_id",
+          "turn_no",
+          "seq",
+          "tool",
+          "action",
+          "kind",
+          "status"
+        ],
+        "title": "FileOperation",
+        "type": "object"
+      },
+      "FileOperationsPage": {
+        "additionalProperties": false,
+        "description": "One page of one file's recorded operations, newest first.",
+        "properties": {
+          "has_earlier": {
+            "default": false,
+            "title": "Has Earlier",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/FileOperation"
+            },
+            "title": "Operations",
+            "type": "array"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "thread_id",
+          "path",
+          "total"
+        ],
+        "title": "FileOperationsPage",
         "type": "object"
       },
       "GitHubConnectRequest": {
@@ -36161,6 +37477,158 @@
         ]
       }
     },
+    "/v1/agent/jobs/{job_id}/thread/context/commands": {
+      "get": {
+        "description": "One page of the caller's conversation's command executions.\n\nThe summary and the program histogram cover every covered execution; the\ncounts and the list follow the search, the program and the filter. A\nbounded read says how many executions exist in total, so a page is never\npresented as the whole conversation. Search and filters are resolved\nhere, before the cursor is accepted, and the cursor is bound to them.\n\nRaises:\n    HTTPException: 404 when the conversation is not the caller's, 422 for\n        a cursor from another list.",
+        "operationId": "get_thread_context_commands_v1_agent_jobs__job_id__thread_context_commands_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "all, failed, slow, or background; says what it means.",
+            "in": "query",
+            "name": "filter",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "description": "all, failed, slow, or background; says what it means.",
+              "enum": [
+                "all",
+                "failed",
+                "slow",
+                "background"
+              ],
+              "title": "Filter",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "latest",
+              "enum": [
+                "latest",
+                "slowest"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Command text, recorded working directory or parsed program.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "Command text, recorded working directory or parsed program.",
+              "maxLength": 200,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "description": "One parsed program's executions.",
+            "in": "query",
+            "name": "program",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One parsed program's executions.",
+              "title": "Program"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandExecutions"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Context Commands",
+        "tags": [
+          "context"
+        ]
+      }
+    },
     "/v1/agent/jobs/{job_id}/thread/context/content/{event_id}": {
       "get": {
         "description": "A window of one stored content event of the caller's conversation.\n\nThe text is what the platform stored, already masked when it was recorded.",
@@ -36862,6 +38330,244 @@
           }
         },
         "summary": "List Agent Thread Events"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/files": {
+      "get": {
+        "description": "One page of the caller's conversation's File Activity.\n\nCounts, totals and filter counts cover every operation the bounded scan\nread; the page is one slice of the files matching the filter and search.\n\nRaises:\n    HTTPException: 404 when the conversation is not the caller's or is\n        deleted; 422 for a cursor from another list.",
+        "operationId": "read_file_activity_v1_agent_jobs__job_id__thread_files_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "active, lines, latest, path or name",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "active",
+              "description": "active, lines, latest, path or name",
+              "enum": [
+                "active",
+                "lines",
+                "latest",
+                "path",
+                "name"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "description": "all, read, written, searched or images",
+            "in": "query",
+            "name": "filter",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "description": "all, read, written, searched or images",
+              "enum": [
+                "all",
+                "read",
+                "written",
+                "searched",
+                "images"
+              ],
+              "title": "Filter",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A case-insensitive substring of a file path.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "A case-insensitive substring of a file path.",
+              "maxLength": 200,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileActivityView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read File Activity",
+        "tags": [
+          "file-activity"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/files/operations": {
+      "get": {
+        "description": "One page of one file's recorded operations, newest first.\n\n``path`` is a normalized path the overview returned; it is matched as a\nstring and never resolved on a filesystem.\n\nRaises:\n    HTTPException: 404 when the conversation is not the caller's or is\n        deleted; 422 for a cursor from another list.",
+        "operationId": "read_file_operations_v1_agent_jobs__job_id__thread_files_operations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 40,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileOperationsPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read File Operations",
+        "tags": [
+          "file-activity"
+        ]
       }
     },
     "/v1/agent/jobs/{job_id}/thread/messages/{message_id}": {

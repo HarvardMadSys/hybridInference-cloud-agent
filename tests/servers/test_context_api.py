@@ -91,8 +91,15 @@ def app(monkeypatch):
     ledger = AsyncMock()
     ledger.thread_request_sources.return_value = ([], False)
     application.dependency_overrides[get_grant_client] = lambda: SimpleNamespace(binding_id="b1")
+    commands = AsyncMock()
+    commands.command_executions.return_value = None
+    application.state.commands = commands
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        context_queries=queries, ledger=ledger, owner_usage=owner_usage, admin_usage=usage
+        context_queries=queries,
+        command_executions=commands,
+        ledger=ledger,
+        owner_usage=owner_usage,
+        admin_usage=usage,
     )
     application.state.queries = queries
     application.state.ledger = ledger
@@ -395,3 +402,77 @@ async def test_dna_reads_the_owners_requests_in_one_window(app):
     app.state.queries.dna_bands.assert_awaited_with(
         job_id="j1", user_id="owner-1", first=0, last=59
     )
+
+
+_COMMAND_PAGE = {
+    "thread_id": "athr_1",
+    "generated_at": NOW.isoformat(),
+    "slow_cutoff_ms": 10_000,
+    "summary": {
+        "total": 2,
+        "settled": 1,
+        "failed": 1,
+        "failure_rate": 1.0,
+        "running": 1,
+        "unknown": 0,
+        "cumulative_ms": 1200,
+        "durations_known": 1,
+        "durations_missing": 1,
+        "duration_basis": "recorded",
+        "background": 0,
+    },
+    "coverage": {
+        "executions_total": 2,
+        "executions_covered": 2,
+        "truncated": False,
+        "turns": 1,
+        "attempts": 1,
+        "copied_jobs_excluded": 0,
+        "unsupported_runtimes": [],
+    },
+    "counts": {"all": 2, "failed": 1, "slow": 0, "background": 0},
+    "attention": {"slowest": None, "failing": None, "repeats": None, "background": 0},
+    "programs": [{"name": "git", "count": 2, "share": 1.0, "fallback": False}],
+    "executions": [],
+    "page": {"total": 2, "returned": 0, "limit": 50, "next_cursor": None},
+    "filter": "all",
+    "sort": "latest",
+    "q": "",
+    "program": None,
+}
+
+
+async def test_commands_are_the_owners_and_refused_when_not(app):
+    app.state.commands.command_executions.return_value = _COMMAND_PAGE
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/commands", filter="failed")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["summary"]["failed"] == 1
+    call = app.state.commands.command_executions.await_args.kwargs
+    assert call["user_id"] == "owner-1"
+    assert call["filter"] == "failed"
+    assert call["limit"] == 50
+
+
+async def test_commands_of_another_conversation_read_as_absent(app):
+    response = await _get(app, "/v1/agent/jobs/ajob_x/thread/context/commands")
+    assert response.status_code == 404
+
+
+async def test_a_cursor_from_another_list_is_refused_before_any_row_is_returned(app):
+    app.state.commands.command_executions.side_effect = ValueError(
+        "Invalid pagination cursor for these filters."
+    )
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/commands", cursor="not-a-cursor")
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "invalid_cursor"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"limit": 0}, {"limit": 500}, {"filter": "everything"}, {"sort": "newest"}, {"q": "x" * 300}],
+)
+async def test_a_bad_commands_request_is_refused_before_any_read(app, params):
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/commands", **params)
+    assert response.status_code == 422
+    app.state.commands.command_executions.assert_not_awaited()

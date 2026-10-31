@@ -5,14 +5,18 @@
 // agent CLI reported for one request, the latest of those (never the live
 // window), a window the CLI reported, and an estimate from stored text.
 
+import { commandExecutionsEn, commandExecutionsZhCN } from './commandExecutions';
 import { contextDashboardEn, contextDashboardZhCN } from './contextDashboard';
+import { filesEn, filesZhCN } from './files';
 import { contextParityEn, contextParityZhCN } from './contextParity';
 import { contextRequestEn, contextRequestZhCN } from './contextRequest';
 
 export const contextEn = {
   ...contextRequestEn,
+  ...commandExecutionsEn,
   ...contextParityEn,
   ...contextDashboardEn,
+  ...filesEn,
   'usage.range.label': 'Range',
   'usage.range.today': 'Today',
   'usage.range.7d': 'Last 7 days',
@@ -108,8 +112,10 @@ export const contextEn = {
 
 export const contextZhCN: Record<keyof typeof contextEn, string> = {
   ...contextRequestZhCN,
+  ...commandExecutionsZhCN,
   ...contextParityZhCN,
   ...contextDashboardZhCN,
+  ...filesZhCN,
   'usage.range.label': '时间范围',
   'usage.range.today': '今天',
   'usage.range.7d': '最近 7 天',

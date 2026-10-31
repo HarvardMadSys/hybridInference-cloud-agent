@@ -71,6 +71,30 @@ export {
 } from './agents/threads';
 
 export type {
+  FileActivityApi,
+  FileActivityCoverageApi,
+  FileActivityFilter,
+  FileActivityQuery,
+  FileActivityRowApi,
+  FileActivitySemanticsApi,
+  FileActivitySort,
+  FileActivityTotalsApi,
+  FileKind as FileActivityFileKind,
+  FileOperationApi,
+  FileOperationKind,
+  FileOperationStatus,
+  FileOperationsPageApi,
+  FilePathBasis,
+} from './agents/fileActivity';
+
+export {
+  FILE_ACTIVITY_FILTERS,
+  FILE_ACTIVITY_SORTS,
+  getAgentFileActivity,
+  getAgentFileOperations,
+} from './agents/fileActivity';
+
+export type {
   CompositionCategoryApi,
   CompositionEntryApi,
   ContextChangeApi,
@@ -104,6 +128,25 @@ export {
   getThreadContextDna,
   getThreadContextTiming,
 } from './agents/context';
+
+export type {
+  CommandAttentionApi,
+  CommandCountsApi,
+  CommandCoverageApi,
+  CommandDurationBasis,
+  CommandExecutionApi,
+  CommandFilter,
+  CommandPageApi,
+  CommandParseBasis,
+  CommandProgramApi,
+  CommandQuery,
+  CommandSort,
+  CommandStatus,
+  CommandSummaryApi,
+  ThreadCommandsApi,
+} from './agents/commandExecutions';
+
+export { getThreadContextCommands } from './agents/commandExecutions';
 
 export type {
   AgentThreadArchiveApi,
