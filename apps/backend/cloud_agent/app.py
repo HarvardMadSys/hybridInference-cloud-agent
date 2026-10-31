@@ -178,6 +178,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         compute_registration,
         context,
         environments,
+        file_activity,
         host_profiling,
         hosts,
         mcp_connections,
@@ -215,6 +216,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     app.include_router(usage.router)
     app.include_router(owner_usage.router)
     app.include_router(context.router)
+    app.include_router(file_activity.router)
     # Owner-facing, and never on the relay's own listener: adding a connection
     # or approving a call is not sandbox work. The relay itself is the reverse
     # — only ``create_mcp_app`` serves it. This application sits behind the

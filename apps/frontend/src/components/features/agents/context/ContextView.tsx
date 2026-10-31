@@ -15,6 +15,7 @@ import { useLocale } from '@/components/providers';
 import type { AgentJob } from '../types';
 import type { ThreadContextApi } from '@/lib/api/agents';
 import { ContextEvents } from './ContextEvents';
+import { FileActivity } from './FileActivity';
 import { ContextGrowthChart } from './ContextGrowthChart';
 import { ContextDashboard } from './dashboard/ContextDashboard';
 import {
@@ -82,6 +83,13 @@ function ContextViewBody({ job, onOpenPoint, onOpenTurn }: ContextViewProps) {
         </Section>
       ) : null}
       <ContextEvents key={key} view={view} nowMs={nowMs} onOpenPoint={onOpenPoint} />
+      <FileActivity
+        key={`files:${key}`}
+        jobId={job.id}
+        conversationKey={key}
+        onOpenPoint={onOpenPoint}
+        onOpenTurn={onOpenTurn}
+      />
       <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <LargestChanges changes={view.largest_changes} points={points} onSelect={setSelected} />
       <ReferenceSections
