@@ -398,7 +398,7 @@ function FileRow({
         >
           {row.type_label}
         </span>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 basis-64">
           <p className="break-words font-medium text-foreground" title={row.path}>
             {parts.directory ? <span className="text-muted">{parts.directory}</span> : null}
             <span>{parts.name}</span>
@@ -446,9 +446,11 @@ function RowSummary({
   locale: string;
 }) {
   const { t } = useLocale();
-  const churn = lineChurn(row);
+  // Only a file something wrote to has line churn; a read-only file has none,
+  // and a pair of zeros would read as a measured result rather than absence.
+  const churn = row.writes > 0 ? lineChurn(row) : null;
   return (
-    <span className="flex shrink-0 flex-wrap items-center gap-1.5 tabular-nums">
+    <span className="ml-auto flex shrink-0 flex-wrap items-center gap-1.5 tabular-nums">
       <Count icon="●" value={row.reads} label={t('files.filter.read')} tone="read" />
       <Count icon="●" value={row.writes} label={t('files.filter.written')} tone="write" />
       {row.searches > 0 ? (
@@ -457,13 +459,15 @@ function RowSummary({
       {row.images > 0 ? (
         <Count icon="▣" value={row.images} label={t('files.filter.images')} tone="image" />
       ) : null}
-      <span
-        className="whitespace-nowrap"
-        title={churn.unknown ? t('files.churnUnknownTip') : t('files.churnTip')}
-      >
-        <span className="text-emerald-600 dark:text-emerald-400">{churn.added}</span>{' '}
-        <span className="text-rose-600 dark:text-rose-400">{churn.removed}</span>
-      </span>
+      {churn ? (
+        <span
+          className="whitespace-nowrap"
+          title={churn.unknown ? t('files.churnUnknownTip') : t('files.churnTip')}
+        >
+          <span className="text-emerald-600 dark:text-emerald-400">{churn.added}</span>{' '}
+          <span className="text-rose-600 dark:text-rose-400">{churn.removed}</span>
+        </span>
+      ) : null}
       <time dateTime={row.last_at ?? undefined} className="whitespace-nowrap text-muted">
         {row.last_at ? relativeTime(row.last_at, nowMs, locale) : t('files.noTime')}
       </time>
@@ -626,10 +630,10 @@ function OperationRow({
         operation.superseded ? 'opacity-70' : ''
       }`}
     >
-      <span className="w-24 shrink-0 whitespace-nowrap text-muted" title={operation.action}>
+      <span className="w-14 shrink-0 whitespace-nowrap text-muted" title={operation.action}>
         {t(KIND_LABEL[operation.kind])}
       </span>
-      <span className="min-w-0 flex-1 break-words">
+      <span className="min-w-0 flex-1 basis-48 break-words">
         <span className="text-foreground">{operation.tool || operation.action}</span>
         <span className="text-muted">
           {' · '}
@@ -692,7 +696,7 @@ function OperationRow({
           <span className="text-rose-600 dark:text-rose-400">{churn.removed}</span>
         </span>
       ) : null}
-      <span className="flex shrink-0 gap-1">
+      <span className="ml-auto flex shrink-0 gap-1">
         <button
           type="button"
           onClick={() =>

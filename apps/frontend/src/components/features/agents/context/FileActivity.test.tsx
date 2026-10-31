@@ -221,6 +221,8 @@ describe('FileActivity', () => {
     expect(screen.getAllByText('−5').length).toBeGreaterThan(0);
     // The second file's only write recorded no removed lines: a dash, not 0.
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+    // A read-only file shows no churn at all, rather than a measured +0 −0.
+    expect(screen.queryByText('+0')).not.toBeInTheDocument();
     expect(mockedActivity).toHaveBeenCalledWith(
       'job-2',
       expect.objectContaining({ sort: 'active', filter: 'all', limit: 25 }),

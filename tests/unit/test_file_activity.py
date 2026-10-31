@@ -223,8 +223,10 @@ def test_multiedit_sums_its_pairs_and_refuses_a_clipped_one():
         "attempt_id": 1,
         "job_id": "j",
         "tool": "MultiEdit",
-        "input": {"file_path": "a.py", "edits": [{}, {}]},
-        "edits_pairs": [
+        "input": {"file_path": "a.py"},
+        # The projection puts the pairs at the payload's top level, each with
+        # the whole side's length, and clips only its own copy.
+        "edits": [
             {"old_string": "a", "new_string": "b", "replace_all": False, "new_chars": 1},
             {"old_string": "c\nd", "new_string": "e", "replace_all": False, "new_chars": 1},
         ],
@@ -237,12 +239,35 @@ def test_multiedit_sums_its_pairs_and_refuses_a_clipped_one():
 
     clipped = {
         **payload,
-        "edits_pairs": [
+        "edits": [
             {"old_string": "a", "new_string": "b", "replace_all": False, "new_chars": 99},
         ],
     }
     [unknown] = tool_operations(clipped, "/w")
     assert (unknown.added, unknown.removed) == (None, None)
+
+
+def test_a_replace_all_pair_leaves_a_multiedit_unknown():
+    payload = {
+        "id": 1,
+        "attempt_id": 1,
+        "job_id": "j",
+        "tool": "MultiEdit",
+        "input": {"file_path": "a.py"},
+        "edits": [
+            {
+                "old_string": "a",
+                "new_string": "b",
+                "replace_all": True,
+                "new_chars": 1,
+                "old_chars": 1,
+            },
+        ],
+        "result_id": 2,
+        "result_error": False,
+    }
+    [operation] = tool_operations(payload, "/w")
+    assert (operation.added, operation.removed) == (None, None)
 
 
 def test_a_multi_file_patch_is_one_operation_per_file():

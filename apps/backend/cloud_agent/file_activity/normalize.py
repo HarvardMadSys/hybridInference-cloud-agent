@@ -319,7 +319,7 @@ def parse_patch(text: str) -> list[PatchSection]:
 
 def _multi_edit(payload: Mapping[str, Any]) -> tuple[int | None, int | None]:
     """Sum a MultiEdit's pairs; a replace-all or a clipped side is unknown."""
-    pairs = payload.get("edits_pairs")
+    pairs = payload.get("edits")
     if not isinstance(pairs, list) or not pairs:
         return None, None
     added = removed = 0
@@ -349,7 +349,9 @@ def _write_edit_deltas(
         # Overwriting a file whose previous lines were not recorded: the added
         # side is known, the removed side is not.
         return int(payload["content_lines"]), None
-    if fields.get("edits") is not None:
+    if payload.get("edits") is not None:
+        # The projection kept each pair, with the whole side's length so a
+        # clipped pair is recognized rather than summed short.
         return _multi_edit(payload)
     if fields.get("replace_all"):
         # How many occurrences were replaced is not recorded.

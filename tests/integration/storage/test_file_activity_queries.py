@@ -290,6 +290,33 @@ async def test_multi_file_patch_add_delete_rename_and_duplicate_results(db, stor
     assert page.operations[0].patch_files == 3
 
 
+async def test_a_multiedit_reads_its_pairs_from_the_real_projection(db, store):
+    [job] = await conversation(db, store, "fa_multiedit")
+    await events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "started", "cwd": "/w"}),
+            call(
+                "MultiEdit",
+                "m1",
+                file_path="a.py",
+                edits=[
+                    {"old_string": "one", "new_string": "one" + chr(10) + "two"},
+                    {"old_string": "three" + chr(10) + "four", "new_string": "three"},
+                ],
+            ),
+            result("m1"),
+        ],
+    )
+    view = await _view(store, job)
+    assert view is not None
+    row = view.files[0]
+    # 2 + 1 lines added, 1 + 2 removed, from the pairs the projection kept.
+    assert (row.added, row.removed) == (3, 3)
+    assert (row.added_unknown_ops, row.removed_unknown_ops) == (0, 0)
+
+
 async def test_codex_file_change_notifications_are_read_from_raw_rows(db, store):
     [job] = await conversation(db, store, "fa_codex")
     notification = {
