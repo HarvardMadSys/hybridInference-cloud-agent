@@ -856,13 +856,18 @@ async def test_a_read_blocked_on_the_pool_is_cancelled_and_a_later_read_works(db
             result("b1"),
         ],
     )
-    # The tier's own connection settings, read from the environment it exports.
+    # This worker's database: the fixture suffixes the name per xdist worker,
+    # so the same rule is applied here rather than the unsuffixed tier name.
+    database = os.environ.get("TEST_DB_NAME", "cloud_agent_ledger_test_db")
+    worker = os.getenv("PYTEST_XDIST_WORKER", "master")
+    if worker != "master":
+        database = f"{database}_{worker}"
     settings = {
         "host": os.environ["TEST_DB_HOST"],
         "port": int(os.environ["TEST_DB_PORT"]),
         "user": os.environ["TEST_DB_USER"],
         "password": os.environ["TEST_DB_PASSWORD"],
-        "database": os.environ["TEST_DB_NAME"],
+        "database": database,
     }
     small = await asyncpg.create_pool(**settings, min_size=1, max_size=1)
     queries = PostgresFileActivityQueries(small)
@@ -891,3 +896,25 @@ async def test_a_read_blocked_on_the_pool_is_cancelled_and_a_later_read_works(db
         assert small.get_size() == small.get_idle_size()
     finally:
         await small.close()
+
+
+async def test_a_text_block_with_escaped_quotes_before_a_big_image_counts(db, store):
+    """A valid block keeps valid JSON after the skeleton replaces its text."""
+    content = json.dumps(
+        [
+            {"type": "text", "text": 'He said "hi" and a backslash \\ end.'},
+            {"type": "image", "source": {"media_type": "image/png", "data": "C" * 120_000}},
+        ]
+    )
+    assert await _read_result(db, store, "fa_escaped_ok", content) == (1, 0)
+
+
+async def test_source_text_with_escaped_json_looking_content_is_a_read(db, store):
+    content = 'const s = "{\\"type\\": \\"image\\"}";\n'
+    assert await _read_result(db, store, "fa_escaped_src", content) == (0, 1)
+
+
+async def test_a_raw_control_character_in_image_data_keeps_it_invalid(db, store):
+    """A raw newline inside a JSON string is invalid JSON, so nothing counts."""
+    content = '{"type":"image","source":{"media_type":"image/png","data":"AA\nBB"}}'
+    assert await _read_result(db, store, "fa_control", content) == (0, 1)

@@ -258,15 +258,20 @@ FILE_ACTIVITY_EVENT_SQL = rf"""
            (result.payload->>'is_error')::boolean AS result_error,
            left(COALESCE(result.payload->>'content', ''), 4000) AS result_content,
            -- A structural skeleton of the result, for image evidence. Bulky
-           -- string fields (a base64 payload, a text body) are emptied so the
-           -- block's own ``type`` and media type survive without transporting
-           -- the body. The reducer parses this as JSON; invalid text stays
-           -- invalid there and counts for nothing.
+           -- string values of the payload fields (a base64 body, a text body)
+           -- are replaced by a marker, so the block's own type and media type
+           -- survive without the body moving. The string token respects JSON
+           -- escapes (\\ and \" pairs) and refuses raw control characters,
+           -- so a valid block with escaped quotes stays valid JSON and an
+           -- invalid one stays invalid for the reducer's json.loads.
            left(regexp_replace(regexp_replace(regexp_replace(
                  COALESCE(result.payload->>'content', ''),
-                 '"data"\s*:\s*"[^"]*"', '"data":""', 'g'),
-                 '"text"\s*:\s*"[^"]*"', '"text":""', 'g'),
-                 '"content"\s*:\s*"[^"]*"', '"content":""', 'g'),
+                 '"data"[[:space:]]*:[[:space:]]*"(?:[^"\\[:cntrl:]]|\\.)*"',
+                 '"data":""', 'g'),
+                 '"text"[[:space:]]*:[[:space:]]*"(?:[^"\\[:cntrl:]]|\\.)*"',
+                 '"text":""', 'g'),
+                 '"content"[[:space:]]*:[[:space:]]*"(?:[^"\\[:cntrl:]]|\\.)*"',
+                 '"content":""', 'g'),
                  4000) AS result_skeleton
     FROM agent_job_events e
     JOIN agent_jobs j ON j.id = e.job_id AND j.thread_id = $1 AND j.user_id = $2
