@@ -216,7 +216,8 @@ function EventRow({
         aria-hidden="true"
         className={`mt-1 h-2 w-2 shrink-0 rounded-full ${KIND_MARK[event.kind]}`}
       />
-      <div className="min-w-0 flex-1">
+      {/* A narrow column keeps room for the sentence; its buttons wrap under it. */}
+      <div className="min-w-[12rem] flex-1">
         <p className="text-foreground">
           <span className="font-medium">{t(ONE_KIND[event.kind])}</span>
           <span className="text-muted">
