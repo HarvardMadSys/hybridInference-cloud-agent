@@ -234,14 +234,19 @@ def test_each_step_sees_the_environment_its_own_exec_gave_it(tmp_path):
     manager = _LocalExec(exec_environment)
     preparation = _preparation(manager)
     seen = tmp_path / "seen"
-    _queue(preparation, _step("true"), _step(f"exec env > {seen}"))
+    _queue(preparation, _step("true"), _step(f"env > {seen}"))
 
     preparation.run()
 
-    alone = subprocess.run(
-        ["/bin/sh", "-c", "env"], env=exec_environment, cwd="/", capture_output=True, check=True
+    alone = tmp_path / "alone"
+    subprocess.run(
+        ["/bin/sh", "-c", f"env > {alone}"],
+        env=exec_environment,
+        cwd="/",
+        capture_output=True,
+        check=True,
     )
-    assert sorted(seen.read_bytes().splitlines()) == sorted(alone.stdout.splitlines())
+    assert sorted(seen.read_bytes().splitlines()) == sorted(alone.read_bytes().splitlines())
     assert b"LC_CTYPE" not in seen.read_bytes()
 
 
