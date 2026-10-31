@@ -25,7 +25,12 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import assert_pool_idle, reset_agent_tables
 from tests.support.migrations import apply_migrations
-from tests.support.owners import on_connection
+from tests.support.model_connections import (
+    use_test_cipher,
+    verified_connection,
+    with_connection_capability,
+)
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, on_connection
 
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api._owner_auth import authenticate_agent_owner
@@ -54,19 +59,22 @@ _TEST_MODEL = "glm-5.1"
 
 
 def _claim_body(worker_id: str) -> dict[str, Any]:
-    return {
-        "worker_id": worker_id,
-        "attestation": {
-            "sandbox_image_digest": "sha256:lifecycle-test-image",
-            "runner_capabilities": [
-                SHARED_SANDBOX_CAPABILITY,
-                NATIVE_FORK_AT_ANCHOR_CAPABILITY,
-                shared_deployment_capability("test-deployment"),
-            ],
-            "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
-            "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
-        },
-    }
+    # From a host that launches members on owner connections, as every turn runs on one.
+    return with_connection_capability(
+        {
+            "worker_id": worker_id,
+            "attestation": {
+                "sandbox_image_digest": "sha256:lifecycle-test-image",
+                "runner_capabilities": [
+                    SHARED_SANDBOX_CAPABILITY,
+                    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+                    shared_deployment_capability("test-deployment"),
+                ],
+                "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+                "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
+            },
+        }
+    )
 
 
 class _FakeOwners:
@@ -122,6 +130,8 @@ async def api(monkeypatch):
     # The allowlist is empty unless a deployment sets it, and an unentitled
     # repo is refused at creation, so declare the one repo these tests use.
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
+    use_test_cipher(monkeypatch)
 
     base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
@@ -149,6 +159,13 @@ async def api(monkeypatch):
     async with pool.acquire() as conn:
         await reset_agent_tables(conn)
         await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
+    # The owner's verified connection, the one `on_connection` names.
+    await verified_connection(
+        store,
+        _OWNER,
+        connection_id=CONNECTION_ID,
+        models=tuple(dict.fromkeys((_TEST_MODEL, *CONNECTION_MODELS))),
+    )
     await store.host_pool.register_host(
         host="runner-test",
         credential_hash="test-credential-hash",
@@ -354,7 +371,6 @@ async def test_environment_maintenance_lock_does_not_delay_attempt_reaper(api, m
                 store,
                 interval_seconds=0.01,
                 max_attempts=3,
-                grants=None,
             ),
             name="dbtest-attempt-reaper",
         )

@@ -137,7 +137,7 @@ _PRINTED, _KEPT = _OUTPUT["nul"]
 
 async def _environment(api: Api, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """An environment with a setup script and one saved command."""
-    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "unstorable-environment-key")
+    # The fixture's credential key, which the owner's connection key is stored under.
     monkeypatch.setattr(
         "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="a" * 40)
     )

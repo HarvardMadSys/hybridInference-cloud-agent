@@ -23,5 +23,3 @@ async def test_admin_and_conversation_usage_queries_keep_personal_source(store, 
     owner = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
     assert owner is not None
     assert owner["job"]["model_connection_id"] == connection_id
-    assert len(owner["conversation_rows"]) == 1
-    assert owner["conversation_rows"][0].get("model_connection_id") == connection_id

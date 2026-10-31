@@ -349,17 +349,12 @@ async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attemp
     queries = store.admin_runs
     admin_inputs = await queries.usage_inputs(job["id"])
     owner_inputs = await job_usage_inputs(db, job_id=job["id"])
-    admin = summarize_job_usage(
-        ledger_rows=[], runtime_inputs=admin_inputs, runtime="claude-code", terminal=True
-    )
-    owner = summarize_job_usage(
-        ledger_rows=[], runtime_inputs=owner_inputs, runtime="claude-code", terminal=True
-    )
+    admin = summarize_job_usage(runtime_inputs=admin_inputs, runtime="claude-code")
+    owner = summarize_job_usage(runtime_inputs=owner_inputs, runtime="claude-code")
     assert admin == owner
     assert admin.runtime.input_tokens == 40
     assert admin.runtime.output_tokens == 8
     assert admin.runtime.normalized_input_tokens == 80
-    assert admin.ledger.totals is None
     assert "PRIVATE" not in json.dumps(admin_inputs, default=str)
 
 

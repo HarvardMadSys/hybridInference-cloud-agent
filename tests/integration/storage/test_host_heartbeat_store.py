@@ -21,7 +21,6 @@ from typing import Any
 import asyncpg
 import pytest
 import pytest_asyncio
-from fastapi import BackgroundTasks
 from tests.integration.storage.test_admin_sandbox_queries import seed
 from tests.integration.storage.test_agent_job_store import _create_job, _waiting_on
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
@@ -175,44 +174,19 @@ def _no_fenced_path(monkeypatch, store) -> None:
     monkeypatch.setattr(store.sandbox, "reconcile_thread_sandbox_observation", fenced)
 
 
-class RecordingGrants:
-    """The grant client's shape, recording what a beat revokes."""
-
-    def __init__(self) -> None:
-        self.renewed: list[str] = []
-        self.revoked: list[str] = []
-
-    async def renew(self, grant_id: str) -> dict[str, Any]:
-        self.renewed.append(grant_id)
-        return {}
-
-    async def revoke(self, grant_id: str) -> bool:
-        self.revoked.append(grant_id)
-        return True
-
-
 async def _enrolled(store) -> None:
     await store.host_pool.register_host(
         host=HOST, credential_hash=CREDENTIAL, capabilities=[], slots_total=4
     )
 
 
-async def _beat(store, retained: list[dict[str, Any]], *, grants: Any = None, **body: Any) -> Any:
-    """One heartbeat through the real handler and the real store.
-
-    Grant renewals and revocations run after the reply is sent, so the tasks
-    the handler leaves for then run here once it returns, as a request's do.
-    """
-    background = BackgroundTasks()
-    reply = await hosts.heartbeat_host(
+async def _beat(store, retained: list[dict[str, Any]], **body: Any) -> Any:
+    """One heartbeat through the real handler and the real store."""
+    return await hosts.heartbeat_host(
         HostHeartbeatRequest.model_validate({"retained_sandboxes": retained, **body}),
-        background_tasks=background,
         host={"host": HOST, "credential_hash": CREDENTIAL},
         store=store,
-        grants=grants,
     )
-    await background()
-    return reply
 
 
 # -- observations that change nothing ------------------------------------------
@@ -711,14 +685,13 @@ async def test_a_repeated_beat_rewrites_only_the_running_group(db, store):
             terminal_count=0,
         ),
     ]
-    grants = RecordingGrants()
-    assert (await _beat(store, retained, grants=grants)).residencies_lost == []
+    assert (await _beat(store, retained)).residencies_lost == []
     quiet_before = await _versions(db, "asbx_quiet")
     busy_before = await _versions(db, "asbx_busy")
     async with db.acquire() as conn:
         events = await conn.fetchval("SELECT COUNT(*) FROM agent_sandbox_events")
 
-    reply = await _beat(store, retained, grants=grants)
+    reply = await _beat(store, retained)
 
     assert reply.residencies_lost == []
     assert await _versions(db, "asbx_quiet") == quiet_before
@@ -728,7 +701,6 @@ async def test_a_repeated_beat_rewrites_only_the_running_group(db, store):
     assert busy_after[1][busy["thread_id"]] != busy_before[1][busy["thread_id"]]
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_sandbox_events") == events
-    assert grants.revoked == []
 
 
 @pytest.mark.parametrize(
@@ -847,13 +819,11 @@ async def test_a_beat_releases_only_the_residencies_still_open(db, store, monkey
             members=[_reported(origin["thread_id"]), _reported(held["thread_id"])],
         )
     ]
-    grants = RecordingGrants()
 
     for _ in range(2):
-        assert (await _beat(store, retained, grants=grants)).residencies_lost == []
+        assert (await _beat(store, retained)).residencies_lost == []
 
     assert released == [held["thread_id"]]
-    assert grants.revoked == ["agr-held"]
     assert (await _membership(db, held["thread_id"]))["residency_status"] == "none"
 
 
@@ -960,10 +930,8 @@ async def test_a_beat_with_no_census_touches_no_group(db, store):
     for body in ({}, {"retained_sandboxes": []}):
         await hosts.heartbeat_host(
             HostHeartbeatRequest.model_validate(body),
-            background_tasks=BackgroundTasks(),
             host={"host": HOST, "credential_hash": CREDENTIAL},
             store=store,
-            grants=None,
         )
 
     assert {sandbox_id: await _versions(db, sandbox_id) for sandbox_id in before} == before
