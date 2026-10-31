@@ -63,19 +63,8 @@ const TEXT = {
   },
 } as const;
 
-test.beforeEach(async ({ page, request }) => {
+test.beforeEach(async ({ request }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
-  await page.route('**/api/v1/agent/model-preference', (route) =>
-    route.fulfill({
-      json: {
-        default_model: null,
-        last_model: null,
-        effective_model: null,
-        deployment_default: null,
-        models: ['fixture-model'],
-      },
-    }),
-  );
 });
 
 test.afterEach(async ({ request }) => {
@@ -253,7 +242,6 @@ for (const locale of ['en', 'zh-CN'] as const) {
           json: {
             repos: ['fixture/repository'],
             runtimes: ['claude-code', 'codex'],
-            models: ['fixture-model'],
             default_model: null,
             github_connected: true,
             github_install_url: null,
@@ -284,9 +272,8 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await agent.click();
       await page.getByRole('option', { name: 'codex', exact: true }).click();
       await model.click();
-      await expect(
-        page.getByRole('option', { name: `chat-model · ${name}`, exact: true }),
-      ).toBeVisible();
+      // The connection's own models, named alone: no other connection lists them.
+      await expect(page.getByRole('option', { name: 'chat-model', exact: true })).toBeVisible();
       await expect(page.getByRole('option', { name: /claude-model/ })).toHaveCount(0);
       await expect(page.getByRole('listbox')).not.toContainText(PROTOCOL_NAMES);
       await page.keyboard.press('Escape');
@@ -294,7 +281,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await agent.click();
       await page.getByRole('option', { name: 'claude-code', exact: true }).click();
       await model.click();
-      await page.getByRole('option', { name: `claude-model · ${name}`, exact: true }).click();
+      await page.getByRole('option', { name: 'claude-model', exact: true }).click();
       await page.locator('#new-task-prompt').fill('Run Claude Code on my provider');
       await page.locator('#new-task-prompt').press('Enter');
       await expect.poll(() => jobs.length).toBe(1);
@@ -352,17 +339,6 @@ test.describe('verification without a protocol menu', () => {
         localStorage.setItem('agents.locale', 'en');
         localStorage.setItem('agents.theme', theme);
       }, variant.theme);
-      await page.route('**/api/v1/agent/model-preference', (route) =>
-        route.fulfill({
-          json: {
-            default_model: null,
-            last_model: null,
-            effective_model: null,
-            deployment_default: null,
-            models: ['fixture-model'],
-          },
-        }),
-      );
       const posted: unknown[] = [];
       let release!: () => void;
       const allowed = new Promise<void>((resolve) => {

@@ -1,6 +1,14 @@
 // Explicit HTTP contract fixtures, not a replacement for control-plane/DB tests.
 // Unknown API calls fail visibly so new UI dependencies cannot silently pass.
 const timestamp = '2026-10-17T00:00:00Z';
+// The owner's one verified connection: the only source a turn can run on.
+const connectionId = `mconn_${'f'.repeat(32)}`;
+const connection = {
+  id: connectionId,
+  name: 'Fixture provider',
+  models: ['fixture-model'],
+  model_runtimes: { 'fixture-model': ['codex'] },
+};
 
 function job(id, prompt = id) {
   return {
@@ -12,6 +20,7 @@ function job(id, prompt = id) {
     turn_no: 1,
     runtime: 'codex',
     model: 'fixture-model',
+    model_connection_id: connectionId,
     state: 'succeeded',
     conversation_state: 'idle',
     native_state: 'ready',
@@ -27,10 +36,6 @@ function job(id, prompt = id) {
     published_pr_url: null,
     detail: null,
     metadata: {},
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
     revision: 1,
     thread_revision: 1,
     created_at: timestamp,
@@ -150,8 +155,11 @@ export function createFixture() {
       json(res, {
         repos: ['fixture/repository'],
         runtimes: ['codex'],
-        models: ['fixture-model'],
         default_model: 'fixture-model',
+        default_model_connection_id: connectionId,
+        model_connections_enabled: true,
+        model_connection_required: false,
+        model_connections: [connection],
         github_connected: true,
         github_install_url: null,
       });
@@ -281,24 +289,17 @@ export function createFixture() {
       json(res, { bindings: [] });
     else if (/^\/v1\/agent\/jobs\/[^/]+\/usage$/.test(api))
       json(res, {
-        ledger: {
-          status: 'pending',
-          source: 'gateway_api_logs',
-          attribution: 'grant_time_window',
-          finalized: false,
-          totals: null,
-          unknown_rows: null,
-          estimated_calls: 0,
-          queried_at: null,
-          missing_attempts: 0,
-          attempts: [],
-        },
         runtime: {
           source: 'runtime',
           input_tokens: null,
           output_tokens: null,
           cache_read_tokens: null,
+          cache_write_tokens: null,
+          reasoning_tokens: null,
+          normalized_input_tokens: null,
         },
+        external_provider: true,
+        version: null,
       });
     else if (/^\/v1\/agent\/jobs\/[^/]+\/git\/metadata$/.test(api))
       json(res, {

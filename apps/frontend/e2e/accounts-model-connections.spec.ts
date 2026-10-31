@@ -98,20 +98,18 @@ for (const text of variants) {
       text.locale,
     );
     let saved: ReturnType<typeof connectionView> | null = null;
-    const gatewayCalls: string[] = [];
+    const retiredCalls: string[] = [];
     context.on('request', (request) => {
-      if (/model-preference|prompt-rewrite/.test(request.url())) gatewayCalls.push(request.url());
+      if (/model-preference|prompt-rewrite/.test(request.url())) retiredCalls.push(request.url());
     });
     await context.route('**/api/v1/agent/config*', (route) =>
       route.fulfill({
         json: {
           repos: ['fixture/repository'],
           runtimes: ['codex'],
-          models: [],
           default_model: null,
           github_connected: true,
           github_install_url: null,
-          gateway_inference: false,
           model_connection_required: !saved?.enabled,
           model_connections_enabled: true,
           model_connections: composerConnections(saved),
@@ -170,7 +168,8 @@ for (const text of variants) {
     await expect(setup).toHaveCount(0);
     await expect(prompt).toHaveValue('Keep the draft while I connect my model');
     await page.getByRole('button', { name: text.model, exact: true }).click();
-    await page.getByRole('option', { name: 'fixture-model · My provider', exact: true }).click();
+    // The only source of this model, so its label needs no connection name.
+    await page.getByRole('option', { name: 'fixture-model', exact: true }).click();
     const run = page.getByRole('button', { name: text.run, exact: true });
     await expect(run).toBeEnabled();
     await card.getByRole('button', { name: text.disable, exact: true }).click();
@@ -185,7 +184,7 @@ for (const text of variants) {
     await card.getByRole('button', { name: text.confirm, exact: true }).click();
     await expect(run).toBeDisabled();
     await expect(setup).toBeVisible();
-    expect(gatewayCalls).toEqual([]);
+    expect(retiredCalls).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       text.width,
     );
@@ -207,11 +206,9 @@ for (const text of variants) {
         json: {
           repos: [],
           runtimes: ['codex'],
-          models: [],
           default_model: null,
           github_connected: false,
           github_install_url: null,
-          gateway_inference: false,
           model_connection_required: true,
           model_connections_enabled: false,
           model_connections: [],
