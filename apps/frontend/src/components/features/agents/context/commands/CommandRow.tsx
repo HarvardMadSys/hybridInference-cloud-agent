@@ -38,6 +38,8 @@ export function CommandRow({
     execution.duration_basis === 'events' ? t('executions.duration.eventsTip') : undefined;
   return (
     <li className="min-w-0">
+      {/* One dense line per execution: status, command, inline timing, program.
+          The secondary facts sit in a tooltip so a row stays one line tall. */}
       <button
         type="button"
         aria-expanded={open}
@@ -45,70 +47,60 @@ export function CommandRow({
           command: clip(execution.command, 60),
         })}
         onClick={() => setOpen((value) => !value)}
-        className="ui-focus-ring flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-surface-hover"
+        className="ui-focus-ring flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] leading-tight hover:bg-surface-hover"
       >
-        <span aria-hidden="true" className={`mt-0.5 shrink-0 font-mono ${tone.className}`}>
+        <span aria-hidden="true" className={`w-3 shrink-0 text-center font-mono ${tone.className}`}>
           {tone.glyph}
         </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="truncate font-mono text-foreground">
-              {clip(execution.command, 160)}
-            </span>
-            {execution.background ? (
-              <span className="shrink-0 rounded bg-teal-500/15 px-1 py-0.5 text-[10px] text-teal-700 dark:text-teal-300">
-                {t('executions.background')}
-              </span>
-            ) : null}
-            {execution.command_truncated ? (
-              <span className="shrink-0 text-[10px] text-muted">
-                {t('executions.details.commandTruncated')}
-              </span>
-            ) : null}
-          </span>
-          <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted">
-            <span>{t(STATUS_LABEL[execution.status])}</span>
-            {execution.exit_code != null ? (
-              <span className="tabular-nums">
-                {t('executions.exit', { code: execution.exit_code })}
-              </span>
-            ) : null}
-            {execution.tool_error ? <span>{t('executions.toolError')}</span> : null}
-            {duration ? (
-              <span
-                className="tabular-nums text-foreground"
-                title={durationTip}
-                aria-label={durationTip}
-              >
-                {duration}
-              </span>
-            ) : (
-              <span>{t('executions.duration.none')}</span>
-            )}
-            <span
-              title={t('executions.turnAttemptTip', {
-                turn: execution.turn_no,
-                attempt: execution.attempt_no,
-              })}
-            >
-              {t('executions.turnAttempt', {
-                turn: execution.turn_no,
-                attempt: execution.attempt_no,
-              })}
-            </span>
-            {execution.at ? (
-              <time dateTime={execution.at}>
-                {new Date(execution.at).toLocaleTimeString(locale, {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  second: '2-digit',
-                })}
-              </time>
-            ) : null}
-            {execution.superseded ? <span>{t('executions.superseded')}</span> : null}
-          </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-foreground">
+          {clip(execution.command, 160)}
         </span>
-        <span className="shrink-0 font-mono text-[11px] text-muted">{execution.program}</span>
+        {execution.background ? (
+          <span className="shrink-0 rounded bg-teal-500/15 px-1 text-[10px] text-teal-700 dark:text-teal-300">
+            {t('executions.background')}
+          </span>
+        ) : null}
+        <span className="shrink-0 text-[10px] text-muted">
+          {t(STATUS_LABEL[execution.status])}
+          {execution.exit_code != null ? ` ${execution.exit_code}` : ''}
+        </span>
+        {duration ? (
+          <span
+            className="w-11 shrink-0 text-right tabular-nums text-muted"
+            title={durationTip}
+            aria-label={durationTip}
+          >
+            {duration}
+          </span>
+        ) : (
+          <span className="w-11 shrink-0 text-right text-[10px] text-muted">—</span>
+        )}
+        <span
+          className="hidden w-14 shrink-0 truncate text-right font-mono text-[10px] text-muted sm:block"
+          title={t('executions.turnAttemptTip', {
+            turn: execution.turn_no,
+            attempt: execution.attempt_no,
+          })}
+        >
+          {t('executions.turnAttempt', {
+            turn: execution.turn_no,
+            attempt: execution.attempt_no,
+          })}
+        </span>
+        {execution.at ? (
+          <time
+            className="hidden w-14 shrink-0 text-right tabular-nums text-[10px] text-muted md:block"
+            dateTime={execution.at}
+          >
+            {new Date(execution.at).toLocaleTimeString(locale, {
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+          </time>
+        ) : null}
+        <span className="w-12 shrink-0 truncate text-right font-mono text-[10px] text-muted">
+          {execution.program}
+        </span>
       </button>
       {open ? (
         <CommandDetails
@@ -185,27 +177,27 @@ function CommandDetails({
     <div
       role="group"
       aria-label={t('executions.details.fields')}
-      className="mb-1 ml-5 rounded-lg border border-border bg-surface-subtle p-2 text-xs"
+      className="mb-1 mr-1 ml-4 rounded-md border border-border bg-surface-muted/60 p-1.5 text-[11px]"
     >
-      <dl className="grid gap-1.5">
+      <dl className="grid gap-1">
         <div className="min-w-0">
-          <dt className="text-[11px] text-muted">{t('executions.details.command')}</dt>
+          <dt className="text-[10px] text-muted">{t('executions.details.command')}</dt>
           <dd className="mt-0.5">
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-foreground">
+            <pre className="mt-0.5 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-snug text-foreground">
               {command}
             </pre>
           </dd>
         </div>
         {execution.cwd ? (
           <div className="min-w-0">
-            <dt className="text-[11px] text-muted">{t('executions.details.cwd')}</dt>
+            <dt className="text-[10px] text-muted">{t('executions.details.cwd')}</dt>
             <dd className="mt-0.5 break-all font-mono text-[11px] text-foreground">
               {execution.cwd}
             </dd>
           </div>
         ) : null}
         <div className="min-w-0">
-          <dt className="text-[11px] text-muted">{t('executions.details.result')}</dt>
+          <dt className="text-[10px] text-muted">{t('executions.details.result')}</dt>
           <dd className="mt-0.5">
             <span className="mr-2 text-[11px] text-muted">
               {execution.exit_code != null
@@ -217,7 +209,7 @@ function CommandDetails({
               })}
             </span>
             {output ? (
-              <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-foreground">
+              <pre className="mt-0.5 max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-snug text-foreground">
                 {output}
               </pre>
             ) : (

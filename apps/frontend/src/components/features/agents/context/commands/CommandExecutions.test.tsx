@@ -159,8 +159,8 @@ describe('CommandExecutions', () => {
     expect(within(section).getByText('cumulative duration')).toBeInTheDocument();
     expect(within(section).getByText('1 · 50%')).toBeInTheDocument();
     expect(within(section).getByText('14s')).toBeInTheDocument();
-    // A missing duration says so rather than showing 0.
-    expect(within(section).getAllByText('no timing recorded').length).toBeGreaterThan(0);
+    // A missing duration shows an em dash, never a fabricated 0.
+    expect(within(section).getAllByText('—').length).toBeGreaterThan(0);
     // Programs carry counts and shares.
     expect(within(section).getByTitle('Filter the list to pytest')).toBeInTheDocument();
     expect(within(section).getByText('67%')).toBeInTheDocument();
@@ -176,7 +176,7 @@ describe('CommandExecutions', () => {
     )!;
     // The denominator is a tooltip on the Failed value, not a paragraph.
     expect(within(section).getByTitle(/failed ÷ settled/)).toBeInTheDocument();
-    expect(within(section).getByText('Running')).toBeInTheDocument();
+    expect(within(section).getByText(/Running/)).toBeInTheDocument();
     expect(within(section).getAllByText('13s').length).toBeGreaterThan(0);
   });
 
@@ -204,7 +204,7 @@ describe('CommandExecutions', () => {
     mocked.mockResolvedValue(page());
     renderSection();
     const filters = await screen.findByRole('group', { name: 'Show one kind of execution' });
-    expect(within(filters).getByRole('button', { name: /All 3/ })).toHaveAttribute(
+    expect(within(filters).getByRole('button', { name: /^All\s*3$/ })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
@@ -216,7 +216,7 @@ describe('CommandExecutions', () => {
         page: { total: 1, returned: 1, limit: 100, next_cursor: null },
       }),
     );
-    fireEvent.click(within(filters).getByRole('button', { name: /Failed 1/ }));
+    fireEvent.click(within(filters).getByRole('button', { name: /^Failed\s*1$/ }));
     await waitFor(() =>
       expect(mocked).toHaveBeenLastCalledWith(
         'j1',
@@ -244,7 +244,7 @@ describe('CommandExecutions', () => {
     mocked.mockResolvedValue(page());
     renderSection();
     const filters = await screen.findByRole('group', { name: 'Show one kind of execution' });
-    expect(within(filters).getByRole('button', { name: /Slow 1/ })).toHaveAttribute(
+    expect(within(filters).getByRole('button', { name: /^Slow\s*1$/ })).toHaveAttribute(
       'title',
       'A command at or over 10s is slow.',
     );
@@ -366,7 +366,7 @@ describe('CommandExecutions', () => {
     expect(await screen.findByRole('heading', { name: '命令执行' })).toBeInTheDocument();
     expect(screen.getByText('已结算执行')).toBeInTheDocument();
     expect(screen.getByText('合计耗时')).toBeInTheDocument();
-    expect(screen.getAllByText('未记录耗时').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 
   it('asks for the conversation it was given, not whichever page is open', async () => {
@@ -503,7 +503,7 @@ it('refreshes a running turn with a request whose signal stays live, and renders
     const list = await screen.findByRole('list', { name: 'Command Executions' });
     await waitFor(() =>
       expect(
-        within(within(list).getAllByRole('listitem')[0]).getByText('Completed'),
+        within(within(list).getAllByRole('listitem')[0]).getByText(/Completed/),
       ).toBeInTheDocument(),
     );
   } finally {
@@ -705,7 +705,7 @@ it('runs the queued final refresh after a settlement that lands mid-read', async
     const list = await screen.findByRole('list', { name: 'Command Executions' });
     await waitFor(() =>
       expect(
-        within(within(list).getAllByRole('listitem')[0]).getByText('Completed'),
+        within(within(list).getAllByRole('listitem')[0]).getByText(/Completed/),
       ).toBeInTheDocument(),
     );
   } finally {

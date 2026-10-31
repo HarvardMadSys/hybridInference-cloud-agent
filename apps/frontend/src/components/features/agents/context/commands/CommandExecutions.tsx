@@ -162,6 +162,8 @@ export function CommandExecutions({
   });
   const [text, setText] = useState('');
   const [programText, setProgramText] = useState('');
+  // A narrow card keeps the rail collapsed so the command list stays primary.
+  const [railOpen, setRailOpen] = useState(false);
   const [pages, setPages] = useState<ThreadCommandsApi[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -283,107 +285,133 @@ export function CommandExecutions({
   };
 
   return (
-    <section className="mt-6">
-      <h3 className="text-sm font-semibold text-foreground">{t('executions.title')}</h3>
-      <p className="mt-1 text-xs text-muted">{t('executions.note')}</p>
-      <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)] lg:items-start">
-        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3">
-          <SummaryRail
-            page={page}
-            loading={loading}
-            error={error}
-            onRetry={() => setQuery((v) => ({ ...v }))}
-          />
-          {page ? (
-            <Programs
-              page={page}
-              filterText={programText}
-              onFilterText={setProgramText}
-              onSelect={selectProgram}
-            />
-          ) : null}
-          {page ? <Attention page={page} onSelectProgram={selectProgram} /> : null}
-        </div>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="search"
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              placeholder={t('executions.search')}
-              aria-label={t('executions.searchLabel')}
-              className="ui-input min-h-9 min-w-0 flex-1 text-xs"
-            />
-            <div className="flex gap-1" role="group" aria-label={t('executions.sort')}>
-              {COMMAND_SORTS.map((sort) => (
-                <Chip
-                  key={sort}
-                  active={query.sort === sort}
-                  onClick={() => setQuery((previous) => ({ ...previous, sort }))}
-                >
-                  {t(SORT_LABEL[sort])}
-                </Chip>
-              ))}
-            </div>
+    <section className="mt-6 min-w-0">
+      {/* One compact DSH-style card: a title row, a bounded body, and a list
+          that scrolls inside the card rather than growing the page. */}
+      <div className="ui-card flex max-h-[560px] min-w-0 flex-col overflow-hidden">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border px-3 py-1.5">
+          <h3 className="shrink-0 text-xs font-semibold text-foreground">
+            {t('executions.title')}
+          </h3>
+          <div
+            className="flex min-w-0 flex-wrap items-center gap-1"
+            role="group"
+            aria-label={t('executions.filter')}
+          >
+            {COMMAND_FILTERS.map((filter) => (
+              <Chip
+                key={filter}
+                active={query.filter === filter}
+                title={filter === 'slow' ? t('executions.filter.slowTip', { cutoff }) : undefined}
+                onClick={() => setQuery((previous) => ({ ...previous, filter }))}
+              >
+                {t(FILTER_LABEL[filter])}
+                {page ? (
+                  <b className="ml-1 font-semibold tabular-nums">
+                    {page.counts[filter].toLocaleString(locale)}
+                  </b>
+                ) : null}
+              </Chip>
+            ))}
           </div>
-          {page ? (
-            <div
-              className="mt-2 flex flex-wrap gap-1"
-              role="group"
-              aria-label={t('executions.filter')}
-            >
-              {COMMAND_FILTERS.map((filter) => (
-                <Chip
-                  key={filter}
-                  active={query.filter === filter}
-                  title={filter === 'slow' ? t('executions.filter.slowTip', { cutoff }) : undefined}
-                  onClick={() => setQuery((previous) => ({ ...previous, filter }))}
-                >
-                  {t(FILTER_LABEL[filter])} {page.counts[filter].toLocaleString(locale)}
-                </Chip>
-              ))}
+          <button
+            type="button"
+            aria-expanded={railOpen}
+            aria-controls="command-executions-rail"
+            onClick={() => setRailOpen((open) => !open)}
+            className="ui-focus-ring ml-auto min-h-7 shrink-0 rounded-md border border-border px-2 text-[11px] text-muted hover:text-foreground lg:hidden"
+          >
+            {railOpen ? t('executions.rail.hide') : t('executions.rail.show')}
+          </button>
+        </div>
+        <div className="grid min-h-0 flex-1 gap-3 p-2.5 lg:grid-cols-[minmax(180px,1fr)_minmax(0,2fr)]">
+          <div
+            id="command-executions-rail"
+            className={`${railClass(railOpen)} min-h-0 min-w-0 flex-col gap-2 lg:flex`}
+          >
+            <SummaryRail
+              page={page}
+              loading={loading}
+              error={error}
+              onRetry={() => setQuery((v) => ({ ...v }))}
+            />
+            {page ? <Attention page={page} onSelectProgram={selectProgram} /> : null}
+            {page ? (
+              <Programs
+                page={page}
+                filterText={programText}
+                onFilterText={setProgramText}
+                onSelect={selectProgram}
+              />
+            ) : null}
+          </div>
+          <div className="flex min-h-0 min-w-0 flex-col">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <input
+                type="search"
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+                placeholder={t('executions.search')}
+                aria-label={t('executions.searchLabel')}
+                className="ui-input min-h-7 min-w-0 flex-1 px-2 text-[11px]"
+              />
+              <div className="flex shrink-0 gap-1" role="group" aria-label={t('executions.sort')}>
+                {COMMAND_SORTS.map((sort) => (
+                  <Chip
+                    key={sort}
+                    active={query.sort === sort}
+                    onClick={() => setQuery((previous) => ({ ...previous, sort }))}
+                  >
+                    {t(SORT_LABEL[sort])}
+                  </Chip>
+                ))}
+              </div>
             </div>
-          ) : null}
-          {page && query.program ? (
-            <button
-              type="button"
-              onClick={() => selectProgram(null)}
-              className="ui-button ui-button-ghost mt-2 min-h-8 px-2 text-[11px]"
-            >
-              {t('executions.rail.programTipOn', { name: query.program })}
-            </button>
-          ) : null}
-          {page && page.executions.length === 0 ? (
-            <p className="mt-3 rounded-lg border border-border px-3 py-2 text-xs text-muted">
-              {t(page.summary.total === 0 ? 'executions.empty' : 'executions.noMatch')}
-            </p>
-          ) : (
-            <ul
-              aria-label={t('executions.title')}
-              className="mt-2 divide-y divide-border rounded-lg border border-border py-1"
-            >
-              {executions.map((execution) => (
-                <CommandRow
-                  key={execution.id}
-                  execution={execution}
-                  jobId={jobId}
-                  onOpenPoint={onOpenPoint}
-                  onOpenTurn={onOpenTurn}
-                />
-              ))}
-            </ul>
-          )}
-          {page ? <Coverage page={page} shown={executions.length} /> : null}
-          {more ? (
-            <button
-              type="button"
-              onClick={showMore}
-              disabled={loading}
-              className="ui-button ui-button-secondary mt-2 min-h-9 px-3 text-xs"
-            >
-              {t('executions.page.showMore')}
-            </button>
-          ) : null}
+            {page && query.program ? (
+              <button
+                type="button"
+                onClick={() => selectProgram(null)}
+                className="ui-focus-ring mt-1 w-fit rounded px-1 text-left text-[11px] text-accent hover:underline"
+              >
+                {t('executions.rail.programTipOn', { name: query.program })}
+              </button>
+            ) : null}
+            {page && page.executions.length === 0 ? (
+              <p className="mt-2 rounded-md border border-border px-2 py-1.5 text-[11px] text-muted">
+                {t(page.summary.total === 0 ? 'executions.empty' : 'executions.noMatch')}
+              </p>
+            ) : (
+              // The list owns the remaining height and scrolls internally, so
+              // expanded output and many rows never grow the page.
+              <ul
+                aria-label={t('executions.title')}
+                className="mt-1.5 min-h-[120px] flex-1 overflow-y-auto overscroll-contain"
+              >
+                {executions.map((execution) => (
+                  <CommandRow
+                    key={execution.id}
+                    execution={execution}
+                    jobId={jobId}
+                    onOpenPoint={onOpenPoint}
+                    onOpenTurn={onOpenTurn}
+                  />
+                ))}
+                {more ? (
+                  <li className="px-1 py-1">
+                    <button
+                      type="button"
+                      onClick={showMore}
+                      disabled={loading}
+                      className="ui-focus-ring min-h-7 w-full rounded-md border border-border text-[11px] text-muted hover:text-foreground"
+                    >
+                      {t('executions.page.showMore')}
+                    </button>
+                  </li>
+                ) : null}
+              </ul>
+            )}
+            {page ? <Coverage page={page} shown={executions.length} /> : null}
+          </div>
         </div>
       </div>
     </section>
@@ -461,33 +489,39 @@ function SummaryRail({
   // still 0ms because durations_known counts it.
   const cumulative = summary.durations_known === 0 ? null : durationLabel(summary.cumulative_ms);
   return (
-    <div className="min-w-0 rounded-lg border border-border p-3">
-      <h4 className="text-xs font-semibold text-foreground" title={t('executions.rail.summaryTip')}>
+    <div className="min-w-0 shrink-0">
+      <h4
+        className="mb-1.5 flex items-center gap-1 border-b border-border pb-1 text-[11px] font-semibold text-foreground"
+        title={t('executions.rail.summaryTip')}
+      >
         {t('executions.rail.summary')}
       </h4>
-      <dl className="mt-2 grid grid-cols-2 gap-2">
-        <Fact label={t('executions.rail.settled')} value={summary.settled.toLocaleString(locale)} />
+      <dl className="grid grid-cols-2 gap-x-2.5 gap-y-1.5">
+        <Fact value={summary.settled.toLocaleString(locale)} label={t('executions.rail.settled')} />
         <Fact
-          label={t('executions.rail.failed')}
           value={
             failure === null
-              ? `${summary.failed.toLocaleString(locale)}`
+              ? summary.failed.toLocaleString(locale)
               : `${summary.failed.toLocaleString(locale)} · ${failure}`
           }
+          label={t('executions.rail.failed')}
           title={t('executions.rail.failedTip')}
+          tone="danger"
         />
         <Fact
-          label={t('executions.rail.cumulative')}
           value={cumulative ?? t('executions.duration.none')}
+          label={t('executions.rail.cumulative')}
           title={t('executions.rail.cumulativeTip')}
+          tone="time"
         />
         <Fact
-          label={t('executions.rail.background')}
           value={summary.background.toLocaleString(locale)}
+          label={t('executions.rail.background')}
+          tone="background"
         />
       </dl>
       {summary.durations_missing > 0 ? (
-        <p className="mt-2 text-[11px] text-muted">
+        <p className="mt-1 text-[10px] text-muted">
           {t('executions.duration.none')}: {summary.durations_missing.toLocaleString(locale)}
         </p>
       ) : null}
@@ -495,11 +529,30 @@ function SummaryRail({
   );
 }
 
-function Fact({ label, value, title }: { label: string; value: string; title?: string }) {
+/** One KPI tile: a bold value above a short label, as DSH's summary grid. */
+function Fact({
+  label,
+  value,
+  title,
+  tone,
+}: {
+  label: string;
+  value: string;
+  title?: string;
+  tone?: 'danger' | 'time' | 'background';
+}) {
+  const colour =
+    tone === 'danger'
+      ? 'text-rose-600 dark:text-rose-400'
+      : tone === 'time'
+        ? 'text-sky-700 dark:text-sky-300'
+        : tone === 'background'
+          ? 'text-teal-700 dark:text-teal-300'
+          : 'text-foreground';
   return (
-    <div className="min-w-0" title={title}>
-      <dt className="text-[11px] text-muted">{label}</dt>
-      <dd className="mt-0.5 text-sm font-semibold tabular-nums text-foreground">{value}</dd>
+    <div className="min-w-0 rounded-md bg-surface-muted px-1.5 py-1" title={title}>
+      <dd className={`truncate text-sm font-bold leading-tight tabular-nums ${colour}`}>{value}</dd>
+      <dt className="mt-0.5 truncate text-[10px] text-muted">{label}</dt>
     </div>
   );
 }
@@ -520,24 +573,31 @@ function Programs({
   const programs = page.programs.filter((program) => program.name.toLowerCase().includes(needle));
   if (page.programs.length === 0) return null;
   return (
-    <div className="min-w-0 rounded-lg border border-border p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="text-xs font-semibold text-foreground">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="mb-1.5 flex flex-none items-center justify-between gap-2 border-b border-border pb-1">
+        <h4
+          className="min-w-0 truncate text-[11px] font-semibold text-foreground"
+          title={t('executions.rail.programsScope')}
+        >
           {t('executions.rail.programs', { count: page.programs.length.toLocaleString(locale) })}
         </h4>
-        <input
-          type="search"
-          value={filterText}
-          onChange={(event) => onFilterText(event.target.value)}
-          placeholder={t('executions.programSearch')}
-          aria-label={t('executions.programSearchLabel')}
-          className="ui-input min-h-8 w-32 text-[11px]"
-        />
+        {page.programs.length > 6 || needle ? (
+          <input
+            type="search"
+            value={filterText}
+            onChange={(event) => onFilterText(event.target.value)}
+            placeholder={t('executions.programSearch')}
+            aria-label={t('executions.programSearchLabel')}
+            className="ui-input min-h-6 w-24 shrink-0 px-1.5 text-[10px]"
+          />
+        ) : null}
       </div>
-      <p className="mt-0.5 text-[11px] text-muted" title={t('executions.rail.programsScope')}>
-        {t('executions.rail.programsScope')}
-      </p>
-      <ul className="mt-2 grid gap-1">
+      <ul
+        aria-label={t('executions.rail.programs', {
+          count: page.programs.length.toLocaleString(locale),
+        })}
+        className="grid min-h-0 flex-1 gap-px overflow-y-auto overscroll-contain"
+      >
         {programs.map((program) => (
           <li key={program.name}>
             <button
@@ -550,8 +610,10 @@ function Programs({
                 { name: program.name },
               )}
               onClick={() => onSelect(program.name)}
-              className={`ui-focus-ring flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] ${
-                page.program === program.name ? 'bg-accent/10' : 'hover:bg-surface-hover'
+              className={`ui-focus-ring flex w-full items-baseline gap-1.5 rounded px-1 py-0.5 text-left text-[11px] leading-snug ${
+                page.program === program.name
+                  ? 'bg-accent/10 text-foreground'
+                  : 'odd:bg-surface-muted/60 hover:bg-surface-hover'
               }`}
             >
               <span className="min-w-0 flex-1 truncate font-mono text-foreground">
@@ -560,15 +622,10 @@ function Programs({
               <span className="shrink-0 tabular-nums text-muted">
                 ×{program.count.toLocaleString(locale)}
               </span>
-              <span className="w-10 shrink-0 text-right tabular-nums text-muted">
+              <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-muted">
                 {formatShare(program.share)}
               </span>
             </button>
-            <div
-              aria-hidden="true"
-              className="mt-0.5 h-1 rounded-full bg-accent/30"
-              style={{ width: `${Math.max(2, program.share * 100)}%` }}
-            />
           </li>
         ))}
       </ul>
@@ -632,18 +689,20 @@ function Attention({
   }
   if (rows.length === 0) return null;
   return (
-    <div className="min-w-0 rounded-lg border border-border p-3">
-      <h4 className="text-xs font-semibold text-foreground">{t('executions.rail.attention')}</h4>
-      <ul className="mt-1.5 grid gap-1">
+    <div className="min-w-0 shrink-0">
+      <h4 className="mb-1 flex items-center gap-1 border-b border-border pb-1 text-[11px] font-semibold text-foreground">
+        {t('executions.rail.attention')}
+      </h4>
+      <ul className="grid gap-px">
         {rows.map((row) => (
           <li key={row.key}>
             <button
               type="button"
               onClick={row.onClick}
               disabled={!row.onClick}
-              className="ui-focus-ring flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] enabled:hover:bg-surface-hover disabled:cursor-default"
+              className="ui-focus-ring flex w-full items-baseline gap-1.5 rounded px-1 py-0.5 text-left text-[11px] enabled:hover:bg-surface-hover disabled:cursor-default"
             >
-              <span className="w-14 shrink-0 text-muted">{row.label}</span>
+              <span className="w-12 shrink-0 text-[10px] text-muted">{row.label}</span>
               <span className="min-w-0 flex-1 truncate font-mono text-foreground">{row.value}</span>
               <span className="shrink-0 tabular-nums text-muted">{row.count}</span>
             </button>
@@ -670,7 +729,7 @@ function Coverage({ page, shown }: { page: ThreadCommandsApi; shown: number }) {
     ? ` ${t('executions.page.more', { count: String(remaining) })}`
     : '';
   return (
-    <div className="mt-2 grid gap-1 text-[11px] text-muted">
+    <div className="mt-1 flex flex-none flex-wrap gap-x-2 gap-y-0.5 text-[10px] leading-tight text-muted">
       <p>
         {coverage.truncated
           ? t('executions.coverage', { covered, total })
@@ -695,6 +754,11 @@ function Coverage({ page, shown }: { page: ThreadCommandsApi; shown: number }) {
       ) : null}
     </div>
   );
+}
+
+/** The rail is collapsible on a narrow card and always shown on a wide one. */
+function railClass(open: boolean): string {
+  return open ? 'flex' : 'hidden';
 }
 
 /** A later page repeating a row already shown is the same execution, once. */
