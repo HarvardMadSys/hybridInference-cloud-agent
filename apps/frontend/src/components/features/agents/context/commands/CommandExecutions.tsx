@@ -102,9 +102,10 @@ function useDebouncedSearch(text: string, applied: string, apply: (q: string) =>
 /** Re-read a running conversation's first page on a stable cadence. */
 function useCommandRefresh(
   active: boolean,
-  load: (wanted: Query, cursor: string | null, append: boolean) => Promise<void>,
   queryRef: { current: Query },
   busy: { current: boolean },
+  pending: { current: boolean },
+  runPending: { current: () => void },
   queryKey: string,
 ) {
   // A running turn adds commands and settles running ones: read the first page
@@ -114,13 +115,15 @@ function useCommandRefresh(
   useEffect(() => {
     if (!active) return undefined;
     const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'visible' || busy.current) return;
-      void load(queryRef.current, null, false);
+      if (document.visibilityState !== 'visible') return;
+      pending.current = true;
+      runPending.current();
     }, COMMANDS_REFRESH_MS);
     return () => window.clearInterval(timer);
-    // The query is read through a ref; load is stable for one job.
+    // The query and the load function are reached through refs on purpose:
+    // the read's own state changes must not re-run this effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, load, queryKey]);
+  }, [active, queryKey]);
 
   // The turn just settled: read once more so a command that finished between
   // polls does not stay "Running" with no further refresh scheduled.
@@ -128,10 +131,11 @@ function useCommandRefresh(
   useEffect(() => {
     const settled = wasActive.current && !active;
     wasActive.current = active;
-    if (!settled || document.visibilityState !== 'visible') return;
-    void load(queryRef.current, null, false);
+    if (!settled) return;
+    pending.current = true;
+    runPending.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, load, queryKey]);
+  }, [active, queryKey]);
 }
 
 export function CommandExecutions({
@@ -174,6 +178,7 @@ export function CommandExecutions({
   const queryRef = useRef(query);
   queryRef.current = query;
 
+  const runPendingRef = useRef<() => void>(() => {});
   const load = useCallback(
     async (wanted: Query, cursor: string | null, append: boolean) => {
       if (busy.current) return;
@@ -195,17 +200,25 @@ export function CommandExecutions({
               setPages([]);
               setError(null);
             },
-            append: (page, add) =>
-              setPages((previous) => (add && previous.length > 0 ? [...previous, page] : [page])),
+            append: (page, add) => {
+              // A successful page clears an earlier read error.
+              setError(null);
+              setPages((previous) => (add && previous.length > 0 ? [...previous, page] : [page]));
+            },
             fail: (message) => setError(message),
             fallback: t('executions.loadError'),
           },
           append,
         );
       } finally {
-        if (inFlight.current === controller) inFlight.current = null;
-        busy.current = false;
-        if (!controller.signal.aborted && ticket === generation.current) setLoading(false);
+        // Cleanup belongs to this request only: an older request finishing
+        // after a newer one started must not clear the newer one's state.
+        if (inFlight.current === controller) {
+          inFlight.current = null;
+          busy.current = false;
+          if (!controller.signal.aborted && ticket === generation.current) setLoading(false);
+          runPendingRef.current();
+        }
       }
     },
     [jobId, t],
@@ -217,6 +230,28 @@ export function CommandExecutions({
     busy.current = false;
   }, []);
 
+  const pending = useRef(false);
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const runPending = useCallback(() => {
+    if (!pending.current || busy.current) return;
+    // A hidden tab keeps the request queued: the visibility listener runs it
+    // when the reader returns instead of dropping it here.
+    if (document.visibilityState !== 'visible') return;
+    pending.current = false;
+    void loadRef.current(queryRef.current, null, false);
+  }, []);
+  // A queued final refresh waits for the in-flight read rather than being
+  // dropped when it finds one, and runs when the tab is visible again.
+  runPendingRef.current = runPending;
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') runPending();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [runPending]);
+
   // A new conversation or query starts from its first page and cancels the
   // previous read, so a paged list never mixes two generations.
   useEffect(() => {
@@ -226,7 +261,7 @@ export function CommandExecutions({
     return cancel;
   }, [load, query, conversationKey, cancel]);
 
-  useCommandRefresh(active, load, queryRef, busy, queryKeyOf(query));
+  useCommandRefresh(active, queryRef, busy, pending, runPendingRef, queryKeyOf(query));
 
   const page = pages[0] ?? null;
   const executions = useMemo(

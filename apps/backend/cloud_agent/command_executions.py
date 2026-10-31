@@ -119,6 +119,14 @@ def poll_tool_names() -> tuple[str, ...]:
     return tuple(sorted(_POLL_TOOLS))
 
 
+class CommandReadTimeout(RuntimeError):
+    """A command read exceeded its overall deadline; retrying may succeed."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"The command read did not finish within {seconds:g}s.")
+        self.seconds = seconds
+
+
 class CommandExecution(BaseModel):
     """One command execution, with only what its records carried."""
 

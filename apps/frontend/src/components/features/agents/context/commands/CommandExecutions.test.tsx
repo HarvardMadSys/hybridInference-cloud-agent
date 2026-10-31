@@ -665,3 +665,131 @@ it('continues a long result by offset instead of hiding the rest', async () => {
   );
   expect(mockedContent).toHaveBeenLastCalledWith('j1', 2, 10);
 });
+
+it('runs the queued final refresh after a settlement that lands mid-read', async () => {
+  let resolveSecond: ((value: ThreadCommandsApi) => void) | undefined;
+  mocked.mockResolvedValueOnce(page({ executions: [execution({ status: 'running' })] }));
+  mocked.mockImplementationOnce(
+    () =>
+      new Promise<ThreadCommandsApi>((resolve) => {
+        resolveSecond = resolve;
+      }),
+  );
+  mocked.mockResolvedValue(page({ executions: [execution({ status: 'completed' })] }));
+  const props = {
+    jobId: 'j1',
+    conversationKey: 't1',
+    onOpenPoint: vi.fn(),
+    onOpenTurn: vi.fn(),
+  };
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { rerender } = render(
+      <LocaleProvider>
+        <CommandExecutions {...props} active />
+      </LocaleProvider>,
+    );
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    // A refresh is in flight when the turn settles.
+    await vi.advanceTimersByTimeAsync(5_100);
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(2));
+    rerender(
+      <LocaleProvider>
+        <CommandExecutions {...props} active={false} />
+      </LocaleProvider>,
+    );
+    // The in-flight refresh resolves as still running; the queued final read
+    // must follow and render the settled state.
+    resolveSecond!(page({ executions: [execution({ status: 'running' })] }));
+    await waitFor(() => expect(mocked.mock.calls.length).toBeGreaterThanOrEqual(3));
+    const list = await screen.findByRole('list', { name: 'Command Executions' });
+    await waitFor(() =>
+      expect(
+        within(within(list).getAllByRole('listitem')[0]).getByText('Completed'),
+      ).toBeInTheDocument(),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('runs the queued final refresh when the tab becomes visible again', async () => {
+  mocked.mockResolvedValue(page({ executions: [execution({ status: 'running' })] }));
+  const props = {
+    jobId: 'j1',
+    conversationKey: 't1',
+    onOpenPoint: vi.fn(),
+    onOpenTurn: vi.fn(),
+  };
+  const { rerender } = render(
+    <LocaleProvider>
+      <CommandExecutions {...props} active />
+    </LocaleProvider>,
+  );
+  await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+  const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  mocked.mockResolvedValue(page({ executions: [execution({ status: 'completed' })] }));
+  rerender(
+    <LocaleProvider>
+      <CommandExecutions {...props} active={false} />
+    </LocaleProvider>,
+  );
+  const before = mocked.mock.calls.length;
+  hidden.mockReturnValue('visible');
+  document.dispatchEvent(new Event('visibilitychange'));
+  await waitFor(() => expect(mocked.mock.calls.length).toBeGreaterThan(before));
+  hidden.mockRestore();
+});
+
+it("does not let an aborted older read clear the newer request's state", async () => {
+  let resolveOld: ((value: ThreadCommandsApi) => void) | undefined;
+  mocked.mockImplementationOnce(
+    () =>
+      new Promise<ThreadCommandsApi>((resolve) => {
+        resolveOld = resolve;
+      }),
+  );
+  mocked.mockResolvedValue(page());
+  const { rerender } = render(
+    <LocaleProvider>
+      <CommandExecutions
+        jobId="j1"
+        conversationKey="t1"
+        onOpenPoint={vi.fn()}
+        onOpenTurn={vi.fn()}
+      />
+    </LocaleProvider>,
+  );
+  await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+  // A new query starts its own request while the first is still pending.
+  mocked.mockImplementationOnce(() => new Promise<ThreadCommandsApi>(() => {}));
+  rerender(
+    <LocaleProvider>
+      <CommandExecutions
+        jobId="j2"
+        conversationKey="t2"
+        onOpenPoint={vi.fn()}
+        onOpenTurn={vi.fn()}
+      />
+    </LocaleProvider>,
+  );
+  await waitFor(() => expect(mocked).toHaveBeenCalledTimes(2));
+  // The older read finishes late; it must not mark the new one idle.
+  resolveOld!(page({ thread_id: 'old' }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // The newer request is still in flight, so no extra read was started.
+  expect(mocked.mock.calls.length).toBe(2);
+});
+
+it('clears a read error after a successful retry', async () => {
+  mocked.mockRejectedValueOnce(new Error('backend down'));
+  mocked.mockResolvedValue(page());
+  renderSection();
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Command executions could not be read.',
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  expect(screen.getByRole('heading', { name: 'Command Executions' })).toBeInTheDocument();
+  expect(screen.getByRole('list', { name: 'Command Executions' })).toBeInTheDocument();
+});

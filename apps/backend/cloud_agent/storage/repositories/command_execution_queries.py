@@ -20,6 +20,7 @@ from cloud_agent.command_executions import (
     DEFAULT_COMMAND_PAGE,
     MAX_COMMAND_EXECUTIONS,
     CommandFilter,
+    CommandReadTimeout,
     CommandSort,
     assemble_command_executions,
     command_executions_page,
@@ -46,14 +47,6 @@ RESULTS_BATCH_LIMIT = 1_000
 #: Every covered read, acquisition included, is bounded in wall time. A large
 #: ledger cannot hold a pooled connection for an unbounded period.
 COMMAND_READ_TIMEOUT_S = 15.0
-
-
-class CommandReadTimeout(RuntimeError):
-    """A command read exceeded its overall deadline; retrying may succeed."""
-
-    def __init__(self, seconds: float) -> None:
-        super().__init__(f"The command read did not finish within {seconds:g}s.")
-        self.seconds = seconds
 
 
 class PostgresCommandExecutionQueries:
@@ -179,17 +172,18 @@ class PostgresCommandExecutionQueries:
         """
         if not attempt_ids:
             return [], [], False
-        polls = [
-            dict(row)
-            for row in await conn.fetch(
-                POLLS_SQL,
-                attempt_ids,
-                user_id,
-                job_id,
-                list(poll_tool_names()),
-                RESULTS_BATCH_LIMIT,
-            )
-        ]
+        poll_rows = await conn.fetch(
+            POLLS_SQL,
+            attempt_ids,
+            user_id,
+            job_id,
+            list(poll_tool_names()),
+            RESULTS_BATCH_LIMIT,
+        )
+        polls = [dict(row) for row in poll_rows]
+        # A poll bound that was reached may have lost a final poll's outcome,
+        # so the read is partial even when no result batch reported its own.
+        partial = len(polls) >= RESULTS_BATCH_LIMIT
         poll_by_call = {str(p["call_id"]): p for p in polls if p.get("call_id")}
         poll_ids = sorted(poll_by_call)
         poll_sessions = {str(p["session_id"]) for p in polls if p.get("session_id")}
@@ -203,7 +197,6 @@ class PostgresCommandExecutionQueries:
         if not call_ids:
             batches.append(([], every_session))
         found: list[dict[str, Any]] = []
-        partial = False
         for batch_calls, batch_sessions in batches:
             related_calls = list(batch_calls)
             # Polls that continue a session in this batch own their results.
@@ -333,4 +326,4 @@ def _structured(value: Any) -> dict[str, Any] | None:
     return None
 
 
-__all__ = ["CommandReadTimeout", "PostgresCommandExecutionQueries"]
+__all__ = ["PostgresCommandExecutionQueries"]
