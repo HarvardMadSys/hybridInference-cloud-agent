@@ -6,7 +6,7 @@
 // it again shows every day). A long range is drawn a window of weeks at a
 // time, and says which weeks are drawn.
 
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { ContextActivityDay } from '@/lib/api/ownerUsage';
 import {
@@ -15,6 +15,7 @@ import {
   type HeatmapCell,
   type HeatmapWeek,
 } from './contextInsightsPresent';
+import { compactCount } from './usagePresent';
 
 const LEVEL_CLASS = [
   'bg-surface-muted',
@@ -23,6 +24,19 @@ const LEVEL_CLASS = [
   'bg-accent/70',
   'bg-accent',
 ];
+
+/** What the pointer is over: the day, its token total and where to draw the bubble. */
+interface Tip {
+  day: string;
+  tokens: number | undefined;
+  left: number;
+  top: number;
+}
+
+/** Roughly the bubble's width, used only to keep it inside the viewport. */
+const TIP_WIDTH = 168;
+/** How far the bubble stays from a window edge. */
+const EDGE = 8;
 
 export function ContextActivityHeatmap({
   since,
@@ -39,6 +53,38 @@ export function ContextActivityHeatmap({
 }) {
   const { t, locale } = useLocale();
   const [page, setPage] = useState(0);
+  const [tip, setTip] = useState<Tip | null>(null);
+  // The grid scrolls sideways and clips its overflow, so the bubble is drawn
+  // outside it and positioned from the cell it describes: above the cell, then
+  // pulled back inside the viewport when the cell sits at an edge.
+  //
+  // The handlers sit on the grid rather than on each cell, because a periodic
+  // re-read replaces the cells: a listener on one of them would see its own
+  // element removed and read that as the pointer leaving, which dropped the
+  // bubble while the pointer had not moved. One listener over the whole grid
+  // outlives every cell it describes.
+  const show = useCallback(
+    (target: Element | null) => {
+      const day = target?.closest('[data-day]')?.getAttribute('data-day');
+      const entry = day ? activity.find((candidate) => candidate.day === day) : undefined;
+      if (!day || !entry || entry.turns === 0 || !target) {
+        setTip(null);
+        return;
+      }
+      const box = target.getBoundingClientRect();
+      const half = TIP_WIDTH / 2;
+      setTip({
+        day,
+        tokens: entry.prompt_tokens,
+        left: Math.min(
+          Math.max(box.left + box.width / 2, half + EDGE),
+          window.innerWidth - half - EDGE,
+        ),
+        top: box.top,
+      });
+    },
+    [activity],
+  );
   const weeks = heatmapWeeks(since, until, activity);
   const view = heatmapWindow(weeks, page);
   if (weeks.length === 0) return null;
@@ -48,7 +94,11 @@ export function ContextActivityHeatmap({
     <section aria-label={t('contextInsights.heatmap')} className="mt-4">
       <h4 className="text-xs font-semibold text-foreground">{t('contextInsights.heatmap')}</h4>
       <p className="mt-0.5 text-xs text-muted">{t('contextInsights.heatmap.note')}</p>
-      <div className="mt-2 flex items-start gap-1 overflow-x-auto pb-1">
+      <div
+        className="mt-2 flex items-start gap-1 overflow-x-auto pb-1"
+        onPointerOver={(event) => show(event.target as Element)}
+        onPointerLeave={() => setTip(null)}
+      >
         <WeekdayLabels />
         {view.weeks.map((week, index) => (
           <div key={week.start} className="flex shrink-0 flex-col gap-1">
@@ -64,11 +114,13 @@ export function ContextActivityHeatmap({
                 cell={cell}
                 selected={selected === cell.day}
                 onSelect={onSelect}
+                onTip={show}
               />
             ))}
           </div>
         ))}
       </div>
+      {tip ? <CellTip tip={tip} /> : null}
       <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
         <span className="flex items-center gap-1" aria-hidden="true">
           {t('contextInsights.heatmap.less')}
@@ -160,10 +212,12 @@ function Cell({
   cell,
   selected,
   onSelect,
+  onTip,
 }: {
   cell: HeatmapCell;
   selected: boolean;
   onSelect: (day: string | null) => void;
+  onTip: (target: Element | null) => void;
 }) {
   const { t, locale } = useLocale();
   const base = CELL;
@@ -179,6 +233,7 @@ function Cell({
   }
   const label = t('contextInsights.heatmap.cell', {
     day: cell.day,
+    tokens: compactCount(entry.prompt_tokens),
     turns: entry.turns.toLocaleString(locale),
     conversations: entry.conversations.toLocaleString(locale),
     requests: entry.main_requests.toLocaleString(locale),
@@ -187,14 +242,47 @@ function Cell({
   return (
     <button
       type="button"
-      title={label}
       aria-label={label}
       aria-pressed={selected}
       data-day={cell.day}
+      onFocus={(event) => onTip(event.currentTarget)}
+      onBlur={() => onTip(null)}
       onClick={() => onSelect(selected ? null : cell.day)}
       className={`${base} ${LEVEL_CLASS[cell.level]} ui-focus-ring ${
-        selected ? 'ring-2 ring-foreground ring-offset-1 ring-offset-surface' : ''
+        selected ? 'outline outline-2 outline-offset-1 outline-foreground/40' : ''
       }`}
     />
+  );
+}
+
+/**
+ * What one day held, in a dark bubble above the cell: the date, then the
+ * provider-reported input its requests summed to. The bubble repeats no
+ * number the cell's own label does not carry, and it is hidden from assistive
+ * technology because the button's label already says the same.
+ *
+ * A control plane that predates the token total sends none: the bubble then
+ * says so rather than showing a zero the server never reported.
+ */
+function CellTip({ tip }: { tip: Tip }) {
+  const { t, locale } = useLocale();
+  const date = new Intl.DateTimeFormat(locale, {
+    month: 'long',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(new Date(`${tip.day}T00:00:00Z`));
+  const amount =
+    tip.tokens === undefined
+      ? t('contextInsights.heatmap.cellTokensUnknown')
+      : t('contextInsights.heatmap.cellTokens', { tokens: tip.tokens.toLocaleString(locale) });
+  return (
+    <span
+      role="tooltip"
+      style={{ left: tip.left, top: tip.top, transform: 'translate(-50%, -100%)' }}
+      className="pointer-events-none fixed z-30 mb-1.5 w-max max-w-[14rem] rounded-lg bg-foreground px-2.5 py-1.5 text-left text-[11px] leading-tight text-surface shadow-lg"
+    >
+      <span className="block font-medium">{date}</span>
+      <span className="block tabular-nums">{amount}</span>
+    </span>
   );
 }

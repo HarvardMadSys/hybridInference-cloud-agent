@@ -534,6 +534,7 @@ function richInsights(period: UsageRange = WEEK): ContextInsightsPage {
         main_requests: 12,
         compactions: 1,
         peak_prompt_tokens: 90_000,
+        prompt_tokens: 412_800,
       },
     ],
     composition: {
@@ -633,7 +634,7 @@ describe('UsageSettings: one range for History and Context insights', () => {
   it('drops a day picked from the heatmap when the range changes, without a stale read', async () => {
     section();
     const day = await screen.findByRole('button', {
-      name: '2026-10-14: 4 turns in 1 conversations, 12 requests, 1 compactions',
+      name: '2026-10-14: 412.8K input tokens over 12 requests, in 4 turns across 1 conversations, 1 compactions',
     });
     fireEvent.click(day);
     await waitFor(() =>
@@ -661,7 +662,7 @@ describe('UsageSettings: one range for History and Context insights', () => {
     for (const [options] of thirty) expect(options.filters?.day).toBeNull();
     expect(screen.queryByRole('button', { name: 'Show every day' })).not.toBeInTheDocument();
     const again = await screen.findByRole('button', {
-      name: '2026-10-14: 4 turns in 1 conversations, 12 requests, 1 compactions',
+      name: '2026-10-14: 412.8K input tokens over 12 requests, in 4 turns across 1 conversations, 1 compactions',
     });
     expect(again).toHaveAttribute('aria-pressed', 'false');
   });

@@ -287,7 +287,9 @@ _ACTIVITY_SQL = f"""
            COUNT(DISTINCT r.thread_id) AS conversations,
            COALESCE(SUM(p.main_requests), 0) AS main_requests,
            COALESCE(SUM(p.compactions), 0) AS compactions,
-           MAX(p.peak_prompt_tokens) AS peak_prompt_tokens
+           MAX(p.peak_prompt_tokens) AS peak_prompt_tokens,
+           COALESCE(SUM((p.profile->'totals'->'main'->>'prompt_tokens')::bigint), 0)::bigint
+               AS prompt_tokens
     FROM runs r
     LEFT JOIN agent_attempts a ON a.job_id = r.id
     LEFT JOIN agent_attempt_context_profiles p

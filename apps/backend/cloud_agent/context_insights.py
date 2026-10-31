@@ -218,6 +218,10 @@ class ContextActivityDay(BaseModel):
     main_requests: int = Field(ge=0)
     compactions: int = Field(ge=0)
     peak_prompt_tokens: int | None = None
+    #: The provider-reported input of every request that day, summed: each
+    #: request resends what the conversation kept, so this is per-request
+    #: exposure, never the day's context size.
+    prompt_tokens: int = Field(default=0, ge=0)
 
 
 class ContextProject(BaseModel):

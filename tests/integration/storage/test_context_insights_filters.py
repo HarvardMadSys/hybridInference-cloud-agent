@@ -157,6 +157,16 @@ async def test_search_project_and_day_narrow_the_whole_range(db, store):
         ((BASE + DAY).date(), 1),
         ((BASE + 2 * DAY).date(), 1),
     ]
+    # Each day also carries what its requests reported as input, summed: the
+    # first day's two turns (5,010 + 9,010), the scratch turn (2,010), and the
+    # third day's two attempts (1,010 for the replaced answer + 3,010 for the
+    # retry): a replaced attempt's requests were still sent. A day nobody ran
+    # in is absent from the list, never a zero row.
+    assert [(row["day"], row["prompt_tokens"]) for row in everything["activity"]] == [
+        (BASE.date(), 14_020),
+        ((BASE + DAY).date(), 2_010),
+        ((BASE + 2 * DAY).date(), 4_020),
+    ]
     projects = {row["repo"]: row for row in everything["projects"]}
     assert set(projects) == {"acme/web", "acme/api", None}
     assert projects[None]["conversations"] == 1 and projects["acme/web"]["turns"] == 2

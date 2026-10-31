@@ -10490,6 +10490,12 @@
             ],
             "title": "Peak Prompt Tokens"
           },
+          "prompt_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
           "turns": {
             "minimum": 0.0,
             "title": "Turns",

@@ -253,7 +253,7 @@ it('groups by project, with the no-repository bucket, and opens one group', asyn
 it('tells each day of the heatmap and lists the conversations of a chosen day', async () => {
   show();
   const busy = await screen.findByRole('button', {
-    name: '2026-10-28: 3 turns in 2 conversations, 6 requests, 1 compactions',
+    name: '2026-10-28: — input tokens over 6 requests, in 3 turns across 2 conversations, 1 compactions',
   });
   expect(screen.getByTitle('2026-10-25: no turns')).toBeInTheDocument();
   fireEvent.click(busy);

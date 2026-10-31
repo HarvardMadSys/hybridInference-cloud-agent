@@ -167,6 +167,11 @@ export interface ContextActivityDay {
   main_requests: number;
   compactions: number;
   peak_prompt_tokens: number | null;
+  /**
+   * The provider-reported input of every request that day, summed. Absent
+   * from a control plane that predates it: never read as zero.
+   */
+  prompt_tokens?: number;
 }
 
 /** One project of the matching runs; `repo` null is the temporary workspaces. */

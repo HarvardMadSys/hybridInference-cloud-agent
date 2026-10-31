@@ -120,7 +120,9 @@ export const contextParityEn = {
   'contextInsights.heatmap.note':
     'One cell per UTC day, darker with more turns. Select a day to list the conversations with turns on it.',
   'contextInsights.heatmap.cell':
-    '{day}: {turns} turns in {conversations} conversations, {requests} requests, {compactions} compactions',
+    '{day}: {tokens} input tokens over {requests} requests, in {turns} turns across {conversations} conversations, {compactions} compactions',
+  'contextInsights.heatmap.cellTokens': '{tokens} tokens',
+  'contextInsights.heatmap.cellTokensUnknown': 'Token total not collected',
   'contextInsights.heatmap.empty': '{day}: no turns',
   'contextInsights.heatmap.less': 'Fewer turns',
   'contextInsights.heatmap.more': 'More',
@@ -249,7 +251,9 @@ export const contextParityZhCN: Record<keyof typeof contextParityEn, string> = {
   'contextInsights.heatmap.note':
     '每格是一个 UTC 日，轮次越多颜色越深。选中某一天，列出那天有过对话的会话。',
   'contextInsights.heatmap.cell':
-    '{day}：{conversations} 个会话共 {turns} 轮，{requests} 次请求，{compactions} 次压缩',
+    '{day}：{requests} 次请求共 {tokens} 输入 token，{conversations} 个会话共 {turns} 轮，{compactions} 次压缩',
+  'contextInsights.heatmap.cellTokens': '{tokens} 个 token',
+  'contextInsights.heatmap.cellTokensUnknown': '没有采集到 token 总量',
   'contextInsights.heatmap.empty': '{day}：没有对话',
   'contextInsights.heatmap.less': '轮次少',
   'contextInsights.heatmap.more': '多',
