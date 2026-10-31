@@ -321,3 +321,30 @@ async def test_a_conversation_over_the_bound_reports_its_true_total(db, store):
     assert page["coverage"]["executions_total"] == 60
     assert page["coverage"]["truncated"] is False
     assert page["page"]["returned"] == 10
+
+
+async def test_results_of_every_turn_in_the_conversation_are_matched(db, store):
+    """A result belongs to its own attempt; a first turn's page must not
+    swallow the later turns' results or leave them unknown."""
+    turns = await _conversation(db, store, "athr_multi", turns=3)
+    for index, turn in enumerate(turns, start=1):
+        await _events(
+            db,
+            turn["job_id"],
+            turn["attempt_id"],
+            [
+                _bash("c1", f"git log -{index}"),
+                _done("c1", f"out{index}", exit_code=0),
+            ],
+        )
+    page = await store.command_executions.command_executions(
+        job_id=turns[0]["job_id"], user_id=OWNER, limit=100
+    )
+    assert page["summary"]["total"] == 3
+    assert page["summary"]["settled"] == 3
+    assert {execution["output_preview"] for execution in page["executions"]} == {
+        "out1",
+        "out2",
+        "out3",
+    }
+    assert page["coverage"]["turns"] == 3

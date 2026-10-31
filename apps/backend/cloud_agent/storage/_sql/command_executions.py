@@ -135,7 +135,11 @@ RESULTS_SQL = f"""
     JOIN agent_jobs j ON j.id = e.job_id
     JOIN agent_threads t ON t.id = j.thread_id
     WHERE e.attempt_id = ANY($1::bigint[])
-      AND j.id = $4 AND j.user_id = $5 AND t.deleted_at IS NULL
+      AND j.user_id = $4 AND t.deleted_at IS NULL
+      AND j.thread_id = (
+          SELECT owner_job.thread_id FROM agent_jobs owner_job
+          WHERE owner_job.id = $5 AND owner_job.user_id = $4
+      )
       AND (
           e.event_type = 'tool_result'
           OR (e.event_type = 'tool_use'

@@ -975,6 +975,7 @@ def _summary(records: Sequence[_Execution]) -> CommandSummary:
     failed = sum(1 for record in records if record.status == "failed")
     durations = [record.duration_ms for record in records if record.duration_ms is not None]
     bases = {record.duration_basis for record in records if record.duration_basis is not None}
+    basis: CUMULATIVE_BASIS
     if not bases:
         basis = "none"
     elif len(bases) == 1:
@@ -1056,11 +1057,11 @@ def _after_cursor(record: _Execution, cursor: CommandCursor, sort: CommandSort) 
 
 
 def _attention(records: Sequence[_Execution]) -> CommandAttention:
-    slowest = None
+    slowest: _Execution | None = None
     for record in records:
         if record.duration_ms is None or record.duration_ms < SLOW_COMMAND_MS:
             continue
-        if slowest is None or record.duration_ms > slowest.duration_ms:
+        if slowest is None or record.duration_ms > (slowest.duration_ms or 0):
             slowest = record
     failing_counts: dict[str, int] = {}
     for record in records:

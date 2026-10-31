@@ -524,12 +524,12 @@ function Coverage({ page, shown }: { page: ThreadCommandsApi; shown: number }) {
       <p>
         {coverage.truncated
           ? t('executions.coverage', {
-            covered: coverage.executions_covered.toLocaleString(locale),
-            total: coverage.executions_total.toLocaleString(locale),
-          })
+              covered: coverage.executions_covered.toLocaleString(locale),
+              total: coverage.executions_total.toLocaleString(locale),
+            })
           : t('executions.coverageAll', {
-            total: coverage.executions_total.toLocaleString(locale),
-          })}
+              total: coverage.executions_total.toLocaleString(locale),
+            })}
       </p>
       {coverage.copied_jobs_excluded > 0 ? (
         <p>
@@ -550,8 +550,8 @@ function Coverage({ page, shown }: { page: ThreadCommandsApi; shown: number }) {
           })}
           {page.page.next_cursor
             ? ` ${t('executions.page.more', {
-              count: (page.page.total - shown).toLocaleString(locale),
-            })}`
+                count: (page.page.total - shown).toLocaleString(locale),
+              })}`
             : ''}
         </p>
       ) : null}

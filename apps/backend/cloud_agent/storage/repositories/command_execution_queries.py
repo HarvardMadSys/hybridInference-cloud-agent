@@ -97,8 +97,8 @@ class PostgresCommandExecutionQueries:
                         attempt_ids,
                         list(poll_tool_names()),
                         MAX_RELATED_EVENTS,
-                        job_id,
                         user_id,
+                        job_id,
                     )
                 ]
         rows = [_call_row(call) for call in calls] + [_related_row(row) for row in related]
