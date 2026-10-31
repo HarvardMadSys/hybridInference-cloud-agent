@@ -192,17 +192,21 @@ describe('trend model', () => {
 
   it('falls back to the latest columns when the saved range is gone', () => {
     const steps = trendColumns(
-      Array.from({ length: 10 }, (_, i) => point(i, { turn_no: 1 + i })),
+      Array.from({ length: 200 }, (_, i) => point(i, { turn_no: 1 + i })),
       'step',
       new Map(),
     );
-    expect(restoreBrowsingWindow(null, steps, 'step')).toEqual(initialWindow(10));
+    expect(restoreBrowsingWindow(null, steps, 'step')).toEqual(initialWindow(200));
     expect(restoreBrowsingWindow(savedRangeOf(steps, 0, 3, 'step'), [], 'step')).toEqual({
       from: 0,
       to: 0,
     });
     const kept = savedRangeOf(steps, 2, 4, 'step')!;
-    expect(restoreBrowsingWindow(kept, steps.slice(5), 'step')).toEqual(initialWindow(5));
+    // 195 retained columns, all after the saved range: the latest 120, not all.
+    expect(restoreBrowsingWindow(kept, steps.slice(5), 'step')).toEqual(initialWindow(195));
+    // Retained history entirely before it, and partially overlapping it.
+    expect(restoreBrowsingWindow(kept, steps.slice(0, 2), 'step')).toEqual(initialWindow(2));
+    expect(restoreBrowsingWindow(kept, steps.slice(3), 'step')).toEqual({ from: 0, to: 1 });
   });
 
   it('resolves a selected request to its own column, or its containing turn column', () => {

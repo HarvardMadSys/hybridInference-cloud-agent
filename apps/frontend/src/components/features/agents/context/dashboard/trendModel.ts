@@ -232,11 +232,9 @@ export function restoreBrowsingWindow(
     from = columns.findIndex((column) => column.turnNo >= saved.fromTurn);
     to = lastAtOrBefore(columns, (column) => column.turnNo <= saved.toTurn);
   }
-  // The retained history no longer covers the saved range at all: show the latest.
-  if (from < 0 && to < 0) return initialWindow(n);
-  if (from < 0) from = 0;
-  if (to < 0) to = n - 1;
-  if (from > to) [from, to] = [to, from];
+  // No overlap with the retained history (every column is before or after the
+  // saved range, or there are no columns at all): show the latest columns.
+  if (from < 0 || to < 0 || from > to) return initialWindow(n);
   return clampWindow(from, to, n);
 }
 

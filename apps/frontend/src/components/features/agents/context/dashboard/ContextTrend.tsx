@@ -105,6 +105,10 @@ function useWindowView({
   overviewRef.current = overview;
   const granularityRef = useRef(granularity);
   granularityRef.current = granularity;
+  // The current columns, read when a pick moves the saved range. A rebuild of
+  // equal columns must not rerun that effect.
+  const columnsRef = useRef(columns);
+  columnsRef.current = columns;
   const saved = useRef<SavedRange | null>(null);
   // A new conversation starts over, with no overview borrowed from the last one.
   useEffect(() => {
@@ -144,14 +148,26 @@ function useWindowView({
     lastCount.current = n;
     if (overviewRef.current) {
       if (latestAdvanced || selectedAt < 0) return;
-      const current = restoreBrowsingWindow(saved.current, columns, granularityRef.current);
+      const current = restoreBrowsingWindow(
+        saved.current,
+        columnsRef.current,
+        granularityRef.current,
+      );
       const around = windowAround(current.from, current.to, selectedAt, n);
       if (around.from !== current.from || around.to !== current.to)
-        saved.current = savedRangeOf(columns, around.from, around.to, granularityRef.current);
+        saved.current = savedRangeOf(
+          columnsRef.current,
+          around.from,
+          around.to,
+          granularityRef.current,
+        );
       return;
     }
     setWin((current) => windowAround(current.from, current.to, selectedAt, n));
-  }, [columns, selectedAt, n]);
+    // Only the selected column and the column count may move the window: a
+    // refresh that rebuilds the same columns, or a Total/Delta switch, is not a
+    // pick and must not shift the saved range.
+  }, [selectedAt, n]);
   const browsing = clampWindow(win.from, win.to, n);
   const shown = overview ? { from: 0, to: Math.max(0, n - 1) } : browsing;
   const toggleOverview = (next: boolean) => {

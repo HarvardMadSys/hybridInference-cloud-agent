@@ -591,8 +591,17 @@ describe('ContextDashboard', () => {
     expect(within(trend).getByText('Showing 11–130 of 130')).toBeInTheDocument();
     const overview = within(trend).getByRole('button', { name: 'Overview' });
     expect(overview).toHaveAttribute('aria-pressed', 'false');
+    expect(overview.className).not.toMatch(/text-accent/);
+    // Adaptive's own style never leaks onto Overview.
+    const adaptive = within(trend).getByRole('button', { name: 'Adaptive' });
+    fireEvent.click(adaptive);
+    expect(adaptive.className).toMatch(/text-accent/);
+    expect(overview.className).not.toMatch(/text-accent/);
+    fireEvent.click(adaptive);
     fireEvent.click(overview);
     expect(overview).toHaveAttribute('aria-pressed', 'true');
+    expect(overview.className).toMatch(/text-accent/);
+    expect(adaptive.className).not.toMatch(/text-accent/);
     expect(within(trend).getByText('Showing 1–130 of 130')).toBeInTheDocument();
     // The whole conversation is drawn, but the request count is unchanged: no read.
     expect(
@@ -654,6 +663,44 @@ describe('ContextDashboard', () => {
     expect(within(trend).getByText('Showing 1–135 of 135')).toBeInTheDocument();
     fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
     // The saved browsing range stays where it was; the new requests stay outside it.
+    expect(within(trend).getByText('Showing 11–130 of 135')).toBeInTheDocument();
+  });
+
+  it('keeps the saved range through repeated refreshes and mode changes after an append', () => {
+    const points = (count: number) =>
+      Array.from({ length: count }, (_, i) =>
+        point(i, { turn_no: 1 + Math.floor(i / 10), event_id: 100 + i, usage_id: null }),
+      );
+    const first = view();
+    first.requests = points(130);
+    first.latest = { ...first.latest!, point: first.requests[129] };
+    // A refresh rebuilds equal data as fresh objects; latency and mode also
+    // change the column objects without changing which request is selected.
+    const refreshed = view();
+    refreshed.requests = points(135);
+    refreshed.latest = { ...refreshed.latest!, point: refreshed.requests[134] };
+    const refreshedAgain = view();
+    refreshedAgain.requests = points(135);
+    refreshedAgain.latest = { ...refreshedAgain.latest!, point: refreshedAgain.requests[134] };
+    const { rerender } = render(
+      <LocaleProvider>
+        <Harness data={first} />
+      </LocaleProvider>,
+    );
+    const trend = card('Context Trend');
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    rerender(
+      <LocaleProvider>
+        <Harness data={refreshed} />
+      </LocaleProvider>,
+    );
+    rerender(
+      <LocaleProvider>
+        <Harness data={refreshedAgain} />
+      </LocaleProvider>,
+    );
+    fireEvent.click(within(trend).getByRole('button', { name: 'Delta' }));
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
     expect(within(trend).getByText('Showing 11–130 of 135')).toBeInTheDocument();
   });
 
