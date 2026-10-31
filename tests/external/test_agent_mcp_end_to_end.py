@@ -70,6 +70,9 @@ _RESOURCE_TEXT = "embedded issue context"
 _UPSTREAM_SECRET = "upstream-secret-token"
 _MCP_TOKEN_SECRET = "e2e-signing-secret-32-bytes-long"
 _ENCRYPTION_KEY = "e2e-encryption-key-at-least-32-bytes"
+#: The relay starts as a deployment does: it refuses to without an account
+#: secret of its own. A test value, not shared with anything.
+_LOCAL_SESSION_SECRET = "e2e-local-session-secret-32-bytes-long"
 _MODEL_TOOL_CALL = f"session__{_ALIAS}__{_TOOL}"
 #: The platform's memory tools, as the bridge presents them to the model.
 _MEMORY_TOOL_CALLS = [f"session__{name}" for name in sorted(memory_tool.TOOL_NAMES)]
@@ -384,6 +387,7 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
                 f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}"
             ),
             "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+            "AGENT_LOCAL_SESSION_SECRET": _LOCAL_SESSION_SECRET,
             "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
             "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
             "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
@@ -400,11 +404,14 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
         # Deployments initialize settings through the main listener first.
         # This isolated relay test uses that same seed path before startup.
         await initialize_settings(Storage(pool).settings)
-        token = await _seed(pool, upstream_url=f"http://127.0.0.1:{upstream_port}/mcp")
 
         from cloud_agent.app import create_mcp_app
 
+        # Started before the seed, as a deployment starts before anyone signs
+        # up: its startup binds the empty database to accounts, and refuses one
+        # that already holds owner rows without that binding.
         servers.append(await _serve(create_mcp_app(), relay_port))
+        token = await _seed(pool, upstream_url=f"http://127.0.0.1:{upstream_port}/mcp")
 
         # Off the event loop: the three servers this test started are tasks in
         # it, and a blocking ``subprocess.run`` here would leave them unable to
@@ -454,6 +461,7 @@ async def test_an_agent_saves_a_memory_through_the_whole_chain(pi_install: pathl
                 f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}"
             ),
             "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+            "AGENT_LOCAL_SESSION_SECRET": _LOCAL_SESSION_SECRET,
             "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
             "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
             "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
@@ -472,11 +480,14 @@ async def test_an_agent_saves_a_memory_through_the_whole_chain(pi_install: pathl
     try:
         apply_migrations(db)
         await initialize_settings(Storage(pool).settings)
-        token = await _seed(pool, upstream_url=f"http://127.0.0.1:{upstream_port}/mcp")
 
         from cloud_agent.app import create_mcp_app
 
+        # Started before the seed, as a deployment starts before anyone signs
+        # up: its startup binds the empty database to accounts, and refuses one
+        # that already holds owner rows without that binding.
         servers.append(await _serve(create_mcp_app(), relay_port))
+        token = await _seed(pool, upstream_url=f"http://127.0.0.1:{upstream_port}/mcp")
         result = await asyncio.to_thread(
             _run_pi,
             pi_install,
