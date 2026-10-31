@@ -830,6 +830,7 @@ export function JobDetail({
                 steerNow={steerNow}
                 insertGoalCommand={insertGoalCommand}
                 onReload={onReload}
+                todo={{ overview: activityOverview, open: activityVisible, toggle: toggleActivity }}
                 hidden={showingSubagent}
               />
             </div>

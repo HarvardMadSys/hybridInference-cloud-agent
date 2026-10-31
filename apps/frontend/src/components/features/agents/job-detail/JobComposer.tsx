@@ -32,6 +32,8 @@ import type { ComposerSsh } from '../ssh/useComposerSsh';
 import type { AgentJob } from '../types';
 import { useComposerDraftValue, type ComposerDraftStore } from '../useComposerDraft';
 import type { usePendingMessages } from '../usePendingMessages';
+import { ComposerOptionsButton, ComposerOptionsPanel, useComposerOptions } from './ComposerOptions';
+import { ComposerTodos, type ComposerTodosProps } from './ComposerTodos';
 import { SkillSelectionDialog } from './LazyPanels';
 import type { useJobComposerSettings } from './useJobComposerSettings';
 import type { useJobRunActions } from './useJobRunActions';
@@ -93,6 +95,7 @@ export function JobComposer({
   steerNow,
   insertGoalCommand,
   onReload,
+  todo,
   hidden = false,
 }: {
   job: AgentJob;
@@ -128,6 +131,8 @@ export function JobComposer({
   steerNow: (command: GoalCommandControls['submit']) => void;
   insertGoalCommand: () => void;
   onReload?: () => void;
+  /** The To-dos strip: the shown turn's recorded task list, summarized above the composer. */
+  todo?: ComposerTodosProps;
   /** Kept mounted, with its draft, while another view replaces the Chat. */
   hidden?: boolean;
 }) {
@@ -170,14 +175,12 @@ export function JobComposer({
   });
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
+  const options = useComposerOptions(rewriting);
   return (
     <>
-      {/* Keep the sticky controls opaque while the transcript scrolls behind them. */}
-      <div
-        ref={composerRef}
-        hidden={hidden}
-        className="sticky bottom-0 z-10 -mx-1 mt-3 bg-gray-50 px-1 pb-1 pt-2 dark:bg-gray-950"
-      >
+      {/* No band of its own behind the status, composer and totals: the
+          composer card is the one opaque surface, and the rest sits on the page. */}
+      <div ref={composerRef} hidden={hidden} className="sticky bottom-0 z-10 mt-3 pb-2 pt-2">
         <LiveAgentStatus job={job} />
         {/* `/goal` on its own is not an objective. It is consumed
                     rather than sent to the model, and this is where the owner
@@ -208,11 +211,12 @@ export function JobComposer({
           disabled={isArchived || contextLost}
           liveTurn={inherited}
         />
+        {todo ? <ComposerTodos {...todo} /> : null}
         <div
           className={
             isArchived
               ? undefined
-              : `ui-composer ${dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''}`
+              : `ui-composer rounded-2xl ${dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''}`
           }
         >
           {job.goal ? (
@@ -340,14 +344,32 @@ export function JobComposer({
                     : 'Message or run a task, / commands, @ files or sessions'
                 }
                 aria-label="Add a follow-up"
-                className="block max-h-[30vh] min-h-12 w-full resize-y rounded-t-xl border-0 bg-transparent px-3 py-2 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
+                className="block max-h-[30vh] min-h-14 w-full resize-y rounded-t-2xl border-0 bg-transparent px-4 pb-1 pt-3 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
               />
               <AttachmentStrip
                 entries={attachments.entries}
                 onRemove={attachments.remove}
                 disabled={contextLost || submitting}
               />
-              <div className="flex flex-wrap items-center gap-1 border-t border-border px-2 py-1">
+              <ComposerOptionsPanel options={options}>
+                <PromptRewrite
+                  key={threadId}
+                  compact
+                  value={followUp}
+                  // Gateway-only: off, with the reason, for a personal source.
+                  {...rewrite}
+                  disabled={
+                    contextLost || submitting || goalCommand.busy || /^\s*\//.test(followUp)
+                  }
+                  onActiveChange={setRewriting}
+                  onApply={(prompt) => {
+                    setFollowUp(prompt);
+                    followUpBox.current?.focus();
+                  }}
+                />
+              </ComposerOptionsPanel>
+              {/* One surface with the box: no rule between them. */}
+              <div className="flex flex-wrap items-center gap-1 px-2.5 pb-2 pt-1">
                 <ComposerPlusMenu
                   onFiles={attachments.add}
                   onOpenSkills={() => setSkillsOpen(true)}
@@ -363,65 +385,51 @@ export function JobComposer({
                   mcpBlockedReason={mcpBlockedReason}
                   disabled={contextLost || submitting}
                 />
-                <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />
-                {modelPicker ? (
-                  <>
-                    {/* The harness stays the thread's; the model is offered
+                <ComposerOptionsButton options={options} />
+                <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1">
+                  {modelPicker ? (
+                    <>
+                      {/* The harness stays the thread's; the model is offered
                           again. A model change restarts this member's CLI and
                           native-resumes it in the same retained workspace; it
                           does not replace or clone the sandbox. */}
-                    <Picker compact label="Model for this turn" {...modelPicker} />
-                    <Picker
-                      compact
-                      label="Reasoning for this turn"
-                      value={effort}
-                      options={efforts}
-                      onChange={setChosenEffort}
-                    />
-                  </>
-                ) : null}
-                <PromptRewrite
-                  key={threadId}
-                  compact
-                  inline
-                  value={followUp}
-                  // Gateway-only: off, with the reason, for a personal source.
-                  {...rewrite}
-                  disabled={
-                    contextLost || submitting || goalCommand.busy || /^\s*\//.test(followUp)
-                  }
-                  onActiveChange={setRewriting}
-                  onApply={(prompt) => {
-                    setFollowUp(prompt);
-                    followUpBox.current?.focus();
-                  }}
-                />
-                <ComposerMessageActions
-                  label={t(isActive ? 'composer.queue' : 'composer.send')}
-                  title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
-                  steerLabel={t('composer.steer')}
-                  steerTitle={t('composer.steerHint', { keys: chordLabel('Enter', apple) })}
-                  onSteer={
-                    canSteer && attachments.entries.length === 0
-                      ? () => void steerNow(goalCommand.submit)
-                      : undefined
-                  }
-                  disabled={
-                    contextLost ||
-                    inheritedUnavailable ||
-                    !followUp.trim() ||
-                    submitting ||
-                    rewriting ||
-                    attachments.uploading ||
-                    readingFiles ||
-                    mcp.saving ||
-                    Boolean(ssh?.saving) ||
-                    goalCommand.busy
-                  }
-                  busy={submitting || goalCommand.busy}
-                />
+                      <Picker compact label="Model for this turn" {...modelPicker} />
+                      <Picker
+                        compact
+                        label="Reasoning for this turn"
+                        value={effort}
+                        options={efforts}
+                        onChange={setChosenEffort}
+                      />
+                    </>
+                  ) : null}
+                  <ComposerMessageActions
+                    label={t(isActive ? 'composer.queue' : 'composer.send')}
+                    title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
+                    steerLabel={t('composer.steer')}
+                    steerTitle={t('composer.steerHint', { keys: chordLabel('Enter', apple) })}
+                    onSteer={
+                      canSteer && attachments.entries.length === 0
+                        ? () => void steerNow(goalCommand.submit)
+                        : undefined
+                    }
+                    disabled={
+                      contextLost ||
+                      inheritedUnavailable ||
+                      !followUp.trim() ||
+                      submitting ||
+                      rewriting ||
+                      attachments.uploading ||
+                      readingFiles ||
+                      mcp.saving ||
+                      Boolean(ssh?.saving) ||
+                      goalCommand.busy
+                    }
+                    busy={submitting || goalCommand.busy}
+                  />
+                </div>
               </div>
-              <p className="px-3 pb-2 text-[11px] leading-4 text-muted">
+              <p className="px-4 pb-2.5 text-[11px] leading-4 text-muted">
                 {runtimeNote(job, contextLost)}
                 {modelPicker ? '' : ` · ${inheritedLabel}`}
                 {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
@@ -430,7 +438,7 @@ export function JobComposer({
               <p
                 role="status"
                 hidden={!inheritedUnavailable}
-                className="px-3 pb-2 text-[11px] leading-4 text-status-error"
+                className="px-4 pb-2.5 text-[11px] leading-4 text-status-error"
               >
                 {t('modelSource.inheritedUnavailable', { label: inheritedLabel })}
               </p>
