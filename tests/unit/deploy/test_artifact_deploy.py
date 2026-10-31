@@ -203,7 +203,7 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
         for key in re.findall(r"\$\{([A-Z_]+):\?", compose.read_text()):
             if not key.endswith("_IMAGE") and key != "AGENT_DEPLOYMENT_SHA":
                 config.setdefault(key, "fixture-value")
-    for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+    for prefix in ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
         key, known = state / f"{prefix}.key", state / f"{prefix}.known-hosts"
         key.write_text("fixture key")
         known.write_text("fixture host fingerprint")

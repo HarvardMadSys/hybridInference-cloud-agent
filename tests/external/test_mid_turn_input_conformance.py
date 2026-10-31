@@ -329,7 +329,7 @@ class _Sandbox:
 
         return LaunchContext(
             workdir="/workspace",
-            gateway_base_url=f"http://{host}:{model.port}",
+            model_base_url=f"http://{host}:{model.port}",
             credential="test-model-key",
             provides_isolation=True,
             state_dir="/agent-state/steer-test",

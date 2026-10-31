@@ -1,6 +1,7 @@
 import type { AdminSettingDefinition } from '@/lib/api/adminSettings';
 
 const CATEGORY_NAMES = new Map([
+  ['Accounts', 'Identity & access'],
   ['Sign-in', 'Identity & access'],
   ['Security', 'Identity & access'],
   ['Publication', 'Source control'],
@@ -23,41 +24,19 @@ interface SettingGroup {
 const SETTING_GROUPS: SettingGroup[] = [
   {
     title: 'Branding',
-    keys: ['site.app_name', 'site.org_name', 'site.org_url', 'site.feature_rag'],
+    keys: ['site.app_name', 'site.org_name', 'site.org_url'],
   },
   {
     title: 'Navigation links',
-    keys: ['site.status_url', 'site.docs_url', 'site.contact_url', 'site.gateway_url'],
+    keys: ['site.status_url', 'site.docs_url', 'site.contact_url'],
   },
   {
-    title: 'Gateway connection',
-    keys: [
-      'gateway_base_url',
-      'gateway_dispatch_token',
-      'gateway_grant_base_path',
-      'gateway_grant_binding_id',
-      'gateway_request_timeout_s',
-      'gateway_connect_timeout_s',
-    ],
-  },
-  {
-    title: 'Sign-in',
-    keys: [
-      'gateway_authorize_url',
-      'session_redirect_uri',
-      'web_base_url',
-      'gateway_issuer',
-      'gateway_jwks_url',
-    ],
+    title: 'Public addresses',
+    keys: ['web_base_url', 'public_api_url'],
   },
   {
     title: 'Signing and encryption keys',
-    keys: [
-      'session_signing_secret',
-      'control_signing_secret',
-      'source_control_encryption_key',
-      'compute_encryption_key',
-    ],
+    keys: ['control_signing_secret', 'source_control_encryption_key', 'compute_encryption_key'],
   },
   {
     title: 'Session security',
@@ -142,7 +121,6 @@ const SETTING_GROUPS: SettingGroup[] = [
     title: 'Sandbox execution',
     keys: [
       'default_execution_profile',
-      'default_model',
       'sandbox_manager_token',
       'sandbox_manager_url_allowed_hosts',
     ],
@@ -155,8 +133,6 @@ const SETTING_GROUPS: SettingGroup[] = [
     title: 'Alerts',
     keys: [
       'alert_webhook_url',
-      'oncall_user_id',
-      'oncall_dispatch_token',
       'queue_alert_after_s',
       'queue_monitor_interval_s',
       'queue_alert_cooldown_s',
@@ -164,13 +140,11 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'Job recovery',
-    keys: ['max_attempts', 'residency_ttl_s', 'grant_renewal_concurrency'],
+    keys: ['max_attempts', 'residency_ttl_s'],
   },
   {
     title: 'Usage and history',
     keys: [
-      'ledger_refresh_concurrency',
-      'ledger_refresh_timeout_s',
       'ledger_idle_s',
       'snapshot_idle_s',
       'snapshot_capture_interval_s',
@@ -206,14 +180,85 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'Task titles',
+    keys: ['task_titles.max_chars'],
+  },
+  {
+    title: 'Sign-up and approval',
     keys: [
-      'task_titles.max_chars',
-      'task_titles.input_max_chars',
-      'task_titles.timeout_seconds',
-      'task_titles.total_timeout_seconds',
-      'task_titles.max_attempts',
-      'task_titles.max_tokens',
+      'accounts.signup_enabled',
+      'accounts.require_email_verification',
+      'accounts.approval_policy',
+      'accounts.signup_admin_notify',
+      'accounts.signup_notify_emails',
+      'accounts.terms_url',
+      'accounts.terms_text',
+      'accounts.admin_emails',
+      'accounts.session_ttl_days',
     ],
+  },
+  {
+    title: 'Sign-in and sign-up limits',
+    keys: [
+      'accounts.login_per_15min',
+      'accounts.login_account_per_15min',
+      'accounts.login_ip_per_hour',
+      'accounts.signup_per_hour',
+      'accounts.signup_per_day',
+      'accounts.signup_require_resolved_ip',
+      'accounts.unresolved_signup_per_hour',
+      'accounts.unresolved_signup_per_day',
+    ],
+  },
+  {
+    title: 'Account email',
+    keys: [
+      'accounts.email_provider',
+      'accounts.smtp_host',
+      'accounts.smtp_port',
+      'accounts.smtp_username',
+      'accounts.smtp_password',
+      'accounts.smtp_from',
+      'accounts.smtp_security',
+      'accounts.tencent_ses_region',
+      'accounts.tencent_ses_from_email',
+      'accounts.tencent_ses_from_name',
+      'accounts.tencent_ses_template_verification',
+      'accounts.tencent_ses_template_password_reset',
+      'accounts.tencent_ses_template_approval',
+      'accounts.tencent_ses_template_rejection',
+      'accounts.tencent_ses_template_admin_signup',
+      'accounts.tencent_ses_template_notice',
+    ],
+  },
+  {
+    title: 'Phone sign-in',
+    keys: [
+      'accounts.sms_enabled',
+      'accounts.sms_provider',
+      'accounts.sms_default_country_code',
+      'accounts.sms_allowed_prefixes',
+      'accounts.sms_code_ttl_s',
+      'accounts.sms_send_cooldown_s',
+      'accounts.sms_send_per_phone_hour',
+      'accounts.sms_send_per_phone_day',
+      'accounts.sms_send_per_ip_hour',
+      'accounts.sms_send_per_ip_day',
+      'accounts.sms_max_attempts',
+      'accounts.sms_verify_per_phone_15min',
+      'accounts.sms_verify_per_ip_hour',
+      'accounts.tencent_sms_region',
+      'accounts.tencent_sms_app_id',
+      'accounts.tencent_sms_sign_name',
+      'accounts.tencent_sms_template_id',
+    ],
+  },
+  {
+    title: 'Tencent Cloud credentials',
+    keys: ['accounts.tencent_secret_id', 'accounts.tencent_secret_key', 'accounts.tencent_token'],
+  },
+  {
+    title: 'Captcha',
+    keys: ['accounts.turnstile_site_key', 'accounts.turnstile_secret_key'],
   },
   {
     title: 'Deletion archive storage',

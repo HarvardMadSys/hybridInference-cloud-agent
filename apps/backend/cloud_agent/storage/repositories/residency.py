@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.storage._sql.accounts import local_access_ended
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
@@ -17,6 +18,13 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import asyncpg
+
+
+#: A beat extends nothing for a local owner whose access has ended; the host
+#: then closes the member, whether or not the termination pass reached it.
+_OWNER_ACCESS_ENDED = local_access_ended(
+    "(SELECT t.user_id FROM agent_threads t WHERE t.id = m.thread_id)"
+)
 
 
 class PostgresResidencyRepository:
@@ -114,7 +122,9 @@ class PostgresResidencyRepository:
             # releasing the membership, so either it committed before the
             # job lock above was granted and this fresh snapshot sees the
             # tombstone, or it waits for this commit and its release then
-            # takes the generation minted here as well.
+            # takes the generation minted here as well. A local account whose
+            # access ended earns nothing either, by the same argument: its
+            # termination updates the running job before releasing.
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_thread_sandbox_memberships AS m
@@ -132,6 +142,7 @@ class PostgresResidencyRepository:
                   AND a.status = 'running'
                   AND a.lease_expires_at > clock_timestamp()
                   AND {LIVE_ATTEMPT_HOST}
+                  AND NOT {local_access_ended("j.user_id")}
                 RETURNING m.thread_id, m.sandbox_id,
                           m.residency_generation AS generation,
                           m.residency_status AS status,
@@ -232,7 +243,7 @@ class PostgresResidencyRepository:
                     generations,
                 )
                 rows = await conn.fetch(
-                    """
+                    f"""
                     UPDATE agent_thread_sandbox_memberships m
                     SET residency_lease_expires_at =
                             clock_timestamp() + make_interval(secs => $3),
@@ -244,6 +255,7 @@ class PostgresResidencyRepository:
                       AND m.residency_status = 'hot'
                       AND m.residency_lease_expires_at > clock_timestamp()
                       AND g.id = m.sandbox_id AND ($4::text IS NULL OR g.host = $4)
+                      AND NOT {_OWNER_ACCESS_ENDED}
                     RETURNING m.thread_id, m.residency_generation,
                               COALESCE(m.residency_grant_id, '') AS grant_id
                     """,

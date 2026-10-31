@@ -3,8 +3,9 @@
 Every read is the signed-in owner's own and never cached. A history covers the
 last ``days`` UTC days, or with ``all=true`` every whole day since the owner's
 first run that one read can sum. Model usage is the
-admin Usage aggregation selected for this owner's runs: the same stored
-Gateway snapshots summed the same way, so the two pages cannot disagree.
+admin Usage aggregation selected for this owner's runs: the same
+agent-reported tokens summed the same way, so the two pages cannot disagree.
+The owner's provider keeps their bill; no cost is known here.
 """
 
 from __future__ import annotations
@@ -17,10 +18,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from cloud_agent.admin_observability import decode_cursor
 from cloud_agent.admin_usage import (
-    MAX_USAGE_LEDGER_ROWS,
+    MAX_USAGE_ATTEMPTS,
     MAX_USAGE_RESPONSE_BYTES,
     MAX_USAGE_RUNS,
-    MAX_USAGE_SNAPSHOT_BYTES,
     aggregate_prepared,
     breakdown,
     day_buckets,
@@ -173,7 +173,7 @@ async def read_owner_tokens(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _OwnerUsageStorage | None = Depends(get_storage),
 ) -> OwnerTokenUsage:
-    """Model usage and cost of the owner's runs created in the period.
+    """Agent-reported model usage of the owner's runs created in the period.
 
     Raises:
         HTTPException: 422 when the selection or its response exceeds the
@@ -192,8 +192,7 @@ async def read_owner_tokens(
             runtime=None,
             repo=None,
             max_runs=MAX_USAGE_RUNS,
-            max_rows=MAX_USAGE_LEDGER_ROWS,
-            max_snapshot_bytes=MAX_USAGE_SNAPSHOT_BYTES,
+            max_attempts=MAX_USAGE_ATTEMPTS,
         )
     except UsageQueryTooLarge:
         raise _error(422, _TOO_LARGE, "Too many runs to sum. Choose a shorter period.") from None
@@ -223,10 +222,10 @@ def _summarize(
     generated_at: datetime,
 ) -> tuple[OwnerTokenUsage, int]:
     """Reduce one owner's selection to totals, UTC days and models, and its size in bytes."""
-    ledger_by_job: dict[str, list[dict[str, Any]]] = {row["id"]: [] for row in cohort}
+    usage_by_job: dict[str, list[dict[str, Any]]] = {row["id"]: [] for row in cohort}
     for row in rows:
-        ledger_by_job[row["job_id"]].append(row)
-    jobs = [{**row, "ledger": ledger_by_job[row["id"]]} for row in cohort]
+        usage_by_job[row["job_id"]].append(row)
+    jobs = [{**row, "usage": usage_by_job[row["id"]]} for row in cohort]
     prepared = prepare_jobs(jobs, terminal_states=TERMINAL_STATES)
     usage = OwnerTokenUsage(
         since=period.since,

@@ -28,7 +28,7 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # reimplemented, and deliberately one-directional: this module depends on
 # ``_owner_auth`` and never the reverse, so there is no cycle to reason about.
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_current_user, get_storage
+from cloud_agent.api.deps import get_current_user, get_storage, require_local_admission
 from cloud_agent.api.mcp_connections_shared import (
     _bad_request,
     _capability_payload,
@@ -92,7 +92,7 @@ from cloud_agent.mcp.registry import (
     oauth_cipher,
     resolve_connection,
 )
-from cloud_agent.settings import setting_env
+from cloud_agent.settings import public_api_url, setting_env
 
 logger = get_logger(__name__)
 
@@ -208,26 +208,9 @@ def _public_base_url() -> str:
     explicit = (setting_env(ENV_MCP_PUBLIC_BASE_URL) or "").strip().rstrip("/")
     if explicit:
         return explicit
-    # Session sign-in already needs the public API callback, including its
-    # proxy prefix. Reuse that operator-controlled URL, never Host/Forwarded
-    # headers or the web origin (which may live on a different host).
-    callback = (setting_env("AGENT_SESSION_REDIRECT_URI") or "").strip()
-    suffix = "/v1/session/callback"
-    try:
-        parsed = urlsplit(callback)
-        if (
-            parsed.scheme not in {"https", "http"}
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or not parsed.path.endswith(suffix)
-        ):
-            return ""
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path[: -len(suffix)], "", ""))
-    except ValueError:
-        return ""
+    # The operator's public API address, including its proxy prefix; never
+    # Host/Forwarded headers or the web origin (which may live elsewhere).
+    return public_api_url()
 
 
 def _policy() -> EgressPolicy:
@@ -1334,19 +1317,20 @@ async def _resolve(host: str, port: int) -> list[str]:
     return [str(info[4][0]) for info in infos]
 
 
-async def _callback_session_user(request: Request) -> str | None:
+async def _callback_session_user(
+    request: Request, storage: Any = Depends(get_storage)
+) -> str | None:
     """The Agent account the returning browser is signed in as, or ``None``.
 
     Read by the same verifier as every owner route, but answered rather than
     raised: the callback is a browser navigation, and a 401 body is a dead end
-    where a redirect back to the app can say what to do. The session cookie is
-    ``SameSite=Lax``, so it travels on this top-level GET from the provider.
-    Only the cookie is read: a provider's redirect cannot carry a bearer, and
-    declaring that header would add a parameter to the served contract that no
-    real callback could use.
+    where a redirect back to the app can say what to do. The cookie is ``Lax``,
+    so it travels on this top-level GET; a redirect cannot carry a bearer. A
+    local account must also still hold ``agent.use``.
     """
     try:
-        user = await get_current_user(request, authorization=None)
+        user = await get_current_user(request, authorization=None, storage=storage)
+        await require_local_admission(request, str(user["user_id"]))
     except HTTPException:
         return None
     return str(user["user_id"])

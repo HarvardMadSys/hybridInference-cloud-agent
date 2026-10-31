@@ -885,15 +885,20 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
     from unittest.mock import AsyncMock
 
     from fastapi import HTTPException
+    from tests.support.owners import CONNECTION_ID, CONNECTION_MODEL, connection_row
 
     from cloud_agent.application import session_fork
 
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "fork-regression-encryption-key")
     broker = SimpleNamespace(prepare_environment=AsyncMock(side_effect=RuntimeError("old broker")))
     monkeypatch.setattr(session_fork, "sandbox_manager_for_job", AsyncMock(return_value=broker))
     store = SimpleNamespace(
         host_pool=object(),
         environments=SimpleNamespace(
             get_environment_binding=AsyncMock(return_value=BoundEnvironment(binding_id="empty"))
+        ),
+        model_connections=SimpleNamespace(
+            get_model_connection=AsyncMock(return_value=connection_row("alice"))
         ),
         session_fork=SimpleNamespace(
             claim_session_fork_materialization=AsyncMock(return_value=False)
@@ -904,13 +909,18 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
         "runtime_id": "claude-code",
         "source_thread_id": "thread",
         "resident_slot_id": 1,
-        "source_job": {"user_id": "alice", "environment_binding_id": "empty"},
+        "source_job": {
+            "user_id": "alice",
+            "environment_binding_id": "empty",
+            "model": CONNECTION_MODEL,
+            "runtime": "claude-code",
+            "thread_id": "thread",
+            "model_connection_id": CONNECTION_ID,
+        },
         "group_members": [{"thread_id": "thread"}],
     }
     with pytest.raises(HTTPException) as failure:
-        await session_fork.materialize_session_fork(
-            operation, job_id="job", job_store=store, grants=None
-        )
+        await session_fork.materialize_session_fork(operation, job_id="job", job_store=store)
     assert failure.value.detail["error"]["type"] == "fork_in_progress"
     broker.prepare_environment.assert_not_awaited()
     store.session_fork.claim_session_fork_materialization.assert_awaited_once()

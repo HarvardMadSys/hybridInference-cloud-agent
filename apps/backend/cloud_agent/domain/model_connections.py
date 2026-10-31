@@ -46,6 +46,7 @@ UnusableReason = Literal[
     "effort_unsupported",
     "changed",
     "feature_disabled",
+    "no_connection",
 ]
 
 #: What the owner is told when a turn cannot run on its connection. Each names
@@ -68,11 +69,15 @@ UNUSABLE_MESSAGES: dict[str, str] = {
         "Reasoning effort cannot be set for a model connection; leave it on Auto."
     ),
     "feature_disabled": (
-        "This deployment has not turned on model connections. Choose a Gateway model."
+        "This deployment has not turned on model connections. Contact the deployment administrator."
     ),
     "changed": (
         "This task's model connection changed while the turn was starting. "
         "The turn did not run on the old key."
+    ),
+    "no_connection": (
+        "This task has no model connection, so it cannot run. Start a new task on a model "
+        "from one of your own model connections."
     ),
 }
 
@@ -83,6 +88,10 @@ class ModelConnectionInvalid(ValueError):
 
 class ModelConnectionConflict(Exception):
     """The owner already has a live connection with that name."""
+
+
+class ModelConnectionAccessEnded(Exception):
+    """The local owner no longer has Agent access when a verified save commits."""
 
 
 class ModelConnectionUnusable(Exception):
@@ -161,7 +170,7 @@ def is_connection_id(value: object) -> bool:
 
 @dataclass(frozen=True)
 class TurnSource:
-    """Which model a turn runs, and where: ``connection_id`` ``None`` is the Gateway."""
+    """Which model a turn runs, and on which of its owner's connections."""
 
     model: str
     connection_id: str | None = None
@@ -264,6 +273,7 @@ __all__ = [
     "SUPPORTED",
     "UNSUPPORTED",
     "UNUSABLE_MESSAGES",
+    "ModelConnectionAccessEnded",
     "ModelConnectionConflict",
     "ModelConnectionInvalid",
     "ModelConnectionUnusable",

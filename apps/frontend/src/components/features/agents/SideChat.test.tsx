@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import receiptContract from '../../../../../../tests/fixtures/side_chat_job_receipt.json';
 import { installSideChatLocks } from './sideChatTestSupport';
 import '@testing-library/jest-dom/vitest';
@@ -96,6 +97,7 @@ const anchor = {
   repo: 'owner/project',
   runtime: 'codex',
   model: 'model-a',
+  model_connection_id: TEST_CONNECTION,
   task_prompt: 'Inherited question',
   title: 'Main task',
   title_source: 'manual',
@@ -103,10 +105,6 @@ const anchor = {
   current_attempt_id: null,
   metadata: null,
   detail: null,
-  spent_usd: null,
-  tokens_in: null,
-  tokens_out: null,
-  model_calls: null,
 } as AgentJobApi;
 const copied: AgentJobApi = {
   ...anchor,
@@ -124,7 +122,7 @@ const next: AgentJobApi = {
   conversation_state: 'running',
   current_attempt_id: 12,
 };
-const config = { models: ['model-a', 'model-b'] } as AgentConfigApi;
+const config = { ...offering(['model-a', 'model-b']) } as AgentConfigApi;
 let jobs: AgentJobApi[];
 let events: AgentThreadEventApi[];
 let waiting: PendingMessageApi[];
@@ -526,40 +524,6 @@ describe('Side Chat', () => {
     });
   });
 
-  it('keeps a personal source, and moving to the Gateway namesake is a change it sends', async () => {
-    const source = 'mconn_0123456789abcdef0123456789abcdef';
-    const personal = { ...anchor, model_connection_id: source };
-    jobs = jobs.map((job) => ({ ...job, model_connection_id: source }));
-    const withConnection = {
-      ...config,
-      runtimes: ['codex'],
-      model_connections: [
-        { id: source, name: 'Mine', models: ['model-a'], model_runtimes: { 'model-a': ['codex'] } },
-      ],
-    };
-    render(
-      <SideChat
-        {...props()}
-        sourceJob={toDisplayJob(personal)}
-        sourceJobs={[personal]}
-        config={withConnection}
-      />,
-    );
-    await ready();
-    expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveAccessibleDescription(
-      'model-a · Mine',
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
-    fireEvent.click(screen.getByRole('option', { name: 'model-a' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
-        prompt: 'Why keep the files?',
-        model: 'model-a',
-      }),
-    );
-  });
-
   it('submits only the new prompt to the child, streams its response, and leaves the main URL alone', async () => {
     const push = vi.spyOn(window.history, 'pushState');
     render(<SideChat {...props()} />);
@@ -572,6 +536,7 @@ describe('Side Chat', () => {
     expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
       prompt: 'Why keep the files?',
       model: 'model-b',
+      model_connection_id: TEST_CONNECTION,
     });
     expect(push).not.toHaveBeenCalled();
     await waitFor(() => expect(streamAgentJob).toHaveBeenCalledWith('side-3', expect.anything()));
@@ -702,28 +667,19 @@ describe('Side Chat', () => {
 });
 
 describe('Side Chat review regressions', () => {
-  it('preserves model and effort choices made while the native fork is preparing', async () => {
+  it('preserves a model choice made while the native fork is preparing', async () => {
     let resolve!: (row: AgentJobApi) => void;
     vi.mocked(forkAgentJob).mockReturnValueOnce(
       new Promise((r) => {
         resolve = r;
       }),
     );
-    render(
-      <SideChat
-        {...props()}
-        config={{
-          ...config,
-          runtime_reasoning_efforts: { codex: ['low', 'medium', 'high'] },
-          model_reasoning_efforts: { 'model-a': ['high'], 'model-b': ['high'] },
-        }}
-      />,
-    );
+    render(<SideChat {...props()} />);
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
     fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Side chat reasoning' }));
-    fireEvent.click(screen.getByRole('option', { name: 'low' }));
+    // A connection turn runs at its provider's default: there is no reasoning control.
+    expect(screen.queryByRole('button', { name: 'Side chat reasoning' })).not.toBeInTheDocument();
     await act(async () => {
       resolve(copied);
     });
@@ -733,7 +689,7 @@ describe('Side Chat review regressions', () => {
       expect(submitThreadMessage).toHaveBeenCalledWith(copied.thread_id, {
         prompt: 'Why keep the files?',
         model: 'model-b',
-        reasoning_effort: 'low',
+        model_connection_id: TEST_CONNECTION,
       }),
     );
   });
@@ -1034,4 +990,37 @@ describe('fixing completed side chat reviews', () => {
     expect(screen.queryByRole('button', { name: 'Fix issues' })).not.toBeInTheDocument();
     expect(submitThreadMessage).not.toHaveBeenCalled();
   });
+});
+
+it('an open side chat keeps a deleted source unavailable instead of sending to a namesake on another connection', async () => {
+  const source = 'mconn_0123456789abcdef0123456789abcdef';
+  const personal = { ...anchor, model_connection_id: source };
+  jobs = jobs.map((job) => ({ ...job, model_connection_id: source }));
+  const sourceProps = { ...props(), sourceJob: toDisplayJob(personal), sourceJobs: [personal] };
+  const view = render(
+    <SideChat
+      {...sourceProps}
+      config={{
+        ...config,
+        model_connections: [
+          {
+            id: source,
+            name: 'Mine',
+            models: ['model-a'],
+            model_runtimes: { 'model-a': ['codex'] },
+          },
+        ],
+      }}
+    />,
+  );
+  await ready();
+  // The connection is deleted; another one lists a model of the same name.
+  view.rerender(<SideChat {...sourceProps} config={{ ...config, ...offering(['model-a']) }} />);
+  expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveAccessibleDescription(
+    'model-a · personal connection (unavailable)',
+  );
+  expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeDisabled();
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+  fireEvent.submit(screen.getByRole('textbox').closest('form')!);
+  expect(submitThreadMessage).not.toHaveBeenCalled();
 });

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fixtures
@@ -12,13 +14,11 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     AsyncMock,
     FakeStorage,
     _api_key_secret,
-    _configured_identity_issuer,
     _create_job,
     client,
     datetime,
     pytest,
     store,
-    timedelta,
 )
 
 pytestmark = pytest.mark.asyncio

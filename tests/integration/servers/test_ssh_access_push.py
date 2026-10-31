@@ -66,7 +66,7 @@ async def _ready_server(api) -> str:
 
 
 async def test_a_change_made_while_the_group_starts_reaches_the_starting_turn(api, monkeypatch):
-    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "ssh-push-test-key")
+    # The fixture's credential key, which the owner's connection key is stored under.
     api.app.include_router(ssh_servers.router)
     await api.store.host_pool.record_host_heartbeat(
         host=_HOST, sandbox_manager_url="http://sandbox-manager.test:9000"

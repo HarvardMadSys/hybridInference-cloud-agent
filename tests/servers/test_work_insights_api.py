@@ -8,18 +8,17 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.api import work_insights
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 
 PATH = "/v1/agent/insights"
 
 
 @pytest.fixture()
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "insights-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(work_insights.router)
     repository = AsyncMock()
@@ -30,16 +29,16 @@ def app(monkeypatch):
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        work_insights=repository
+        local_accounts=SESSIONS, work_insights=repository
     )
     application.state.repository = repository
     return application
 
 
 async def test_insights_are_the_owners_and_never_cached(app):
-    session = identity.mint_session(user_id="owner-1")
+    session = SESSIONS.sign_in("owner-1")
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
     ) as http:

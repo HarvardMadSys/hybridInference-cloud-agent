@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -28,7 +29,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentConfig: vi.fn().mockResolvedValue({
     repos: ['owner/repository'],
     runtimes: ['codex'],
-    models: ['test-model'],
+    ...offering(['test-model']),
     github_connected: true,
     github_install_url: null,
   }),
@@ -84,6 +85,7 @@ function rawJob(id: string, turn: number, overrides: Partial<AgentJobApi> = {}):
     title: 'Recorded result review',
     runtime: 'codex',
     model: 'test-model',
+    model_connection_id: TEST_CONNECTION,
     base_ref: 'dev',
     base_sha: 'abcdef123',
     state: 'succeeded',
@@ -95,10 +97,6 @@ function rawJob(id: string, turn: number, overrides: Partial<AgentJobApi> = {}):
     metadata: null,
     created_at: null,
     updated_at: null,
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
     ...overrides,
   };
 }

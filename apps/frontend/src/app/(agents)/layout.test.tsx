@@ -53,6 +53,11 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 
+// Without access an account waits for approval in its own panel.
+vi.mock('@/components/features/auth/WaitlistPanel', () => ({
+  WaitlistPanel: () => <section data-testid="waitlist-panel" />,
+}));
+
 vi.mock('@/components/features/auth/ProtectedRoute', () => ({
   ProtectedRoute: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
@@ -95,7 +100,6 @@ vi.mock('@/components/providers/AuthProvider', async () => {
 vi.mock('@/components/providers/SiteConfigProvider', () => ({
   useSiteConfig: () => ({
     branding: { appName: 'FreeInference', orgName: '', orgUrl: '', statusUrl },
-    features: { rag: false },
   }),
 }));
 
@@ -831,6 +835,7 @@ describe('AgentsLayout permissions', () => {
       );
       expect(screen.queryByText('private workspace')).not.toBeInTheDocument();
       expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(screen.getByTestId('waitlist-panel')).toBeInTheDocument();
     },
   );
 });

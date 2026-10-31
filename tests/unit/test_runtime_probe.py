@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
 import pytest
+from tests.support.owners import on_connection
 
 from cloud_agent_host import runtime_probe
 from cloud_agent_host.drivers import TurnResult
@@ -139,7 +140,7 @@ def test_anthropic_stream_reads_to_one_settled_answer(model: httpx.Client, path:
 
 
 def test_anthropic_without_stream_answers_one_message(model: httpx.Client) -> None:
-    response = model.post("/v1/messages", json={"model": MODEL})
+    response = model.post("/v1/messages", json=on_connection({"model": MODEL}))
     assert response.headers["content-type"] == "application/json"
     message = response.json()
     assert message["content"] == [{"type": "text", "text": REPLY}]
@@ -278,7 +279,7 @@ def test_the_member_is_started_without_its_values_on_the_command_line(
     monkeypatch.setattr(runtime_probe.subprocess, "Popen", popen)
     box = SimpleNamespace(docker="docker", id="container-id")
     context = runtime_probe._context(box, "claude-code", VERSION)
-    assert context.gateway_base_url == f"http://127.0.0.1:{PROBE_MODEL_PORT}"
+    assert context.model_base_url == f"http://127.0.0.1:{PROBE_MODEL_PORT}"
     assert context.spawn_live is not None
     context.spawn_live(["claude", "--print"], {"ANTHROPIC_API_KEY": context.credential})
 

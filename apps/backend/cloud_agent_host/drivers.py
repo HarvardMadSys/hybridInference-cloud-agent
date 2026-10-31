@@ -37,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.codex_app_server import CodexTurnUsage, codex_error_text, codex_tool_output
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -47,6 +48,7 @@ from cloud_agent_host.runtimes import (
     THINKING,
     TOOL_RESULT,
     TOOL_USE,
+    USAGE,
     AgentRuntime,
     ClaudeCodeRuntime,
     CodexRuntime,
@@ -105,7 +107,7 @@ class ResidentLiveRuntime(DialectRuntime, Protocol):
         *,
         workdir: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -280,34 +282,6 @@ def _record_text(record: dict[str, Any]) -> str:
     )
 
 
-def _codex_error_text(message: str) -> str:
-    """Codex's error message without the request diagnostics it appends.
-
-    0.145.0 appends ``, url: <address>`` and then cf-ray, request id and auth
-    details to an HTTP error's message. The address is the sandbox's gateway
-    relay, which means nothing to the owner; the full error stays in the event.
-    """
-    return message.split(", url: ", 1)[0][:2000]
-
-
-def _codex_tool_output(item: dict[str, Any]) -> str:
-    """What a command or an MCP call returned, as the text the owner reads.
-
-    A command's ``aggregatedOutput`` is text already. An MCP call's ``result``
-    is an object of the tool's content blocks and structured content, and its
-    ``error`` an object naming a message (0.145.0); ``str`` of either is a
-    Python rendering. So the result is stored as JSON, as the other runtimes
-    store theirs, and the error as its message.
-    """
-    output = item.get("aggregatedOutput") or item.get("result")
-    if not output:
-        error = item.get("error")
-        output = (error.get("message") or error) if isinstance(error, dict) else error
-    if output is None or isinstance(output, str):
-        return output or ""
-    return json.dumps(output, ensure_ascii=False, default=str)
-
-
 def _http_agent_error_text(error: Any) -> str:
     """Read an OpenCode/Kilo session error the way their own CLI prints it.
 
@@ -409,7 +383,7 @@ class LaunchContext:
     """
 
     workdir: str
-    gateway_base_url: str
+    model_base_url: str
     credential: str
     provides_isolation: bool
     base_env: dict[str, str] = field(default_factory=dict)
@@ -1184,7 +1158,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
         return self.runtime.prepare_live(
             workdir=self._context.workdir,
             model=model,
-            gateway_base_url=self._context.gateway_base_url,
+            model_base_url=self._context.model_base_url,
             credential=self._context.credential,
             provides_isolation=self._context.provides_isolation,
             mcp_config=self._context.mcp_config,
@@ -1309,6 +1283,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         # Each subagent thread's spawning call, as the spawn items name it.
         # Kept for the process, whose threads outlive any one turn.
         self._agent_calls: dict[str, str] = {}
+        self._usage = CodexTurnUsage()
 
     def _thread_owner(self, params: dict[str, Any]) -> dict[str, str]:
         """Mark a notification from another thread as that subagent's.
@@ -1506,8 +1481,12 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             for receiver in item.get("receiverThreadIds") or []:
                 if isinstance(receiver, str) and receiver:
                     self._agent_calls.setdefault(receiver, str(item["id"]))
+                    self._usage.spawned(receiver, turn.protocol_turn_id)
         owner = self._thread_owner(params)
         raw_notification = _codex_raw_row(value, line, owner)
+        if method == "thread/tokenUsage/updated":
+            usage = self._usage.counted(params, turn.protocol_turn_id, owner)
+            return HarnessEvent(USAGE, usage, raw_line=line) if usage else raw_notification
         if method == "error" and params.get("willRetry") is not True and not owner:
             # The error that fails the turn (0.145.0 sends it before the failed
             # turn/completed); a retried one says ``willRetry`` and stays raw.
@@ -1516,7 +1495,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             if message:
                 return HarnessEvent(
                     ERROR,
-                    {"text": _codex_error_text(str(message)), "error": error},
+                    {"text": codex_error_text(str(message)), "error": error},
                     raw_line=line,
                 )
         if method == "item/tool/requestUserInput":
@@ -1618,7 +1597,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "tool_use_id": item.get("id"),
                     "is_error": (isinstance(exit_code, int) and exit_code != 0)
                     or bool(item.get("error")),
-                    "content": _codex_tool_output(item)[:4000],
+                    "content": codex_tool_output(item)[:4000],
                     "exit_code": exit_code,
                     **owner,
                 },
@@ -1629,15 +1608,14 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 DIFF, {"text": str(params.get("diff") or "")[:4000], **owner}, raw_line=line
             )
         if method == "turn/completed":
-            # A subagent's turn ending is not this turn's result; its usage
-            # still counts, so it stays a marked lifecycle record.
+            # A subagent's turn ending is not this turn's result, so it stays a
+            # marked lifecycle record; its usage came in tokenUsage notifications.
             completed = params.get("turn")
             return HarnessEvent(
                 LIFECYCLE,
                 {
                     "phase": "result",
                     "status": completed.get("status") if isinstance(completed, dict) else None,
-                    "usage": completed.get("usage") if isinstance(completed, dict) else None,
                     **owner,
                 },
                 raw_line=line,
@@ -2769,7 +2747,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         argv, extra_env = self.runtime.prepare_live(
             workdir=context.workdir,
             model="",  # pinned per session below, chosen by the first turn's model
-            gateway_base_url=context.gateway_base_url,
+            model_base_url=context.model_base_url,
             credential=context.credential,
             provides_isolation=context.provides_isolation,
             mcp_config=context.mcp_config,

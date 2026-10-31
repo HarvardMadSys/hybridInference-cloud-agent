@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import ledger, publish_worker
+from cloud_agent import publish_worker
 from cloud_agent.workers import snapshots
-from cloud_agent.workers.background_wake import LEDGER, PUBLISH, SNAPSHOT, BackgroundWake
+from cloud_agent.workers.background_wake import PUBLISH, SNAPSHOT, BackgroundWake
 
 #: Well under every worker's clock, so a worker that only slept would miss it.
 AT_ONCE_S = 0.5
@@ -43,7 +43,7 @@ async def _listening() -> BackgroundWake:
     """A wake-up whose connection is listening, its connect wake-ups consumed."""
     wake = BackgroundWake()
     wake.reset(listening=True)
-    for kind in (SNAPSHOT, PUBLISH, LEDGER):
+    for kind in (SNAPSHOT, PUBLISH):
         assert await wake.wait(kind, 0)
     return wake
 
@@ -61,7 +61,7 @@ async def test_each_worker_is_woken_by_its_own_name_and_a_reset_wakes_all():
     assert wake.listening is True
     wake.reset(listening=False)
     assert wake.listening is False
-    assert all([await wake.wait(kind, 0) for kind in (SNAPSHOT, PUBLISH, LEDGER)])
+    assert all([await wake.wait(kind, 0) for kind in (SNAPSHOT, PUBLISH)])
 
 
 async def test_a_due_snapshot_is_captured_when_announced_not_at_the_next_tick():
@@ -118,16 +118,11 @@ async def test_an_idle_coordinator_looks_again_when_a_deferred_capture_is_due(mo
 
 
 async def test_while_nothing_listens_each_worker_looks_on_its_old_clock(monkeypatch):
-    monkeypatch.setattr(ledger, "REFRESH_POLL_SECONDS", 0.01)
     captured = AsyncMock(return_value=False)
     monkeypatch.setattr(snapshots, "_capture_due_shared_snapshot", captured)
     imported = AsyncMock()
     monkeypatch.setattr(publish_worker, "_retry_due_base_imports", imported)
     monkeypatch.setattr(publish_worker, "_publish_due", AsyncMock())
-    collector_store = SimpleNamespace(
-        claim_due_ledger_refresh=AsyncMock(return_value=None),
-        next_ledger_refresh_due=AsyncMock(return_value=None),
-    )
     wake = BackgroundWake()  # never connected
     tasks = [
         asyncio.create_task(
@@ -143,18 +138,9 @@ async def test_while_nothing_listens_each_worker_looks_on_its_old_clock(monkeypa
                 wake=wake,
             )
         ),
-        asyncio.create_task(
-            ledger.collect_usage_snapshots(collector_store, SimpleNamespace(), wake=wake)  # type: ignore[arg-type]
-        ),
     ]
     try:
-        await _eventually(
-            lambda: (
-                captured.await_count >= 3
-                and imported.await_count >= 3
-                and collector_store.claim_due_ledger_refresh.await_count >= 3
-            )
-        )
+        await _eventually(lambda: captured.await_count >= 3 and imported.await_count >= 3)
     finally:
         for task in tasks:
             await _stop(task)
@@ -417,37 +403,5 @@ async def test_an_idle_publisher_looks_again_when_a_retry_is_due(monkeypatch, re
     )
     try:
         await _eventually(lambda: imported.await_count >= 1)
-    finally:
-        await _stop(task)
-
-
-async def test_an_idle_collector_reads_when_the_earliest_schedule_is_due(monkeypatch):
-    due = datetime.now(UTC) + timedelta(seconds=0.1)
-    store = SimpleNamespace(
-        claim_due_ledger_refresh=AsyncMock(return_value=None),
-        next_ledger_refresh_due=AsyncMock(return_value=due),
-    )
-    task = asyncio.create_task(
-        ledger.collect_usage_snapshots(store, SimpleNamespace(), wake=await _listening())  # type: ignore[arg-type]
-    )
-    try:
-        await _eventually(lambda: store.claim_due_ledger_refresh.await_count >= 2)
-    finally:
-        await _stop(task)
-
-
-async def test_an_idle_collector_with_nothing_scheduled_waits_for_its_wake_up(monkeypatch):
-    store = SimpleNamespace(
-        claim_due_ledger_refresh=AsyncMock(return_value=None),
-        next_ledger_refresh_due=AsyncMock(return_value=None),
-    )
-    wake = await _listening()
-    task = asyncio.create_task(ledger.collect_usage_snapshots(store, SimpleNamespace(), wake=wake))  # type: ignore[arg-type]
-    try:
-        await _eventually(lambda: store.claim_due_ledger_refresh.await_count == 1)
-        await asyncio.sleep(0.05)
-        assert store.claim_due_ledger_refresh.await_count == 1, "nothing due, nothing read"
-        wake.notified(LEDGER)
-        await _eventually(lambda: store.claim_due_ledger_refresh.await_count == 2)
     finally:
         await _stop(task)

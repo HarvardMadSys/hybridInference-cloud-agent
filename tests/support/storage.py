@@ -19,6 +19,8 @@ from __future__ import annotations
 import pathlib
 from typing import Any
 
+from tests.support.owners import CONNECTION_ID, connection_row
+
 from cloud_agent.ports.sandbox import TerminalControlRoute
 
 _PORTS = pathlib.Path(__file__).resolve().parents[2] / "apps" / "backend" / "cloud_agent" / "ports"
@@ -47,12 +49,16 @@ class AllCapabilities:
         return None
 
     async def list_model_connections(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Legacy fixtures' owners have added no model connection of their own."""
-        return []
+        """Every fixture owner has one verified model connection, as every working owner does."""
+        return [connection_row(user_id)]
 
     async def get_model_connection(self, *, user_id: str, connection_id: str):
-        """No fixture owner has a model connection, so a named one reads as missing."""
-        return None
+        """The owner's one connection (:data:`~tests.support.owners.CONNECTION_ID`); any other is missing."""
+        return connection_row(user_id) if connection_id == CONNECTION_ID else None
+
+    async def bind_residency(self, **_kwargs: Any) -> bool:
+        """The connection is unchanged, so a residency binds at its current revision."""
+        return True
 
     async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
         """Legacy fixtures' sandbox groups were never handed a model connection key."""

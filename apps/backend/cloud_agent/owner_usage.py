@@ -386,6 +386,8 @@ class OwnerTokenUsage(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    #: Every amount is what the owner's agents reported, not a provider's bill.
+    source: Literal["runtime_reported"] = "runtime_reported"
     since: datetime
     until: datetime
     day_timezone: Literal["UTC"] = "UTC"

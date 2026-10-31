@@ -212,7 +212,7 @@ def _context(box: _Container, runtime_id: str, version: str) -> LaunchContext:
 
     return LaunchContext(
         workdir=_WORKDIR,
-        gateway_base_url=f"http://127.0.0.1:{PROBE_MODEL_PORT}",
+        model_base_url=f"http://127.0.0.1:{PROBE_MODEL_PORT}",
         credential="runtime-probe",
         provides_isolation=True,
         state_dir=_STATE_DIR,

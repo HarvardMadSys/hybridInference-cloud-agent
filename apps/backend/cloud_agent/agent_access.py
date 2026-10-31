@@ -1,4 +1,4 @@
-"""The Gateway's explicit Agent admission decision, independent of account roles."""
+"""The account's explicit Agent admission decision, independent of account roles."""
 
 from __future__ import annotations
 

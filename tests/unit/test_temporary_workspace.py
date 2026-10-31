@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
-from tests.unit.test_goal_controller import FakeGateway
+from tests.unit.test_goal_controller import FakeOwners
 from tests.unit.test_runner_host_settings import _JOB, _run_new_chat
 
 from cloud_agent.api.environments import RuntimeRefreshInput, refresh_runtime_environment
@@ -177,7 +177,7 @@ async def test_a_goal_in_a_temporary_workspace_checks_no_repository(monkeypatch)
         raise AssertionError("a temporary workspace has no repository to check")
 
     monkeypatch.setattr("cloud_agent.goals.controller.require_entitled_repo", refuse)
-    gateway = FakeGateway()
+    gateway = FakeOwners()
     turn = {
         "id": "ajob_1",
         "thread_id": "athr_1",
@@ -188,7 +188,7 @@ async def test_a_goal_in_a_temporary_workspace_checks_no_repository(monkeypatch)
     }
 
     action = await _check_access(
-        SimpleNamespace(source_control=None), turn, app_credentials=object(), gateway=gateway
+        SimpleNamespace(source_control=None), turn, app_credentials=object(), owners=gateway
     )
 
     assert action is None
@@ -197,7 +197,7 @@ async def test_a_goal_in_a_temporary_workspace_checks_no_repository(monkeypatch)
 
 async def test_a_goal_in_a_temporary_workspace_still_needs_agent_access() -> None:
     """Withdrawn access pauses the goal before any repository question arises."""
-    gateway = FakeGateway()
+    gateway = FakeOwners()
     gateway.allowed = False
     turn = {
         "id": "ajob_1",
@@ -208,7 +208,7 @@ async def test_a_goal_in_a_temporary_workspace_still_needs_agent_access() -> Non
         "thread_sandbox": None,
     }
 
-    action = await _check_access(SimpleNamespace(source_control=None), turn, gateway=gateway)
+    action = await _check_access(SimpleNamespace(source_control=None), turn, owners=gateway)
 
     assert action is not None
     assert action.kind == "pause"

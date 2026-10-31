@@ -43,7 +43,6 @@ from cloud_agent_host.sandbox import ProcessBackend
 #: This host's configuration, which every child's command line carries.
 _CONFIG: dict[str, Any] = {
     "base_url": "http://control",
-    "gateway_url": "http://gateway",
     "lease_ttl": 120.0,
     "agent_timeout_s": 3600.0,
     "host": "host-a",
@@ -61,8 +60,6 @@ def _argv(handover_fd: str, worker_id: str) -> list[str]:
         handover_fd,
         "--base-url",
         "http://control",
-        "--gateway-url",
-        "http://gateway",
         "--worker-id",
         worker_id,
         "--host",
@@ -417,7 +414,6 @@ def _serve(monkeypatch, raw: str, *, spare: bool) -> tuple[int, bytes]:
         code = runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -568,6 +564,7 @@ def test_the_service_hands_its_spare_to_each_launch_and_retires_it(service, monk
     handed: list[Any] = []
 
     def spawn(_payload: dict[str, Any], **kwargs: Any) -> LaunchResult:
+        assert "gateway_url" not in kwargs
         handed.append(kwargs["spare"])
         return LaunchResult(LAUNCH_STARTED, FakeHandle())
 
@@ -585,7 +582,6 @@ def test_the_service_hands_its_spare_to_each_launch_and_retires_it(service, monk
     assert (
         runner_mod.run_forever(
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             backend=backend,
             host="host-a",

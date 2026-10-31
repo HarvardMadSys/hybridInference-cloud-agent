@@ -115,7 +115,9 @@ describe('owner-scoped pending reads', () => {
 });
 
 describe('owner-scoped usage snapshots', () => {
-  const USAGE = { ledger: { status: 'available' } } as AgentJobUsageApi;
+  const USAGE = {
+    runtime: { source: 'runtime', input_tokens: 1, output_tokens: 1, cache_read_tokens: null },
+  } as AgentJobUsageApi;
 
   it('keeps one snapshot per job and answers nothing before one is kept', () => {
     const reads = createAgentReadScope();

@@ -1,6 +1,6 @@
 """Teams: membership, single-use invitations, join requests and the owner's audit.
 
-Every route requires the signed-in owner session and the Gateway's current
+Every route requires the signed-in owner session and the account's current
 ``agent.use``. Who may act on a team is then decided by the store, inside the
 transaction that acts: a non-member, or a team that no longer exists, is 404 so
 team ids cannot be probed; a member asking for an owner-only change is 403; a
@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._sensitive_routes import SensitiveRoute
-from cloud_agent.api.deps import get_gateway_client, get_storage, require_store
+from cloud_agent.api.deps import get_owner_directory, get_storage, require_store
 from cloud_agent.application import teams as flows
 from cloud_agent.domain.teams import (
     AUDIT_PAGE_LIMIT,
@@ -57,8 +57,8 @@ from cloud_agent.schemas import (
 )
 
 if TYPE_CHECKING:
+    from cloud_agent.accounts.directory import LocalOwnerDirectory
     from cloud_agent.domain.teams import TeamRecord
-    from cloud_agent.gateway import GatewayClient
     from cloud_agent.ports.teams import TeamRepository
 
 _STATUS: dict[type[TeamError], int] = {
@@ -189,12 +189,12 @@ async def list_members(
     team_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
-    gateway: GatewayClient = Depends(get_gateway_client),
+    owners: LocalOwnerDirectory = Depends(get_owner_directory),
 ) -> TeamMemberListResponse:
     """List active members, owner first, with display names and account emails."""
     members = await _teams(store).list_members(user["user_id"], team_id)
     return TeamMemberListResponse(
-        members=await flows.member_responses(gateway, user["user_id"], members)
+        members=await flows.member_responses(owners, user["user_id"], members)
     )
 
 
@@ -246,12 +246,12 @@ async def transfer_ownership(
     body: TransferOwnershipRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
-    gateway: GatewayClient = Depends(get_gateway_client),
+    owners: LocalOwnerDirectory = Depends(get_owner_directory),
 ) -> TeamResponse:
     """Make an admitted active member the owner; the caller stays as a member."""
     team = await flows.transfer_ownership(
         _teams(store),
-        gateway,
+        owners,
         user["user_id"],
         team_id,
         user_id=body.user_id,
@@ -308,7 +308,7 @@ async def claim_invitation(
     body: ClaimInvitationRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
-    gateway: GatewayClient = Depends(get_gateway_client),
+    owners: LocalOwnerDirectory = Depends(get_owner_directory),
 ) -> OwnJoinRequestResponse:
     """Ask to join with a link; the owner or an admin still has to approve.
 
@@ -318,7 +318,7 @@ async def claim_invitation(
     request = await _teams(store).claim_invitation(
         user["user_id"], token_hash=flows.hash_invitation_token(body.token)
     )
-    (response,) = await flows.own_request_responses(gateway, [request])
+    (response,) = await flows.own_request_responses(owners, [request])
     return response
 
 
@@ -329,11 +329,11 @@ async def claim_invitation(
 async def list_own_join_requests(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
-    gateway: GatewayClient = Depends(get_gateway_client),
+    owners: LocalOwnerDirectory = Depends(get_owner_directory),
 ) -> OwnJoinRequestListResponse:
     """The caller's own recent requests and where each stands."""
     requests = await _teams(store).list_own_join_requests(user["user_id"])
-    return OwnJoinRequestListResponse(requests=await flows.own_request_responses(gateway, requests))
+    return OwnJoinRequestListResponse(requests=await flows.own_request_responses(owners, requests))
 
 
 @router.get("/teams/{team_id}/join-requests", response_model=JoinRequestListResponse)
@@ -341,11 +341,11 @@ async def list_join_requests(
     team_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
-    gateway: GatewayClient = Depends(get_gateway_client),
+    owners: LocalOwnerDirectory = Depends(get_owner_directory),
 ) -> JoinRequestListResponse:
     """List pending requests for an owner or admin to decide."""
     requests = await _teams(store).list_join_requests(user["user_id"], team_id)
-    return JoinRequestListResponse(requests=await flows.applicant_responses(gateway, requests))
+    return JoinRequestListResponse(requests=await flows.applicant_responses(owners, requests))
 
 
 @router.post(
@@ -357,11 +357,11 @@ async def decide_join_request(
     body: DecideJoinRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
-    gateway: GatewayClient = Depends(get_gateway_client),
+    owners: LocalOwnerDirectory = Depends(get_owner_directory),
 ) -> JoinRequestResponse:
     """Approve or decline; repeating the same decision returns its result."""
     return await flows.decide_join_request(
-        _teams(store), gateway, user["user_id"], team_id, request_id, approve=body.approve
+        _teams(store), owners, user["user_id"], team_id, request_id, approve=body.approve
     )
 
 

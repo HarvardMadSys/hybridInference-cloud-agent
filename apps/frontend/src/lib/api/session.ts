@@ -1,15 +1,12 @@
-// The session BFF: this service's own half of sign-in.
+// The session: who the HttpOnly cookie says this browser is.
 //
-// **The browser never holds a gateway credential at all.** Sign-in is two
-// server routes — `GET /v1/session/login` and `GET /v1/session/callback` — and
-// the browser only ever navigates to the first (see `@/lib/auth/signin`). The
-// PKCE verifier lives in an HttpOnly cookie and the identity token is redeemed
-// and spent inside the control plane, so neither is reachable from page
-// JavaScript. What is left here are the two calls that read or drop the
-// session cookie.
+// Page JavaScript never holds the session token. Sign-in is in
+// `@/lib/api/accounts`; what is left here are the two calls that read or drop
+// the session cookie.
 
 import { agentApiBase } from '@/config/env';
 import { jsonOrThrow, safeFetch } from './client';
+import type { AccountIdentity, WaitlistEntry } from './accounts';
 import { APIError } from '@/lib/utils/errors';
 
 export type AgentPermission = 'agent.use' | 'agent.admin';
@@ -21,7 +18,13 @@ export interface AgentAccessApi {
 
 export interface SessionUserApi {
   id: string;
+  email?: string;
+  waitlist?: WaitlistEntry;
   agent_access?: AgentAccessApi;
+  /** How the account signs in. */
+  identity?: AccountIdentity;
+  /** Whether it holds administration. */
+  is_local_admin?: boolean;
 }
 
 /** Who the cookie says we are. A 401 here means "not signed in", not an error. */
@@ -48,8 +51,7 @@ export async function getSessionUser(): Promise<SessionUserApi | null> {
 /**
  * Drop the session cookie.
  *
- * Only the server's answer deletes it, and the session inside is a signed
- * token that stays valid until it expires. A request that failed — an outage,
+ * Only the server's answer ends the session. A request that failed — an outage,
  * a proxy's error page, no network — has left this browser signed in, so it
  * is reported rather than treated as done.
  */

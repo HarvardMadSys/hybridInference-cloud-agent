@@ -124,6 +124,14 @@
     @apply text-muted;
   }
 
+  .ui-button-danger {
+    @apply bg-red-600 text-white;
+  }
+
+  .ui-button-danger:hover:not(:disabled) {
+    @apply bg-red-700;
+  }
+
   .ui-button-secondary:hover:not(:disabled),
   .ui-button-ghost:hover:not(:disabled) {
     @apply bg-surface-hover text-foreground;

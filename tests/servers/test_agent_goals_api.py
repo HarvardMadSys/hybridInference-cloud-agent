@@ -24,6 +24,7 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - pytest fixtures
     client,
     store,
 )
+from tests.support.owners import on_connection
 
 from cloud_agent.goals.controller import client_request_id_for
 
@@ -156,12 +157,14 @@ async def test_a_job_created_with_a_goal_carries_it_on_the_conversation(client, 
     """The composer's path: one submission sets the objective and starts the work."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "goal": GOAL,
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "glm-5.1",
+                "goal": GOAL,
+            }
+        ),
     )
     assert response.status_code == 201, response.text
 

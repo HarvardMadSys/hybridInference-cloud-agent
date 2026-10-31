@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Res
 from fastapi.responses import StreamingResponse
 
 from cloud_agent import measurement_writer
+from cloud_agent.api._local_auth import terminal_open_fence
 from cloud_agent.api._operation_measurements import (
     FILE_READ_STAGE,
     measured_call,
@@ -36,6 +37,7 @@ from cloud_agent.api._owner_auth import (
     OWNER_STREAM_MAX_S,
     _no_such_job,
     _owned_job,
+    owner_stream_guard,
     require_agent_owner,
 )
 from cloud_agent.api._workspace_access import (
@@ -580,20 +582,24 @@ async def create_agent_job_terminal(
             if measure is not None:
                 measure.name_request(TERMINAL_CREATE)
                 measure.mark(TERMINAL_CREATE)
-            try:
-                payload = await measured_call(
-                    measure,
-                    TERMINAL_CREATE,
-                    call=lambda profiling: sandbox_manager.create_terminal(
-                        _workspace_id(job),
-                        rows=body.rows,
-                        cols=body.cols,
-                        profiling=profiling,
-                        **({"environment": environment} if environment else {}),
-                    ),
-                )
-            except SandboxManagerError as exc:
-                raise _terminal_sandbox_manager_http_error(exc) from exc
+            async with terminal_open_fence(
+                _require_store(store), str(user["user_id"]), sandbox_manager, _workspace_id(job)
+            ) as opened:
+                try:
+                    payload = await measured_call(
+                        measure,
+                        TERMINAL_CREATE,
+                        call=lambda profiling: sandbox_manager.create_terminal(
+                            _workspace_id(job),
+                            rows=body.rows,
+                            cols=body.cols,
+                            profiling=profiling,
+                            **({"environment": environment} if environment else {}),
+                        ),
+                    )
+                except SandboxManagerError as exc:
+                    raise _terminal_sandbox_manager_http_error(exc) from exc
+                opened["terminal"] = payload
             if measure is not None:
                 measure.outcome = "completed"
             response = measured_response(AgentTerminalSessionResponse, measure, payload)
@@ -682,7 +688,9 @@ _SSE_FRAME_END = b"\n\n"
 
 
 async def _relay_terminal_stream(
-    upstream: SandboxManagerStream, request: Request
+    upstream: SandboxManagerStream,
+    request: Request,
+    still_admitted: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[bytes]:
     """Relay the sandbox manager's PTY stream until the client leaves or the cap passes.
 
@@ -702,6 +710,8 @@ async def _relay_terminal_stream(
             # Chunks are cut where the network cut them, not at frames.
             tail = (tail + chunk)[-len(_SSE_FRAME_END) :]
             if tail == _SSE_FRAME_END and clock() >= closes_at:
+                break
+            if tail == _SSE_FRAME_END and still_admitted is not None and not await still_admitted():
                 break
     finally:
         await upstream.aclose()
@@ -757,7 +767,9 @@ async def stream_agent_job_terminal(
                 measure.outcome = "completed"
 
             response = StreamingResponse(
-                _relay_terminal_stream(upstream, request),
+                _relay_terminal_stream(
+                    upstream, request, owner_stream_guard(request, str(user["user_id"]))
+                ),
                 media_type="text/event-stream",
                 headers=(
                     _SSE_HEADERS

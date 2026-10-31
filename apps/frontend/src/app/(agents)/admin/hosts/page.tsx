@@ -89,8 +89,7 @@ import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
-// easily as "gone". Carried over from the gateway's section along with the
-// wording it justifies.
+// easily as "gone".
 const RECENT_POLL_SECONDS = 300;
 
 // Well under the staleness threshold, so a host that stops polling is reported

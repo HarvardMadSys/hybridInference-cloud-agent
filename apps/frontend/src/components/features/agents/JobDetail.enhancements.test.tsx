@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -82,8 +83,7 @@ function job(threadId = 'thread-first', overrides: Partial<AgentJob> = {}): Agen
     branch: 'agent/task',
     runtime: 'claude-code',
     model: 'qwen-test',
-    spentUsd: 0,
-    hasLedger: false,
+    modelConnectionId: TEST_CONNECTION,
     timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
@@ -92,7 +92,6 @@ function job(threadId = 'thread-first', overrides: Partial<AgentJob> = {}): Agen
     diffFiles: [],
     diffStat: { add: 0, del: 0 },
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
     ...overrides,
   };
 }
@@ -141,7 +140,7 @@ beforeEach(() => {
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
-    models: ['qwen-test'],
+    ...offering(['qwen-test']),
     github_connected: true,
     github_install_url: null,
   });
@@ -432,12 +431,12 @@ describe('visible send modes', () => {
     vi.mocked(getAgentConfig).mockResolvedValue({
       repos: ['owner/repository'],
       runtimes: ['claude-code'],
-      models: ['qwen-test'],
       model_connections_enabled: true,
       model_connections: [
+        ...(offering(['qwen-test']).model_connections ?? []),
         {
           id: mine,
-          name: 'Mine',
+          name: 'Other',
           models: ['qwen-test'],
           model_runtimes: { 'qwen-test': ['claude-code'] },
         },
@@ -451,9 +450,9 @@ describe('visible send modes', () => {
     });
     render(<JobDetail job={job()} userId="alice" />);
     await screen.findByRole('button', { name: 'Steer now' });
-    // The same model ID on a personal connection is another source, billed elsewhere.
+    // The same model ID on another connection is another source, billed elsewhere.
     fireEvent.click(screen.getByLabelText('Model for this turn'));
-    fireEvent.click(screen.getByRole('option', { name: 'qwen-test · Mine' }));
+    fireEvent.click(screen.getByRole('option', { name: 'qwen-test · Other' }));
     expect(screen.queryByRole('button', { name: 'Steer now' })).not.toBeInTheDocument();
     expect(
       screen.getByText(/runs as the next turn instead of joining the running one/),

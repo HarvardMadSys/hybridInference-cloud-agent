@@ -2,16 +2,14 @@
 
 // Session state for the app.
 //
-// Recreated rather than moved: the source provider drove the gateway's own
-// email/password login and its token refresh. This service has neither. Sign-in
-// happens at the gateway and lands as an HttpOnly cookie, so the only question
-// this provider can answer is "does the cookie still work", which it asks by
-// calling `/v1/session/me`.
+// Sign-in establishes an HttpOnly cookie. Identity and current admission are
+// read through /v1/session/me; no password or token is retained by this
+// provider.
 //
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { clearSideChatDrafts } from '@/components/features/agents/sideChatStorage';
 import { clearAccountResources } from '@/components/features/profile/accountResource';
-import { AUTH_EXPIRED_EVENT } from '@/lib/api/client';
+import { ACCOUNT_SWITCHED_EVENT, AUTH_EXPIRED_EVENT, pinAccount } from '@/lib/api/client';
 import { announceSession, listenForSession } from '@/lib/auth/sessionSync';
 import { APIError } from '@/lib/utils/errors';
 import {
@@ -19,11 +17,21 @@ import {
   getSessionUser,
   type AgentAccessApi,
   type AgentPermission,
+  type SessionUserApi,
 } from '@/lib/api/session';
 
-interface User {
-  id: string;
-  agent_access?: AgentAccessApi;
+type User = SessionUserApi;
+
+/** Admit only the documented identity fields. */
+function sessionIdentity(me: SessionUserApi): User {
+  return {
+    id: me.id,
+    agent_access: me.agent_access,
+    email: me.email,
+    waitlist: me.waitlist,
+    identity: me.identity,
+    is_local_admin: me.is_local_admin,
+  };
 }
 
 interface AuthState {
@@ -108,13 +116,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (previous !== undefined) setSessionSwitched(true);
       }
       accountId.current = me.id;
+      pinAccount(me.id);
       setState({
         isAuthenticated: true,
         loading: false,
-        user: {
-          id: me.id,
-          agent_access: me.agent_access,
-        },
+        user: sessionIdentity(me),
       });
     } catch (error) {
       if (epoch !== sessionEpoch.current) return;
@@ -142,11 +148,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Whether the cookie still names the account this tab shows, asked without
   // the loading state a full refresh shows, and acted on only when it does not.
   const lastCheck = useRef(0);
+  const checkEpoch = useRef(0);
   const checkSession = useCallback(async () => {
     lastCheck.current = Date.now();
+    const epoch = sessionEpoch.current;
+    const check = ++checkEpoch.current;
     try {
       const me = await getSessionUser();
+      if (epoch !== sessionEpoch.current || check !== checkEpoch.current || reading.current) return;
       if ((me?.id ?? undefined) !== accountId.current) await refreshUser();
+      else if (me) {
+        // Admission can change while identity stays the same. Apply the fresh
+        // answer without unmounting the page or losing an edited draft.
+        setState((previous) => ({ ...previous, user: sessionIdentity(me) }));
+      }
     } catch {
       // An outage is not a different account; the next request will say so.
     }
@@ -189,6 +204,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
   }, [state.user?.id]);
+
+  // The API refused a request of this tab's account because the browser
+  // switched to another: read the session again, which notices the switch.
+  useEffect(() => {
+    const handleSwitched = () => void refreshUser();
+    window.addEventListener(ACCOUNT_SWITCHED_EVENT, handleSwitched);
+    return () => window.removeEventListener(ACCOUNT_SWITCHED_EVENT, handleSwitched);
+  }, [refreshUser]);
 
   const logout = useCallback(async () => {
     // Signed out once the server has dropped the cookie, and not before. A

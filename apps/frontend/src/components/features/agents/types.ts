@@ -347,7 +347,7 @@ export interface AgentJob {
   runtime: string;
   runtimeVersion?: string;
   model: string;
-  /** The owner's connection `model` runs on; undefined is the Gateway. */
+  /** The owner's connection `model` runs on. */
   modelConnectionId?: string;
   /**
    * How hard this turn asked the model to think. Undefined is Auto — nobody
@@ -356,10 +356,6 @@ export interface AgentJob {
   reasoningEffort?: string;
   /** Set when the model is served on our own hardware, e.g. "H200". */
   modelLocal?: string;
-  spentUsd: number;
-  // False when the deployment has no billing ledger, so the UI can say
-  // "unknown" instead of implying the job cost nothing.
-  hasLedger?: boolean;
   elapsedLabel?: string;
   timeoutLabel: string;
   sandbox: string;
@@ -391,7 +387,6 @@ export interface AgentJob {
   diffFileDetails?: AgentDiffFile[];
   diffStat?: { add: number; del: number };
   gates: AgentGate[];
-  usage: { tokensIn: string; tokensOut: string; cachePct: number; turns: number | null };
   /** Attempt continuity telemetry; `replay` can occur only on historical rows. */
   continuityMode?: 'hot' | 'warm_native' | 'cold_native' | 'replay';
   /** Canonical user-facing context state; independent of process-id reuse. */

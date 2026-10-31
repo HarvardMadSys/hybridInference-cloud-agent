@@ -14,6 +14,7 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.accounts.settings_registry import ACCOUNT_SETTINGS
 from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.deployment_setup import BOOTSTRAP as BOOTSTRAP, bootstrap_snapshot
 from cloud_agent.domain_cipher import settings_root_key
@@ -25,8 +26,6 @@ from cloud_agent.setting_definition import (
     SettingValue,
     _github_install_url,
     _gitlab_redirect_uri,
-    _grant_base_path,
-    _issuer,
     _numeric,
     _s3_bucket,
     _s3_prefix,
@@ -65,21 +64,6 @@ SETTINGS: tuple[Setting, ...] = (
         env="AGENT_LOG_FORMAT",
         choices=("text", "json"),
         description="Text or structured JSON output. Applies to the control plane's own log handler without a restart.",
-    ),
-    # Generous enough for a busy gateway, bounded because a control plane
-    # blocked on a lookup is a control plane that has stopped scheduling. It
-    # also bounds one usage page as a whole, from waiting for a slot to the
-    # last byte of the body.
-    _numeric(
-        "gateway_request_timeout_s", "Gateway request timeout (seconds)", "Gateway", 10.0, 0.1, 300
-    ),
-    _numeric(
-        "gateway_connect_timeout_s",
-        "Gateway connection timeout (seconds)",
-        "Gateway",
-        5.0,
-        0.1,
-        300,
     ),
     # Seconds between attempts to load an App that failed. Also the Retry-After
     # a caller refused in the meantime is given.
@@ -280,22 +264,6 @@ SETTINGS: tuple[Setting, ...] = (
         ),
     ),
     Setting(
-        "site.gateway_url",
-        "Gateway website URL",
-        "Appearance",
-        "",
-        env="AGENT_WEB_GATEWAY_URL",
-        url=True,
-    ),
-    Setting(
-        "site.feature_rag",
-        "Docs assistant",
-        "Appearance",
-        False,
-        kind="boolean",
-        env="AGENT_WEB_FEATURE_RAG",
-    ),
-    Setting(
         "compute.cloudlab_api_url",
         "CloudLab API URL",
         "Compute",
@@ -328,58 +296,6 @@ SETTINGS: tuple[Setting, ...] = (
         120,
         30,
         300,
-    ),
-    Setting(
-        "gateway_base_url",
-        "Gateway API URL",
-        "Gateway",
-        "",
-        env="GATEWAY_BASE_URL",
-        url=True,
-        https_unless_private=True,
-    ),
-    Setting(
-        "gateway_dispatch_token",
-        "Gateway dispatch token",
-        "Gateway",
-        "",
-        env="GATEWAY_GRANT_DISPATCH_TOKEN",
-        secret=True,
-        minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
-        minimum_bytes_new_values_only=True,
-        description="A random credential of at least 32 bytes, the same value the Gateway holds. Sent only to the Gateway API URL: to change that URL, clear this first and enter it again afterwards, or save both together.",
-    ),
-    Setting(
-        "gateway_grant_base_path",
-        "Grant API path",
-        "Gateway",
-        "/internal/agent-grants",
-        env="GATEWAY_GRANT_BASE_PATH",
-        check=_grant_base_path,
-    ),
-    Setting(
-        "gateway_grant_binding_id",
-        "Grant binding ID",
-        "Gateway",
-        "",
-        env="GATEWAY_GRANT_BINDING_ID",
-    ),
-    Setting(
-        "gateway_authorize_url",
-        "Sign-in authorization URL",
-        "Sign-in",
-        "",
-        env="GATEWAY_AUTHORIZE_URL",
-        url=True,
-        https_unless_private=True,
-    ),
-    Setting(
-        "session_redirect_uri",
-        "Sign-in callback URL",
-        "Sign-in",
-        "",
-        env="AGENT_SESSION_REDIRECT_URI",
-        url=True,
     ),
     Setting("web_base_url", "Web app URL", "Sign-in", "", env="AGENT_WEB_BASE_URL", url=True),
     Setting(
@@ -521,24 +437,8 @@ SETTINGS: tuple[Setting, ...] = (
         secret=True,
         url=True,
     ),
-    Setting(
-        "oncall_user_id", "On-call service account", "Operations", "", env="AGENT_ONCALL_USER_ID"
-    ),
-    Setting(
-        "oncall_dispatch_token",
-        "On-call dispatch token",
-        "Operations",
-        "",
-        env="AGENT_ONCALL_DISPATCH_TOKEN",
-        secret=True,
-        minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
-        minimum_bytes_new_values_only=True,
-        description="A random credential of at least 32 bytes, the same value the alert relay sends. Empty opens nothing.",
-    ),
-    # How long a residency's lease lives between beats (design §7) and, since
-    # the lease and the thread-attributed grant are renewed by the same beat
-    # and revoked together (retained-session design §§3 and 6), the cap on how
-    # long an idle resident process keeps a live credential after its host goes
+    # How long a residency's lease lives between beats (design §7): the cap on
+    # how long an idle resident process keeps running after its host goes
     # quiet.
     _numeric(
         "residency_ttl_s",
@@ -562,11 +462,6 @@ SETTINGS: tuple[Setting, ...] = (
         86400,
     ),
     _numeric("max_attempts", "Maximum job attempts", "Operations", 3, 1, 20),
-    _numeric("grant_renewal_concurrency", "Concurrent grant renewals", "Operations", 16, 1, 128),
-    _numeric("ledger_refresh_concurrency", "Concurrent usage refreshes", "Operations", 4, 1, 128),
-    _numeric(
-        "ledger_refresh_timeout_s", "Usage refresh timeout (seconds)", "Operations", 15.0, 1, 120
-    ),
     # The longest an idle usage collector waits on its wake-up before looking
     # anyway.
     _numeric("ledger_idle_s", "Usage idle check interval (seconds)", "Operations", 30.0, 1, 300),
@@ -673,29 +568,21 @@ SETTINGS: tuple[Setting, ...] = (
         3600,
     ),
     _numeric("task_titles.max_chars", "Maximum task title length", "Task titles", 36, 8, 36),
-    _numeric(
-        "task_titles.input_max_chars", "Maximum title input length", "Task titles", 4000, 1, 4000
-    ),
-    _numeric(
-        "task_titles.timeout_seconds",
-        "Title request timeout (seconds)",
-        "Task titles",
-        10.0,
-        0.1,
-        120,
-    ),
-    _numeric(
-        "task_titles.total_timeout_seconds",
-        "Title generation time limit (seconds)",
-        "Task titles",
-        120.0,
-        1,
-        600,
-    ),
-    _numeric("task_titles.max_attempts", "Maximum title attempts", "Task titles", 5, 1, 5),
-    _numeric("task_titles.max_tokens", "Maximum title output tokens", "Task titles", 256, 16, 256),
 )
 MIGRATED_SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        "public_api_url",
+        "Public API URL",
+        "Sign-in",
+        "",
+        env="AGENT_PUBLIC_API_URL",
+        url=True,
+        description=(
+            "This API's public address, including any proxy prefix, such as "
+            "https://agent.example.com/api. MCP sign-in callbacks and compute node "
+            "registration are built from it unless they have their own address."
+        ),
+    ),
     Setting(
         "sandbox_archive.bucket",
         "Sandbox archive S3 bucket",
@@ -754,34 +641,6 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_PGADMIN_PUBLIC_URL",
         url=True,
         description="Optional public URL ending in /admin/agent/pgadmin. Empty derives it from the saved web base URL and /api/admin/agent/pgadmin.",
-    ),
-    Setting(
-        "gateway_issuer",
-        "Gateway identity issuer",
-        "Sign-in",
-        "",
-        env="GATEWAY_ISSUER",
-        check=_issuer,
-        description="Exact issuer signed by the Gateway. Once this database is bound, it cannot be changed here.",
-    ),
-    Setting(
-        "gateway_jwks_url",
-        "Gateway public keys URL",
-        "Sign-in",
-        "",
-        env="GATEWAY_JWKS_URL",
-        url=True,
-        https_unless_private=True,
-    ),
-    Setting(
-        "session_signing_secret",
-        "Session signing key",
-        "Security",
-        "",
-        env="AGENT_SESSION_SECRET",
-        secret=True,
-        minimum_bytes=32,
-        description="A random key of at least 32 bytes. Replacing it signs out existing browser sessions.",
     ),
     Setting(
         "control_signing_secret",
@@ -877,22 +736,10 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_MCP_ALLOW_PLAIN_HTTP",
         description="Allow unencrypted HTTP MCP connections. Takes effect for new MCP transports after restarting the MCP listener.",
     ),
-    Setting(
-        "default_model",
-        "Default model for new tasks",
-        "Execution",
-        "deepseek-v4-flash",
-        env="AGENT_DEFAULT_MODEL",
-        empty_env_imports=True,
-        description=(
-            "The model a new task starts on when its owner has not chosen one. A user's "
-            "pinned model beats their last used model, which beats this default. A model "
-            "the gateway does not offer to a user is skipped rather than forced, and if "
-            "this one is unavailable the task waits for the user to choose. Empty means "
-            "this deployment offers no default at all."
-        ),
-    ),
 )
+# Imported from the environment on first sight in an existing deployment, as
+# the settings above were: an upgraded deployment keeps its AGENT_SMTP_* mail.
+MIGRATED_SETTINGS += ACCOUNT_SETTINGS
 SETTINGS += MIGRATED_SETTINGS
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 SETTINGS_BY_STORAGE_KEY = {setting.storage_key: setting for setting in SETTINGS}
@@ -978,7 +825,6 @@ def _validate_relations(
         ("attachments.max_total_bytes", "attachments.max_user_bytes"),
         ("skills.max_skill_bytes", "skills.max_selection_bytes"),
         ("goals.wakeup_backoff_seconds", "goals.wakeup_backoff_max_seconds"),
-        ("task_titles.timeout_seconds", "task_titles.total_timeout_seconds"),
     ):
         if values[smaller] > values[larger]:
             message = (
@@ -1021,12 +867,7 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
     Only the changed keys are held to this registry. A value an earlier release
     saved and this one refuses must never block the update that repairs it,
     and the editor saves one key at a time. Stored credential encryption keys
-    stay stable. And the gateway URL cannot move away from the dispatch token
-    it was configured with: the token is write-only, but it is sent to
-    whatever URL is saved, so an update that changes the URL must also supply
-    the token again or clear it. A supplied secret is always fresh ciphertext
-    (Fernet's IV is random), so an encoded value equal to the previous one is a
-    token this update did not supply.
+    stay stable.
     """
     changed = {
         SETTINGS_BY_STORAGE_KEY[key].key
@@ -1039,22 +880,6 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
             raise ValueError(
                 f"{SETTINGS_BY_KEY[key].label} cannot be replaced or reset without re-encrypting stored credentials"
             )
-    # Compared with whatever the URL was, unset included, so clearing it and
-    # then naming a new host is the same move.
-    if (
-        after["gateway_base_url"]
-        and after["gateway_base_url"] != before["gateway_base_url"]
-        and after["gateway_dispatch_token"]
-        and encoded.get("gateway_dispatch_token") == previous.get("gateway_dispatch_token")
-    ):
-        url, token = (
-            SETTINGS_BY_KEY["gateway_base_url"].label,
-            SETTINGS_BY_KEY["gateway_dispatch_token"].label,
-        )
-        raise ValueError(
-            f"{token} is sent to {url}. To change {url}, clear {token} first and "
-            "enter it again afterwards, or save both in one update."
-        )
 
 
 def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
@@ -1149,9 +974,7 @@ def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, An
     """Build the editor response with write-only secret status."""
     values = _decode(encoded, [])
     locked = {
-        key
-        for key in ("gateway_issuer", "source_control_encryption_key", "compute_encryption_key")
-        if values[key]
+        key for key in ("source_control_encryption_key", "compute_encryption_key") if values[key]
     }
     return {
         "revision": revision,
@@ -1177,21 +1000,7 @@ def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
     if mounted_key and os.path.isfile(mounted_key) and os.access(mounted_key, os.R_OK):
         configured["github_app_private_key"] = True
     for key, label, required, fields in (
-        (
-            "sign_in",
-            "Gateway sign-in",
-            True,
-            (
-                "gateway_base_url",
-                "gateway_dispatch_token",
-                "gateway_issuer",
-                "gateway_jwks_url",
-                "gateway_authorize_url",
-                "session_redirect_uri",
-                "web_base_url",
-                "session_signing_secret",
-            ),
-        ),
+        ("sign_in", "Account mail links", True, ("web_base_url",)),
         (
             "execution",
             "Agent execution",
@@ -1314,6 +1123,32 @@ def setting_env(name: str, default: str | None = None) -> str | None:
     return manager_env(name, default)
 
 
+def public_api_url() -> str:
+    """This API's configured public base URL, without a trailing slash, or ``""``.
+
+    Read from the operator's ``AGENT_PUBLIC_API_URL`` only, never from request
+    headers. Anything other than an absolute HTTP(S) URL with no credentials,
+    query or fragment answers ``""``, so a caller treats it as unconfigured.
+    """
+    from urllib.parse import urlsplit
+
+    raw = (setting_env("AGENT_PUBLIC_API_URL") or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme not in {"https", "http"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    return raw
+
+
 def settings_environment() -> dict[str, str]:
     """Build a provider configuration mapping from bootstrap and saved settings."""
     result = manager_environment(os.environ)
@@ -1328,8 +1163,8 @@ def settings_environment() -> dict[str, str]:
 def weak_credentials() -> list[str]:
     """Name each configured credential shorter than :data:`MINIMUM_CREDENTIAL_BYTES`.
 
-    Names only; no value leaves this function. The signing key, the user
-    credential encryption key and the dispatch tokens are read from the
+    Names only; no value leaves this function. The signing key and the user
+    credential encryption key are read from the
     adopted snapshot, where a value saved before their floor existed may still
     be short. ``ADMIN_TOKEN`` is read from the process environment, the only
     place it lives: it is not refused, because a deployment's recovery door

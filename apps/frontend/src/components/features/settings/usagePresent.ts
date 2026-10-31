@@ -29,8 +29,9 @@ export function periodQuery(period: UsagePeriod): HistoryQuery {
   return PERIOD_QUERY[period];
 }
 
-export const CHART_METRICS = ['cost', 'tokens', 'running', 'cpu', 'memory'] as const;
-export type ChartMetric = (typeof CHART_METRICS)[number];
+export type ChartMetric = 'cost' | 'tokens' | 'running' | 'cpu' | 'memory';
+/** What the chart offers: not cost, which each owner's provider keeps. */
+export const CHART_METRICS: readonly ChartMetric[] = ['tokens', 'running', 'cpu', 'memory'];
 
 /** States in the order the summary names them; a zero count is left out. */
 export const STATE_ORDER: ContainerState[] = [

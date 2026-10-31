@@ -1,18 +1,11 @@
 // @vitest-environment jsdom
 
-// Sign-in starts at the control plane, and the browser's whole contribution is
-// a landing path.
+// Where sign-in returns the browser to, and how another account signs in.
 //
 // The prefix rule is what these cases are mostly about. `basePath` is read at
 // module scope from `process.env`, so each case re-imports the module with the
 // environment already set; `vi.resetModules()` is what makes that re-import
 // real rather than a cache hit.
-//
-// What is *not* here any more is as important as what is: there is no
-// `callbackUri`, no `buildAuthorizeUrl` and no PKCE, because the browser no
-// longer assembles the authorize URL or redeems the code. The redirect URI the
-// gateway matches is configured on the server (`AGENT_SESSION_REDIRECT_URI`),
-// where the browser cannot get it wrong.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -24,70 +17,10 @@ async function loadSignin(basePath: string | undefined, apiBase = '') {
   return import('./signin');
 }
 
-describe('signInUrl', () => {
-  const originalBasePath = process.env.NEXT_PUBLIC_BASE_PATH;
-  const originalApiBase = process.env.NEXT_PUBLIC_AGENT_API_URL;
-
-  afterEach(() => {
-    if (originalBasePath === undefined) delete process.env.NEXT_PUBLIC_BASE_PATH;
-    else process.env.NEXT_PUBLIC_BASE_PATH = originalBasePath;
-    if (originalApiBase === undefined) delete process.env.NEXT_PUBLIC_AGENT_API_URL;
-    else process.env.NEXT_PUBLIC_AGENT_API_URL = originalApiBase;
-    vi.resetModules();
-  });
-
-  it('points at the control plane, not the gateway', async () => {
-    const { signInUrl } = await loadSignin('', 'https://agents.example/api');
-
-    const url = new URL(signInUrl('/'));
-
-    expect(url.origin + url.pathname).toBe('https://agents.example/api/v1/session/login');
-    expect(url.searchParams.get('return_to')).toBe('/');
-  });
-
-  it('is same-origin when no control-plane origin is configured', async () => {
-    const { signInUrl } = await loadSignin('', '');
-
-    expect(signInUrl('/')).toBe('/v1/session/login?return_to=%2F');
-  });
-
-  it('carries the landing path with the base path stripped', async () => {
-    const { signInUrl } = await loadSignin('/agents', '');
-
-    const url = new URL(signInUrl('/agents/ajob_123'), 'https://agents.example');
-
-    expect(url.searchParams.get('return_to')).toBe('/ajob_123');
-  });
-
-  it('asks the gateway for its account chooser when switching accounts', async () => {
-    const { switchAccountUrl } = await loadSignin('/agents', '');
-
-    const url = new URL(switchAccountUrl('/agents/ajob_123', '01JUSER'), 'https://agents.example');
-
-    expect(url.searchParams.get('return_to')).toBe('/ajob_123');
-    expect(url.searchParams.get('prompt')).toBe('select_account');
-    expect(url.searchParams.get('login_hint')).toBe('01JUSER');
-  });
-
-  it('adds neither prompt nor hint to an ordinary sign-in', async () => {
-    const { signInUrl, switchAccountUrl } = await loadSignin('', '');
-
-    expect(signInUrl('/')).toBe('/v1/session/login?return_to=%2F');
-    expect(switchAccountUrl('/')).toBe('/v1/session/login?return_to=%2F&prompt=select_account');
-  });
-
-  it('refuses to carry an off-site landing path', async () => {
-    // `return_to` survives a round trip through the gateway, so it is
-    // attacker-influenced. The server checks this too — that copy is the one
-    // that counts — but sending it is already wrong.
-    const { signInUrl } = await loadSignin('', '');
-
-    for (const hostile of ['//evil.example/x', 'https://evil.example/x']) {
-      expect(new URL(signInUrl(hostile), 'https://x.example').searchParams.get('return_to')).toBe(
-        '/',
-      );
-    }
-  });
+afterEach(() => {
+  delete process.env.NEXT_PUBLIC_BASE_PATH;
+  delete process.env.NEXT_PUBLIC_AGENT_API_URL;
+  vi.resetModules();
 });
 
 // `safeReturnTo` strips `basePath` because it hands a path to a server that
@@ -128,5 +61,19 @@ describe('safeReturnTo', () => {
     expect(safeReturnTo('https://evil.example/x')).toBe('/');
     expect(safeReturnTo(undefined)).toBe('/');
     expect(safeReturnTo('')).toBe('/');
+  });
+});
+
+describe('local account navigation', () => {
+  it('rejects backslashes and control characters before direct navigation', async () => {
+    const { safeReturnTo } = await loadSignin('');
+    for (const value of ['/\\evil.test', '/\n/evil.test', '/\t/evil.test'])
+      expect(safeReturnTo(value)).toBe('/');
+  });
+  it('another account signs in on the login page, returning here', async () => {
+    const { accountSignInUrl } = await loadSignin('/agents');
+    expect(accountSignInUrl('/agents/job')).toBe('/agents/login?return_to=%2Fjob');
+    expect(accountSignInUrl(null)).toBe('/agents/login?return_to=%2F');
+    expect(accountSignInUrl('//evil.example/x')).toBe('/agents/login?return_to=%2F');
   });
 });

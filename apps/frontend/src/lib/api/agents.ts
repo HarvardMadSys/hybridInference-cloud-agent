@@ -140,21 +140,13 @@ export {
 } from './agents/resources';
 
 export type {
-  AgentLedgerStatus,
-  AgentLedgerTotalsApi,
-  AgentLedgerUnknownRowsApi,
-  AgentAttemptUsageApi,
+  AgentUsageStatus,
+  AgentUsageTotalsApi,
+  AgentUsageUnknownRowsApi,
   AgentJobUsageApi,
-  AgentMessageRequestApi,
-  ModelTtftApi,
 } from './agents/usage';
 
-export {
-  getAgentMessageRequest,
-  getAgentJobUsage,
-  getAgentThreadModelTtft,
-  refreshAgentJobUsage,
-} from './agents/usage';
+export { getAgentJobUsage } from './agents/usage';
 
 export type {
   AgentJobFileStatus,

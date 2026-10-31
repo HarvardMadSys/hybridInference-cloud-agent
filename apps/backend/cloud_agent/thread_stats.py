@@ -62,15 +62,24 @@ _ERROR = "error"
 _FIRST_OUTPUT_KINDS = frozenset({_MESSAGE, _THINKING, _TOOL_USE})
 
 #: Token-count key spellings seen across runtimes. Claude reports the
-#: Anthropic wire shape verbatim; pi's adapter normalizes to its own names;
-#: codex has no verified shape yet, so its keys are accepted defensively
-#: rather than assumed. An unrecognized shape yields ``None`` (see the
-#: module docstring's second property), never a partial sum.
+#: Anthropic wire shape verbatim; pi's adapter and the Codex driver (from
+#: Codex's ``thread/tokenUsage/updated``) normalize to the second spelling.
+#: An unrecognized shape yields ``None`` (see the module docstring's second
+#: property), never a partial sum.
 _INPUT_KEYS = ("input_tokens", "input_token_count", "prompt_tokens")
 _OUTPUT_KEYS = ("output_tokens", "output_token_count", "completion_tokens")
 _CACHE_READ_KEYS = ("cache_read_input_tokens", "cache_read_tokens", "cached_tokens")
 _CACHE_WRITE_KEYS = ("cache_creation_input_tokens", "cache_write_tokens")
-TOKEN_KEY_GROUPS = (_INPUT_KEYS, _OUTPUT_KEYS, _CACHE_READ_KEYS, _CACHE_WRITE_KEYS)
+#: Reasoning tokens, which only Codex reports. They are part of output, kept
+#: beside it and never added to it.
+_REASONING_KEYS = ("reasoning_output_tokens",)
+TOKEN_KEY_GROUPS = (
+    _INPUT_KEYS,
+    _OUTPUT_KEYS,
+    _CACHE_READ_KEYS,
+    _CACHE_WRITE_KEYS,
+    _REASONING_KEYS,
+)
 
 #: Every payload key the summaries here read: a model call's usage and its
 #: identity, how a tool call pairs with its result and whether it failed, and
@@ -141,7 +150,7 @@ class ThreadStats:
 #: Stored attempt rollups name their reducer. A future semantic change bumps
 #: this value so an unchanged event stream is recomputed instead of serving a
 #: result written by an older reducer.
-ATTEMPT_ROLLUP_VERSION = 1
+ATTEMPT_ROLLUP_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -164,6 +173,8 @@ class AttemptStatsRollup:
     output_tokens: int | None
     cache_read_tokens: int | None
     cache_write_tokens: int | None
+    #: Of ``output_tokens``, those the agent reported as reasoning.
+    reasoning_tokens: int | None
     saw_usage: bool
     produced_text: bool
     rate_tokens: int
@@ -282,6 +293,7 @@ class AttemptStatsAccumulator:
                         ("output_tokens", self._provisional_usage.output_tokens),
                         ("cache_read_input_tokens", self._provisional_usage.cache_read_tokens),
                         ("cache_creation_input_tokens", self._provisional_usage.cache_write_tokens),
+                        ("reasoning_output_tokens", self._provisional_usage.reasoning_tokens),
                     )
                     if value is not None
                 }
@@ -313,6 +325,7 @@ class AttemptStatsAccumulator:
             output_tokens=totals.output_tokens,
             cache_read_tokens=totals.cache_read_tokens,
             cache_write_tokens=totals.cache_write_tokens,
+            reasoning_tokens=totals.reasoning_tokens,
             saw_usage=totals.saw_usage,
             produced_text=self.produced_text,
             rate_tokens=output if contributes_rate and output is not None else 0,
@@ -413,6 +426,7 @@ def attempt_rollup_payload(rollup: AttemptStatsRollup) -> dict[str, Any]:
         "output_tokens": rollup.output_tokens,
         "cache_read_tokens": rollup.cache_read_tokens,
         "cache_write_tokens": rollup.cache_write_tokens,
+        "reasoning_tokens": rollup.reasoning_tokens,
         "saw_usage": rollup.saw_usage,
         "produced_text": rollup.produced_text,
         "rate_tokens": rollup.rate_tokens,
@@ -445,6 +459,7 @@ def attempt_rollup_from_payload(
         output_tokens=_cache_optional_int(payload, "output_tokens"),
         cache_read_tokens=_cache_optional_int(payload, "cache_read_tokens"),
         cache_write_tokens=_cache_optional_int(payload, "cache_write_tokens"),
+        reasoning_tokens=_cache_optional_int(payload, "reasoning_tokens"),
         saw_usage=_cache_bool(payload, "saw_usage"),
         produced_text=_cache_bool(payload, "produced_text"),
         rate_tokens=_cache_int(payload, "rate_tokens"),
@@ -573,6 +588,7 @@ class _TokenTotals:
         self.output_tokens: int | None = None
         self.cache_read_tokens: int | None = None
         self.cache_write_tokens: int | None = None
+        self.reasoning_tokens: int | None = None
 
     def add(self, usage: Mapping[str, Any] | None) -> None:
         """Fold one usage mapping in, ignoring the keys it does not carry."""
@@ -583,6 +599,7 @@ class _TokenTotals:
             ("output_tokens", _first_int(usage, _OUTPUT_KEYS)),
             ("cache_read_tokens", _first_int(usage, _CACHE_READ_KEYS)),
             ("cache_write_tokens", _first_int(usage, _CACHE_WRITE_KEYS)),
+            ("reasoning_tokens", _first_int(usage, _REASONING_KEYS)),
         )
         for field, value in values:
             if value is None:
@@ -630,6 +647,24 @@ def normalized_runtime_input_tokens(
             return None
         total += sum(value for value in values if value is not None)
     return total
+
+
+def reported_token_totals(events: Iterable[Mapping[str, Any]]) -> dict[str, int | None]:
+    """One job's reported counters, each model call once, as ``summarize_thread`` counts them.
+
+    Every counter is ``None`` until some call reported it; reasoning is part of
+    output and is not added to it.
+    """
+    totals = _TokenTotals()
+    for usage in _distinct_usage(sorted(events, key=_event_sort_key)):
+        totals.add(usage)
+    return {
+        "input_tokens": totals.input_tokens,
+        "output_tokens": totals.output_tokens,
+        "cache_read_tokens": totals.cache_read_tokens,
+        "cache_write_tokens": totals.cache_write_tokens,
+        "reasoning_tokens": totals.reasoning_tokens,
+    }
 
 
 def _distinct_usage(events: Sequence[Mapping[str, Any]]) -> Iterable[Mapping[str, Any]]:
@@ -811,9 +846,8 @@ def _first_output_at(ordered: Sequence[Mapping[str, Any]]) -> datetime | None:
 def _usage_of(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """Return the usage mapping an event carries, if it carries one.
 
-    Three runtimes put it in three places: claude attaches it to whichever
-    assistant event it produced, pi emits a dedicated ``usage`` event, and
-    codex hangs it off the terminal ``lifecycle`` record.
+    Claude attaches it to whichever assistant event it produced; pi and the
+    Codex driver emit a dedicated ``usage`` event per model call.
     """
     payload = _payload(event)
     event_type = event.get("event_type")
@@ -868,6 +902,7 @@ def _rollup_usage(rollup: AttemptStatsRollup) -> dict[str, int]:
         "output_tokens": rollup.output_tokens,
         "cache_read_input_tokens": rollup.cache_read_tokens,
         "cache_creation_input_tokens": rollup.cache_write_tokens,
+        "reasoning_output_tokens": rollup.reasoning_tokens,
     }
     return {key: value for key, value in values.items() if value is not None}
 

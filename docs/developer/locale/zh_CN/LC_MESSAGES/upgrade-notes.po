@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 04:23-0400\n"
+"POT-Creation-Date: 2026-10-30 22:44-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0106_user_model_connections`. The supported deployment scripts run "
+"`0108_local_account_parity`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,9 +46,9 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0106_user_model_connections`。官方支持的部署脚本会在替换 API "
-"之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
-"#applying-migrations-that-are-not-backwards-compatible)。"
+"`0108_local_account_parity`。官方支持的部署脚本会在替换 API "
+"之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md"
+"#applying-migrations-that-are-not-backwards-compatible)中。"
 
 #: ../developer/upgrade-notes.md:18
 msgid ""
@@ -60,10 +60,144 @@ msgstr ""
 "Settings](operations.md#admin-settings)。"
 
 #: ../developer/upgrade-notes.md:22
+msgid "Independent accounts cutover"
+msgstr "独立账号切换"
+
+#: ../developer/upgrade-notes.md:24
+msgid ""
+"This release removes HybridInference Gateway sign-in, admission and "
+"inference. Cloud Agent keeps its own accounts, and every task runs on a "
+"model connection its owner adds with their own provider key. A database "
+"from an earlier release is keyed by Gateway owner IDs that no account "
+"holds, so it is not upgraded, converted or mapped: the release starts on "
+"a **new, empty database**, and the old one is kept untouched as the "
+"archive and rollback source. People register again, apply through the "
+"waiting list and add their model connections. Nothing migrates old tasks,"
+" connections or identities."
+msgstr ""
+"本版本移除了 HybridInference Gateway 的登录、准入和推理。Cloud Agent "
+"保留自己的账号，每个任务都运行在其所有者用自己的服务商密钥添加的模型连接上。早期版本的数据库以 Gateway 所有者 ID 为键，而这些 ID "
+"不属于任何账号，因此不会被升级、转换或映射：本版本从一个**新的空数据库**开始，旧数据库原样保留，作为归档和回滚来源。用户需要重新注册、通过等候名单申请，并重新添加模型连接。旧的任务、连接和身份都不会迁移。"
+
+#: ../developer/upgrade-notes.md:33
+msgid ""
+"**Archive the old deployment.** Drain it, stop every writer, and take a "
+"custom-format `pg_dump` of the old Agent database with its checksum, the "
+"old configuration and root keys. Keep the old database itself; do not "
+"delete, downgrade or rebind it. Optionally confirm it is what this "
+"release refuses, read-only:"
+msgstr ""
+"**归档旧部署。** 排空它，停止所有写入方，对旧的 Agent 数据库做一份自定义格式的 "
+"`pg_dump`，连同校验和、旧配置和根密钥一起保存。保留旧数据库本身；不要删除、降级或重新绑定它。可以选择以只读方式确认它正是本版本会拒绝的数据库："
+
+#: ../developer/upgrade-notes.md:43
+msgid "It exits non-zero, names this runbook, and changes nothing."
+msgstr "它以非零状态退出，指出本操作手册，并且不做任何改动。"
+
+#: ../developer/upgrade-notes.md:45
+msgid ""
+"**Create a new, empty Agent database** and point `AGENT_DATABASE_URL` at "
+"it. The same check must now report an empty database that will be bound "
+"on first start. `deploy/control-plane/deploy.sh` runs it read-only before"
+" it migrates, and stops if it refuses."
+msgstr ""
+"**新建一个空的 Agent 数据库**，并让 `AGENT_DATABASE_URL` "
+"指向它。同一检查此时必须报告这是一个空数据库，会在首次启动时绑定。`deploy/control-plane/deploy.sh` "
+"会在迁移之前以只读方式运行它，检查拒绝时就停止。"
+
+#: ../developer/upgrade-notes.md:50
+msgid ""
+"**Give the deployment its own secrets**, none of them shared with the "
+"Gateway or with another environment: `AGENT_LOCAL_SESSION_SECRET`, "
+"`AGENT_SETTINGS_ENCRYPTION_KEY`, `AGENT_CONTROL_TOKEN_SECRET`, "
+"`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` (each at least 32 random bytes, "
+"`openssl rand -hex 32`) and a separate `ADMIN_TOKEN`. Hosts enroll again "
+"with new enrollment tokens."
+msgstr ""
+"**为部署配置它自己的密钥**，都不与 Gateway "
+"或其他环境共用：`AGENT_LOCAL_SESSION_SECRET`、`AGENT_SETTINGS_ENCRYPTION_KEY`、`AGENT_CONTROL_TOKEN_SECRET`、`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`（每个至少"
+" 32 个随机字节，`openssl rand -hex 32`），以及一个单独的 `ADMIN_TOKEN`。主机用新的注册令牌重新注册。"
+
+#: ../developer/upgrade-notes.md:57
+msgid ""
+"**Remove every Gateway variable.** The control plane and `deploy.sh` "
+"refuse `AGENT_AUTH_MODE`, `GATEWAY_*` (issuer, JWKS, authorize, base URL,"
+" grant path, binding and dispatch token), `IDENTITY_*`, "
+"`AGENT_SESSION_REDIRECT_URI`, `AGENT_GATEWAY_URL`, "
+"`AGENT_GATEWAY_SSH_HOST`, `AGENT_WEB_GATEWAY_URL`, "
+"`AGENT_WEB_FEATURE_RAG` and the on-call dispatch variables, and a host "
+"refuses `AGENT_GATEWAY_URL`, `AGENT_GATEWAY_HOSTNAME` and the inference "
+"tunnel's `AGENT_TUNNEL_*`. Set `AGENT_WEB_BASE_URL` (the base of every "
+"emailed link) and `AGENT_PUBLIC_API_URL` (this API's public address, "
+"which `AGENT_SESSION_REDIRECT_URI` used to give)."
+msgstr ""
+"**删除所有 Gateway 变量。** 控制平面和 `deploy.sh` 会拒绝 "
+"`AGENT_AUTH_MODE`、`GATEWAY_*`（issuer、JWKS、授权页、基础 "
+"URL、授权路径、绑定和分发令牌）、`IDENTITY_*`、`AGENT_SESSION_REDIRECT_URI`、`AGENT_GATEWAY_URL`、`AGENT_GATEWAY_SSH_HOST`、`AGENT_WEB_GATEWAY_URL`、`AGENT_WEB_FEATURE_RAG`"
+" 以及值班分发变量；主机会拒绝 `AGENT_GATEWAY_URL`、`AGENT_GATEWAY_HOSTNAME` 和推理隧道的 "
+"`AGENT_TUNNEL_*`。设置 `AGENT_WEB_BASE_URL`（所有邮件链接的基础地址）和 "
+"`AGENT_PUBLIC_API_URL`（本 API 的公开地址，以前由 `AGENT_SESSION_REDIRECT_URI` 提供）。"
+
+#: ../developer/upgrade-notes.md:68
+msgid ""
+"**Mail.** An existing SMTP transport, such as the one HybridInference "
+"sends with, may be reused: set `AGENT_SMTP_HOST`, `AGENT_SMTP_PORT` "
+"(587), `AGENT_SMTP_SECURITY=starttls`, `AGENT_SMTP_USERNAME`, "
+"`AGENT_SMTP_PASSWORD` and `AGENT_SMTP_FROM` from the operator's secret "
+"store, never from the repository. Only the transport is shared: every "
+"link in a message is built from `AGENT_WEB_BASE_URL` and signed with this"
+" deployment's own `AGENT_LOCAL_SESSION_SECRET`, and the account data is "
+"this database's."
+msgstr ""
+"**邮件。** 可以复用现有的 SMTP 传输，例如 HybridInference 发信用的那一个：从运维人员的密钥存储中设置 "
+"`AGENT_SMTP_HOST`、`AGENT_SMTP_PORT`（587）、`AGENT_SMTP_SECURITY=starttls`、`AGENT_SMTP_USERNAME`、`AGENT_SMTP_PASSWORD`"
+" 和 `AGENT_SMTP_FROM`，绝不写进仓库。共享的只是传输：邮件中的每个链接都基于 `AGENT_WEB_BASE_URL` "
+"构造，并用本部署自己的 `AGENT_LOCAL_SESSION_SECRET` 签名，账号数据属于本数据库。"
+
+#: ../developer/upgrade-notes.md:77
+msgid ""
+"**Initial administrators.** List the verified addresses of the people who"
+" administer the deployment in `AGENT_LOCAL_ADMIN_EMAILS` (`admin-"
+"one@example.org,admin-two@example.org` are placeholders; production names"
+" exactly its two administrators, staging its own list). The list, like "
+"every account setting, is imported once, at the first start; after that "
+"it is edited under **Admin → Settings → Accounts**, not in the "
+"environment. A listed account is approved and made an administrator only "
+"once its address is proven, by a link sent to it. There is no grant to "
+"the first person who signs up. Alternatively, or for the very first one, "
+"exchange the setup code the control plane logs at startup "
+"(`agent_local_setup_pending`) at `/setup/administrator`, or use `python "
+"-m cloud_agent.accounts.bootstrap_admin` ([first administrator](local-"
+"accounts.md#the-first-administrator))."
+msgstr "**初始管理员。** 把负责管理本部署的人员已验证的邮箱地址列在 `AGENT_LOCAL_ADMIN_EMAILS` 中（`admin-one@example.org,admin-two@example.org` 只是占位符；生产环境只列出它的两位管理员，预发环境使用自己的名单）。这个名单和所有账号设置一样，只在首次启动时导入一次；此后在 **管理 → 设置 → 账号** 中编辑，而不是在环境变量中。列出的账号只有在其地址被证明之后——即点击了发到该地址的链接——才会被批准并成为管理员。第一个注册的人不会得到任何授权。另外，或者对于第一位管理员，可以在 `/setup/administrator` 用控制平面启动时记录的设置代码（`agent_local_setup_pending`）兑换，或使用 `python -m cloud_agent.accounts.bootstrap_admin`（[首个管理员](local-accounts.md#the-first-administrator)）。"
+
+#: ../developer/upgrade-notes.md:91
+msgid ""
+"**Deploy and verify.** Run the usual deployment. Then: sign-up sends a "
+"verification link at `AGENT_WEB_BASE_URL`; an administrator approves an "
+"application; the applicant adds a model connection and runs a task. Model"
+" connections are on by default. To hold new turns until every host and "
+"control-plane replica runs this release, set "
+"`AGENT_MODEL_CONNECTIONS_ENABLED=false` before deploying and unset it "
+"once they all do."
+msgstr "**部署并验证。** 按常规流程部署。然后确认：注册会发送指向 `AGENT_WEB_BASE_URL` 的验证链接；管理员能批准申请；申请人能添加模型连接并运行任务。模型连接默认开启。如果希望等每台主机和每个控制平面副本都运行本版本后再接受新轮次，就在部署前设置 `AGENT_MODEL_CONNECTIONS_ENABLED=false`，等它们全部升级后再取消设置。"
+
+#: ../developer/upgrade-notes.md:99
+msgid ""
+"**Rollback.** Before the new deployment has taken writes that matter, "
+"stop it and redeploy the previous release against the archived database "
+"and configuration, which were never changed. After new writes, keep the "
+"new database: it holds accounts the old release cannot read, and the two "
+"databases are never merged."
+msgstr ""
+"**回滚。** "
+"在新部署还没有产生重要的写入之前，停止它，并针对从未改动过的归档数据库和配置重新部署上一个版本。有了新的写入之后，请保留新数据库：其中的账号旧版本无法读取，两个数据库也永远不会合并。"
+
+#: ../developer/upgrade-notes.md:105
 msgid "Conversation history read contract"
 msgstr "对话历史读取协议"
 
-#: ../developer/upgrade-notes.md:24
+#: ../developer/upgrade-notes.md:107
 #, python-brace-format
 msgid ""
 "This release changes `GET /v1/agent/jobs/{job_id}/thread` to "
@@ -80,7 +214,7 @@ msgstr ""
 " 条轮次或消息记录，`limit` 最大为 100，序列化响应最多为 512 KiB。`current_job_id` "
 "独立于分页标识最新轮次；设置 `anchor=true` 则从选中的 job 开始读取。"
 
-#: ../developer/upgrade-notes.md:32
+#: ../developer/upgrade-notes.md:115
 msgid ""
 "Pass `next_cursor` as `cursor` to load older history explicitly. For "
 "refreshes, retain older pages and pass `sync_cursor` as `after`; follow "
@@ -96,7 +230,7 @@ msgstr ""
 "null。这样会重读末尾两个仍可能变化的轮次，避免尚未提交的写入落在新分配的 ID 之前而被漏掉。消息按 ID 合并，job 按 ID "
 "和版本合并，保留轮次顺序，并将每轮的起始提示放在回复和轮中消息之前。每次请求都会检查游标属于当前所有者且对话未被删除。"
 
-#: ../developer/upgrade-notes.md:40
+#: ../developer/upgrade-notes.md:123
 #, python-brace-format
 msgid ""
 "Messages longer than 4,096 Unicode characters carry `content_truncated` "
@@ -118,11 +252,11 @@ msgstr ""
 "/v1/agent/threads/{thread_id}/messages`；省略队列快照不代表队列为空。这只改变面向所有者的读取 "
 "API，不影响运行时会话恢复或转录回放。"
 
-#: ../developer/upgrade-notes.md:51
+#: ../developer/upgrade-notes.md:134
 msgid "Recent migrations"
 msgstr "近期迁移"
 
-#: ../developer/upgrade-notes.md:53
+#: ../developer/upgrade-notes.md:136
 msgid "Newest first."
 msgstr "新的排在前面。"
 
@@ -133,6 +267,43 @@ msgstr "迁移"
 #: ../developer/upgrade-notes.md
 msgid "What it changes"
 msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0107_local_accounts`"
+msgstr "`0107_local_accounts`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Creates the tables accounts use: accounts, password sign-in, waiting-list"
+" admissions, server-side sessions, emailed tokens, abuse counters, access"
+" terminations and the account identity marker. It changes no existing row"
+" and locks no existing table. A downgrade drops them, and with them every"
+" account."
+msgstr "创建账号所用的表：账号、密码登录、等候名单准入、服务器端会话、邮件令牌、滥用计数、访问终止以及账号身份标记。它不修改任何现有行，也不锁定任何现有表。降级会删除这些表，所有账号也随之删除。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0108_local_account_parity`"
+msgstr "`0108_local_account_parity`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Local accounts only. Splits `agent_local_password_logins` into sign-in "
+"identities (email, login name, phone) and optional password credentials, "
+"carrying every account over with its verification time and hash (a "
+"verified email is recorded as verified by its link, the only way "
+"`0107_local_accounts` had); adds the access view every SQL gate reads, "
+"the `deleted` account state with the account's name, note, language and "
+"sign-in and deletion times, phone codes, browser sessions, sign-in "
+"events, the signup domain list, first-run setup and administrator mail to"
+" accounts. It touches only the account tables. A downgrade restores the "
+"email-and-password table and drops the new tables, with the sign-in "
+"events and mail history in them; it refuses while any account signs in "
+"some other way or is deleted, rather than dropping that account."
+msgstr ""
+"仅涉及账号。把 `agent_local_password_logins` "
+"拆分为登录身份（邮箱、登录名、手机号）和可选的密码凭据，把每个账号连同其验证时间和哈希一并迁移过来（已验证的邮箱记录为通过链接验证，这是 "
+"`0107_local_accounts` 唯一的方式）；新增每个 SQL 闸门都读取的访问视图、`deleted` "
+"账号状态及账号的名称、备注、语言、登录和删除时间，以及手机验证码、浏览器会话、登录事件、注册域名列表、首次设置和发给账号的管理员邮件。它只涉及账号表。降级会恢复邮箱加密码的表并删除新表，连同其中的登录事件和邮件历史；只要有账号通过其他方式登录或已被删除，降级就会拒绝，而不是删除该账号。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0106_user_model_connections`"
@@ -148,27 +319,13 @@ msgid ""
 "`agent_model_connection_residencies` table binding a resident member's "
 "process to one connection revision for one residency generation (a "
 "separate table, so a running previous release's prepared statements over "
-"the membership table keep working). Nothing is rewritten, and every "
-"existing turn reads as the Gateway's (NULL). The feature stays off until "
-"`AGENT_MODEL_CONNECTIONS_ENABLED` is set, which needs every host and "
-"control-plane replica on this release first. A downgrade refuses while "
-"any connection exists, or any turn, waiting message or resident member "
-"names one, finished conversations included, because without the columns "
-"they would continue on the Gateway ([owner model "
-"connections](operations.md#owner-model-connections))."
-msgstr ""
-"为所有者自己的推理端点（Chat Completions、Responses "
-"或 Anthropic Messages）新增 `agent_model_connections`、"
-"`agent_model_connection_checks` 和 `agent_model_connection_scan_keys` "
-"三张表，新增可为空的来源列 `agent_jobs.model_connection_id` "
-"和 `agent_pending_messages.model_connection_id`，"
-"并新增单独的 `agent_model_connection_residencies` "
-"表，把驻留成员的进程在一个驻留代次内绑定到一个连接修订版本（单独建表，是为了让仍在运行的上一版本针对成员表的预编译语句继续可用）"
-"。不改写任何行，已有的轮次都读作网关轮次（NULL）。在设置 `AGENT_MODEL_CONNECTIONS_ENABLED` "
-"之前该功能保持关闭，而设置它之前，每台主机和每个控制平面副本都必须先运行本次发布。"
-"只要还存在任何连接，或者有任何轮次、等待中的消息或驻留成员指向某个连接（包括已结束的会话）"
-"，降级就会拒绝执行，因为没有这些列，它们会在网关上继续运行（见[所有者模型连接](operations.md#owner-model-connections)"
-"）。"
+"the membership table keep working). Nothing is rewritten. Connections are"
+" admitted unless `AGENT_MODEL_CONNECTIONS_ENABLED` is set to `0`, `false`"
+" or `no`. A downgrade refuses while any connection exists, or any turn, "
+"waiting message or resident member names one, finished conversations "
+"included ([owner model connections](operations.md#owner-model-"
+"connections))."
+msgstr "新增 `agent_model_connections`、`agent_model_connection_checks` 和 `agent_model_connection_scan_keys` 三张表，用于所有者自己的推理端点（Chat Completions、Responses 或 Anthropic Messages）；新增可空的来源列 `agent_jobs.model_connection_id` 和 `agent_pending_messages.model_connection_id`；以及单独的 `agent_model_connection_residencies` 表，把常驻成员的进程绑定到某一 residency 代次下的一个连接修订（单独成表，以便正在运行的上一版本针对成员表的预编译语句继续有效）。不改写任何数据。除非 `AGENT_MODEL_CONNECTIONS_ENABLED` 设为 `0`、`false` 或 `no`，否则连接都会被准入。只要存在任何连接，或任何轮次、等待中的消息或常驻成员引用了某个连接（包括已结束的对话），降级就会拒绝（[所有者模型连接](operations.md#owner-model-connections)）。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0105_job_event_usage_summary`"
@@ -424,6 +581,11 @@ msgid ""
 "transaction cannot run a concurrent build. Changes no row. A downgrade "
 "drops the index concurrently; runs already claimed stay claimed."
 msgstr ""
+"以并发方式在 `agent_environment_runs` 上建立部分索引，只包含仍在排队等待 Host 认领的运行。空闲且支持环境的 "
+"Host 每隔几秒认领一次，prebuild 维护过程也会重复扫描；没有这个索引时，每次认领都会读取该表全部的测试和 prebuild 历史，而自"
+" `0078` 起没有任何部分索引覆盖这些查询。建索引时读取运行历史，不会阻塞正在运行的 API "
+"的插入；中断的构建会留下无效索引，下一次运行会删除并重建。离线 SQL "
+"则直接建立索引，因为转换事务中不能执行并发构建。不修改任何行。降级会以并发方式删除索引；已被认领的运行保持认领状态。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0090_user_model_preferences`"
@@ -770,25 +932,23 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:102
+#: ../developer/upgrade-notes.md:187
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
-"migrations-that-are-not-backwards-compatible). A database still stamped "
-"with the retired pre-2026-09-10 chain cannot be upgraded directly; see "
-"[preserving an old-chain database](operations.md#preserving-an-old-chain-"
-"database)."
+"migrations-that-are-not-backwards-compatible). A database from before the"
+" independent-accounts release, on either chain, is not upgraded; see [the"
+" cutover](#independent-accounts-cutover)."
 msgstr ""
-"更早的、需要停机维护窗口的修订，列在[执行不向后兼容的迁移](operations.md#applying-migrations-that-"
-"are-not-backwards-compatible)里。如果数据库还标记着 2026-09-10 "
-"之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
-"database)。"
+"需要维护窗口的较早修订列在[应用不向后兼容的迁移](operations.md#applying-migrations-that-are-not-"
+"backwards-compatible)中。独立账号版本之前的数据库，无论处于哪条迁移链，都不会被升级；见[切换说明"
+"](#independent-accounts-cutover)。"
 
-#: ../developer/upgrade-notes.md:108
+#: ../developer/upgrade-notes.md:192
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:110
+#: ../developer/upgrade-notes.md:194
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"

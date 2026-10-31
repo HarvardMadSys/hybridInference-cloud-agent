@@ -155,13 +155,14 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
-    "ledger_task",
     "capacity_task",
     "agent_memory_task",
     "queue_monitor_task",
     "publish_task",
     "profiling_policy_task",
     "compute_resource_task",
+    "account_access_task",
+    "account_broadcast_task",
     "notification_listener_task",
 )
 
@@ -213,7 +214,6 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
             store,
             credential_provider=credential_provider,
             github_app=app.state.source_control.github,
-            grants=app.state.grants,
             http=app.state.http,
             wake=getattr(app.state, "background_wake", None),
         ),
@@ -363,7 +363,7 @@ async def _shutdown_lifespan(  # noqa: PLR0912 complexity baseline, #771
             _BACKGROUND_TASKS.discard(task)
     await _invoke(close_host, errors)
     # Close what was opened, innermost first: the per-sandbox-manager pools, the
-    # GitHub App's own client, then the shared gateway pool.
+    # GitHub App's own client, then the shared outbound pool.
     await _invoke(close_sandbox_manager_clients, errors)
     source_control = getattr(app.state, "source_control", None)
     if source_control is not None:
@@ -395,11 +395,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     import httpx
 
+    from cloud_agent.accounts.config import refuse_retired_configuration
     from cloud_agent.application.profiling_control import ProfilingControlService
     from cloud_agent.capacity_history import prune_host_capacity_history
-    from cloud_agent.gateway import GatewayClient
-    from cloud_agent.grants import GrantClient, RenewalSchedule
-    from cloud_agent.ledger import collect_usage_snapshots
     from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.mcp.runtime import close_host, maintain_host_sessions
     from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
@@ -409,12 +407,14 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.settings import (
         initialize_settings,
         reset_settings,
-        setting_env,
         synchronize_settings,
     )
     from cloud_agent.storage.assembly import Storage
     from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
 
+    # Before the database is touched at all: a deployment still configured for
+    # the removed Gateway integration stops here, with the variables named.
+    refuse_retired_configuration()
     dsn = os.environ.get(ENV_DATABASE_URL, "")
     if not dsn:
         raise RuntimeError(f"{ENV_DATABASE_URL} must be set")
@@ -433,62 +433,47 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # Schema is Alembic's. There is no initialize step to run: the store's
         # no-op one went with the store, and the DDL and backfills it used to
         # carry have been migrations since 0001.
-        from cloud_agent.identity_namespace import ensure_gateway_namespace
+        from cloud_agent.bootstrap.identity import (
+            account_tasks,
+            attach_owner_directory,
+            bind_identity_source,
+        )
 
-        # An empty deployment must remain reachable through recovery-token setup.
-        # A recorded foreign namespace still refuses startup before workers run.
-        issuer = (setting_env("GATEWAY_ISSUER") or "").strip() or None
-        app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
+        # A database whose owners are not this service's accounts refuses
+        # startup before any worker runs.
+        await bind_identity_source(pool)
 
         app.state.storage = storage
         # A task this process does not start stays None.
         for name in _SHUTDOWN_TASK_ATTRS:
             setattr(app.state, name, None)
         _spawn(app, "settings_task", synchronize_settings(storage.settings))
-        # One pool, shared by both gateway clients. Each call used to build its own
-        # client and pay a connect — and a TLS handshake, where the gateway is
-        # behind TLS — and admission is not an occasional call: `require_agent_owner`
-        # is a dependency of every owner route, terminal input and resize included.
-        # Pull-request titles, web search, draft pull requests and CloudLab borrow
-        # it for the same reason, each at a bounded rate. Thread titles and prompt
-        # rewrites do not: an owner sets those off, a model call holds its
-        # connection for the whole answer, and a burst of them could leave
-        # admission and grant calls waiting for one of this pool's hundred
-        # connections. Every borrower passes its own deadline per request, so
-        # this one carries no default timeout of its own.
+        # One outbound pool. Draft pull requests, web search, the MCP catalog and
+        # CloudLab borrow it, each at a bounded rate, rather than each paying a
+        # connect and a TLS handshake per call. Every borrower passes its own
+        # deadline per request, so this one carries no default timeout of its
+        # own.
         #
         # It keeps no cookies. A cookie one answer set would go out with every
-        # later request to that host, and these requests carry owners' grants and
-        # repositories' tokens; the per-call clients they replaced kept none.
+        # later request to that host, and these requests carry repositories'
+        # tokens; the per-call clients they replaced kept none.
         #
-        # Idle connections still expire at httpx's five seconds: no upstream here
-        # documents a longer idle timeout, and a gateway served straight from
-        # uvicorn, as in deploy/local, closes its connections at five.
+        # Idle connections expire at httpx's five seconds: no upstream here
+        # documents a longer idle timeout.
         http = httpx.AsyncClient(cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])))
         app.state.http = http
-        app.state.gateway = GatewayClient(client=http)
-        # The sandbox's credential is minted at the gateway now, so the claim
-        # path and the renewal/revocation passes share that pool rather than each
-        # building their own per call. They take the same seam; until this was
-        # wired, the comment here described sharing that was not happening.
-        app.state.grants = GrantClient(client=http)
-        # What each grant's last renewal bought, so a grant with plenty left is
-        # not renewed again on every pass. One per process, read and fed by the
-        # renewal task below and by the host heartbeat, which only this main
-        # listener receives; `get_renewal_schedule` hands it to the heartbeat.
-        app.state.renewal_schedule = RenewalSchedule()
+        # Identity and admission are answered from this database.
+        attach_owner_directory(app, storage)
         if background:
             _build_source_control(app)
         else:
             app.state.source_control = None
 
         # **The background work belongs to exactly one process.** The attempt
-        # maintenance task supersedes lapsed attempts and revokes grants; its
-        # owned sibling task renews live grants. The publisher opens pull
+        # maintenance task supersedes lapsed attempts; the publisher opens pull
         # requests. A second listener on this same database — the MCP relay is
-        # one — running its own copies would renew every grant twice per
-        # interval, double the load it puts on the gateway, and have two workers
-        # racing for the same publish.
+        # one — running its own copies would reap every lease twice and have two
+        # workers racing for the same publish.
         #
         # So this is a parameter of the lifespan rather than a property of it, and
         # `create_mcp_app` says no.
@@ -508,11 +493,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             _spawn(
                 app,
                 "reaper_task",
-                reap_expired_attempts(
-                    storage,
-                    grants=app.state.grants,
-                    schedule=app.state.renewal_schedule,
-                ),
+                reap_expired_attempts(storage),
             )
             _spawn(
                 app,
@@ -533,7 +514,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 run_goal_wakeup_maintenance(
                     storage,
                     github_app=app.state.source_control.github,
-                    gateway=app.state.gateway,
+                    owners=app.state.owners,
                 ),
             )
             _spawn(
@@ -545,7 +526,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 run_pending_message_maintenance(
                     storage,
                     github_app=app.state.source_control.github,
-                    gateway=app.state.gateway,
+                    owners=app.state.owners,
                 ),
             )
             # The workers below wait on this as well as their clocks; the shared
@@ -558,13 +539,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             )
             _spawn(app, "sandbox_deletion_task", coordinate_sandbox_deletions(storage))
             _spawn(app, "sandbox_move_out_task", coordinate_move_out(storage))
-            _spawn(
-                app,
-                "ledger_task",
-                collect_usage_snapshots(
-                    storage.ledger, app.state.grants, wake=app.state.background_wake
-                ),
-            )
             # Host capacity history keeps filling whether or not anybody has the
             # admin page open — that is the whole reason it is stored at all rather
             # than accumulated in the browser. The points are written by the
@@ -573,6 +547,10 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             # heartbeat or the reaper.
             _spawn(app, "capacity_task", prune_host_capacity_history(storage.host_capacity))
             _spawn(app, "agent_memory_task", maintain_agent_memories(storage.agent_memory))
+            for name, work in account_tasks(
+                storage, mailer=getattr(app.state, "account_mailer", None)
+            ):
+                _spawn(app, name, work)
             # The profiling policy loop runs only here, in the one main process
             # that owns the reaper: file and terminal requests are rooted in this
             # process alone (the relay listener roots none, see below), so this is

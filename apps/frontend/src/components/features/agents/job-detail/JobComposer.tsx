@@ -14,7 +14,6 @@ import { LiveAgentStatus } from '../LiveAgentStatus';
 import { NativeQuestionPrompt } from '../NativeQuestionPrompt';
 import { PendingMessageQueue } from '../PendingMessageQueue';
 import { Picker } from '../Picker';
-import { PromptRewrite } from '../PromptRewrite';
 import { ThreadStatsBar } from '../ThreadStatsBar';
 import { ownerFailureMessage } from '../adapt';
 import { AttachmentStrip } from '../attachments/AttachmentStrip';
@@ -22,6 +21,7 @@ import type { useAttachments } from '../attachments/useAttachments';
 import { isSteerChord } from '../composerKeys';
 import { hasLostContext } from '../conversationJob';
 import { modelOverride } from '../modelSource';
+import { ModelConnectionNotice } from '../ModelConnectionNotice';
 import { GoalBar } from '../goal/GoalBar';
 import { hasLiveWork } from '../goal/liveWork';
 import { useGoalCommand, type GoalCommandControls } from '../goal/useGoalCommand';
@@ -82,10 +82,8 @@ export function JobComposer({
   setChosenSkills,
   mcpBlockedReason,
   submitting,
-  rewriting,
   readingFiles,
   setReadingFiles,
-  setRewriting,
   actionError,
   setActionError,
   submitFollowUp,
@@ -113,10 +111,8 @@ export function JobComposer({
   setChosenSkills: (skills: SelectedSkillApi[]) => void;
   mcpBlockedReason?: string;
   submitting: boolean;
-  rewriting: boolean;
   readingFiles: boolean;
   setReadingFiles: (reading: boolean) => void;
-  setRewriting: (rewriting: boolean) => void;
   actionError: string | null;
   setActionError: (error: string | null) => void;
   /** Each runs the `/goal` command it is given first: a draft that is one is not sent. */
@@ -142,7 +138,6 @@ export function JobComposer({
     choice,
     inheritedLabel,
     inheritedUnavailable,
-    rewrite,
     effort,
     setChosenEffort,
     modelPicker,
@@ -376,22 +371,6 @@ export function JobComposer({
                     />
                   </>
                 ) : null}
-                <PromptRewrite
-                  key={threadId}
-                  compact
-                  inline
-                  value={followUp}
-                  // Gateway-only: off, with the reason, for a personal source.
-                  {...rewrite}
-                  disabled={
-                    contextLost || submitting || goalCommand.busy || /^\s*\//.test(followUp)
-                  }
-                  onActiveChange={setRewriting}
-                  onApply={(prompt) => {
-                    setFollowUp(prompt);
-                    followUpBox.current?.focus();
-                  }}
-                />
                 <ComposerMessageActions
                   label={t(isActive ? 'composer.queue' : 'composer.send')}
                   title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
@@ -407,7 +386,6 @@ export function JobComposer({
                     inheritedUnavailable ||
                     !followUp.trim() ||
                     submitting ||
-                    rewriting ||
                     attachments.uploading ||
                     readingFiles ||
                     mcp.saving ||
@@ -423,6 +401,7 @@ export function JobComposer({
                 {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
                 {steerNote(queue.canSendNow, otherModel, apple, t)}
               </p>
+              <ModelConnectionNotice config={config} />
               <p
                 role="status"
                 hidden={!inheritedUnavailable}

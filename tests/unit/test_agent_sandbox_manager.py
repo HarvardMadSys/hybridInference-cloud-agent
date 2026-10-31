@@ -24,6 +24,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import launch_connection
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient
 from cloud_agent.schemas import RetainedSandboxStop
@@ -526,10 +527,10 @@ def _launch() -> dict[str, object]:
         "runtime_version": "2.1.220",
         "native_session_id": "native-source",
         "model": "glm-5.1",
-        "gateway_base_url": "http://gateway",
-        "credential": "grant",
+        "credential": "provider-key",
         "slot_id": 0,
         "residency_generation": 1,
+        **launch_connection("claude-code"),
     }
 
 
@@ -1582,10 +1583,9 @@ def test_a_request_the_sandbox_manager_rejects_names_the_field_but_never_its_val
 
 @pytest.mark.asyncio
 async def test_the_sandbox_manager_launches_tools_through_its_hosts_own_mcp_relay(monkeypatch):
-    """Like the gateway's, the MCP relay is this host's, whatever a caller names.
-
-    It is the relay the host rules admit for the group, so any other address
-    would only be refused at the bridge. A launch without tools is given none.
+    """The MCP relay is this host's, whatever a caller names: the one the host
+    rules admit for the group, so any other address would only be refused at
+    the bridge. A launch without tools is given none.
     """
     launches: list[ResidentLaunch] = []
 

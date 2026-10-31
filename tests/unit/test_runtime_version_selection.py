@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tests.support.owners import connection_access
+
 from cloud_agent.domain.runtimes import resolve_runtime_version
 from cloud_agent.schemas import WorkerClaimAttestation, WorkerClaimResponse
 from cloud_agent_host.runner import (
@@ -185,6 +187,7 @@ class _Backend:
 
 def _job(version: str | None) -> ClaimedJob:
     return ClaimedJob(
+        model_connection=connection_access("claude-code"),
         job_id="ajob_1",
         thread_id="athr_1",
         attempt_id=1,
@@ -195,7 +198,6 @@ def _job(version: str | None) -> ClaimedJob:
         runtime="claude-code",
         model="m",
         worker_token="w",
-        sandbox_token="s",
         runtime_version=version,
     )
 
@@ -344,7 +346,6 @@ def _full_claim() -> WorkerClaimResponse:
             "activation_generation": 1,
             "process_generation": 1,
         },
-        sandbox_token="s",
         mcp_token="t",
         clone_token="c",
         github_token="g",

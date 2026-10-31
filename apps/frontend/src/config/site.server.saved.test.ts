@@ -22,9 +22,7 @@ const saved = (appName = 'Saved app') => ({
     statusUrl: '',
     docsUrl: '',
     contactUrl: '',
-    gatewayUrl: '',
   },
-  features: { rag: false },
 });
 
 const response = (value: unknown) => ({ ok: true, json: async () => value });
@@ -37,7 +35,6 @@ beforeEach(async () => {
   vi.stubEnv('AGENT_CONTROL_PLANE_URL', 'http://control-plane:8000');
   vi.stubEnv('AGENT_WEB_APP_NAME', 'Old environment branding');
   vi.stubEnv('AGENT_WEB_ORG_URL', 'https://old.example.com');
-  vi.stubEnv('AGENT_WEB_FEATURE_RAG', 'true');
   vi.stubEnv('AGENT_DEPLOYMENT_SHA', 'image-version');
   vi.stubEnv('AGENT_WEB_DEPLOYED_AT', '');
 });
@@ -54,8 +51,7 @@ describe('request-time saved appearance settings', () => {
     const fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        branding: { appName: 'Saved app', orgName: '', orgUrl: '', statusUrl: '', gatewayUrl: '' },
-        features: { rag: false },
+        branding: { appName: 'Saved app', orgName: '', orgUrl: '', statusUrl: '' },
       }),
     });
     vi.stubGlobal('fetch', fetch);
@@ -83,9 +79,7 @@ describe('request-time saved appearance settings', () => {
                 orgName: '',
                 orgUrl: 'https://%',
                 statusUrl: '',
-                gatewayUrl: '',
               },
-              features: { rag: true },
             };
           },
         });

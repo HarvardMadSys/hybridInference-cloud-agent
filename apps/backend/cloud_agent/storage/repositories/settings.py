@@ -42,16 +42,6 @@ class PostgresSettingsRepository:
         """Initialize or import new fields once, preserving every saved value."""
         async with self._pool.acquire() as conn, conn.transaction():
             imported = dict(values)
-            if "gateway_issuer" in imported:
-                from cloud_agent.identity_namespace import IdentityNamespaceError
-
-                issuer = await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace")
-                if issuer:
-                    if imported["gateway_issuer"] and imported["gateway_issuer"] != issuer:
-                        raise IdentityNamespaceError(
-                            "GATEWAY_ISSUER does not match this Agent database's identity issuer."
-                        )
-                    imported["gateway_issuer"] = issuer
             await conn.execute(
                 """
                 INSERT INTO agent_settings (id, revision, "values")
@@ -91,10 +81,6 @@ class PostgresSettingsRepository:
             settings.validate_settings_update(previous, values)
             if values == previous:
                 return revision, values, previous
-            if "gateway_issuer" in changes:
-                from cloud_agent.identity_namespace import check_gateway_namespace
-
-                await check_gateway_namespace(conn, str(values["gateway_issuer"]) or None)
             updated = await conn.fetchrow(
                 """
                 UPDATE agent_settings

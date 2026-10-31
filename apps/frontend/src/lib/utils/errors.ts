@@ -1,9 +1,8 @@
 export const ERROR_MESSAGES: Record<string, string> = {
   // Authentication errors. Only codes this service's responses can still
   // carry: the structured branch passes the control plane's `type` through,
-  // the legacy branch passes `error_code` through, and jsonOrThrow no longer
-  // infers gateway-era sign-in codes (password reset, email verification,
-  // duplicate signup) from message wording.
+  // the legacy branch passes `error_code` through, and jsonOrThrow infers
+  // nothing from message wording.
   ACCOUNT_SUSPENDED: 'Account has been suspended. Please contact support',
   SESSION_NOT_FOUND: 'Session not found. Please login again',
   SESSION_REVOKED: 'Session has been revoked',

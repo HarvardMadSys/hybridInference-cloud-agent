@@ -10,12 +10,12 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES, MAX_USAGE_RUNS
 from cloud_agent.api import owner_usage
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.owner_usage import (
     CONTAINER_CURSOR_SCOPE,
     MAX_ALL_TIME_DAYS,
@@ -35,8 +35,7 @@ ZERO = OwnerResourceTotals(
 
 @pytest.fixture()
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "usage-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(owner_usage.router)
     queries = AsyncMock()
@@ -59,9 +58,9 @@ def app(monkeypatch):
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        owner_usage=queries, admin_usage=usage
+        local_accounts=SESSIONS, owner_usage=queries, admin_usage=usage
     )
     application.state.queries = queries
     application.state.usage = usage
@@ -69,7 +68,7 @@ def app(monkeypatch):
 
 
 async def _get(app, path, *, owner="owner-1", **params):
-    headers = {"Authorization": f"Bearer {identity.mint_session(user_id=owner)}"} if owner else {}
+    headers = {"Authorization": f"Bearer {SESSIONS.sign_in(owner)}"} if owner else {}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
     ) as http:

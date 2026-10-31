@@ -69,8 +69,8 @@ class AgentThreadMessageCreate(BaseModel):
         None,
         pattern=MODEL_CONNECTION_ID_PATTERN,
         description=(
-            "The source of `model`: the owner's connection, or null for the Gateway. "
-            "Only with `model`; an omitted model inherits the previous turn's model "
+            "The source of `model`: the owner's connection. Sent only with `model`, "
+            "and required with it; an omitted model inherits the previous turn's model "
             "and its source together."
         ),
     )
@@ -133,7 +133,7 @@ class AgentPendingMessageUpdate(BaseModel):
         None, max_length=50
     )
     model: str | None = None
-    #: The source of ``model``, sent with it; null is the Gateway.
+    #: The source of ``model``, sent with it.
     model_connection_id: str | None = Field(None, pattern=MODEL_CONNECTION_ID_PATTERN)
     reasoning_effort: str | None = Field(None, max_length=32)
     state: Literal["held", "queued"] | None = None

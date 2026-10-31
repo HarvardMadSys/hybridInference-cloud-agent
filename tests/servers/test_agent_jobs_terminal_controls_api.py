@@ -19,7 +19,6 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     _api_key_secret,
     _attach_shared_workspace,
     _build_app,
-    _configured_identity_issuer,
     _create_job,
     _TerminalSessionSandboxManager,
     store,

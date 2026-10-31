@@ -39,6 +39,8 @@ from pathlib import Path
 
 import yaml
 
+from cloud_agent.accounts.config import RETIRED_GATEWAY_VARIABLES
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy" / "control-plane" / "docker-compose.yml"
 WEB_DOCKERFILE = REPO_ROOT / "deploy" / "control-plane" / "Dockerfile.web"
@@ -77,12 +79,11 @@ _PYTHON_SOURCES = (
     "migrations/**/*.py",
 )
 
-#: Control-plane modules that write a *host's* environment: compute setup and
-#: the host bootstrap render, require and forbid the names in a new machine's
-#: `.env`. Those names are host variables, which the control plane's compose
-#: file has no business setting, so in these two modules only an actual read of
-#: the control plane's own environment counts. The names still need rows in
-#: ENVIRONMENT.md, which the inventory check below enforces.
+#: Control-plane modules that write a *host's* environment. Compute setup,
+#: bootstrap and its inference helper render, require and forbid names in the
+#: host's `.env`. Only actual reads of the control plane's own environment
+#: count toward Compose wiring here. The inventory check still requires an
+#: ENVIRONMENT.md row for every name.
 _HOST_ENV_WRITERS = (
     "apps/backend/cloud_agent/application/compute_setup.py",
     "apps/backend/cloud_agent/providers/compute/host_bootstrap.py",
@@ -174,6 +175,9 @@ def test_control_plane_variables_are_wired_into_compose() -> None:
     ) - _NOT_VARIABLES
     assert read, "no variable reads found under apps/backend/cloud_agent/ — regex drift?"
     read -= _COMPOSE_EXEMPT
+    # Named only to refuse a stale deployment at startup: offering them on the
+    # stack would invite exactly the configuration that is refused.
+    read -= set(RETIRED_GATEWAY_VARIABLES)
     unreachable = sorted(read - _compose_environment_keys())
     assert not unreachable, (
         "the control plane reads these, but they are not keys under "

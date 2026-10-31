@@ -20,7 +20,6 @@ import {
   GearIcon,
   GlobeIcon,
   HelpIcon,
-  HomeIcon,
   LogOutIcon,
   MailIcon,
   RefreshIcon,
@@ -36,7 +35,7 @@ import {
   MENU_ROW,
   MENU_ROW_SELECTED,
 } from '@/components/ui/menuStyles';
-import { switchAccountUrl } from '@/lib/auth/signin';
+import { accountSignInUrl } from '@/lib/auth/signin';
 import { LOCALES, LOCALE_LABELS } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
 
@@ -343,18 +342,6 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
                   {profile.email}
                 </div>
               ) : null}
-              {branding.gatewayUrl ? (
-                <a
-                  role="menuitem"
-                  href={`${branding.gatewayUrl}/dashboard`}
-                  className={ITEM}
-                  onClick={() => close(false)}
-                  {...plain}
-                >
-                  <HomeIcon className="h-4 w-4 shrink-0 text-muted" />
-                  <span className="min-w-0 flex-1 truncate">{t('nav.dashboard')}</span>
-                </a>
-              ) : null}
               <Link
                 role="menuitem"
                 href={SETTINGS_PATHS.profile}
@@ -383,7 +370,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
               <div role="separator" className={SEPARATOR} />
               <a
                 role="menuitem"
-                href={switchAccountUrl(pathname ?? '/')}
+                href={accountSignInUrl(pathname)}
                 className={ITEM}
                 onClick={() => close(false)}
                 {...plain}

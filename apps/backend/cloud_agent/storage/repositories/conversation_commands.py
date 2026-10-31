@@ -34,11 +34,7 @@ from cloud_agent.storage._sql.sandbox import lock_memberships
 from cloud_agent.storage._sql.ssh import enable_ssh_servers
 from cloud_agent.storage.repositories.environments import bind_environment
 from cloud_agent.storage.repositories.goals import new_goal_id
-from cloud_agent.task_titles import (
-    fallback_title,
-    normalize_generated_title,
-    thread_title_needs_generation,
-)
+from cloud_agent.task_titles import fallback_title
 
 if TYPE_CHECKING:
     from cloud_agent.goals.models import GoalInput
@@ -556,98 +552,6 @@ class PostgresConversationCommands:
                 title,
             )
         return dict(row) if row is not None else None
-
-    async def get_thread_title_prompt(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
-    ) -> str | None:
-        """Return the first prompt if this fenced attempt may still name its thread."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT t.title, t.title_source, first.task_prompt
-                FROM agent_jobs j
-                JOIN agent_threads t ON t.id = j.thread_id
-                JOIN agent_jobs first ON first.thread_id = t.id AND first.turn_no = 1
-                JOIN agent_attempts a ON a.id = j.current_attempt_id AND a.job_id = j.id
-                WHERE j.id = $1 AND a.id = $2 AND a.lease_generation = $3
-                  AND t.deleted_at IS NULL AND NOT j.cancel_requested
-                  AND (
-                      (j.state = 'running' AND a.status = 'running'
-                       AND a.lease_expires_at > clock_timestamp())
-                      OR (j.state = 'succeeded' AND a.status = 'finished')
-                  )
-                """,
-                job_id,
-                attempt_id,
-                lease_generation,
-            )
-        if row is None or not thread_title_needs_generation(row["title_source"], row["title"]):
-            return None
-        return str(row["task_prompt"])
-
-    async def set_generated_thread_title(
-        self, *, job_id: str, attempt_id: int, lease_generation: int, title: str
-    ) -> bool:
-        """Save a missing/recovered title while its attempt remains current."""
-        if normalize_generated_title(title) is None:
-            return False
-        async with self._pool.acquire() as conn, conn.transaction():
-            locked_attempt = await conn.fetchval(
-                "SELECT id FROM agent_attempts WHERE id = $1 AND lease_generation = $2 FOR SHARE",
-                attempt_id,
-                lease_generation,
-            )
-            if locked_attempt is None:
-                return False
-            # Match follow-up/fork lock ordering: thread before job. Locking the
-            # source also makes a simultaneous manual rename win in either order.
-            thread = await conn.fetchrow(
-                """
-                SELECT t.id, t.title, t.title_source FROM agent_threads t
-                JOIN agent_jobs j ON j.thread_id = t.id
-                WHERE j.id = $1 AND t.deleted_at IS NULL
-                FOR UPDATE OF t
-                """,
-                job_id,
-            )
-            if thread is None or not thread_title_needs_generation(
-                thread["title_source"], thread["title"]
-            ):
-                return False
-            authority = await conn.fetchrow(
-                """
-                SELECT j.state AS job_state, a.status AS attempt_status
-                FROM agent_attempts a
-                JOIN agent_jobs j ON j.id = a.job_id
-                WHERE j.id = $1 AND j.current_attempt_id = a.id
-                  AND a.id = $2 AND a.lease_generation = $3 AND NOT j.cancel_requested
-                  AND (
-                      (j.state = 'running' AND a.status = 'running')
-                      OR (j.state = 'succeeded' AND a.status = 'finished')
-                  )
-                FOR SHARE OF j
-                """,
-                job_id,
-                attempt_id,
-                lease_generation,
-            )
-            if authority is None:
-                return False
-            if authority["job_state"] == "running" and not await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            ):
-                return False
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_threads SET title = $2, title_source = 'generated'
-                WHERE id = $1 AND deleted_at IS NULL
-                RETURNING id
-                """,
-                thread["id"],
-                title,
-            )
-            return updated is not None
 
     async def set_thread_pinned(
         self, *, job_id: str, user_id: str, pinned: bool

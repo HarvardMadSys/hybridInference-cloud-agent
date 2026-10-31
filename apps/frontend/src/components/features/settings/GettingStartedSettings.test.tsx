@@ -42,7 +42,6 @@ function renderSettings(conversations: number) {
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: [],
     runtimes: ['claude-code'],
-    models: ['model-a'],
     github_connected: false,
     github_install_url: '/agents/integrations',
   });

@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.agent_memory import AgentMemoryConflict, AgentMemoryFull, AgentMemoryNotFound
 from cloud_agent.api import agent_memory
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import install_admin_no_store
 
 PATH = "/v1/agent/memories"
@@ -36,8 +36,7 @@ def memory(**changes):
 
 @pytest.fixture()
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "memory-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(agent_memory.router)
     install_admin_no_store(application, prefixes=(PATH,))
@@ -61,14 +60,16 @@ def app(monkeypatch):
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
-    application.dependency_overrides[get_storage] = lambda: SimpleNamespace(agent_memory=repository)
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
+    application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, agent_memory=repository
+    )
     application.state.repository = repository
     return application
 
 
 def headers(user_id="owner-1"):
-    return {"Authorization": f"Bearer {identity.mint_session(user_id=user_id)}"}
+    return {"Authorization": f"Bearer {SESSIONS.sign_in(user_id)}"}
 
 
 def client(app):

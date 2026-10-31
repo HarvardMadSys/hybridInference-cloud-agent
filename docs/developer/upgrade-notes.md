@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0106_user_model_connections`. The supported deployment scripts run migrations
+`0108_local_account_parity`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -18,6 +18,89 @@ transitions that need stopped writers are listed in
 After migrating, start the main control-plane listener with its existing
 complete environment: it imports newly registered settings once, as described
 in [Admin Settings](operations.md#admin-settings).
+
+## Independent accounts cutover
+
+This release removes HybridInference Gateway sign-in, admission and inference.
+Cloud Agent keeps its own accounts, and every task runs on a model connection
+its owner adds with their own provider key. A database from an earlier
+release is keyed by Gateway owner IDs that no account holds, so it is not
+upgraded, converted or mapped: the release starts on a **new, empty
+database**, and the old one is kept untouched as the archive and rollback
+source. People register again, apply through the waiting list and add their
+model connections. Nothing migrates old tasks, connections or identities.
+
+1. **Archive the old deployment.** Drain it, stop every writer, and take a
+   custom-format `pg_dump` of the old Agent database with its checksum, the
+   old configuration and root keys. Keep the old database itself; do not
+   delete, downgrade or rebind it. Optionally confirm it is what this release
+   refuses, read-only:
+
+   ```bash
+   AGENT_DATABASE_URL='<old database>' python -m cloud_agent.identity_namespace --check
+   ```
+
+   It exits non-zero, names this runbook, and changes nothing.
+
+2. **Create a new, empty Agent database** and point `AGENT_DATABASE_URL` at
+   it. The same check must now report an empty database that will be bound on
+   first start. `deploy/control-plane/deploy.sh` runs it read-only before it
+   migrates, and stops if it refuses.
+
+3. **Give the deployment its own secrets**, none of them shared with the
+   Gateway or with another environment: `AGENT_LOCAL_SESSION_SECRET`,
+   `AGENT_SETTINGS_ENCRYPTION_KEY`, `AGENT_CONTROL_TOKEN_SECRET`,
+   `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` (each at least 32 random bytes,
+   `openssl rand -hex 32`) and a separate `ADMIN_TOKEN`. Hosts enroll again
+   with new enrollment tokens.
+
+4. **Remove every Gateway variable.** The control plane and `deploy.sh` refuse
+   `AGENT_AUTH_MODE`, `GATEWAY_*` (issuer, JWKS, authorize, base URL, grant
+   path, binding and dispatch token), `IDENTITY_*`,
+   `AGENT_SESSION_REDIRECT_URI`, `AGENT_GATEWAY_URL`,
+   `AGENT_GATEWAY_SSH_HOST`, `AGENT_WEB_GATEWAY_URL`, `AGENT_WEB_FEATURE_RAG`
+   and the on-call dispatch variables, and a host refuses `AGENT_GATEWAY_URL`,
+   `AGENT_GATEWAY_HOSTNAME` and the inference tunnel's `AGENT_TUNNEL_*`. Set
+   `AGENT_WEB_BASE_URL` (the base of every emailed link) and
+   `AGENT_PUBLIC_API_URL` (this API's public address, which
+   `AGENT_SESSION_REDIRECT_URI` used to give).
+
+5. **Mail.** An existing SMTP transport, such as the one HybridInference sends
+   with, may be reused: set `AGENT_SMTP_HOST`, `AGENT_SMTP_PORT` (587),
+   `AGENT_SMTP_SECURITY=starttls`, `AGENT_SMTP_USERNAME`,
+   `AGENT_SMTP_PASSWORD` and `AGENT_SMTP_FROM` from the operator's secret
+   store, never from the repository. Only the transport is shared: every link
+   in a message is built from `AGENT_WEB_BASE_URL` and signed with this
+   deployment's own `AGENT_LOCAL_SESSION_SECRET`, and the account data is
+   this database's.
+
+6. **Initial administrators.** List the verified addresses of the people who
+   administer the deployment in `AGENT_LOCAL_ADMIN_EMAILS`
+   (`admin-one@example.org,admin-two@example.org` are placeholders; production
+   names exactly its two administrators, staging its own list). The list,
+   like every account setting, is imported once, at the first start; after
+   that it is edited under **Admin → Settings → Accounts**, not in the
+   environment. A listed
+   account is approved and made an administrator only once its address is
+   proven, by a link sent to it. There is no grant to the first person who
+   signs up. Alternatively, or for the very first one, exchange the setup code
+   the control plane logs at startup (`agent_local_setup_pending`) at
+   `/setup/administrator`, or use `python -m cloud_agent.accounts.bootstrap_admin`
+   ([first administrator](local-accounts.md#the-first-administrator)).
+
+7. **Deploy and verify.** Run the usual deployment. Then: sign-up sends a
+   verification link at `AGENT_WEB_BASE_URL`; an administrator approves an
+   application; the applicant adds a model connection and runs a task. Model
+   connections are on by default. To hold new turns until every host and
+   control-plane replica runs this release, set
+   `AGENT_MODEL_CONNECTIONS_ENABLED=false` before deploying and unset it once
+   they all do.
+
+**Rollback.** Before the new deployment has taken writes that matter, stop it
+and redeploy the previous release against the archived database and
+configuration, which were never changed. After new writes, keep the new
+database: it holds accounts the old release cannot read, and the two
+databases are never merged.
 
 ## Conversation history read contract
 
@@ -54,7 +137,9 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
-| `0106_user_model_connections` | Adds `agent_model_connections`, `agent_model_connection_checks` and `agent_model_connection_scan_keys` tables for owners' own inference endpoints (Chat Completions, Responses or Anthropic Messages), nullable source columns `agent_jobs.model_connection_id` and `agent_pending_messages.model_connection_id`, and a separate `agent_model_connection_residencies` table binding a resident member's process to one connection revision for one residency generation (a separate table, so a running previous release's prepared statements over the membership table keep working). Nothing is rewritten, and every existing turn reads as the Gateway's (NULL). The feature stays off until `AGENT_MODEL_CONNECTIONS_ENABLED` is set, which needs every host and control-plane replica on this release first. A downgrade refuses while any connection exists, or any turn, waiting message or resident member names one, finished conversations included, because without the columns they would continue on the Gateway ([owner model connections](operations.md#owner-model-connections)). |
+| `0107_local_accounts` | Creates the tables accounts use: accounts, password sign-in, waiting-list admissions, server-side sessions, emailed tokens, abuse counters, access terminations and the account identity marker. It changes no existing row and locks no existing table. A downgrade drops them, and with them every account. |
+| `0108_local_account_parity` | Local accounts only. Splits `agent_local_password_logins` into sign-in identities (email, login name, phone) and optional password credentials, carrying every account over with its verification time and hash (a verified email is recorded as verified by its link, the only way `0107_local_accounts` had); adds the access view every SQL gate reads, the `deleted` account state with the account's name, note, language and sign-in and deletion times, phone codes, browser sessions, sign-in events, the signup domain list, first-run setup and administrator mail to accounts. It touches only the account tables. A downgrade restores the email-and-password table and drops the new tables, with the sign-in events and mail history in them; it refuses while any account signs in some other way or is deleted, rather than dropping that account. |
+| `0106_user_model_connections` | Adds `agent_model_connections`, `agent_model_connection_checks` and `agent_model_connection_scan_keys` tables for owners' own inference endpoints (Chat Completions, Responses or Anthropic Messages), nullable source columns `agent_jobs.model_connection_id` and `agent_pending_messages.model_connection_id`, and a separate `agent_model_connection_residencies` table binding a resident member's process to one connection revision for one residency generation (a separate table, so a running previous release's prepared statements over the membership table keep working). Nothing is rewritten. Connections are admitted unless `AGENT_MODEL_CONNECTIONS_ENABLED` is set to `0`, `false` or `no`. A downgrade refuses while any connection exists, or any turn, waiting message or resident member names one, finished conversations included ([owner model connections](operations.md#owner-model-connections)). |
 | `0105_job_event_usage_summary` | Adds a nullable `usage_summary` column to `agent_job_events`. Adding it rewrites no rows and holds its lock only for the catalog change. New events store the projection of their payload that usage reads need, and those reads take it from there; events stored before the column existed are projected when read, as before. A downgrade drops the column, and usage reads project every payload again. |
 | `0104_notification_change_keyset` | Builds a `(user_id, kind, change_xid, entity_id)` index concurrently before dropping the preceding owner/XID index, so notification delta continuation pages seek directly instead of scanning the whole snapshot interval. It changes no row and does not block foreground writes. Existing v1 continuations finish in their previous kind/identity order before advancing to v2. The previous API remains functionally compatible during migration, although its delta reads may use a less selective index until it is replaced. A downgrade restores the preceding index concurrently. |
 | `0103_terminal_resume_keyset` | Rebuilds the partial terminal-resume index on `(updated_at, id)`, matching the replay keyset so every bounded continuation seeks directly instead of sorting equal-time rows again. The online build does not block foreground writes and changes no row. A downgrade restores the preceding one-column index. |
@@ -101,9 +186,8 @@ Newest first.
 
 Older revisions that need a maintenance window are listed in
 [applying migrations that are not backwards-compatible](operations.md#applying-migrations-that-are-not-backwards-compatible).
-A database still stamped with the retired pre-2026-09-10 chain cannot be
-upgraded directly; see
-[preserving an old-chain database](operations.md#preserving-an-old-chain-database).
+A database from before the independent-accounts release, on either chain, is
+not upgraded; see [the cutover](#independent-accounts-cutover).
 
 ## When you add a migration
 

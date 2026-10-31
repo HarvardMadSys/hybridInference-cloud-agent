@@ -60,7 +60,7 @@ def _turn(runtime: str, owner: dict[str, str]) -> tuple[list[dict], dict[str, st
     live_argv, live_env = get_runtime(runtime).prepare_live(
         workdir="/tmp/work",
         model="test-model",
-        gateway_base_url="http://127.0.0.1:8900",
+        model_base_url="http://127.0.0.1:8900",
         credential=_PLATFORM,
         provides_isolation=True,
     )

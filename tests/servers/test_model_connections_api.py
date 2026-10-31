@@ -5,8 +5,8 @@ are exercised through ASGI: what is stored (ciphertext, never the key), what
 is shown (never the key, nor what a bad request sent), which owner can see
 what (only their own), and what a change does to processes still running on
 the old state. The turn half -- admission, follow-ups, waiting messages,
-claims and residencies -- runs without the Gateway's catalog or grants for a
-turn on a connection, and refuses rather than falls back when the connection
+claims and residencies -- runs on the owner's connection for a
+turn on a connection, and refuses when the connection
 cannot serve it.
 """
 
@@ -25,14 +25,14 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 -- autouse fixture
     FakeStorage,
     _api_key_secret,
     _build_app,
-    _configured_identity_issuer,
-    _FakeGateway,
+    _FakeOwners,
 )
-from tests.servers.test_grant_at_claim import _app as _claim_app, _ClaimStore, _Grants
+from tests.servers.test_worker_claim import _app as _claim_app, _ClaimStore
+from tests.support.owners import on_connection
 
 from cloud_agent.api import model_connections as api
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_gateway_client, get_grant_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.application import (
     model_connection_check as check,
     model_connection_save as save,
@@ -209,7 +209,6 @@ def _settings_app(store: _Store, owner: str = "owner-1") -> FastAPI:
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_grant_client] = lambda: None
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": owner}
     return app
 
@@ -604,7 +603,7 @@ async def test_a_rename_with_unchanged_fields_keeps_credential_processes_and_che
     provider.calls.clear()
     before = copy.deepcopy(store.model_connections.rows[view["id"]])
     renamed = await _patch(store, view["id"], same)
-    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "")
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "false")
     # With the deployment gate off, renaming through the same form still works.
     gate_off = await _patch(store, view["id"], {**same, "name": "Again"})
 
@@ -757,7 +756,7 @@ async def test_with_the_gate_off_nothing_new_can_be_made_usable(provider, monkey
     store = _Store()
     view = await _create(store)
     provider.calls.clear()
-    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "")
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "false")
     async with await _client(_settings_app(store)) as client:
         listed = await client.get(PATH)
         created = await client.post(PATH, json={**_CREATE, "name": "Second"})
@@ -954,7 +953,7 @@ async def test_a_listing_past_the_hourly_limit_calls_no_provider(listing):
 
 async def test_with_the_gate_off_nothing_is_listed(listing, monkeypatch):
     store = _Store()
-    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "")
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "false")
     response = await _discover(store, {"base_url": "https://models.example/v1", "api_key": _KEY})
 
     assert response.status_code == 403
@@ -1035,16 +1034,6 @@ async def test_a_listing_dials_only_a_public_ipv4_address(base_url):
 # -- turns ---------------------------------------------------------------------------
 
 
-class _NoCatalogGateway(_FakeGateway):
-    """Agent admission answers; the model catalog must not be asked at all."""
-
-    async def model_catalog(self, user_id: str) -> list[str]:
-        raise AssertionError("a turn on an owner connection read the Gateway catalog")
-
-    async def model_catalog_with_reasoning_efforts(self, user_id: str):
-        raise AssertionError("a turn on an owner connection read the Gateway catalog")
-
-
 class _TurnStorage(FakeStorage):
     """The jobs fake, with this owner's connections behind the port."""
 
@@ -1086,18 +1075,18 @@ def _connection_row(
 
 def _turn_app(store: _TurnStorage) -> FastAPI:
     app = _build_app(store)
-    app.dependency_overrides[get_gateway_client] = _NoCatalogGateway
+    app.dependency_overrides[get_owner_directory] = _FakeOwners
     return app
 
 
 async def _create_job(client: AsyncClient, **body: Any):
     return await client.post(
         "/v1/agent/jobs",
-        json={"repo": None, "task_prompt": "fix it", "runtime": "opencode", **body},
+        json=on_connection({"repo": None, "task_prompt": "fix it", "runtime": "opencode", **body}),
     )
 
 
-async def test_a_task_on_an_owner_connection_needs_neither_the_gateway_catalog_nor_its_id():
+async def test_a_task_on_an_owner_connection():
     store = _TurnStorage()
     row = _connection_row()
     store.connections.rows[row["id"]] = row
@@ -1232,11 +1221,10 @@ async def _follow_up(connections, parent, **request):
         reasoning_effort=request.get("reasoning_effort"),
         store=_FollowUpStore(connections),
         app_credentials=None,
-        gateway=_NoCatalogGateway(),
     )
 
 
-async def test_a_follow_up_inherits_its_source_and_rechecks_it_without_the_gateway():
+async def test_a_follow_up_inherits_its_source_and_rechecks_it():
     connections = FakeModelConnections()
     row = _connection_row()
     connections.rows[row["id"]] = row
@@ -1255,10 +1243,12 @@ async def test_a_follow_up_switching_source_is_checked_against_the_new_one():
     connections = FakeModelConnections()
     row = _connection_row(models=("gpt-4.1", "o4-mini"))
     connections.rows[row["id"]] = row
-    gateway_parent = _parent(model="glm-5.1", model_connection_id=None, reasoning_effort="high")
+    parent_without_connection = _parent(
+        model="glm-5.1", model_connection_id=None, reasoning_effort="high"
+    )
 
     switched = await _follow_up(
-        connections, gateway_parent, model="o4-mini", model_connection_id=row["id"]
+        connections, parent_without_connection, model="o4-mini", model_connection_id=row["id"]
     )
     assert (switched.model, switched.model_connection_id) == ("o4-mini", row["id"])
     assert switched.reasoning_effort is None
@@ -1314,7 +1304,7 @@ async def test_a_waiting_message_on_a_deleted_connection_is_held_with_the_reason
             "model_connection_id": None,
         },
         parent_job_id="ajob_1",
-        gateway=_NoCatalogGateway(),
+        owners=_FakeOwners(),
         app_credentials=None,
     )
     assert held is not None
@@ -1359,8 +1349,8 @@ class _ConnectionClaimStore(_ClaimStore):
         )
 
 
-async def _claim(store, grants, capabilities=("model-connections-v1",)):
-    app = _claim_app(store, grants)
+async def _claim(store, capabilities=("model-connections-v1",)):
+    app = _claim_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         return await client.post(
             "/v1/agent/worker/claim",
@@ -1371,9 +1361,9 @@ async def _claim(store, grants, capabilities=("model-connections-v1",)):
         )
 
 
-async def test_a_claim_on_a_connection_carries_its_key_and_mints_no_gateway_grant():
-    store, grants = _ConnectionClaimStore(_connection_row()), _Grants()
-    response = await _claim(store, grants)
+async def test_a_claim_on_a_connection_carries_its_key():
+    store = _ConnectionClaimStore(_connection_row())
+    response = await _claim(store)
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -1384,19 +1374,17 @@ async def test_a_claim_on_a_connection_carries_its_key_and_mints_no_gateway_gran
         "protocol": "chat_completions",
         "api_key": _KEY,
     }
-    assert body["sandbox_token"] == ""
-    assert grants.calls == []
+    assert "sandbox_token" not in body
 
 
-async def test_a_claude_claim_carries_the_messages_protocol_and_mints_no_gateway_grant():
+async def test_a_claude_claim_carries_the_messages_protocol():
     row = _connection_row(
         models=("claude-sonnet-4-5",),
         protocols=("chat_completions", "anthropic_messages"),
         base_url="https://gateway.example/anthropic/v1",
     )
     store = _ConnectionClaimStore(row, runtime="claude-code", model="claude-sonnet-4-5")
-    grants = _Grants()
-    response = await _claim(store, grants)
+    response = await _claim(store)
 
     assert response.status_code == 200, response.text
     access = response.json()["model_connection"]
@@ -1404,7 +1392,7 @@ async def test_a_claude_claim_carries_the_messages_protocol_and_mints_no_gateway
     assert access["base_url"] == "https://gateway.example/anthropic/v1"
     assert access["protocol"] == "anthropic_messages"
     assert access["api_key"] == _KEY
-    assert response.json()["sandbox_token"] == "" and grants.calls == []
+    assert "sandbox_token" not in response.json()
 
 
 @pytest.mark.parametrize(
@@ -1412,15 +1400,12 @@ async def test_a_claude_claim_carries_the_messages_protocol_and_mints_no_gateway
 )
 async def test_a_translated_claim_names_both_protocols_and_needs_the_compat_host(runtime, client):
     store = _ConnectionClaimStore(_connection_row(), runtime=runtime)
-    grants = _Grants()
-    response = await _claim(
-        store, grants, ("model-connections-v1", "model-protocol-translation-v1")
-    )
+    response = await _claim(store, ("model-connections-v1", "model-protocol-translation-v1"))
 
     assert response.status_code == 200, response.text
     access = response.json()["model_connection"]
     assert (access["protocol"], access["client_protocol"]) == ("chat_completions", client)
-    assert access["api_key"] == _KEY and grants.calls == []
+    assert access["api_key"] == _KEY
     # The member's loopback token: the platform's MAC over this member's
     # process identity, never a function of the provider key it shares.
     identity = {
@@ -1440,39 +1425,38 @@ async def test_a_translated_claim_names_both_protocols_and_needs_the_compat_host
     assert _KEY not in access["local_token"]
 
     older = _ConnectionClaimStore(_connection_row(), runtime=runtime)
-    refused = await _claim(older, grants, ("model-connections-v1",))
+    refused = await _claim(older, ("model-connections-v1",))
     assert refused.status_code == 503
-    assert older.released and older.failed == [] and grants.calls == []
+    assert older.released and older.failed == []
 
 
 async def test_a_direct_claim_never_asks_for_the_compat_host():
     store = _ConnectionClaimStore(_connection_row(), runtime="pi")
-    response = await _claim(store, _Grants(), ("model-connections-v1",))
+    response = await _claim(store, ("model-connections-v1",))
     assert response.status_code == 200, response.text
     assert "client_protocol" not in response.json()["model_connection"]
     assert "local_token" not in response.json()["model_connection"]
 
 
 async def test_a_host_that_cannot_launch_on_a_connection_gets_the_claim_back():
-    store, grants = _ConnectionClaimStore(_connection_row()), _Grants()
-    response = await _claim(store, grants, capabilities=())
+    store = _ConnectionClaimStore(_connection_row())
+    response = await _claim(store, capabilities=())
 
     assert response.status_code == 503
     assert store.released and store.failed == []
-    assert "sk-" not in response.text and grants.calls == []
+    assert "sk-" not in response.text
 
 
 @pytest.mark.parametrize(
     "change", [{"enabled": False}, {"deleted_at": "now", "enabled": False}, {"models": ["x"]}]
 )
 async def test_a_claim_on_a_connection_that_cannot_serve_it_ends_the_turn(change):
-    store, grants = _ConnectionClaimStore(_connection_row(**change)), _Grants()
-    response = await _claim(store, grants)
+    store = _ConnectionClaimStore(_connection_row(**change))
+    response = await _claim(store)
 
     assert response.status_code == 403
     assert response.json()["detail"]["error"]["type"] == "model_connection_unusable"
     assert store.failed == ["ajob_0001"] and store.released == []
-    assert grants.calls == [], "never moved to the Gateway"
 
 
 class _ResidencyStore:
@@ -1510,12 +1494,8 @@ async def test_a_residency_on_a_connection_gets_its_key_bound_to_the_current_rev
     connections.rows[row["id"]] = row
     store = _ResidencyStore(connections)
 
-    class _NoGrants:
-        async def mint(self, **kwargs):
-            raise AssertionError("a residency on an owner connection minted a Gateway grant")
-
     credential, revision, plan = await residency_credential(
-        store, _NoGrants(), job=_JOB, row=dict(_ROW), host="h", fence=_FENCE
+        store, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE
     )
     assert (credential, revision, plan) == (_KEY, 1, "responses>responses")
     assert connections.bound == [{"thread_id": "athr_1", "generation": 4}]
@@ -1532,7 +1512,7 @@ async def test_a_translated_fork_gives_each_member_its_own_token():
         "target": {"thread_id": "athr_target", "generation": 1},
     }
     source, target = await session_fork._fork_credentials(
-        _ResidencyStore(connections), None, source_job, residencies
+        _ResidencyStore(connections), source_job, residencies
     )
     assert source["credential"] == target["credential"] == _KEY
     assert source["inference_client_protocol"] == target["inference_client_protocol"] == "responses"
@@ -1560,7 +1540,7 @@ async def test_a_residency_whose_connection_changed_is_released_and_ends_the_tur
 
     connections.bind_residency = changed_meanwhile  # type: ignore[method-assign]
     with pytest.raises(HTTPException) as refused:
-        await residency_credential(store, None, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE)
+        await residency_credential(store, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE)
     assert refused.value.status_code == 403
     assert refused.value.detail["error"]["reason"] == "changed"
     assert store.released == [("athr_1", 4)]
@@ -1573,7 +1553,7 @@ async def test_invalidation_releases_and_reports_every_stale_residency():
         {"thread_id": "athr_1", "generation": 2, "host": "gone-host", "grant_id": ""}
     ]
     released = await invalidate_connection(
-        store, None, user_id="owner-1", connection_id="mconn_" + "a" * 32
+        store, user_id="owner-1", connection_id="mconn_" + "a" * 32
     )
     assert released == 1
     assert store.model_connections.release_calls == [("owner-1", "mconn_" + "a" * 32)]
@@ -1590,22 +1570,22 @@ async def test_config_offers_the_owners_connections_and_their_last_use_without_t
     from cloud_agent.model_preference import ModelPreferenceView
 
     async def last_on_connection(user_id: str) -> ModelPreferenceView:
-        return ModelPreferenceView.of(None, "gpt-4.1", row["id"])
+        return ModelPreferenceView(last_model="gpt-4.1", last_model_connection_id=row["id"])
 
     store.get_model_preference = last_on_connection  # type: ignore[method-assign]
 
-    class _DownGateway(_FakeGateway):
+    class _DownDirectory(_FakeOwners):
         async def model_catalog_with_reasoning_efforts(self, user_id: str):
-            from cloud_agent.gateway import GatewayError
+            from cloud_agent.accounts.directory import OwnerDirectoryError
 
-            raise GatewayError("catalog down")
+            raise OwnerDirectoryError("catalog down")
 
     app = _build_app(store)
-    app.dependency_overrides[get_gateway_client] = _DownGateway
+    app.dependency_overrides[get_owner_directory] = _DownDirectory
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         config = (await client.get("/v1/agent/config")).json()
 
-    assert config["models"] == []
+    assert "models" not in config
     assert config["default_model"] == "gpt-4.1"
     assert config["default_model_connection_id"] == row["id"]
     assert config["model_connections"] == [
@@ -1624,7 +1604,7 @@ async def test_with_the_gate_off_a_task_on_a_connection_is_refused_not_moved(mon
     store = _TurnStorage()
     row = _connection_row()
     store.connections.rows[row["id"]] = row
-    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "")
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "false")
     async with AsyncClient(transport=ASGITransport(app=_turn_app(store)), base_url="http://t") as c:
         refused = await _create_job(c, model="gpt-4.1", model_connection_id=row["id"])
 
@@ -1633,11 +1613,11 @@ async def test_with_the_gate_off_a_task_on_a_connection_is_refused_not_moved(mon
     assert store.jobs == {}
 
 
-def _remembering(store: _TurnStorage, connection_id: str, *, pinned: str | None = None):
+def _remembering(store: _TurnStorage, connection_id: str):
     from cloud_agent.model_preference import ModelPreferenceView
 
     async def preference(user_id: str) -> ModelPreferenceView:
-        return ModelPreferenceView.of(pinned, "glm-5.1", connection_id)
+        return ModelPreferenceView(last_model="glm-5.1", last_model_connection_id=connection_id)
 
     store.get_model_preference = preference  # type: ignore[method-assign]
 
@@ -1649,9 +1629,7 @@ def _remembering(store: _TurnStorage, connection_id: str, *, pinned: str | None 
 async def test_an_unavailable_remembered_connection_leaves_the_default_empty(
     monkeypatch, unavailable
 ):
-    """Never the Gateway's ``glm-5.1``, nor the deployment default: the owner chooses."""
-    from tests.servers.test_agent_jobs_api import _with_deployment_default
-
+    """Nothing stands in for it: the owner chooses."""
     store = _TurnStorage()
     changes = {"models": ["glm-5.1"]}
     if unavailable != "gate":
@@ -1659,31 +1637,16 @@ async def test_an_unavailable_remembered_connection_leaves_the_default_empty(
     row = _connection_row(**changes)
     store.connections.rows[row["id"]] = row
     _remembering(store, row["id"])
-    _with_deployment_default(monkeypatch, "qwen-next")
     if unavailable == "gate":
-        monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "")
+        monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "false")
     async with AsyncClient(
         transport=ASGITransport(app=_build_app(store)), base_url="http://t"
     ) as c:
         config = (await c.get("/v1/agent/config")).json()
 
-    assert "glm-5.1" in config["models"] and "qwen-next" in config["models"]
     assert config["default_model"] is None
     assert config["default_model_connection_id"] is None
     assert config["model_connections_enabled"] is (unavailable != "gate")
-
-
-async def test_a_gateway_pin_still_outranks_a_remembered_connection(monkeypatch):
-    store = _TurnStorage()
-    row = _connection_row(models=("glm-5.1",))
-    store.connections.rows[row["id"]] = row
-    _remembering(store, row["id"], pinned="qwen-next")
-    async with AsyncClient(
-        transport=ASGITransport(app=_build_app(store)), base_url="http://t"
-    ) as c:
-        config = (await c.get("/v1/agent/config")).json()
-
-    assert (config["default_model"], config["default_model_connection_id"]) == ("qwen-next", None)
 
 
 # -- automatic detection: one model at a time ---------------------------------------
@@ -1765,9 +1728,7 @@ async def test_the_composer_offers_exactly_what_the_gates_accept():
 @pytest.mark.parametrize(("model", "client"), [("chat-only", "responses"), ("responses-only", "")])
 async def test_a_claim_resolves_codex_natively_or_through_the_helper_per_model(model, client):
     store = _ConnectionClaimStore(_auto_row(**_MIXED), runtime="codex", model=model)
-    response = await _claim(
-        store, _Grants(), ("model-connections-v1", "model-protocol-translation-v1")
-    )
+    response = await _claim(store, ("model-connections-v1", "model-protocol-translation-v1"))
 
     assert response.status_code == 200, response.text
     access = response.json()["model_connection"]
@@ -1777,7 +1738,7 @@ async def test_a_claim_resolves_codex_natively_or_through_the_helper_per_model(m
 
 async def test_a_claim_on_an_unverified_model_ends_the_turn_with_the_reason():
     store = _ConnectionClaimStore(_auto_row(**_MIXED), model="never-checked")
-    response = await _claim(store, _Grants())
+    response = await _claim(store)
     assert response.status_code == 403
     assert response.json()["detail"]["error"]["reason"] == "model_unverified"
 
@@ -1789,12 +1750,10 @@ async def test_a_residency_names_the_plan_its_model_has_now():
     row["models"] = ["gpt-5.1-codex"]
     connections.rows[row["id"]] = row
     store = _ResidencyStore(connections)
-    *_, native = await residency_credential(
-        store, None, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE
-    )
+    *_, native = await residency_credential(store, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE)
     # Verified again meanwhile: Responses is gone, Chat remains.
     row["model_checks"]["gpt-5.1-codex"] = {**_facts(chat="supported"), "revision": 1}
     *_, translated = await residency_credential(
-        store, None, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE
+        store, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE
     )
     assert (native, translated) == ("responses>responses", "responses>chat_completions")

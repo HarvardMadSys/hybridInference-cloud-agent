@@ -32,6 +32,8 @@ describe('administrator recovery setup', () => {
     const store = vi.spyOn(Storage.prototype, 'setItem');
     render(<SetupPage />);
     expect(screen.queryByText('Settings editor unlocked')).not.toBeInTheDocument();
+    expect(screen.getByText(/Configure sign-in for this deployment/)).toBeInTheDocument();
+    expect(screen.queryByText(/before Gateway sign-in/)).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Administrator recovery token'), {
       target: { value: 'test-private-recovery-token' },
     });

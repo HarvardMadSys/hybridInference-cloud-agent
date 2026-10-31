@@ -16,11 +16,11 @@ import pytest
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fixtures
     FakeStorage,
     _api_key_secret,
-    _configured_identity_issuer,
     _create_job,
     client,
     store,
 )
+from tests.support.owners import connection_claim
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.asyncio
 async def _worker_auth(client: AsyncClient) -> tuple[str, dict[str, str]]:
     """Create a job, claim it as a worker, and return its id and the worker's header."""
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     return job_id, {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
 

@@ -142,8 +142,7 @@ async def test_the_admin_listings_read_the_window_through_the_index(store, pool)
             runtime=None,
             repo=None,
             max_runs=_TURNS,
-            max_rows=_TURNS,
-            max_snapshot_bytes=1,
+            max_attempts=_TURNS,
         )
     finally:
         await listing_pool.close()

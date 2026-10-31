@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from tests.support.owners import connection_access, residency_connection
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, ChatSandboxManager
@@ -20,6 +21,7 @@ from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend
 
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -29,7 +31,6 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
     runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
@@ -44,7 +45,13 @@ _PAYLOAD = {
     "runtime": "claude-code",
     "model": "m",
     "worker_token": "ajt.a.b",
-    "sandbox_token": "grant",
+    "model_connection": {
+        "connection_id": _JOB.model_connection.connection_id,
+        "revision": _JOB.model_connection.revision,
+        "base_url": _JOB.model_connection.base_url,
+        "protocol": _JOB.model_connection.protocol,
+        "api_key": _JOB.model_connection.api_key,
+    },
 }
 
 
@@ -96,7 +103,6 @@ def _serve(monkeypatch, payload: dict[str, Any]) -> dict[str, Any]:
             runner_mod._serve_turn(
                 handover_fd=write_fd,
                 base_url="http://control",
-                gateway_url="http://gateway",
                 worker_id="runner-a",
                 lease_ttl=120.0,
                 agent_timeout_s=3600.0,
@@ -208,6 +214,12 @@ def _run_new_chat(
     )
     control = Mock(spec=runner_mod.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
+    control.establish_shared_residency.return_value = {
+        "credential": _JOB.model_connection.api_key,
+        "generation": 1,
+        "model": job.model,
+        **residency_connection("claude-code"),
+    }
     if job.thread_attachment_count:
         control.list_attachments.return_value = [
             {"id": 17, "path": "replacement.txt", "size_bytes": len(b"replacement")}
@@ -269,7 +281,6 @@ def _run_new_chat(
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings=host_settings,
@@ -446,7 +457,6 @@ def test_an_existing_untrusted_sandbox_without_a_quota_is_not_warned_about(monke
             heart=SimpleNamespace(),
             backend=backend,
             host="host-a",
-            gateway_base_url="http://gateway",
             agent_timeout_s=30,
             finish_attempt=finish,
             host_settings={"sandbox_disk_mib": 0},
@@ -601,7 +611,6 @@ def test_an_existing_sandbox_keeps_the_capacity_and_resources_it_was_created_wit
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings=settings,
@@ -697,7 +706,6 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
     )

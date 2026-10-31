@@ -145,7 +145,6 @@ def _serve(
         target=runner_mod.run_forever,
         kwargs={
             "base_url": "http://control",
-            "gateway_url": "http://gateway",
             "worker_id": "runner-a",
             "backend": backend,
             "host": "host-a",
@@ -308,7 +307,6 @@ def test_an_environment_test_that_ends_at_capacity_frees_its_slot_at_once(servic
     _identity, _process_backend, _released = service
     backend = runner_mod.ContainerBackend(image="img")
     monkeypatch.setattr(backend, "preflight", lambda **_kw: None)
-    monkeypatch.setattr(backend, "check_gateway_reachable", lambda _url: None)
     monkeypatch.setattr(
         backend, "version_stamp", lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
     )

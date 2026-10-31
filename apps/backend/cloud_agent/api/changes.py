@@ -32,7 +32,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from cloud_agent.api._job_views import _iso
-from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, require_agent_owner
+from cloud_agent.api._owner_auth import (
+    OWNER_STREAM_MAX_S,
+    owner_stream_guard,
+    require_agent_owner,
+)
 from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api.deps import get_owner_change_signal, get_storage, require_store
 from cloud_agent.api.usage import job_usage_response
@@ -158,11 +162,14 @@ async def stream_owner_changes(
         # Admission was checked once, for this connection, so the connection
         # does not outlive the cap.
         closes_at = clock() + OWNER_STREAM_MAX_S
+        still_admitted = owner_stream_guard(request, user_id)
         with signal.subscribe(user_id) as subscription:
             yield _frame("hello", {"live": signal.listening})
             while True:
                 remaining = closes_at - clock()
                 if remaining <= 0 or await request.is_disconnected():
+                    return
+                if not await still_admitted():
                     return
                 woken = await subscription.wait(min(_KEEPALIVE_S, remaining))
                 changes = subscription.take()

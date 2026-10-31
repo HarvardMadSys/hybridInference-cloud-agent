@@ -254,9 +254,7 @@ class AutomaticDeploymentSetup(ComputeRequest):
     """Generate immutable Host setups from the running release and trusted machines."""
 
     request_id: str = Field(min_length=1, max_length=128)
-    gateway: SetupMachine
     control: SetupMachine
-    gateway_port: int = Field(default=8080, ge=1, le=65535)
     chat_network_pool: str
     dns_server: str
     protected_cidrs: list[str] = Field(min_length=1, max_length=64)

@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
@@ -29,7 +28,7 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.integration.storage.test_mcp_connection_store import _connect, _invocation
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
-from tests.support.usage import conversation_rows, job_usage_inputs
+from tests.support.usage import job_usage_inputs
 
 from cloud_agent.workers.background_wake import CHANNEL as BACKGROUND
 from cloud_agent.workers.mcp_decision_signal import CHANNEL as DECISIONS
@@ -74,151 +73,39 @@ def _owner_hints(payloads: list[str], kind: str) -> list[tuple[str, str]]:
     return [(item["user"], item["id"]) for item in found if item["kind"] == kind]
 
 
-async def _ledger_row(pool, attempt_id: int) -> int:
-    async with pool.acquire() as conn:
-        return await conn.fetchval(
-            "INSERT INTO agent_attempt_ledger "
-            "(attempt_id, grant_id, residency_generation, binding_id, window_since) "
-            "VALUES ($1, 'grant-one', 1, 'gateway-binding-one', NOW()) RETURNING id",
-            attempt_id,
-        )
-
-
-async def test_a_model_calls_usage_is_read_at_once_and_pushed_to_its_owner(store, pool):
+async def test_a_model_calls_usage_is_pushed_to_its_owner_when_it_is_stored(store, pool):
+    """The agent's usage report is what the owner's tabs show; each one tells them at once."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
     owner = await _listen(OWNER)
-    background = await _listen(BACKGROUND)
     try:
-        ledger_id = await _ledger_row(pool, claim["attempt_id"])
-        assert _owner_hints(await owner.until_quiet(pool), "usage") == [
-            (job["user_id"], job["id"])
-        ], "attribution became available"
-
-        # An event without usage asks for nothing.
+        # An event without usage changes nobody's usage.
         await store.attempt_commands.append_event(
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
             event_type="tool_result",
             payload={"content": "ok"},
         )
-        assert await background.until_quiet(pool) == []
+        assert _owner_hints(await owner.until_quiet(pool), "usage") == []
 
-        # A model call's usage schedules a read, which wakes the collector.
+        # A model call's usage, nested (Claude) or as its own event (pi, Codex).
         await store.attempt_commands.append_event(
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
             event_type="message",
             payload={"text": "done", "usage": {"input_tokens": 3, "output_tokens": 1}},
         )
-        assert await background.until_quiet(pool) == ["ledger"]
-        async with pool.acquire() as conn:
-            scheduled = await conn.fetchval(
-                "SELECT next_refresh_at <= NOW() FROM agent_attempt_ledger WHERE id = $1",
-                ledger_id,
-            )
-        assert scheduled is True
-
-        # The read's result reaches the owner; bookkeeping alone does not.
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE agent_attempt_ledger SET refresh_generation = refresh_generation + 1 "
-                "WHERE id = $1",
-                ledger_id,
-            )
-            assert _owner_hints(await owner.until_quiet(pool), "usage") == []
-            await conn.execute(
-                "UPDATE agent_attempt_ledger SET snapshot = '{}'::jsonb, queried_at = NOW() "
-                "WHERE id = $1",
-                ledger_id,
-            )
         assert _owner_hints(await owner.until_quiet(pool), "usage") == [(job["user_id"], job["id"])]
-
-        # An attempt that stops makes its closing read due.
-        assert await store.attempt_commands.transition(
-            job_id=job["id"],
-            attempt_id=claim["attempt_id"],
-            lease_generation=claim["lease_generation"],
-            from_states=("running",),
-            to_state="failed",
-            detail="the agent exited",
-        )
-        assert "ledger" in await background.until_quiet(pool)
-    finally:
-        await owner.connection.close()
-        await background.connection.close()
-
-
-async def test_a_call_reported_while_its_usage_is_read_is_read_again_after(store, pool):
-    """A model call that finishes during a usage read schedules the next one.
-
-    That read may have asked the gateway before the call finished, so its own
-    completion keeps the request. Until then, another worker counts the row
-    from the claim's expiry rather than looking again and again.
-    """
-    await _create_job(store)
-    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    assert claim is not None
-    ledger_id = await _ledger_row(pool, claim["attempt_id"])
-    usage = {"text": "done", "usage": {"input_tokens": 3, "output_tokens": 1}}
-
-    async def report_a_call() -> None:
         await store.attempt_commands.append_event(
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
-            event_type="message",
-            payload=usage,
+            event_type="usage",
+            payload={"input_tokens": 4, "output_tokens": 2, "usage_id": "codex:t:6"},
         )
-
-    async def scheduled() -> datetime | None:
-        async with pool.acquire() as conn:
-            return await conn.fetchval(
-                "SELECT next_refresh_at FROM agent_attempt_ledger WHERE id = $1", ledger_id
-            )
-
-    await report_a_call()
-    read = await store.ledger.claim_due_ledger_refresh()
-    assert read is not None and await scheduled() is None
-
-    await report_a_call()
-    assert await scheduled() is not None, "a call during the read is asked for"
-    due = await store.ledger.next_ledger_refresh_due()
-    assert due is not None and due > datetime.now(UTC) + timedelta(seconds=30), (
-        "while the read is claimed, nothing is due before its claim expires"
-    )
-
-    assert await store.ledger.complete_ledger_refresh(
-        ledger_id=read["id"],
-        refresh_generation=read["refresh_generation"],
-        terminal=False,
-        report={},
-        error_code=None,
-    )
-    kept = await scheduled()
-    assert kept is not None, "completing the read keeps the request made during it"
-    assert await store.ledger.next_ledger_refresh_due() == kept
-
-    # Without a call in between, a completed read leaves nothing scheduled.
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_attempt_ledger SET next_refresh_at = NOW() WHERE id = $1", ledger_id
-        )
-    read = await store.ledger.claim_due_ledger_refresh()
-    assert read is not None
-    assert await store.ledger.complete_ledger_refresh(
-        ledger_id=read["id"],
-        refresh_generation=read["refresh_generation"],
-        terminal=False,
-        report={},
-        error_code=None,
-    )
-    assert await scheduled() is None
-
-
-def _without_window_end(rows: list[dict]) -> list[dict]:
-    """Rows as compared across reads: a running attempt's window ends at each read's NOW()."""
-    return [{k: v for k, v in row.items() if k != "window_until"} for row in rows]
+        assert _owner_hints(await owner.until_quiet(pool), "usage") == [(job["user_id"], job["id"])]
+    finally:
+        await owner.connection.close()
 
 
 async def test_an_owners_usage_is_read_from_one_snapshot_whose_version_orders_it(
@@ -235,21 +122,15 @@ async def test_an_owners_usage_is_read_from_one_snapshot_whose_version_orders_it
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
-    ledger_id = await _ledger_row(pool, claim["attempt_id"])
     first = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
     assert first is not None
     assert first["job"]["state"] == "running" and first["job"]["runtime"] == job["runtime"]
-    assert _without_window_end(first["ledger_rows"]) == _without_window_end(
-        await store.ledger.ledger_rows_for_job(job_id=job["id"])
-    )
-    assert first["conversation_rows"] == await conversation_rows(
-        pool, job_id=job["id"], user_id=job["user_id"]
-    )
+    assert set(first) == {"job", "inputs", "version"}
     assert first["inputs"] == await job_usage_inputs(pool, job_id=job["id"])
     assert await store.ledger.job_usage_reads(job_id=job["id"], user_id="someone-else") is None
 
-    # A usage event and a stored reading land while the read is under way,
-    # after its first statement: neither is in it.
+    # A usage event lands while the read is under way, after its first
+    # statement: it is not in it.
     real_inputs = ledger_repository.fetch_job_usage_inputs
 
     async def a_commit_lands_first(conn, job_id):
@@ -260,9 +141,6 @@ async def test_an_owners_usage_is_read_from_one_snapshot_whose_version_orders_it
                 job["id"],
                 claim["attempt_id"],
             )
-            await other.execute(
-                "UPDATE agent_attempt_ledger SET queried_at = NOW() WHERE id = $1", ledger_id
-            )
         return await real_inputs(conn, job_id)
 
     monkeypatch.setattr(ledger_repository, "fetch_job_usage_inputs", a_commit_lands_first)
@@ -270,57 +148,14 @@ async def test_an_owners_usage_is_read_from_one_snapshot_whose_version_orders_it
     monkeypatch.setattr(ledger_repository, "fetch_job_usage_inputs", real_inputs)
     assert during is not None
     assert during["inputs"]["events"] == [], "the event committed mid-read is not in it"
-    assert during["ledger_rows"][0]["queried_at"] is None
     assert during["version"] >= first["version"]
 
     after = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
     assert after is not None
     assert [event["event_type"] for event in after["inputs"]["events"]] == ["usage"]
-    assert after["ledger_rows"][0]["queried_at"] is not None
     assert after["version"] > during["version"], "it saw a commit the other did not"
     again = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
     assert again is not None and again["version"] >= after["version"]
-
-
-async def test_an_attempt_without_a_ledger_row_says_whether_it_ever_called_a_model(store, pool):
-    job = await _create_job(store)
-    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    assert claim is not None
-    assert await store.attempt_commands.transition(
-        job_id=job["id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        from_states=("running",),
-        to_state="failed",
-        detail="source checkout exceeds the retained import size limit",
-    )
-    rows = await store.ledger.ledger_rows_for_job(job_id=job["id"])
-    assert [(row["id"], row["model_usage_reported"]) for row in rows] == [(None, False)]
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload) "
-            "VALUES ($1, $2, 1, 'usage', '{\"input_tokens\": 1}'::jsonb)",
-            job["id"],
-            claim["attempt_id"],
-        )
-    rows = await store.ledger.ledger_rows_for_job(job_id=job["id"])
-    assert rows[0]["model_usage_reported"] is True
-
-
-async def test_the_earliest_scheduled_read_is_when_the_collector_wakes(store, pool):
-    assert await store.ledger.next_ledger_refresh_due() is None
-    await _create_job(store)
-    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    assert claim is not None
-    ledger_id = await _ledger_row(pool, claim["attempt_id"])
-    soon = datetime.now(UTC) + timedelta(seconds=7)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_attempt_ledger SET next_refresh_at = $2 WHERE id = $1", ledger_id, soon
-        )
-    due = await store.ledger.next_ledger_refresh_due()
-    assert due is not None and abs((due - soon).total_seconds()) < 0.01
 
 
 async def test_the_queue_and_tool_approvals_tell_their_owner(store, pool):

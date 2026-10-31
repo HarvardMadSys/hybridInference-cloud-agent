@@ -11,7 +11,6 @@ import {
   type AgentMemoryScope,
 } from '@/lib/api/agentMemory';
 import { getInsights, type WorkInsights } from '@/lib/api/insights';
-import { getModelPreference } from '@/lib/api/modelPreference';
 import { getUserProfile } from '@/lib/api/userProfile';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
@@ -37,10 +36,6 @@ import { listSkills } from '@/lib/api/skills';
 import { listSshServers } from '@/lib/api/sshServers';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
-vi.mock('@/lib/api/modelPreference', () => ({
-  getModelPreference: vi.fn(),
-  saveModelPreference: vi.fn(),
-}));
 // My Settings also lists personal model connections; this deployment offers none.
 vi.mock('@/lib/api/modelConnections', () => ({
   MAX_MODELS: 8,
@@ -191,15 +186,7 @@ beforeEach(() => {
   });
   localStorage.clear();
   document.documentElement.lang = 'en';
-  vi.mocked(getModelPreference).mockResolvedValue({
-    default_model: null,
-    last_model: 'model-a',
-    effective_model: 'model-a',
-    deployment_default: null,
-    models: ['model-a', 'model-b'],
-  });
   vi.mocked(getAgentConfig).mockResolvedValue({
-    models: ['model-a', 'model-b'],
     repos: [],
     runtimes: ['codex'],
     github_connected: true,
@@ -773,4 +760,12 @@ describe('IntegrationsView', () => {
     // no longer carries a placeholder pill.
     expect(screen.queryAllByText('Coming soon')).toHaveLength(0);
   });
+});
+
+it('My Settings offers model connections and no default-model pin', async () => {
+  render(<MySettingsView />);
+  await screen.findByRole('region', { name: 'Personal model connections' });
+  expect(screen.queryByRole('region', { name: 'Default model' })).not.toBeInTheDocument();
+  expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
+  expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
 });

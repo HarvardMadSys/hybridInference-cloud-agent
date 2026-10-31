@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 04:47-0400\n"
+"POT-Creation-Date: 2026-10-30 22:23-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,7 +13,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.10.3\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../developer/web-app.md:1
 msgid "The owner web app"
@@ -798,12 +798,6 @@ msgstr ""
 
 #: ../developer/web-app.md:354
 msgid ""
-"**Prompt rewriting.** See [Draft prompt rewriting](operations.md#draft-"
-"prompt-rewriting)."
-msgstr "**改写提示词。** 见[改写草稿提示词](operations.md#draft-prompt-rewriting)。"
-
-#: ../developer/web-app.md:356
-msgid ""
 "**Review.** Starts an independent code-review subagent in a workspace "
 "tab, covering every change since the conversation's original base, "
 "current workspace changes included, and instructed not to edit files. It "
@@ -815,7 +809,7 @@ msgstr ""
 "在工作区的一个标签页里启动一个独立的代码审查子代理，审查范围是从对话最初的基线以来的所有改动，包括工作区里当前的改动，并且要求它不修改文件。它需要有可用的原生"
 " Fork，所以不能从已归档的对话或已经丢失上下文的对话启动。再选一次会重新打开这个对话已有的审查。"
 
-#: ../developer/web-app.md:361
+#: ../developer/web-app.md:359
 msgid ""
 "**Watch PR and merge.** Starts a follow-up in the same chat that watches "
 "checks and reviews, fixes failures and feedback, and merges once the "
@@ -833,4 +827,3 @@ msgstr ""
 "满足必需的检查和审查后合并；哪些东西不经人就能合并，由仓库规则决定。它会保留输入区里还没发出的文字和附件，并且只有在共用这个工作区的所有对话都没有正在进行的工作或等待中的消息时才能启动。代理需要能读取检查和审查、把草稿标为就绪并合并的源代码管理工具：也就是"
 " GitHub 预设，搭配一个对 Contents 和 Pull requests 有读写权限的令牌。连接到 `/mcp/readonly` "
 "的连接必须用这个预设重新连接。盯守会随这一轮的超时结束；如果这一轮做了修复，它会结束，让平台去发布这些修复。"
-

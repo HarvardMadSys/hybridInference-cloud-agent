@@ -1,9 +1,11 @@
-"""Cross-task usage aggregation over stored Gateway snapshots.
+"""Cross-task usage aggregation over what each turn's agent reported.
 
 One run is one ``agent_jobs`` turn and every execution attempt it made. A
 selection is by job creation time, a day bucket is a UTC creation day, and every
-number comes from the same per-job accounting the owner and admin run reads use.
-Missing snapshots stay missing: this module never converts them into zeroes.
+number is the agent's own report, reduced per turn by
+:mod:`cloud_agent.runtime_usage`. A turn that reported nothing stays missing:
+this module never converts it into zeroes. Cost and model calls belong to the
+owner's provider and are never known here.
 """
 
 from __future__ import annotations
@@ -17,10 +19,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from cloud_agent.grant_usage import (
     DERIVED_AMOUNT_CHARS,
     USAGE_METRICS,
-    GrantUsageDerivedTotals,
-    GrantUsageUnknownRows,
+    UsageSums,
+    UsageUnknownRows,
 )
-from cloud_agent.ledger import JobLedgerSummary, summarize_job_ledger
+from cloud_agent.runtime_usage import RuntimeJobUsage, summarize_runtime_job
 
 #: Longest selectable window, in whole days.
 MAX_USAGE_WINDOW_DAYS = 90
@@ -28,38 +30,35 @@ MAX_USAGE_WINDOW_DAYS = 90
 DEFAULT_USAGE_WINDOW_DAYS = 7
 #: Jobs in one selection, before the query is refused.
 MAX_USAGE_RUNS = 10_000
-#: Attempt and ledger rows in one selection, before the query is refused.
-MAX_USAGE_LEDGER_ROWS = 50_000
-#: Serialized bytes of the projected snapshots in one selection.
-MAX_USAGE_SNAPSHOT_BYTES = 32 * 1024 * 1024
+#: Attempts in one selection, before the query is refused.
+MAX_USAGE_ATTEMPTS = 50_000
 #: Serialized bytes of the HTTP JSON one selection may return. Checked on the
 #: real serialized response, because no per-row budget bounds a sum of wide
 #: counters. A measured worst case with 4,000-digit counters in every metric
 #: over 89 day buckets returned 429 KiB, so reaching 1 MiB needs counters no
-#: real gateway report carries; the bound is here so that input still fails
-#: rather than arriving.
+#: real report carries; the bound is here so that input still fails rather
+#: than arriving.
 MAX_USAGE_RESPONSE_BYTES = 1024 * 1024
 #: Groups shown per breakdown before the remainder is combined.
 BREAKDOWN_TOP_GROUPS = 20
 #: The grouped model of a job whose configured model is empty or missing.
 UNKNOWN_MODEL_GROUP = None
 
-LedgerStatus = Literal["pending", "available", "partial", "unavailable", "stale"]
+UsageStatus = Literal["pending", "available", "partial", "unavailable"]
 BreakdownDimension = Literal["user_id", "model"]
 DayBucket = tuple[datetime, datetime]
 
 
-#: Every state one job's ledger summary can end in, each counted exactly once.
-_STATUS_ORDER: tuple[LedgerStatus, ...] = (
+#: Every state one job's usage can end in, each counted exactly once.
+_STATUS_ORDER: tuple[UsageStatus, ...] = (
     "available",
     "partial",
-    "stale",
     "pending",
     "unavailable",
 )
 
 
-class AdminUsageTotals(GrantUsageDerivedTotals):
+class AdminUsageTotals(UsageSums):
     """Known metric sums for one selection, group or day; unknowns stay null."""
 
 
@@ -71,12 +70,13 @@ class AdminUsageAggregate(BaseModel):
     run_count: int = Field(ge=0)
     attempt_count: int = Field(ge=0)
     totals: AdminUsageTotals | None = None
-    unknown_rows: GrantUsageUnknownRows | None = None
+    unknown_rows: UsageUnknownRows | None = None
     estimated_calls: int = Field(default=0, ge=0)
     oldest_queried_at: datetime | None = None
+    #: Runs whose agent reported any usage.
     runs_with_snapshot: int = Field(default=0, ge=0)
     missing_attempts: int = Field(default=0, ge=0)
-    status_counts: dict[LedgerStatus, int] = Field(
+    status_counts: dict[UsageStatus, int] = Field(
         default_factory=lambda: dict.fromkeys(_STATUS_ORDER, 0)
     )
     active_runs: int = Field(default=0, ge=0)
@@ -93,7 +93,7 @@ class AdminUsageGroup(BaseModel):
 
 
 class AdminUsageBreakdown(BaseModel):
-    """The largest groups by recorded cost and the remainder as one row."""
+    """The largest groups by reported tokens and the remainder as one row."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -143,9 +143,8 @@ class AdminUsageResponse(BaseModel):
 
     # The breakdowns partition the same runs as ``summary``. Adding the user and
     # model breakdowns together would double count every run.
-    schema_version: Literal[1] = 1
-    source: Literal["gateway_api_logs"] = "gateway_api_logs"
-    attribution: Literal["grant_time_window"] = "grant_time_window"
+    schema_version: Literal[2] = 2
+    source: Literal["runtime_reported"] = "runtime_reported"
     finalized: Literal[False] = False
     selection: AdminUsageSelection
     generated_at: datetime
@@ -216,15 +215,15 @@ def day_key(created_at: datetime) -> str:
     return created_at.astimezone(UTC).date().isoformat()
 
 
-def _unknown_rows(rows: list[GrantUsageUnknownRows]) -> GrantUsageUnknownRows | None:
+def _unknown_rows(rows: list[UsageUnknownRows]) -> UsageUnknownRows | None:
     if not rows:
         return None
-    return GrantUsageUnknownRows(
+    return UsageUnknownRows(
         **{name: sum(getattr(row, name) for row in rows) for name in USAGE_METRICS}
     )
 
 
-def _sum_totals(totals: list[GrantUsageDerivedTotals]) -> AdminUsageTotals | None:
+def _sum_totals(totals: list[UsageSums]) -> AdminUsageTotals | None:
     """Add known values only, leaving each unknown metric unknown.
 
     Every amount here is an exact decimal string whose width is already bounded
@@ -233,7 +232,8 @@ def _sum_totals(totals: list[GrantUsageDerivedTotals]) -> AdminUsageTotals | Non
     """
     if not totals:
         return None
-    summed: dict[str, Any] = {"calls": sum(total.calls for total in totals)}
+    calls = [total.calls for total in totals if total.calls is not None]
+    summed: dict[str, Any] = {"calls": sum(calls) if calls else None}
     for name in USAGE_METRICS:
         known = [value for value in (getattr(total, name) for total in totals) if value is not None]
         if name != "spent_usd":
@@ -253,10 +253,9 @@ def _sum_totals(totals: list[GrantUsageDerivedTotals]) -> AdminUsageTotals | Non
     return AdminUsageTotals(**summed)
 
 
-#: One job, ready to be added to any number of cohorts. Resolving a stored
-#: report is the expensive part of a selection, so it happens exactly once per
-#: job and the four reductions reuse the result.
-Prepared = tuple[dict[str, Any], JobLedgerSummary, bool]
+#: One job, ready to be added to any number of cohorts. Its usage is reduced
+#: exactly once per job and the four reductions reuse the result.
+Prepared = tuple[dict[str, Any], RuntimeJobUsage, bool]
 
 
 class _Cohort:
@@ -269,10 +268,10 @@ class _Cohort:
 
     def __init__(self) -> None:
         self.usage = AdminUsageAggregate(run_count=0, attempt_count=0)
-        self._totals: list[GrantUsageDerivedTotals] = []
-        self._unknown: list[GrantUsageUnknownRows] = []
+        self._totals: list[UsageSums] = []
+        self._unknown: list[UsageUnknownRows] = []
 
-    def add(self, summary: JobLedgerSummary, *, active: bool) -> None:
+    def add(self, summary: RuntimeJobUsage, *, active: bool) -> None:
         """Account for one job exactly once in this cohort."""
         usage = self.usage
         usage.run_count += 1
@@ -283,7 +282,7 @@ class _Cohort:
         usage.refreshing_runs += int(summary.refreshing)
         usage.active_runs += int(active)
         if summary.totals is None:
-            # No readable snapshot: this job contributes coverage, never zero.
+            # Nothing reported: this job contributes coverage, never zero.
             return
         usage.runs_with_snapshot += 1
         if summary.queried_at is not None:
@@ -303,13 +302,11 @@ class _Cohort:
 
 
 def prepare_jobs(rows: list[dict[str, Any]], *, terminal_states: tuple[str, ...]) -> list[Prepared]:
-    """Resolve each job's ledger summary once, for reuse by every reduction."""
+    """Reduce each job's usage once, for reuse by every reduction."""
     return [
         (
             row,
-            summarize_job_ledger(
-                row.get("ledger") or [], terminal=row.get("state") in terminal_states
-            ),
+            summarize_runtime_job(row, terminal=row.get("state") in terminal_states),
             row.get("state") not in terminal_states,
         )
         for row in rows
@@ -317,7 +314,7 @@ def prepare_jobs(rows: list[dict[str, Any]], *, terminal_states: tuple[str, ...]
 
 
 def aggregate_prepared(prepared: list[Prepared]) -> AdminUsageAggregate:
-    """Account for jobs whose ledger summaries this request already resolved."""
+    """Account for jobs whose usage this request already reduced."""
     return _aggregate(prepared)
 
 
@@ -331,7 +328,7 @@ def _aggregate(prepared: list[Prepared]) -> AdminUsageAggregate:
 def aggregate_jobs(
     rows: list[dict[str, Any]], *, terminal_states: tuple[str, ...]
 ) -> AdminUsageAggregate:
-    """Account for a cohort of jobs, each through the shared job ledger summary."""
+    """Account for a cohort of jobs, each through the shared per-turn reduction."""
     return _aggregate(prepare_jobs(rows, terminal_states=terminal_states))
 
 
@@ -340,23 +337,23 @@ def _key_order(key: str | None) -> tuple[int, bytes]:
     return (1, b"") if key is None else (0, key.encode("utf-8"))
 
 
-def _spend_order(usage: AdminUsageAggregate) -> Decimal:
-    spent = usage.totals.spent_usd if usage.totals else None
-    return Decimal(spent) if spent is not None else Decimal(0)
+def _volume_order(usage: AdminUsageAggregate) -> int:
+    """Reported tokens in and out: the only volume every source shares."""
+    totals = usage.totals
+    return 0 if totals is None else (totals.tokens_in or 0) + (totals.tokens_out or 0)
 
 
 def _ranked(groups: dict[str | None, AdminUsageAggregate]) -> list[AdminUsageGroup]:
-    """Sort groups by recorded cost descending; unknown cost ranks last.
+    """Sort groups by reported tokens descending; a group with none ranks last.
 
-    A group with no readable snapshot has no recorded cost at all. It stays in
-    the result so its runs and coverage are visible, and it is never described
-    as cheap.
+    A group whose agents reported nothing stays in the result so its runs and
+    coverage are visible, and it is never described as unused.
     """
     ranked = sorted(
         groups.items(),
         key=lambda item: (
             item[1].totals is None,
-            -_spend_order(item[1]),
+            -_volume_order(item[1]),
             _key_order(item[0]),
         ),
     )
@@ -371,10 +368,10 @@ def breakdown(
     top: int = BREAKDOWN_TOP_GROUPS,
     prepared: list[Prepared] | None = None,
 ) -> AdminUsageBreakdown:
-    """Group a cohort by one stored job field and rank the groups by cost.
+    """Group a cohort by one stored job field and rank the groups by reported tokens.
 
     The remainder is aggregated from its own jobs rather than by subtracting the
-    shown groups from the summary, so a group with no readable cost still
+    shown groups from the summary, so a group with no reported usage still
     contributes its coverage and statuses. A group whose key is missing or empty
     is kept as one explicit unknown group instead of being guessed at. Pass
     ``prepared`` to reuse summaries this request already resolved.

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
+from tests.support.owners import connection_access
 from tests.support.ssh_keys import host_key, private_key
 
 from cloud_agent_host import runner as runner_mod
@@ -43,6 +44,7 @@ _ACCESS = SshAccess(
     ],
 )
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -52,7 +54,6 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
     runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
@@ -121,7 +122,6 @@ def _run(monkeypatch, job: ClaimedJob) -> Mock:
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=Mock(),
     )
@@ -149,8 +149,8 @@ def test_a_chat_without_ssh_servers_costs_no_call(monkeypatch) -> None:
 
 def test_the_keys_are_masked_in_everything_the_runner_reports() -> None:
     values = runner_mod._claim_secret_values(replace(_JOB, ssh_access=_ACCESS))
-    assert values == {"ssh-key:gpu": _KEY}
-    assert runner_mod._claim_secret_values(_JOB) == {}
+    assert values["ssh-key:gpu"] == _KEY
+    assert "ssh-key:gpu" not in runner_mod._claim_secret_values(_JOB)
 
 
 def test_the_runner_tells_the_sandbox_manager_its_turn_is_starting() -> None:

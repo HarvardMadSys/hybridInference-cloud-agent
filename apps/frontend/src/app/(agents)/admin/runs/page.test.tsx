@@ -39,7 +39,7 @@ vi.mock('@/components/providers/AuthProvider', async () => {
   const actual = await vi.importActual<typeof import('@/components/providers/AuthProvider')>(
     '@/components/providers/AuthProvider',
   );
-  return { hasAgentPermission: actual.hasAgentPermission };
+  return { ...actual };
 });
 vi.mock('next/navigation', () => ({
   useParams: () => route,
@@ -48,9 +48,6 @@ vi.mock('next/navigation', () => ({
 vi.mock('@/lib/api/adminRuns', () => ({
   getAdminRun: vi.fn(),
   getAdminAttemptResources: vi.fn(),
-  getAdminLlmRequestSources: vi.fn(),
-  getAdminLlmRequests: vi.fn(),
-  getAdminRunModelTtft: vi.fn(),
 }));
 // The Startup line reads the measurement surface, a different client. Mocked
 // for the same reason the run client is: jsdom has no control plane to answer,
@@ -65,13 +62,7 @@ vi.mock('@/lib/api/adminMeasurements', () => ({
   getMeasurement: measurements.getMeasurement,
 }));
 
-import {
-  getAdminRun,
-  getAdminAttemptResources,
-  getAdminLlmRequestSources,
-  getAdminLlmRequests,
-  getAdminRunModelTtft,
-} from '@/lib/api/adminRuns';
+import { getAdminRun, getAdminAttemptResources } from '@/lib/api/adminRuns';
 import { listMeasurements } from '@/lib/api/adminMeasurements';
 import AdminRunPage from './[jobId]/page';
 import { RunState } from './shared';
@@ -99,51 +90,6 @@ function run(overrides: Partial<AdminRun> = {}): AdminRun {
 
 function usage(): AgentJobUsageApi {
   return {
-    ledger: {
-      status: 'partial',
-      source: 'gateway_api_logs',
-      attribution: 'grant_time_window',
-      finalized: false,
-      totals: {
-        calls: 2,
-        tokens_in: 40086,
-        tokens_out: 413,
-        cache_read: 19712,
-        cache_write: null,
-        reasoning: null,
-        spent_usd: '0.00978569',
-      },
-      unknown_rows: {
-        tokens_in: 0,
-        tokens_out: 0,
-        cache_read: 0,
-        cache_write: 0,
-        reasoning: 2,
-        spent_usd: 0,
-      },
-      estimated_calls: 0,
-      queried_at: '2026-09-10T08:03:00Z',
-      missing_attempts: 0,
-      attempts: [
-        {
-          attempt_id: 10,
-          attempt_no: 1,
-          status: 'partial',
-          reason: null,
-          totals: null,
-          unknown_rows: null,
-          estimated_calls: 0,
-          queried_at: '2026-09-10T08:03:00Z',
-          windows: [
-            {
-              since: '2026-09-10T08:00:00Z',
-              until: '2026-09-10T08:02:00Z',
-              basis: 'request_started_at',
-            },
-          ],
-        },
-      ],
-    },
     runtime: {
       source: 'runtime',
       input_tokens: 20374,
@@ -151,7 +97,6 @@ function usage(): AgentJobUsageApi {
       output_tokens: 413,
       cache_read_tokens: 19712,
     },
-    conversation: null,
   };
 }
 
@@ -177,7 +122,6 @@ function detail(overrides: Partial<AdminRunDetail> = {}): AdminRunDetail {
       output_tokens_per_second: 257,
       timing_source: 'message_events',
     },
-    capabilities: { llm_requests: true },
     ...overrides,
   };
 }
@@ -341,37 +285,16 @@ beforeEach(() => {
   for (const read of [
     getAdminRun,
     getAdminAttemptResources,
-    getAdminLlmRequestSources,
-    getAdminLlmRequests,
-    getAdminRunModelTtft,
     listMeasurements,
     measurements.getMeasurement,
   ]) {
     vi.mocked(read).mockReset();
   }
-  vi.mocked(getAdminRunModelTtft).mockResolvedValue({
-    source: 'gateway_request_log',
-    status: 'available',
-    mean_ttft_ms: 10_400,
-    samples: 3,
-    requests_read: 3,
-    sources_read: 1,
-    sources_total: 1,
-    complete: true,
-    reason: null,
-  });
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   auth.id = 'admin-1';
   route.jobId = 'job-1';
   vi.mocked(getAdminRun).mockResolvedValue(detail());
   vi.mocked(getAdminAttemptResources).mockResolvedValue(resources());
-  vi.mocked(getAdminLlmRequestSources).mockResolvedValue({
-    job_id: 'job-1',
-    observed_at: '2026-09-10T08:03:00Z',
-    sources: [],
-    next_cursor: null,
-    reason: null,
-  });
   // The header's Startup line reads the latest run's startup sample. Its default
   // answer here is "nothing stored", which is what a turn has while measurement
   // is off.
@@ -521,49 +444,10 @@ describe('admin run observation', () => {
     // Which sections cover which runs is on hover, not another paragraph.
     expect(note).toHaveAttribute(
       'title',
-      'Resources and startup show the latest run; turn statistics, token usage and LLM requests cover every run.',
-    );
-    // Every run's requests belong to the turn, so none is picked out.
-    await waitFor(() =>
-      expect(getAdminLlmRequestSources).toHaveBeenCalledWith(
-        'job-1',
-        { limit: 100 },
-        expect.any(AbortSignal),
-      ),
+      'Resources and startup show the latest run; turn statistics and token usage cover every run.',
     );
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Previous attempts/ })).not.toBeInTheDocument();
-  });
-
-  it('says a run that could not start could not start, and lists no requests for it', async () => {
-    const restarted = attemptsDetail();
-    vi.mocked(getAdminRun).mockResolvedValue(
-      detail({
-        attempts: [{ ...restarted.attempts[0], status: 'aborted' }, restarted.attempts[1]],
-      }),
-    );
-    vi.mocked(getAdminLlmRequestSources).mockResolvedValue({
-      job_id: 'job-1',
-      observed_at: '2026-09-10T08:03:00Z',
-      sources: [
-        {
-          source_id: null,
-          attempt_id: 10,
-          attempt_no: 1,
-          window_since: null,
-          window_until: null,
-          window_state: 'unknown',
-          availability: 'unavailable',
-          reason: 'attribution_unavailable',
-        },
-      ],
-      next_cursor: null,
-      reason: null,
-    });
-    render(<AdminRunPage />);
-    expect(await screen.findByText(/the run on host-a could not start/)).toBeVisible();
-    expect(await screen.findByText('This turn has not started.')).toBeInTheDocument();
-    expect(screen.queryByText(/never attributed/)).not.toBeInTheDocument();
   });
 
   it('explains a queued turn without assuming why it has not started', async () => {
@@ -581,84 +465,7 @@ describe('admin run observation', () => {
     auth.access = { allowed: true, permissions: ['agent.use'] };
     render(<AdminRunPage />);
     expect(screen.getByText('Admin access required')).toBeInTheDocument();
-    for (const fn of [
-      getAdminRun,
-      getAdminAttemptResources,
-      getAdminLlmRequestSources,
-      getAdminLlmRequests,
-    ])
-      expect(fn).not.toHaveBeenCalled();
-  });
-
-  it('shows turn statistics and one token usage summary without usage diagnostics', async () => {
-    render(<AdminRunPage />);
-    expect(await screen.findByRole('heading', { name: 'Turn statistics' })).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Token usage' })).toBeVisible();
-    expect(screen.getByText('27m 47s')).toBeVisible();
-    const statistics = within(screen.getByRole('region', { name: 'Turn statistics' }));
-    // Gateway TTFT and startup-inclusive first output are separate rows.
-    expect(await statistics.findByText('10.4s')).toBeVisible();
-    expect(statistics.getByText('Avg model time to first token (TTFT)')).toHaveAttribute(
-      'title',
-      expect.stringContaining('startup are not included'),
-    );
-    expect(statistics.getByText('1m 36s')).toBeVisible();
-    expect(getAdminRunModelTtft).toHaveBeenCalledWith('job-1', expect.any(AbortSignal));
-    const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
-    expect(totals.getByRole('row', { name: 'Model calls 2' })).toBeVisible();
-    expect(totals.getByText('$0.0097')).toHaveAttribute('title', '0.00978569');
-    expect(screen.queryByText(/Gateway totals for this run/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Estimates from recorded activity/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/^Gateway:/)).not.toBeInTheDocument();
-    expect(screen.queryByText('Finalized')).not.toBeInTheDocument();
-    expect(screen.queryByText('Not finalized')).not.toBeInTheDocument();
-    expect(screen.queryByText('Accounting update in progress')).not.toBeInTheDocument();
-    expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
-    expect(screen.queryByText('Gateway ledger')).not.toBeInTheDocument();
-    expect(screen.queryByText('Runtime reported')).not.toBeInTheDocument();
-    expect(screen.queryByText('Attribution windows')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Snapshot:/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Rows missing metrics:/)).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('table', { name: 'Usage source comparison' }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText('LLM requests')).toBeInTheDocument();
-    // Request metrics now load with the section; an empty source list makes no gateway read.
-    expect(getAdminLlmRequestSources).toHaveBeenCalledWith(
-      'job-1',
-      { limit: 100 },
-      expect.any(AbortSignal),
-    );
-    expect(getAdminLlmRequests).not.toHaveBeenCalled();
-    expect(screen.queryByText('Failure classification')).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: /Publish|View changes|Raw events/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it('keeps incomplete, estimated and unavailable usage clear in the summary', async () => {
-    const partial = usage();
-    partial.ledger.missing_attempts = 1;
-    partial.ledger.estimated_calls = 2;
-    partial.ledger.unknown_rows!.tokens_in = 1;
-    partial.ledger.unknown_rows!.spent_usd = 1;
-    vi.mocked(getAdminRun).mockResolvedValue(
-      detail({ usage: partial, session_statistics: undefined }),
-    );
-
-    render(<AdminRunPage />);
-    await screen.findByRole('heading', { name: 'Token usage' });
-    const statistics = within(screen.getByRole('region', { name: 'Turn statistics' }));
-    expect(statistics.getAllByText('Unavailable')).toHaveLength(4);
-    const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
-    expect(
-      totals.getByRole('row', { name: 'Input tokens (including cache) 40,086 (1 unknown)' }),
-    ).toBeVisible();
-    expect(totals.getByRole('row', { name: 'Cost (USD) $0.0097 (1 unknown)' })).toBeVisible();
-    expect(totals.getByRole('row', { name: 'Reasoning tokens Unavailable' })).toBeVisible();
-    expect(screen.getByText('Gateway totals are missing for part of this turn.')).toBeVisible();
-    expect(screen.getByText('2 calls contain estimated usage.')).toBeVisible();
-    expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
+    for (const fn of [getAdminRun, getAdminAttemptResources]) expect(fn).not.toHaveBeenCalled();
   });
 
   it('says the owner\u2019s provider bills a turn on their connection, with no cost figure', async () => {
@@ -671,7 +478,6 @@ describe('admin run observation', () => {
     expect(
       totals.getByRole('row', { name: "Cost (USD) Billed by the owner's provider" }),
     ).toBeVisible();
-    expect(screen.getByText(/ran on its owner.s own model connection/)).toBeVisible();
   });
 
   it('keeps zero-coverage totals unavailable and exposes timing provenance and incomplete process evidence', async () => {
@@ -816,8 +622,8 @@ describe('admin run observation', () => {
 
   it('keeps turn summaries whole for a restarted turn and aborts an in-flight read when admin permission is lost', async () => {
     vi.mocked(getAdminRun).mockResolvedValue(attemptsDetail());
-    const pending = deferred<Awaited<ReturnType<typeof getAdminLlmRequestSources>>>();
-    vi.mocked(getAdminLlmRequestSources).mockReturnValueOnce(pending.promise);
+    const pending = deferred<Awaited<ReturnType<typeof getAdminAttemptResources>>>();
+    vi.mocked(getAdminAttemptResources).mockReturnValueOnce(pending.promise);
     const view = render(<AdminRunPage />);
     await screen.findByText('host-b');
     // Both summary sections describe the entire turn, every run included.
@@ -826,13 +632,13 @@ describe('admin run observation', () => {
     expect(screen.getByText('257 tok/s')).toBeVisible();
     expect(
       within(screen.getByRole('table', { name: 'Token usage totals' })).getByRole('row', {
-        name: 'Model calls 2',
+        name: 'Input tokens 20,374',
       }),
     ).toBeVisible();
-    await waitFor(() => expect(getAdminLlmRequestSources).toHaveBeenCalled());
+    await waitFor(() => expect(getAdminAttemptResources).toHaveBeenCalled());
     auth.access = { allowed: true, permissions: ['agent.use'] };
     view.rerender(<AdminRunPage />);
-    expect(vi.mocked(getAdminLlmRequestSources).mock.lastCall?.[2]?.aborted).toBe(true);
+    expect(vi.mocked(getAdminAttemptResources).mock.lastCall?.[2]?.aborted).toBe(true);
     expect(screen.getByText('Admin access required')).toBeInTheDocument();
     auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
     view.rerender(<AdminRunPage />);
@@ -842,12 +648,12 @@ describe('admin run observation', () => {
 
   it('aborts its reads when navigating to another turn', async () => {
     vi.mocked(getAdminRun).mockResolvedValueOnce(attemptsDetail());
-    const pending = deferred<Awaited<ReturnType<typeof getAdminLlmRequestSources>>>();
-    vi.mocked(getAdminLlmRequestSources).mockReturnValueOnce(pending.promise);
+    const pending = deferred<Awaited<ReturnType<typeof getAdminAttemptResources>>>();
+    vi.mocked(getAdminAttemptResources).mockReturnValueOnce(pending.promise);
     const view = render(<AdminRunPage />);
     await screen.findByText('host-b');
-    await waitFor(() => expect(getAdminLlmRequestSources).toHaveBeenCalled());
-    const firstRead = vi.mocked(getAdminLlmRequestSources).mock.lastCall![2];
+    await waitFor(() => expect(getAdminAttemptResources).toHaveBeenCalled());
+    const firstRead = vi.mocked(getAdminAttemptResources).mock.lastCall![2];
 
     route.jobId = 'job-2';
     vi.mocked(getAdminRun).mockResolvedValueOnce(

@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 from tests.unit.test_user_profile import data_url, picture
 
-from cloud_agent import identity
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.api import user_profile
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import create_app, create_mcp_app, install_admin_no_store
-from cloud_agent.gateway import GatewayError
 from cloud_agent.user_avatar import generate_user_avatar
 from cloud_agent.user_profile import MAX_PROFILE_REQUEST_BYTES, ProfileConflict, ProfileView
 
@@ -23,8 +23,7 @@ PATH = "/v1/agent/profile"
 
 @pytest.fixture
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "profile-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(user_profile.router)
     install_admin_no_store(application, prefixes=(PATH,))
@@ -40,15 +39,17 @@ def app(monkeypatch):
         "permissions": ["agent.use"],
     }
     gateway.user_email.return_value = "owner@example.com"
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
-    application.dependency_overrides[get_storage] = lambda: SimpleNamespace(user_profile=repository)
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
+    application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, user_profile=repository
+    )
     application.state.repository = repository
-    application.state.gateway = gateway
+    application.state.owners = gateway
     return application
 
 
 def headers(owner="owner-1"):
-    return {"Authorization": f"Bearer {identity.mint_session(user_id=owner)}"}
+    return {"Authorization": f"Bearer {SESSIONS.sign_in(owner)}"}
 
 
 async def test_owner_is_taken_from_session_and_email_is_read_only(app):
@@ -73,7 +74,7 @@ async def test_owner_is_taken_from_session_and_email_is_read_only(app):
         replace_image=False,
         image_data_url=None,
     )
-    assert all(call.args == ("owner-1",) for call in app.state.gateway.user_email.await_args_list)
+    assert all(call.args == ("owner-1",) for call in app.state.owners.user_email.await_args_list)
 
 
 async def test_every_answer_carries_the_accounts_fixed_companion(app):
@@ -153,7 +154,7 @@ async def test_revision_conflicts_and_gateway_failures_do_not_report_success(app
         app.state.repository.save_user_profile.side_effect = ProfileConflict()
         conflict = await client.patch(PATH, headers=headers(), json=body)
         app.state.repository.save_user_profile.reset_mock()
-        app.state.gateway.user_email.side_effect = GatewayError("unavailable")
+        app.state.owners.user_email.side_effect = OwnerDirectoryError("unavailable")
         unavailable = await client.patch(PATH, headers=headers(), json=body)
     assert conflict.status_code == 409
     assert unavailable.status_code == 503
@@ -166,7 +167,7 @@ async def test_unauthenticated_and_revoked_users_cannot_read_or_write(app):
         transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
     ) as client:
         assert (await client.get(PATH)).status_code == 401
-        app.state.gateway.agent_access.side_effect = lambda owner: {
+        app.state.owners.agent_access.side_effect = lambda owner: {
             "user_id": owner,
             "allowed": False,
             "permissions": [],

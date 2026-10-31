@@ -3,7 +3,7 @@
 The first supported bootstrap OS is Ubuntu 22.04/24.04 amd64 with passwordless
 sudo and KVM. Docker/Compose and pinned Kata can be installed by the trusted
 profile. Tunnel permissions and sandbox manager routing must already be provisioned on
-the stable control-plane/gateway machines and supplied through the profile.
+the stable control-plane machine and supplied through the profile.
 """
 
 from __future__ import annotations
@@ -556,7 +556,7 @@ with open(lock_path, 'a') as lock:
         run('data_mount_failed', ['systemctl', 'daemon-reload'])
     if params['install']:
         run('prerequisites_update_failed', ['apt-get', 'update'])
-        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables'])
+        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables', 'python3-yaml'])
         run('docker_start_failed', ['systemctl', 'enable', '--now', 'docker'])
         # The bundled script validates its pinned download checksum and KVM.
         run('kata_install_failed', ['bash', 'deploy/host/setup_kata_runtime.sh'])
@@ -606,9 +606,6 @@ print(json.dumps({'ready': ready, 'blocked_reasons': [] if ready else ['host_rea
 _REQUIRED_ENV = {
     "AGENT_SANDBOX_IMAGE",
     "AGENT_SANDBOX_MANAGER_TOKEN",
-    "AGENT_TUNNEL_SSH_DESTINATION",
-    "AGENT_TUNNEL_SSH_KEY",
-    "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
     "AGENT_MCP_TUNNEL_SSH_DESTINATION",
     "AGENT_MCP_TUNNEL_SSH_KEY",
     "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS",
@@ -633,15 +630,43 @@ _ALLOWED_NON_AGENT_ENV = {
     "OPENCODE_EXTRA_VERSIONS",
     "KILO_EXTRA_VERSIONS",
 }
+#: The relays a host's sandboxes and runner reach: the MCP-only relay and the
+#: control-plane API. Each has its own key and known_hosts file.
+_TUNNEL_PREFIXES = ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL")
 _FORBIDDEN_ENV = {
     "AGENT_COMPUTE_SECRET_KEY",
     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
     "AGENT_CONTROL_TOKEN_SECRET",
     "AGENT_SESSION_SECRET",
+    "AGENT_LOCAL_SESSION_SECRET",
+    "AGENT_SMTP_PASSWORD",
     "AGENT_SANDBOX_ALLOW_OPEN_NETWORK",
     "AGENT_EGRESS_AGENT_TIER",
     "ALLOW_UNSAFE_CONTAINER_BACKEND",
 }
+
+
+#: Host settings of the removed Gateway inference relay and account mode. The
+#: host recipe refuses them too (``sandbox_host.sh``).
+_RETIRED_ENV = frozenset(
+    {
+        "AGENT_AUTH_MODE",
+        "AGENT_GATEWAY_URL",
+        "AGENT_GATEWAY_HOSTNAME",
+        "AGENT_TUNNEL_SSH_DESTINATION",
+        "AGENT_TUNNEL_SSH_PORT",
+        "AGENT_TUNNEL_SSH_KEY",
+        "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
+        "AGENT_TUNNEL_REMOTE_HOST",
+        "AGENT_TUNNEL_REMOTE_PORT",
+        "AGENT_TUNNEL_LISTEN_PORT",
+    }
+)
+
+
+def _retired_inference(values: dict[str, str | None]) -> bool:
+    """Whether a profile still configures the removed Gateway inference relay or mode."""
+    return any(value for name, value in values.items() if name in _RETIRED_ENV)
 
 
 def _repack(source: bytes, assets: dict[str, bytes]) -> bytes:
@@ -906,6 +931,13 @@ class SshHostBootstrap:
         }.items():
             template = template.replace("{" + key + "}", value)
         values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))
+        if _retired_inference(values):
+            raise ProviderError(
+                "deployment_profile_invalid",
+                "Deployment profile still configures the removed Gateway inference relay "
+                "or account mode (AGENT_AUTH_MODE, AGENT_GATEWAY_*, AGENT_TUNNEL_SSH_* and "
+                "the relay's ports); remove those settings",
+            )
         if (
             any(
                 not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
@@ -965,7 +997,7 @@ class SshHostBootstrap:
             # OpenSSH refuses a private key without its final newline, and
             # profiles saved before inputs were kept exactly have lost it.
             assets[name] = ((await self._resolver.resolve(ref)).rstrip() + "\n").encode()
-        for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+        for prefix in _TUNNEL_PREFIXES:
             for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):
                 path = values[f"{prefix}_{suffix}"] or ""
                 relative = path.removeprefix(profile.deploy_root + "/")

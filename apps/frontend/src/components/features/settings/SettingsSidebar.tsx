@@ -16,6 +16,11 @@ const ITEMS = [
     icon: 'M4 7h9m4 0h3M4 17h3m4 0h9M13 4v6M7 14v6',
   },
   {
+    href: SETTINGS_PATHS.account,
+    label: 'security.title',
+    icon: 'M12 3 4 6v6c0 5 3.4 8.5 8 9 4.6-.5 8-4 8-9V6l-8-3ZM9 12l2 2 4-4',
+  },
+  {
     href: SETTINGS_PATHS.memory,
     label: 'settings.memory.title',
     icon: 'M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18ZM12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18ZM15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4',

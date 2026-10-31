@@ -19,8 +19,6 @@ const FULL_ENV = {
   AGENT_WEB_STATUS_URL: 'https://status.acme.example/',
   AGENT_WEB_DOCS_URL: 'https://docs.acme.example/agents/',
   AGENT_WEB_CONTACT_URL: 'MAILTO:support@acme.example',
-  AGENT_WEB_GATEWAY_URL: 'https://gateway.acme.example/authorize',
-  AGENT_WEB_FEATURE_RAG: 'true',
 };
 
 describe('parseRuntimeSiteConfig', () => {
@@ -28,7 +26,7 @@ describe('parseRuntimeSiteConfig', () => {
     expect(parseRuntimeSiteConfig({})).toEqual(NEUTRAL_SITE_CONFIG);
   });
 
-  it('reads the eight documented variables and nothing else', () => {
+  it('reads the six documented variables and nothing else', () => {
     expect(parseRuntimeSiteConfig(FULL_ENV)).toEqual({
       branding: {
         appName: 'Acme Agents',
@@ -37,11 +35,7 @@ describe('parseRuntimeSiteConfig', () => {
         statusUrl: 'https://status.acme.example/',
         docsUrl: 'https://docs.acme.example/agents/',
         contactUrl: 'mailto:support@acme.example',
-        // Reduced to the origin: the links built from it are `/chat` and
-        // `/dashboard`, so a path in the configured URL is not carried.
-        gatewayUrl: 'https://gateway.acme.example',
       },
-      features: { rag: true },
     });
   });
 
@@ -57,7 +51,6 @@ describe('parseRuntimeSiteConfig', () => {
     expect(site.branding.statusUrl).toBe('');
     expect(site.branding.docsUrl).toBe('');
     expect(site.branding.contactUrl).toBe('');
-    expect(site.branding.gatewayUrl).toBe('');
   });
 
   it.each([
@@ -66,7 +59,6 @@ describe('parseRuntimeSiteConfig', () => {
     ['AGENT_WEB_DOCS_URL', 'docs.example.test'],
     ['AGENT_WEB_CONTACT_URL', 'support@example.test'],
     ['AGENT_WEB_CONTACT_URL', 'mailto:support@example.test?subject=Hi'],
-    ['AGENT_WEB_GATEWAY_URL', '://missing-scheme'],
   ])('refuses an unparseable %s instead of hiding the link', (name, value) => {
     expect(() => parseRuntimeSiteConfig({ [name]: value })).toThrow(SiteConfigError);
     expect(() => parseRuntimeSiteConfig({ [name]: value })).toThrow(name);
@@ -77,26 +69,8 @@ describe('parseRuntimeSiteConfig', () => {
     ['AGENT_WEB_STATUS_URL', 'ftp://status.example.test/'],
     ['AGENT_WEB_DOCS_URL', 'javascript:alert(1)'],
     ['AGENT_WEB_CONTACT_URL', 'javascript:alert(1)'],
-    ['AGENT_WEB_GATEWAY_URL', 'data:text/html,hi'],
   ])('refuses a non-http(s) %s', (name, value) => {
     expect(() => parseRuntimeSiteConfig({ [name]: value })).toThrow(/must be an http\(s\) URL/);
-  });
-
-  it.each([
-    ['true', true],
-    ['TRUE', true],
-    [' false ', false],
-    ['', false],
-    [undefined, false],
-  ])('parses the rag switch %j as %j', (raw, expected) => {
-    const env = raw === undefined ? {} : { AGENT_WEB_FEATURE_RAG: raw };
-    expect(parseRuntimeSiteConfig(env).features.rag).toBe(expected);
-  });
-
-  it.each(['1', 'yes', 'on', 'truthy'])('refuses the ambiguous rag value %j', (raw) => {
-    expect(() => parseRuntimeSiteConfig({ AGENT_WEB_FEATURE_RAG: raw })).toThrow(
-      /must be "true" or "false"/,
-    );
   });
 
   it('exposes exactly the declared fields, whatever else is in the environment', () => {
@@ -106,19 +80,21 @@ describe('parseRuntimeSiteConfig', () => {
       AGENT_SESSION_SECRET: sentinel,
       AGENT_WEB_SOMETHING_NEW: sentinel,
       AGENT_WEB_APP_NAME_EXTRA: sentinel,
+      // The retired Gateway link and docs assistant switch are not read.
+      AGENT_WEB_GATEWAY_URL: 'https://gateway.example',
+      AGENT_WEB_FEATURE_RAG: 'true',
     });
 
-    expect(Object.keys(site).sort()).toEqual(['branding', 'features']);
+    expect(Object.keys(site).sort()).toEqual(['branding']);
     expect(Object.keys(site.branding).sort()).toEqual([
       'appName',
       'contactUrl',
       'docsUrl',
-      'gatewayUrl',
       'orgName',
       'orgUrl',
       'statusUrl',
     ]);
-    expect(Object.keys(site.features)).toEqual(['rag']);
+    expect(JSON.stringify(site)).not.toContain('gateway.example');
     expect(JSON.stringify(site)).not.toContain(sentinel);
   });
 

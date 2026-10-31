@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getAgentAttemptTelemetry, getAgentMessageRequest } from '@/lib/api/agents';
+import { getAgentAttemptTelemetry } from '@/lib/api/agents';
 import type { AgentThreadEventApi } from '@/lib/api/agents';
 
 import {
@@ -19,17 +19,10 @@ import type { AgentJob } from './types';
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentAttemptTelemetry: vi.fn(),
-  getAgentMessageRequest: vi.fn(),
   getAgentJobUsage: vi.fn(),
-  refreshAgentJobUsage: vi.fn(),
 }));
 
 beforeEach(() => {
-  vi.mocked(getAgentMessageRequest).mockResolvedValue({
-    status: 'unavailable',
-    request: null,
-    reason: 'message_correlation_unsupported',
-  });
   vi.mocked(getAgentAttemptTelemetry).mockReset();
   vi.mocked(getAgentAttemptTelemetry).mockResolvedValue({
     attempt_id: 1,

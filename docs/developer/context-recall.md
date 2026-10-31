@@ -129,13 +129,13 @@ shared-live membership.
 2. Verify the exact host/API SHA, reverse sandbox manager probe and fresh heartbeat using
    [deployment reliability](deployment-reliability.md). A working model call does
    not prove the intended host revision is serving jobs.
-3. Run the opt-in behavior preflight from the target checkout against the target
-   inference Gateway:
+3. Run the opt-in behavior preflight from the target checkout against the
+   model provider the deployment's owners use, with a test key the tester holds:
 
    ```bash
    CLOUD_AGENT_TEST_API_KEY_FILE=/path/to/test-key \
      uv run python -m deploy.preflight.check_model_context \
-     https://gateway.example.com --repetitions 3
+     https://provider.example.com --repetitions 3
    ```
 
    `CLOUD_AGENT_TEST_PROXY` optionally names an HTTP proxy. The key remains in
@@ -159,7 +159,7 @@ shared-live membership.
    before attributing it to persistence.
 
 The preflight is opt-in and is not automatically run by deployment workflows.
-CI receives no inference key. Repeat it when Gateway model routes, model
+CI receives no inference key. Repeat it when provider model routes, model
 deployment or CLI pins change. Finite samples test the reported failure without
 guaranteeing that a model never makes another incorrect claim.
 

@@ -3,8 +3,6 @@
   "observation_seconds": 120,
   "deployment_secrets": {
     "pilot-env": "/run/compute/secrets/pilot.env",
-    "pilot-gateway-key": "/run/compute/secrets/pilot-gateway.key",
-    "pilot-gateway-hosts": "/run/compute/secrets/pilot-gateway.known_hosts",
     "pilot-mcp-key": "/run/compute/secrets/pilot-mcp.key",
     "pilot-mcp-hosts": "/run/compute/secrets/pilot-mcp.known_hosts",
     "pilot-control-key": "/run/compute/secrets/pilot-control.key",
@@ -20,8 +18,6 @@
       "deploy_root": "/opt/cloud-agent-pilot",
       "environment_ref": "deployment:pilot-env",
       "files": {
-        ".compute-secrets/gateway.key": "deployment:pilot-gateway-key",
-        ".compute-secrets/gateway.known_hosts": "deployment:pilot-gateway-hosts",
         ".compute-secrets/mcp.key": "deployment:pilot-mcp-key",
         ".compute-secrets/mcp.known_hosts": "deployment:pilot-mcp-hosts",
         ".compute-secrets/control.key": "deployment:pilot-control-key",

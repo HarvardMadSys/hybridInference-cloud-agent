@@ -63,7 +63,6 @@ def _claim_body(**changes: object) -> dict[str, object]:
         "runtime": "opencode",
         "model": "gemini-2.5-pro",
         "worker_token": "w",
-        "sandbox_token": "",
     }
     body.update(changes)
     return body
@@ -176,7 +175,6 @@ def _launch(**changes: object) -> ResidentLaunch:
         "native_session_id": "native-1",
         "model": "gemini-2.5-pro",
         "reasoning_effort": None,
-        "gateway_base_url": "http://relay.local:8080",
         "credential": None,
         **_ACCESS.launch_fields(),
     }
@@ -196,22 +194,15 @@ def test_a_rotated_key_or_a_source_switch_never_borrows_the_live_process():
     assert not transport.compatible_with(
         replace(launch, inference_base_url="https://other.example/v1", credential=None)
     )
-    gateway = replace(launch, inference_base_url="", inference_protocol="", inference_source="")
-    assert not transport.compatible_with(gateway)
-    assert not ResidentTransport(launch=gateway, session=SimpleNamespace()).compatible_with(
-        replace(launch, credential=None)
-    )
 
 
-def test_a_connection_launch_names_all_of_its_identity_or_none():
-    with pytest.raises(ValueError, match="model connection launch"):
-        _launch(inference_source="")
-    with pytest.raises(ValueError, match="model connection launch"):
-        _launch(inference_base_url="")
+def test_a_resident_cannot_launch_without_its_connection():
+    for missing in ("inference_source", "inference_base_url", "inference_protocol"):
+        with pytest.raises(ValueError, match="owner's model connection"):
+            _launch(**{missing: ""})
 
 
-def test_the_sandbox_manager_keeps_the_connection_url_and_replaces_only_the_relays(monkeypatch):
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://10.0.0.1:8080")
+def test_the_sandbox_manager_keeps_the_connection_url(monkeypatch):
     body = SharedResidentLaunchConfig(
         runtime_id="opencode",
         model="gemini-2.5-pro",
@@ -221,7 +212,6 @@ def test_the_sandbox_manager_keeps_the_connection_url_and_replaces_only_the_rela
     )
     launch = resident_launch("athr_1", body)
 
-    assert launch.gateway_base_url == "http://10.0.0.1:8080"
     assert launch.inference_base_url == _ACCESS.base_url
     assert launch.inference_source == _ACCESS.source
     assert _KEY not in repr(body)
@@ -242,10 +232,10 @@ def test_chat_completions_runtimes_get_the_exact_url_and_key_in_their_environmen
     argv, env = runtime.prepare_live(
         workdir="/workspace",
         model="gemini-2.5-pro",
-        gateway_base_url=ExactBaseUrl(_ACCESS.base_url),
+        model_base_url=ExactBaseUrl(_ACCESS.base_url),
         credential=_KEY,
     )
-    # Not normalized to ``/v1`` the way the Gateway relay's address is.
+    # Not normalized to ``/v1`` the way a plain address is.
     assert env["OPENAI_BASE_URL"] == "https://generativelanguage.example/v1beta/openai"
     assert env["OPENAI_API_KEY"] == _KEY
     assert "ANTHROPIC_API_KEY" not in env and "ANTHROPIC_BASE_URL" not in env
@@ -253,11 +243,11 @@ def test_chat_completions_runtimes_get_the_exact_url_and_key_in_their_environmen
 
 
 @pytest.mark.parametrize("runtime", [OpencodeRuntime(), PiRuntime()])
-def test_the_gateway_relay_is_still_normalized_and_given_both_spellings(runtime):
+def test_a_plain_address_is_normalized_and_given_both_spellings(runtime):
     _argv, env = runtime.prepare_live(
         workdir="/workspace",
         model="glm-5.1",
-        gateway_base_url="http://relay.local:8080",
+        model_base_url="http://relay.local:8080",
         credential="grant",
     )
     assert env["OPENAI_BASE_URL"] == "http://relay.local:8080/v1"
@@ -268,7 +258,7 @@ def test_codex_points_its_provider_at_the_exact_url_with_the_key_in_the_environm
     argv, env = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="gpt-5.1-codex",
-        gateway_base_url=ExactBaseUrl("https://api.example.com/openai/v1"),
+        model_base_url=ExactBaseUrl("https://api.example.com/openai/v1"),
         credential=_KEY,
     )
     joined = " ".join(argv)
@@ -284,6 +274,6 @@ def test_claude_code_refuses_a_connection_that_does_not_speak_anthropic_messages
         ClaudeCodeRuntime().prepare_live(
             workdir="/workspace",
             model="claude-sonnet",
-            gateway_base_url=ExactBaseUrl("https://openai-compatible.example/v1"),
+            model_base_url=ExactBaseUrl("https://openai-compatible.example/v1"),
             credential=_KEY,
         )

@@ -2,7 +2,7 @@
 
 Requests are strict and closed: an unknown field, a boolean where a revision
 belongs, or a control character in a name is a 422, never a silent coercion.
-Responses carry display data only. A member's email comes from the Gateway at
+Responses carry display data only. A member's email comes from their account at
 read time and is ``None`` when it cannot be read; no response ever carries an
 invitation token except the one that created it.
 """

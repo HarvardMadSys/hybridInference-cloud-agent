@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
+import { createAgentJob, listRepoBranches } from '@/lib/api/agents';
 import type {
   AgentConfigApi,
   AgentPluginInputApi,
@@ -19,7 +19,8 @@ import {
   peekComposerDraft,
   rememberReturn,
 } from './githubReturn';
-import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
+import { useComposerConfig } from './useComposerConfig';
+import { ModelConnectionNotice } from './ModelConnectionNotice';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
 import { useAuth } from '@/components/providers/AuthProvider';
@@ -30,7 +31,6 @@ import { DeferredCreateRepositoryDialog } from './DeferredCreateRepositoryDialog
 import { ComposerDialogLoading } from './ComposerDialogLoading';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
-import { PromptRewrite } from './PromptRewrite';
 import { composerCommandMatches } from './composerCommands';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
@@ -87,6 +87,12 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
  */
 function selectableRepos(config: AgentConfigApi | null): string[] {
   return config?.github_connected ? config.repos : [];
+}
+
+/** A refreshed config must still admit this workspace before a task can run. */
+function canRunInRepository(config: AgentConfigApi | null, repo: string, refreshing: boolean) {
+  if (!config || refreshing || config.github_load_status === 'unavailable') return false;
+  return repo === TEMPORARY_WORKSPACE || (config.github_connected && Boolean(repo));
 }
 
 function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; userId?: string }) {
@@ -176,9 +182,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     composerModel;
   const { model, connectionId } = composerModel.choice;
   const [effort, setEffort] = useState(draft?.effort ?? '');
-  const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [rewriting, setRewriting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
@@ -292,56 +296,19 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     if (draft) forgetComposerDraft(userId);
   }, [draft, userId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    getAgentConfig()
-      .then((cfg) => {
-        if (!cancelled) applyConfig(cfg);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled)
-          setError(
-            cause instanceof Error ? cause.message : tRef.current('composer.loadConfigFailed'),
-          );
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [applyConfig]);
-
-  // While the deployment's GitHub App is temporarily unavailable nothing can
-  // run, and the service is retrying on its own. Look again at its interval so
-  // the composer comes back by itself; the pickers are hidden meanwhile, so
-  // re-reading the config overwrites no choice the user made.
   const githubUnavailable = config?.github_load_status === 'unavailable';
-  useEffect(() => {
-    if (!githubUnavailable) return undefined;
-    let cancelled = false;
-    let pending = false;
-    const read = () => {
-      if (document.visibilityState === 'hidden' || pending) return;
-      pending = true;
-      getAgentConfig()
-        .then((cfg) => {
-          if (!cancelled) applyConfig(cfg);
-        })
-        // The next tick asks again; the notice already says why nothing runs.
-        .catch(() => undefined)
-        .finally(() => {
-          pending = false;
-        });
-    };
-    const timer = window.setInterval(read, SOURCE_CONTROL_RECHECK_MS);
-    document.addEventListener('visibilitychange', read);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', read);
-    };
-  }, [githubUnavailable, applyConfig]);
+  const {
+    loading,
+    refreshing: configRefreshing,
+    refresh: refreshConfig,
+  } = useComposerConfig(
+    applyConfig,
+    (cause) => {
+      setConfig((current) => (current?.github_load_status === 'unavailable' ? current : null));
+      setError(cause instanceof Error ? cause.message : tRef.current('composer.loadConfigFailed'));
+    },
+    githubUnavailable,
+  );
 
   // The offered efforts follow the (runtime, model) pair, so switching either
   // can empty the set or drop the current choice out of it.
@@ -422,12 +389,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // Connected, and GitHub has given the App no repository yet: a step still to
   // take, not a connection to make again.
   const noRepositories = config?.github_connected === true && config.repos.length === 0;
-  const busy =
-    submitting || goalCommand.busy || rewriting || Boolean(repo && environmentStatus === 'loading');
+  const busy = submitting || goalCommand.busy || Boolean(repo && environmentStatus === 'loading');
   const missingRepository = config?.github_connected === true && !repo;
   const canRun =
-    !locked &&
-    (temporary || (config?.github_connected === true && Boolean(repo))) &&
+    canRunInRepository(config, repo, configRefreshing) &&
     task.trim().length > 0 &&
     !busy &&
     !(repo && !environmentSelection && environmentStatus !== 'error') &&
@@ -496,20 +461,15 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
    */
   async function refreshRepositories() {
     setRefreshing(true);
-    try {
-      const cfg = await getAgentConfig({ fresh: true });
-      applyConfig(cfg);
+    const cfg = await refreshConfig({ fresh: true });
+    if (cfg) {
       setError(null);
-      // The repository the link asked for may be the one that just arrived.
       if (unavailableRepo && cfg.repos.includes(unavailableRepo)) {
         setRepo(unavailableRepo);
         setUnavailableRepo(null);
       }
-    } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : t('composer.loadConfigFailed'));
-    } finally {
-      setRefreshing(false);
     }
+    setRefreshing(false);
   }
 
   /**
@@ -676,6 +636,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         </p>
       </div>
 
+      <ModelConnectionNotice config={config} />
+
       {locked ? (
         <div className="mt-5">
           <ConnectSourceControl unavailable />
@@ -688,9 +650,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           />
           <button
             type="button"
-            disabled={rewriting || submitting}
+            disabled={submitting}
             onClick={() => {
-              if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+              if (!submitting) setCreateRepositoryOpen(true);
             }}
             className="mt-3 rounded-lg px-3 py-2 text-sm font-medium text-crimson-dark hover:bg-crimson/5 disabled:cursor-not-allowed disabled:opacity-50 dark:text-rose-300 dark:hover:bg-white/5"
           >
@@ -778,17 +740,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           disabled={submitting}
         />
 
-        <PromptRewrite
-          value={task}
-          {...composerModel.rewrite}
-          disabled={submitting || goalCommand.busy || /^\s*\//.test(task)}
-          onActiveChange={setRewriting}
-          onApply={(prompt) => {
-            setTask(prompt);
-            taskBox.current?.focus();
-          }}
-        />
-
         <EnvironmentPicker
           key={repo}
           repo={temporary ? '' : repo}
@@ -836,14 +787,14 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               onRefresh={() => void refreshRepositories()}
               onConfigure={config?.github_install_url ? () => void goToGitHub('manage') : undefined}
               onCreate={() => {
-                if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+                if (!submitting) setCreateRepositoryOpen(true);
               }}
               // Repository access is GitHub's to give; until it is connected
               // the picker offers the connection instead of managing any.
               disconnected={disconnected}
               onConnect={canConnect ? () => void goToGitHub('connect') : undefined}
               refreshing={refreshing}
-              createDisabled={rewriting || submitting}
+              createDisabled={submitting}
               returnFocusTo={repoPickerFromTask ? taskBox : undefined}
             />
             {temporary ? null : (

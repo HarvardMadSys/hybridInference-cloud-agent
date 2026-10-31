@@ -27,48 +27,36 @@ const sshConnection = (id: string, name: string): ComputeConnection => ({
   blocked_reasons: [],
 });
 const connections: ComputeConnection[] = [
-  sshConnection('gateway-key', 'Gateway administration'),
   sshConnection('control-key', 'Control-plane administration'),
   { ...sshConnection('portal', 'CloudLab portal'), provider_id: 'cloudlab' },
 ];
 const savedParameters: Omit<AutomaticComputeSetupRequest, 'request_id'> = {
-  gateway: {
-    connection_id: 'gateway-key',
-    address: 'gateway.example.org',
-    username: 'operator',
-    port: 22,
-  },
   control: {
     connection_id: 'control-key',
     address: 'control.example.org',
     username: 'operator',
     port: 22,
   },
-  gateway_port: 8080,
   chat_network_pool: '172.29.0.0/16',
   dns_server: '1.1.1.1',
   protected_cidrs: ['203.0.113.0/24', '198.51.100.0/24', '192.0.2.0/24'],
   slots: 2,
 };
 const machineDefaults = {
-  gateway: { address: 'freeinference.org' },
   control: { address: 'service-node.example.org' },
 };
 
 function fillAutomaticSetup() {
-  fireEvent.change(screen.getByLabelText('Gateway host address'), {
-    target: { value: 'gateway.example.org' },
-  });
-  fireEvent.change(screen.getByLabelText('Gateway SSH username'), {
-    target: { value: 'operator' },
-  });
+  fillControlSetup();
+}
+
+function fillControlSetup() {
   fireEvent.change(screen.getByLabelText('Control-plane host address'), {
     target: { value: 'control.example.org' },
   });
   fireEvent.change(screen.getByLabelText('Control-plane SSH username'), {
     target: { value: 'operator' },
   });
-  chooseOption(screen.getByLabelText('Gateway SSH connection'), 'Gateway administration');
   chooseOption(
     screen.getByLabelText('Control-plane SSH connection'),
     'Control-plane administration',
@@ -114,7 +102,9 @@ describe('Server setup', () => {
     render(<ComputeSetup connections={connections} onSaved={saved} />);
     const configure = screen.getByRole('button', { name: 'Configure automatically' });
     await waitFor(() => expect(configure).toBeEnabled());
-    expect(screen.getByLabelText('Gateway host address')).toHaveValue('freeinference.org');
+    expect(screen.getByLabelText('Control-plane host address')).toHaveValue(
+      'service-node.example.org',
+    );
     expect(screen.getByLabelText('Control-plane host address')).toHaveValue(
       'service-node.example.org',
     );
@@ -137,7 +127,7 @@ describe('Server setup', () => {
     await waitFor(() => expect(configure).toBeEnabled());
     expect(screen.queryByLabelText('Release bundle')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Host environment')).not.toBeInTheDocument();
-    for (const field of ['Gateway SSH connection', 'Control-plane SSH connection'])
+    for (const field of ['Control-plane SSH connection'])
       expect(optionNames(screen.getByLabelText(field))).not.toContain('CloudLab portal');
     expect(screen.getByLabelText('Server setup capacity')).toHaveValue(2);
     fillAutomaticSetup();
@@ -145,19 +135,12 @@ describe('Server setup', () => {
     await waitFor(() => expect(saved).toHaveBeenCalledOnce());
     expect(api.createAutomaticComputeSetup).toHaveBeenCalledWith({
       request_id: expect.any(String),
-      gateway: {
-        connection_id: 'gateway-key',
-        address: 'gateway.example.org',
-        port: 22,
-        username: 'operator',
-      },
       control: {
         connection_id: 'control-key',
         address: 'control.example.org',
         port: 22,
         username: 'operator',
       },
-      gateway_port: 8080,
       chat_network_pool: '172.29.0.0/16',
       dns_server: '1.1.1.1',
       protected_cidrs: ['203.0.113.0/24', '198.51.100.0/24', '192.0.2.0/24'],
@@ -179,7 +162,7 @@ describe('Server setup', () => {
     expect(manual).toHaveAttribute('aria-pressed', 'true');
     expect(automatic).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByLabelText('Release bundle')).toBeVisible();
-    expect(screen.getByLabelText('Gateway host address')).not.toBeVisible();
+    expect(screen.getByLabelText('Control-plane host address')).not.toBeVisible();
     await waitFor(() => expect(api.getComputeAutomaticSetup).toHaveBeenCalled());
   });
 
@@ -218,7 +201,7 @@ describe('Server setup', () => {
     const firstId = vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0].request_id;
     fireEvent.click(screen.getByRole('button', { name: 'Manual setup' }));
     fireEvent.click(screen.getByRole('button', { name: 'Automatic setup' }));
-    expect(screen.getByLabelText('Gateway host address')).toHaveValue('gateway.example.org');
+    expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
     fireEvent.click(configure);
     await waitFor(() => expect(api.createAutomaticComputeSetup).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(configure).toBeEnabled());
@@ -266,7 +249,7 @@ describe('Server setup', () => {
     });
     render(<ComputeSetup connections={connections} onSaved={vi.fn()} />);
     const retry = await screen.findByRole('button', { name: 'Retry automatic setup' });
-    expect(screen.getByLabelText('Gateway host address')).toHaveValue('gateway.example.org');
+    expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
     expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
     expect(screen.getByLabelText('Control-plane SSH connection')).toHaveTextContent(
       'Control-plane administration',
@@ -305,7 +288,7 @@ describe('Server setup', () => {
     const saved = vi.fn();
     const restored = render(<ComputeSetup connections={connections} onSaved={saved} />);
     const retry = await screen.findByRole('button', { name: 'Retry automatic setup' });
-    expect(screen.getByLabelText('Gateway host address')).toHaveValue('gateway.example.org');
+    expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
     expect(screen.getByLabelText('Sandbox DNS server')).toHaveValue('1.1.1.1');
     expect(api.createAutomaticComputeSetup).toHaveBeenCalledTimes(1);
     fireEvent.click(retry);
@@ -355,7 +338,7 @@ describe('Server setup', () => {
     });
     render(<ComputeSetup connections={connections} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Start new setup' }));
-    expect(screen.getByLabelText('Gateway host address')).toHaveValue('gateway.example.org');
+    expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
     expect(api.createAutomaticComputeSetup).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Configure automatically' }));
     await waitFor(() => expect(api.createAutomaticComputeSetup).toHaveBeenCalledOnce());
@@ -363,4 +346,90 @@ describe('Server setup', () => {
     expect(request).toEqual({ ...savedParameters, request_id: expect.any(String) });
     expect(request.request_id).not.toBe('setup-stuck');
   });
+});
+
+function localParameters() {
+  return { ...savedParameters };
+}
+
+it('automatic setup needs only a control machine and submits no inference machine', async () => {
+  // Defaults saved by an older release, with an inference machine, are not sent.
+  vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+    available: true,
+    deployment_sha: 'c'.repeat(40),
+    blocked_reasons: [],
+    defaults: {
+      ...savedParameters,
+      gateway: { connection_id: 'old', address: 'old.example.org', username: 'old', port: 22 },
+      gateway_port: 8080,
+    } as never,
+  });
+  const saved = vi.fn();
+  render(<ComputeSetup connections={[connections[0]]} onSaved={saved} />);
+  const configure = screen.getByRole('button', { name: 'Configure automatically' });
+  await waitFor(() => expect(configure).toBeEnabled());
+  expect(screen.queryByLabelText('Gateway host address')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Gateway SSH username')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Gateway SSH connection')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Gateway inference port')).not.toBeInTheDocument();
+  expect(screen.queryByText('Gateway machine')).not.toBeInTheDocument();
+  expect(screen.getByText(/Owners provide their own inference connections/)).toBeInTheDocument();
+  fireEvent.click(configure);
+  await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+  expect(api.createAutomaticComputeSetup).toHaveBeenCalledWith({
+    ...localParameters(),
+    request_id: expect.any(String),
+  });
+  expect(vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0]).not.toHaveProperty('gateway');
+  expect(vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0]).not.toHaveProperty(
+    'gateway_port',
+  );
+});
+
+it('setup accepts control-only defaults and resumes the same pending request', async () => {
+  vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+    available: true,
+    deployment_sha: 'c'.repeat(40),
+    blocked_reasons: [],
+    machine_defaults: { control: { address: 'control.example.org' } },
+    defaults: localParameters(),
+    pending_request_id: 'local-setup-pending',
+  });
+  render(<ComputeSetup connections={[connections[0]]} onSaved={vi.fn()} />);
+  const retry = await screen.findByRole('button', { name: 'Retry automatic setup' });
+  expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
+  expect(api.createAutomaticComputeSetup).not.toHaveBeenCalled();
+  fireEvent.click(retry);
+  await waitFor(() =>
+    expect(api.createAutomaticComputeSetup).toHaveBeenCalledWith({
+      ...localParameters(),
+      request_id: 'local-setup-pending',
+    }),
+  );
+});
+
+it('setup recovers a browser retry with only a control machine', async () => {
+  vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+    available: true,
+    deployment_sha: 'c'.repeat(40),
+    blocked_reasons: [],
+    machine_defaults: { control: { address: 'control.example.org' } },
+  });
+  vi.mocked(api.createAutomaticComputeSetup).mockRejectedValueOnce(
+    new Error('Connection timed out.'),
+  );
+  const initial = render(<ComputeSetup connections={[connections[0]]} onSaved={vi.fn()} />);
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Configure automatically' })).toBeEnabled(),
+  );
+  fillControlSetup();
+  fireEvent.click(screen.getByRole('button', { name: 'Configure automatically' }));
+  await screen.findByRole('alert');
+  const original = vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0];
+  expect(original).toEqual({ ...localParameters(), request_id: expect.any(String) });
+  initial.unmount();
+  render(<ComputeSetup connections={[connections[0]]} onSaved={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry automatic setup' }));
+  await waitFor(() => expect(api.createAutomaticComputeSetup).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(api.createAutomaticComputeSetup).mock.calls[1][0]).toEqual(original);
 });

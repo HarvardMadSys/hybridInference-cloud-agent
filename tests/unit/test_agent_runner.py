@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import httpx
 import pytest
 from pydantic import ValidationError
+from tests.support.owners import connection_access, residency_connection
 
 from cloud_agent.schemas import WorkerSandboxAbandonRequest
 from cloud_agent_host import control_plane_client, runner as runner_mod
@@ -46,9 +47,9 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
     runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+    model_connection=connection_access("claude-code"),
 )
 
 
@@ -426,7 +427,6 @@ def test_a_claimed_turn_dispatches_only_to_shared_live(monkeypatch):
         runner_mod.run_turn(
             _JOB,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-1",
             backend=backend,
             host="host-a",
@@ -434,7 +434,6 @@ def test_a_claimed_turn_dispatches_only_to_shared_live(monkeypatch):
         == 0
     )
     assert dispatched[0]["job"] is _JOB
-    assert dispatched[0]["gateway_base_url"] == "http://gateway"
 
 
 @pytest.mark.parametrize(
@@ -531,7 +530,6 @@ def test_historical_one_to_one_sandbox_fails_closed():
         heart=SimpleNamespace(),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=lambda state, detail=None, **_kwargs: finished.append((state, detail)),
     )
@@ -640,7 +638,6 @@ def _run_shared_boundary_case(
         ),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         measurement=measurement,
@@ -806,9 +803,10 @@ def test_a_lease_lost_before_admission_admits_nothing(monkeypatch):
 def _probe_then_replace(control, supervisor, *, residency: dict) -> None:
     """The live process refuses the probe, so a residency is established anew."""
     control.establish_shared_residency.return_value = {
-        "credential": "grant-2",
+        "credential": "provider-key-2",
         "generation": 12,
         "model": _JOB.model,
+        **residency_connection("claude-code"),
         **residency,
     }
     answer = supervisor.ensure_shared_resident.side_effect
@@ -848,7 +846,7 @@ def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
         "",
         None,
     )
-    assert (opened.mcp_credential, opened.credential) == (opened_with, "grant-2")
+    assert (opened.mcp_credential, opened.credential) == (opened_with, "provider-key-2")
     assert opened.residency_generation == 12
 
 
@@ -1824,7 +1822,6 @@ def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
     with pytest.raises(RuntimeError, match="cannot attest shared-sandbox-v1"):
         runner_mod.run_forever(
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner",
             backend=backend,
             host="host-a",
@@ -2411,9 +2408,10 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
         # The retry rotates the residency grant before reopening the process.
         control.establish_shared_residency.return_value = {
-            "credential": "grant-2",
+            "credential": "provider-key-2",
             "generation": 2,
             "model": _JOB.model,
+            **residency_connection("claude-code"),
         }
 
         def flaky(_thread_id, **kwargs):

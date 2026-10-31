@@ -103,7 +103,7 @@ class _StreamingProcess(_LiveProcess):
 def _context(process: _LiveProcess, tmp_path) -> LaunchContext:
     return LaunchContext(
         workdir="/w",
-        gateway_base_url="http://gw",
+        model_base_url="http://gw",
         credential="agr",
         provides_isolation=True,
         mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
@@ -175,7 +175,7 @@ def _written(process: _LiveProcess) -> list[str]:
 
 def test_claude_the_launch_echoes_what_it_reads():
     argv, _ = ClaudeCodeRuntime().prepare_live(
-        workdir="/w", model="m", gateway_base_url="http://gw", credential="agr"
+        workdir="/w", model="m", model_base_url="http://gw", credential="agr"
     )
 
     assert "--replay-user-messages" in argv

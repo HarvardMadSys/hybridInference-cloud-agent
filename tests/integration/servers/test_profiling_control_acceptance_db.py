@@ -52,13 +52,15 @@ from tests.integration.servers.test_measurement_acceptance_db import (
     _arrange_chain,
     _db_config,
     _dsn,
-    _Gateway,
     _reset,
     _SandboxManager,
     _serve,
+    _signed_in_owner,
 )
+from tests.support.local_accounts import LOCAL_SECRET
 
-from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
+from cloud_agent.accounts.config import ENV_LOCAL_SESSION_SECRET
+from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.app import create_app
 from cloud_agent.application.profiling_control import ProfilingControlService
 from cloud_agent.host_pool import hash_secret
@@ -152,8 +154,11 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     monkeypatch.setenv("AGENT_DATABASE_URL", _dsn(config))
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "acceptance-control-secret-of-32-bytes")
     monkeypatch.setenv("ADMIN_TOKEN", "acceptance-admin-token")
-    monkeypatch.setenv("AGENT_SESSION_SECRET", "acceptance-session-secret-32-bytes!")
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
+    monkeypatch.setenv(ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
+    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "acceptance-settings-key-of-32-bytes!")
+    monkeypatch.setenv(
+        "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "acceptance-credential-key-of-32-bytes"
+    )
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "acceptance-sandbox-manager-token")
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(tmp_path / "records.jsonl"))
@@ -185,10 +190,10 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     sandbox_manager = _SandboxManager()
     monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = create_app()
-    app.dependency_overrides[get_gateway_client] = _Gateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     server, task, base_url = await _serve(app)
     store = Storage(pool)
+    owner_cookie = await _signed_in_owner(store, base_url)
     job, _claim, sandbox = await _arrange_chain(store)
     # The chain enrolls its host with a placeholder hash, which is enough for
     # every test that never presents a credential. This one does present one --
@@ -234,10 +239,6 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     worker_task = asyncio.create_task(worker.run())
     await asyncio.sleep(0)
 
-    from tests.integration.servers.test_measurement_acceptance_db import USER_ID
-
-    from cloud_agent.identity import SESSION_COOKIE, mint_session
-
     chain = _ControlChain(
         pool=pool,
         store=store,
@@ -248,7 +249,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
         service=service,
         worker=worker,
         worker_task=worker_task,
-        owner_cookie={SESSION_COOKIE: mint_session(user_id=USER_ID)},
+        owner_cookie=owner_cookie,
         sandbox_manager_base_url=sandbox_manager_base_url,
         host_credential=host_credential,
     )

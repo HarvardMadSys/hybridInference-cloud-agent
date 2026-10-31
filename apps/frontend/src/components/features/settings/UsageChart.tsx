@@ -29,7 +29,7 @@ const CHART_LABEL: Record<ChartMetric, TranslationKey> = {
  */
 export function UsageChart({ days, locale }: { days: ChartDay[]; locale: string }) {
   const { t } = useLocale();
-  const [metric, setMetric] = useState<ChartMetric>('cost');
+  const [metric, setMetric] = useState<ChartMetric>('tokens');
   const [pointed, setPointed] = useState<number | null>(null);
   if (days.length < 2) return null;
   const bars = chartBars(days, metric);

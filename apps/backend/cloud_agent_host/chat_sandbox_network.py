@@ -1250,7 +1250,7 @@ class ChatSandboxNetwork:
                         # This is the live bridge of a retained container, not an
                         # orphan. reconcile() also runs for status polling, so
                         # pruning it here would silently disconnect an active turn
-                        # from both relays and the internet.
+                        # from its relay and the internet.
                         continue
                     if not self._network_is_stale_for_prune(network):
                         # Runner and sandbox manager use separate Docker clients. During
@@ -1444,8 +1444,8 @@ class ChatSandboxNetwork:
 
         The guard proves the host's rules exist; this proves the guest is
         behind them the way the agent will be: a default route, the one
-        resolver answering a real query, both relays accepting on their service
-        ports, and the host and the metadata address refused by the rules
+        resolver answering a real query, the relay accepting on its service
+        port, and the host and the metadata address refused by the rules
         themselves. It runs as the sandbox user, so it sees what the agent
         sees. Reaching the public internet is deliberately not a condition: an
         outside outage is not a broken boundary. A failure stops the sandbox,

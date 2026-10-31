@@ -8,6 +8,7 @@ transaction ownership it has here.
 
 from __future__ import annotations
 
+from cloud_agent.storage.repositories.accounts import PostgresLocalAccountRepository
 from cloud_agent.storage.repositories.agent_memory import PostgresAgentMemoryRepository
 from cloud_agent.storage.repositories.attachments import PostgresAttachmentRepository
 from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
@@ -20,7 +21,6 @@ from cloud_agent.storage.repositories.credential_queries import PostgresCredenti
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
 from cloud_agent.storage.repositories.goal_wakeups import PostgresGoalWakeupRepository
 from cloud_agent.storage.repositories.goals import PostgresGoalRepository
-from cloud_agent.storage.repositories.grants import PostgresGrantRepository
 from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
@@ -39,6 +39,7 @@ from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
 from cloud_agent.storage.repositories.owner_usage import PostgresOwnerUsageRepository
+from cloud_agent.storage.repositories.owner_work import PostgresOwnerWorkRepository
 from cloud_agent.storage.repositories.pending_messages import PostgresPendingMessageRepository
 from cloud_agent.storage.repositories.profiling_control import (
     PostgresProfilingControlRepository,
@@ -70,10 +71,10 @@ __all__ = [
     "PostgresExecutionQueries",
     "PostgresGoalRepository",
     "PostgresGoalWakeupRepository",
-    "PostgresGrantRepository",
     "PostgresHostCapacityRepository",
     "PostgresHostPoolRepository",
     "PostgresLedgerRepository",
+    "PostgresLocalAccountRepository",
     "PostgresMcpCatalogRepository",
     "PostgresMcpConnectionRepository",
     "PostgresModelConnectionRepository",
@@ -81,6 +82,7 @@ __all__ = [
     "PostgresNotificationMaintenanceRepository",
     "PostgresOperationMeasurementRepository",
     "PostgresOwnerUsageRepository",
+    "PostgresOwnerWorkRepository",
     "PostgresPendingMessageRepository",
     "PostgresProfilingControlRepository",
     "PostgresResidencyRepository",

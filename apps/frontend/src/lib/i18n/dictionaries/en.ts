@@ -1,3 +1,4 @@
+import { accountsEn } from './accounts';
 import { modelSelectionEn } from './modelSelection';
 import { usageEn } from './usage';
 
@@ -13,6 +14,7 @@ import { usageEn } from './usage';
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  ...accountsEn,
   'environment.title': 'Environment',
   'environment.configure': 'Configure Environment',
   'environment.sectionTitle': 'Environments',
@@ -416,11 +418,9 @@ export const en = {
   'nav.aria': 'Product navigation',
   'nav.skipToWorkspace': 'Skip to workspace',
   'nav.status': 'Status',
-  'nav.docsAssistant': 'Docs Assistant',
   'nav.docs': 'Documentation',
   'nav.agents': 'Agents',
   'nav.admin': 'Admin',
-  'nav.dashboard': 'Dashboard',
   'nav.logOut': 'Log out',
   'nav.logOutFailed': 'Could not log out. You are still signed in; try again.',
   'nav.switchAccount': 'Switch account',
@@ -437,9 +437,6 @@ export const en = {
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
-  'shell.accessRequired.title': 'Agent access required',
-  'shell.accessRequired.body': 'This account has not been granted access to this Agent deployment.',
-  'shell.accessRequired.back': 'Back to Dashboard',
   'shell.renderError.title': 'This page could not be displayed',
   'shell.renderError.body':
     'Something on it failed to render. Retry, or open another chat or page.',
@@ -1318,9 +1315,6 @@ export const en = {
   'ssh.rotateHint':
     'Install the new key, then test it. The old key keeps working until the new one logs in; remove the old line afterwards.',
   'ssh.testNewKey': 'Test the new key',
-  'common.loading': 'Loading…',
-  'common.retry': 'Retry',
-  'common.refreshFailed': 'Refresh failed — showing the last successful read.',
 } as const;
 
 export type TranslationKey = keyof typeof en;

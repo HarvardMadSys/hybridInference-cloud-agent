@@ -1,7 +1,7 @@
 """The agent API's single mount point: surface routers behind one prefix.
 
 The handlers live in the surface modules this mounts — ``jobs``, ``turns``,
-``prompt_rewrite``, ``threads``, ``changes``, ``workspace``, ``worker``,
+``threads``, ``changes``, ``workspace``, ``worker``,
 ``worker_events``, ``source_control``, ``catalog`` and ``config`` — each owns
 its own prefix, its own dependencies and the capabilities it reaches the store
 for. This module exists so that ``app.py`` mounts one router, and so that the
@@ -30,7 +30,6 @@ from cloud_agent.api import (
     changes,
     config,
     jobs,
-    prompt_rewrite,
     source_control,
     threads,
     turns,
@@ -49,7 +48,6 @@ SURFACE_ROUTERS = (
     config.router,
     source_control.router,
     jobs.router,
-    prompt_rewrite.router,
     catalog.router,
     turns.router,
     threads.router,

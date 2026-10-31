@@ -17,14 +17,12 @@ const JOB: AgentJob = {
   branch: 'agent/job-1',
   runtime: 'claude-code',
   model: 'model',
-  spentUsd: 0,
   timeoutLabel: '',
   sandbox: '',
   attempts: [],
   events: [],
   diffFiles: [],
   gates: [],
-  usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: 0 },
 };
 beforeEach(() => mocks.review.mockReturnValue(null));
 afterEach(cleanup);

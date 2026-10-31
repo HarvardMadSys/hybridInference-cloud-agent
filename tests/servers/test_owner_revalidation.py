@@ -1,38 +1,38 @@
-"""Every browser read/write requires a current, explicit Gateway permission."""
+"""Every browser read/write requires a current, explicit account permission."""
 
 from __future__ import annotations
 
 import ast
 import inspect
 import textwrap
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi import Depends, FastAPI, Header
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_admin_surface_guards import _flatten
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.api._owner_auth import (
     authenticate_agent_owner,
     require_agent_owner,
 )
 from cloud_agent.api.deps import (
-    AGENT_ACCESS_ALLOW_TTL_S,
-    AgentAccessAdmission,
-    get_gateway_client,
+    get_owner_directory,
+    get_storage,
     verify_admin_access,
 )
 from cloud_agent.api.hosts import authenticate_host
-from cloud_agent.api.service_jobs import verify_oncall_dispatch
 from cloud_agent.api.worker import _worker_claims, verify_claiming_host
-from cloud_agent.gateway import GatewayError
 
 pytestmark = pytest.mark.asyncio
 _OWNER = "user_1"
 
 
-class _AccessGateway:
+class _Directory:
     def __init__(
         self,
         permissions: list[str] | None = None,
@@ -47,7 +47,9 @@ class _AccessGateway:
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         self.asked.append(user_id)
         if self.error is not None:
-            raise GatewayError("unavailable", status_code=self.error, error_type=self.error_type)
+            raise OwnerDirectoryError(
+                "unavailable", status_code=self.error, error_type=self.error_type
+            )
         return {
             "user_id": user_id,
             "allowed": "agent.use" in self.permissions,
@@ -55,7 +57,7 @@ class _AccessGateway:
         }
 
 
-def _app(gateway: _AccessGateway, role: str = "admin") -> FastAPI:
+def _app(directory: _Directory, role: str = "admin") -> FastAPI:
     app = FastAPI()
 
     @app.get("/probe")
@@ -73,16 +75,17 @@ def _app(gateway: _AccessGateway, role: str = "admin") -> FastAPI:
         "role": role,
         "authenticated": True,
     }
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: directory
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(local_accounts=SESSIONS)
     return app
 
 
 @pytest.mark.parametrize("role", ["free", "pro", "internal", "admin", "custom"])
 @pytest.mark.parametrize("method", ["GET", "POST"])
-async def test_gateway_allowed_owners_work_independently_of_role(role, method):
-    gateway = _AccessGateway()
+async def test_allowed_owners_work_independently_of_role(role, method):
+    directory = _Directory()
     async with AsyncClient(
-        transport=ASGITransport(app=_app(gateway, role)), base_url="https://test"
+        transport=ASGITransport(app=_app(directory, role)), base_url="https://test"
     ) as client:
         response = await client.request(method, "/probe")
     assert response.status_code == 200
@@ -92,18 +95,18 @@ async def test_gateway_allowed_owners_work_independently_of_role(role, method):
     # answered by verify_admin_access on the admin surface, never by a field
     # an owner route could branch on.
     assert "is_admin" not in response.json()
-    assert gateway.asked == [_OWNER]
+    assert directory.asked == [_OWNER]
 
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
 async def test_an_old_admin_session_cannot_bypass_a_denial(method):
-    gateway = _AccessGateway([])
+    directory = _Directory([])
     async with AsyncClient(
-        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+        transport=ASGITransport(app=_app(directory)), base_url="https://test"
     ) as client:
         response = await client.request(method, "/probe")
     assert response.status_code == 403
-    assert gateway.asked == [_OWNER]
+    assert directory.asked == [_OWNER]
 
 
 @pytest.mark.parametrize(
@@ -121,94 +124,59 @@ async def test_an_old_admin_session_cannot_bypass_a_denial(method):
 async def test_unavailable_policy_never_falls_back_to_session_role(
     status, error_type, expected, method
 ):
-    gateway = _AccessGateway(error=status, error_type=error_type)
+    directory = _Directory(error=status, error_type=error_type)
     async with AsyncClient(
-        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+        transport=ASGITransport(app=_app(directory)), base_url="https://test"
     ) as client:
         response = await client.request(method, "/probe")
     assert response.status_code == expected
 
 
-class _Clock:
-    def __init__(self) -> None:
-        self.now = 1_000.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-async def test_a_withdrawal_stops_admitting_requests_once_the_kept_grant_expires():
-    gateway = _AccessGateway()
-    clock = _Clock()
-    app = _app(gateway)
-    app.state.agent_access_admission = AgentAccessAdmission(clock=clock)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+async def test_a_withdrawal_stops_the_very_next_request():
+    """The directory reads the account row each time: no decision is kept."""
+    directory = _Directory()
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(directory)), base_url="https://test"
+    ) as client:
         assert (await client.get("/probe")).status_code == 200
-        gateway.permissions = []
-        # Inside the bound, the grant the Gateway gave a moment ago admits.
-        clock.now += AGENT_ACCESS_ALLOW_TTL_S - 0.5
-        assert (await client.get("/probe")).status_code == 200
-        assert gateway.asked == [_OWNER]
-        # Past it, the Gateway is asked again, and its denial is never kept.
-        clock.now += 1
+        directory.permissions = []
         assert (await client.get("/probe")).status_code == 403
         assert (await client.post("/probe")).status_code == 403
-    assert gateway.asked == [_OWNER, _OWNER, _OWNER]
-
-
-async def test_a_slow_answer_does_not_stretch_how_long_its_grant_is_kept():
-    """The bound counts from when the Gateway was asked, not from when it answered."""
-    clock = _Clock()
-
-    class _SlowGateway(_AccessGateway):
-        async def agent_access(self, user_id: str) -> dict[str, Any]:
-            clock.now += AGENT_ACCESS_ALLOW_TTL_S - 1  # the answer takes this long
-            return await super().agent_access(user_id)
-
-    gateway = _SlowGateway()
-    app = _app(gateway)
-    app.state.agent_access_admission = AgentAccessAdmission(clock=clock)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
-        assert (await client.get("/probe")).status_code == 200
-        gateway.permissions = []
-        # Kept for the rest of the bound only: here it is ten seconds old.
-        clock.now += 1
-        assert (await client.get("/probe")).status_code == 403
-    assert gateway.asked == [_OWNER, _OWNER]
+    assert directory.asked == [_OWNER, _OWNER, _OWNER]
 
 
 async def test_a_grant_is_used_at_once_after_a_denial():
-    gateway = _AccessGateway(permissions=[])
+    directory = _Directory(permissions=[])
     async with AsyncClient(
-        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+        transport=ASGITransport(app=_app(directory)), base_url="https://test"
     ) as client:
         assert (await client.get("/probe")).status_code == 403
-        gateway.permissions = ["agent.use"]
+        directory.permissions = ["agent.use"]
         assert (await client.get("/probe")).status_code == 200
-    assert gateway.asked == [_OWNER, _OWNER]
+    assert directory.asked == [_OWNER, _OWNER]
 
 
-async def test_an_unavailable_gateway_is_asked_again_and_admits_nothing():
-    gateway = _AccessGateway(error=503)
+async def test_an_unavailable_directory_is_asked_again_and_admits_nothing():
+    directory = _Directory(error=503)
     async with AsyncClient(
-        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+        transport=ASGITransport(app=_app(directory)), base_url="https://test"
     ) as client:
         assert (await client.get("/probe")).status_code == 503
         assert (await client.get("/probe")).status_code == 503
-    assert gateway.asked == [_OWNER, _OWNER]
+    assert directory.asked == [_OWNER, _OWNER]
 
 
-async def test_the_admin_surface_asks_the_gateway_on_every_request(admin_env):
-    gateway = _AccessGateway(permissions=["agent.use", "agent.admin"])
+async def test_the_admin_surface_asks_the_directory_on_every_request(admin_env):
+    directory = _Directory(permissions=["agent.use", "agent.admin"])
     async with AsyncClient(
-        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+        transport=ASGITransport(app=_app(directory)), base_url="https://test"
     ) as client:
-        client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id=_OWNER))
+        client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in(_OWNER))
         assert (await client.get("/probe")).status_code == 200
         assert (await client.get("/admin/probe")).status_code == 200
-        gateway.permissions = ["agent.use"]
+        directory.permissions = ["agent.use"]
         assert (await client.get("/admin/probe")).status_code == 403
-    assert gateway.asked == [_OWNER, _OWNER, _OWNER]
+    assert directory.asked == [_OWNER, _OWNER, _OWNER]
 
 
 def _gates(route: Any) -> list[Any]:
@@ -224,7 +192,7 @@ def _gates(route: Any) -> list[Any]:
     return calls
 
 
-#: Gates that re-ask the gateway before they allow a request. Compared by
+#: Gates that re-ask the directory before they allow a request. Compared by
 #: identity, so a dependency that merely shares the name does not count.
 #: verify_admin_access is a browser gate too: its session path requires a fresh
 #: agent.admin decision, even though ADMIN_TOKEN needs no user lookup.
@@ -236,7 +204,7 @@ REVALIDATING_GATES = (require_agent_owner, verify_admin_access)
 #: wrong thing. Named by the call each route actually makes, not by URL prefix:
 #: a prefix exempts whatever is put under it, which is the same "the next one
 #: falls off the list" failure this test exists to catch.
-MACHINE_GATES = (verify_claiming_host, authenticate_host, verify_oncall_dispatch)
+MACHINE_GATES = (verify_claiming_host, authenticate_host)
 
 #: Routes that answer without a session or a machine credential, on purpose.
 #: Keyed by method and served path, so nothing inherits an exemption by sharing
@@ -244,14 +212,57 @@ MACHINE_GATES = (verify_claiming_host, authenticate_host, verify_oncall_dispatch
 PUBLIC_ROUTES = {
     ("GET", "/healthz"): "liveness only; it reads nothing about anyone",
     ("GET", "/v1/agent/site-config"): "the deployment's public appearance, read before sign-in",
-    ("GET", "/v1/session/login"): "starts sign-in, so there is no session yet",
-    ("GET", "/v1/session/callback"): "finishes sign-in, creating the session",
     ("POST", "/v1/session/logout"): "only ends the session it was sent with",
-    ("GET", "/v1/session/me"): "asks the gateway for a fresh decision in its handler",
+    ("GET", "/v1/session/me"): "asks the directory for a fresh decision in its handler",
     ("POST", "/v1/agent/host/register"): "redeems a one-time enrollment token",
     ("POST", "/v1/compute/node-registrations"): "redeems a node's one-time registration token",
     ("GET", "/v1/agent/mcp/oauth/callback/{provider}"): (
         "finishes only the OAuth flow the signed-in account started"
+    ),
+    # Accounts. Sign-in and recovery run before there is a session.
+    ("GET", "/v1/auth/config"): "says which sign-in this deployment offers, before sign-in",
+    ("POST", "/v1/auth/signup"): "creates an unverified account, so there is no session yet",
+    ("POST", "/v1/auth/login"): "creates the session",
+    ("POST", "/v1/auth/verify-email"): "redeems a single-use emailed token",
+    ("POST", "/v1/auth/resend-verification"): "mails a link; answers the same for any address",
+    ("POST", "/v1/auth/forgot-password"): "mails a link; answers the same for any address",
+    ("POST", "/v1/auth/reset-password"): "redeems a single-use emailed token",
+    ("GET", "/v1/waitlist"): (
+        "identity only by design: the server-side session row is read on every request"
+    ),
+    ("POST", "/v1/waitlist"): (
+        "identity only by design: applying is what an unadmitted account may do"
+    ),
+    ("GET", "/v1/auth/options"): "says what the sign-in pages offer, before sign-in",
+    ("POST", "/v1/auth/setup/admin"): "redeems the one-time first-run setup code",
+    ("POST", "/v1/auth/phone/code"): "sends a code; answers the same for any number",
+    ("POST", "/v1/auth/phone/signup"): "redeems a single-use code; there is no session yet",
+    ("POST", "/v1/auth/phone/login"): "redeems a single-use code, creating the session",
+    ("GET", "/v1/auth/accounts"): (
+        "the browser's own chooser: reads its server-side browser row on every request"
+    ),
+    ("POST", "/v1/auth/switch"): (
+        "re-reads the browser row and the chosen account's live session in its handler"
+    ),
+    ("DELETE", "/v1/auth/accounts/{account_id}"): "only signs an account out of its own browser",
+    ("POST", "/v1/auth/logout-all"): "only ends the browser it was sent with",
+    ("PUT", "/v1/auth/account/locale"): (
+        "identity only, re-read per request: stores the account's own interface language"
+    ),
+    ("GET", "/v1/auth/account"): (
+        "identity only by design: the server-side session row is read on every request"
+    ),
+    ("POST", "/v1/auth/account/password"): (
+        "identity only, re-read per request, and the owner proves it again in the handler"
+    ),
+    ("POST", "/v1/auth/account/email"): (
+        "identity only, re-read per request, and the owner proves it again in the handler"
+    ),
+    ("POST", "/v1/auth/account/phone"): (
+        "identity only, re-read per request, and a single-use code proves the number"
+    ),
+    ("POST", "/v1/auth/account/delete"): (
+        "identity only, re-read per request, and the owner proves it again in the handler"
     ),
 }
 
@@ -381,7 +392,7 @@ async def test_the_walk_sees_a_read_a_name_and_a_mention_for_what_they_are():
 
 @pytest.fixture()
 def admin_env(monkeypatch):
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-test-secret-long-enough-for-hs256")
+    use_session_secret(monkeypatch)
     monkeypatch.setenv("ADMIN_TOKEN", "the-machine-token")
 
 
@@ -393,31 +404,31 @@ def admin_env(monkeypatch):
 async def test_admin_permission_is_scoped_separately(
     admin_env, role, method, permissions, expected
 ):
-    gateway = _AccessGateway(permissions)
+    directory = _Directory(permissions)
     async with AsyncClient(
-        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+        transport=ASGITransport(app=_app(directory)), base_url="https://test"
     ) as client:
-        client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id=_OWNER))
+        client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in(_OWNER))
         response = await client.request(method, "/admin/probe")
     assert response.status_code == expected
-    assert gateway.asked == [_OWNER]
+    assert directory.asked == [_OWNER]
     if expected == 200:
         assert response.json()["actor"] == f"admin:{_OWNER}"
 
 
-async def test_the_machine_token_stays_independent_of_gateway_permissions(admin_env):
-    gateway = _AccessGateway(error=503)
+async def test_the_machine_token_stays_independent_of_directory_permissions(admin_env):
+    directory = _Directory(error=503)
     async with AsyncClient(
-        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+        transport=ASGITransport(app=_app(directory)), base_url="https://test"
     ) as client:
         response = await client.post(
             "/admin/probe", headers={"Authorization": "Bearer the-machine-token"}
         )
     assert response.status_code == 200
     assert response.json()["actor"] == "admin-token"
-    assert gateway.asked == []
+    assert directory.asked == []
 
 
 @pytest.fixture(autouse=True)
 def _configured_identity_issuer(monkeypatch):
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
+    monkeypatch.setenv("GATEWAY_ISSUER", "https://directory.example")

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import {
@@ -25,10 +26,6 @@ import { getInsights, type WorkInsights } from '@/lib/api/insights';
 vi.mock('@/lib/api/insights', () => ({ getInsights: vi.fn() }));
 import { getUserProfile } from '@/lib/api/userProfile';
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn() }));
-
-import { rewritePrompt, type RewritePromptResult } from '@/lib/api/promptRewrite';
-
-vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 
 import { FirstRunProvider } from './firstRun';
 import { requestGitHubAccess } from './githubReturn';
@@ -124,10 +121,11 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
   return {
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
-    models: ['model-a'],
+    ...offering(['model-a']),
     // The server always resolves a starting model for an owner with a choice;
     // an unset one is its own case, where the control stays empty.
     default_model: 'model-a',
+    default_model_connection_id: TEST_CONNECTION,
     github_connected: true,
     github_install_url: null,
     ...overrides,
@@ -661,90 +659,6 @@ describe('TaskComposer source-control onboarding', () => {
     expect(getInsights).toHaveBeenCalledTimes(3);
   });
 
-  it('rewrites the draft for review before creating a task', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(config());
-    vi.mocked(createAgentJob).mockResolvedValue({ id: 'rewritten-task' } as never);
-    vi.mocked(rewritePrompt).mockResolvedValue({
-      kind: 'prompt',
-      prompt: 'Add CSV export with accessible controls and clear error feedback.',
-    });
-    render(<TaskComposer initialRepo="owner/repository" />);
-    const box = await screen.findByRole('textbox', { name: 'What should the agent do?' });
-    fireEvent.change(box, { target: { value: 'Add export' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
-    await waitFor(() =>
-      expect(box).toHaveValue('Add CSV export with accessible controls and clear error feedback.'),
-    );
-    expect(createAgentJob).not.toHaveBeenCalled();
-    await runWhenReady();
-    await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith(
-        expect.objectContaining({
-          task_prompt: 'Add CSV export with accessible controls and clear error feedback.',
-        }),
-        { account: account.id },
-      ),
-    );
-  });
-
-  it.each(['onboarding', 'repository picker'] as const)(
-    'waits for a pending rewrite before opening repository creation from %s',
-    async (entry) => {
-      vi.mocked(getAgentConfig).mockResolvedValue(
-        config({ repos: entry === 'onboarding' ? [] : ['owner/repository'] }),
-      );
-      let finish!: (result: RewritePromptResult) => void;
-      vi.mocked(rewritePrompt).mockReturnValue(
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-      );
-      render(<TaskComposer />);
-      const task = await screen.findByRole('textbox', { name: 'What should the agent do?' });
-      fireEvent.change(task, { target: { value: 'Build an app' } });
-      fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
-      if (entry === 'repository picker') fireEvent.click(await repositoryButton());
-      const create = screen.getByRole('button', { name: 'Create repository' });
-      expect(create).toBeDisabled();
-      fireEvent.click(create);
-      expect(screen.queryByRole('dialog', { name: 'Create repository' })).not.toBeInTheDocument();
-      expect(createGitHubRepository).not.toHaveBeenCalled();
-      await act(async () => finish({ kind: 'prompt', prompt: 'Build an accessible app' }));
-      expect(task).toHaveValue('Build an accessible app');
-      if (entry === 'repository picker') fireEvent.click(await repositoryButton());
-      const available = screen.getByRole('button', { name: 'Create repository' });
-      expect(available).toBeEnabled();
-      fireEvent.click(available);
-      const name = await screen.findByRole('textbox', { name: 'Repository name' });
-      await waitFor(() => expect(name).toHaveFocus());
-      expect(screen.getByRole('dialog', { name: 'Create repository' })).toBeInTheDocument();
-      expect(createAgentJob).not.toHaveBeenCalled();
-    },
-  );
-
-  it('keeps Enter from starting a task while clarification is open', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(config());
-    vi.mocked(rewritePrompt).mockResolvedValue({
-      kind: 'questions',
-      questions: ['Which export format?', 'Which records should be included?'],
-    });
-    render(<TaskComposer initialRepo="owner/repository" />);
-    const box = await screen.findByRole('textbox', { name: 'What should the agent do?' });
-    fireEvent.change(box, { target: { value: 'Add export' } });
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Ask clarification questions first' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
-    await screen.findByText('Which export format?');
-    fireEvent.click(await repositoryButton());
-    expect(screen.getByRole('button', { name: 'Create repository' })).toBeDisabled();
-    fireEvent.keyDown(box, { key: 'Enter' });
-    expect(createAgentJob).not.toHaveBeenCalled();
-    expect(box).toHaveValue('Add export');
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: /^Run/ })).toBeEnabled());
-    fireEvent.click(await repositoryButton());
-    expect(screen.getByRole('button', { name: 'Create repository' })).toBeEnabled();
-  });
-
   // Someone arriving for the first time has nothing connected, and needs
   // nothing: the task runs in a temporary workspace, and connecting GitHub is
   // one optional line beside the box.
@@ -1122,6 +1036,7 @@ describe('TaskComposer source-control onboarding', () => {
           repo: 'owner/new',
           runtime: 'codex',
           chosenModel: 'model-b',
+          chosenModelConnectionId: TEST_CONNECTION,
         },
         savedAt: Date.now(),
       }),
@@ -1130,7 +1045,7 @@ describe('TaskComposer source-control onboarding', () => {
       config({
         repos: ['owner/new', 'owner/repository'],
         runtimes: ['claude-code', 'codex'],
-        models: ['model-a', 'model-b'],
+        ...offering(['model-a', 'model-b']),
       }),
     );
 
@@ -1331,6 +1246,7 @@ describe('TaskComposer source-control onboarding', () => {
           task_prompt: 'Fix the flaky test',
           runtime: 'claude-code',
           model: 'model-a',
+          model_connection_id: TEST_CONNECTION,
           base_ref: 'dev',
           environment_id: null,
           environment_revision: 0,
@@ -1352,7 +1268,7 @@ describe('TaskComposer source-control onboarding', () => {
     // The server answers with the owner's own choice — here the model their
     // previous task ran on — already narrowed to what this deployment offers.
     vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-b'], default_model: 'model-b' }),
+      config({ ...offering(['model-a', 'model-b']), default_model: 'model-b' }),
     );
     vi.mocked(listSkills).mockResolvedValue([]);
     vi.mocked(listEnvironments).mockResolvedValue({
@@ -1391,7 +1307,7 @@ describe('TaskComposer source-control onboarding', () => {
     // the list: the model is the owner's choice, and picking one for them is
     // the same mistake as picking a repository for them.
     vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-b'], default_model: 'retired-model' }),
+      config({ ...offering(['model-a', 'model-b']), default_model: 'retired-model' }),
     );
     vi.mocked(listSkills).mockResolvedValue([]);
     vi.mocked(listEnvironments).mockResolvedValue({
@@ -1412,16 +1328,17 @@ describe('TaskComposer source-control onboarding', () => {
     render(<TaskComposer />);
 
     await chooseRepository();
-    // An empty control, not a guess: it reads as the placeholder in italic.
-    expect(screen.getByLabelText('Model')).toHaveValue('');
-    expect(screen.getByLabelText('Model')).toHaveTextContent('Choose model');
+    // Not a guess: the resolved model stays named, marked unavailable, and Run waits.
+    expect(screen.getByLabelText('Model')).toHaveTextContent('retired-model (unavailable)');
+    expect(screen.getByLabelText('Model')).not.toHaveTextContent('model-a');
+    expect(screen.getByRole('button', { name: 'Run' })).toBeDisabled();
   });
 
   it('waits for a model instead of choosing the first one in the list', async () => {
     // Nothing resolved for this owner: no pin, no history, no deployment
     // default. Run stays disabled and says which control is empty.
     vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-b'], default_model: null }),
+      config({ ...offering(['model-a', 'model-b']), default_model: null }),
     );
     vi.mocked(listSkills).mockResolvedValue([]);
     vi.mocked(listEnvironments).mockResolvedValue({
@@ -2403,6 +2320,7 @@ describe('TaskComposer source-control onboarding', () => {
           task_prompt: 'Fix the flaky test',
           runtime: 'claude-code',
           model: 'model-a',
+          model_connection_id: TEST_CONNECTION,
           base_ref: 'dev',
           environment_id: null,
           environment_revision: 0,
@@ -2535,25 +2453,9 @@ describe('durable new-task drafts', () => {
     await waitFor(() => expect(screen.getByLabelText('Branch')).toHaveValue('main'));
   });
 
-  it('re-resolves a model it filled in, so a pin saved meanwhile takes effect', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-b'], default_model: 'model-a' }),
-    );
-    const first = render(<TaskComposer />);
-    await chooseRepository();
-    expect(screen.getByLabelText('Model')).toHaveValue('model-a');
-    first.unmount();
-    // Away in My Settings, the owner pins model-b.
-    vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-b'], default_model: 'model-b' }),
-    );
-    render(<TaskComposer />);
-    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
-  });
-
   it('keeps a model the owner chose here across a visit', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-b'], default_model: 'model-a' }),
+      config({ ...offering(['model-a', 'model-b']), default_model: 'model-a' }),
     );
     const first = render(<TaskComposer />);
     await chooseRepository();
@@ -2585,34 +2487,28 @@ describe('durable new-task drafts', () => {
       }),
     );
     vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-b'], default_model: 'model-b' }),
+      config({ ...offering(['model-a', 'model-b']), default_model: 'model-b' }),
     );
     render(<TaskComposer />);
     expect(await screen.findByRole('textbox')).toHaveValue('Keep this text');
     await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
   });
 
-  it('never saves the fallback for a retired pick as a pick of its own', async () => {
+  it('never saves the resolved model as a pick of its own', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-b', 'model-c'], default_model: 'model-a' }),
+      config({ ...offering(['model-a', 'model-b', 'model-c']), default_model: 'model-a' }),
     );
     const first = render(<TaskComposer />);
     await chooseRepository();
-    fireEvent.click(screen.getByLabelText('Model'));
-    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
+    expect(screen.getByLabelText('Model')).toHaveValue('model-a');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep this text' } });
     first.unmount();
-    // model-b is withdrawn: the control falls back to what the server resolved.
+    // The owner then pins model-c in Settings: the draft kept no model of its own.
     vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-c'], default_model: 'model-a' }),
-    );
-    const second = render(<TaskComposer />);
-    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-a'));
-    second.unmount();
-    // The owner then pins model-c in Settings.
-    vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-a', 'model-c'], default_model: 'model-c' }),
+      config({ ...offering(['model-a', 'model-c']), default_model: 'model-c' }),
     );
     render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('Keep this text');
     await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-c'));
   });
 
@@ -2886,148 +2782,6 @@ describe('TaskComposer plugins', () => {
   });
 });
 
-describe('TaskComposer reasoning effort', () => {
-  beforeEach(() => {
-    navigation.push.mockReset();
-    vi.mocked(createAgentJob).mockReset();
-    vi.mocked(getAgentConfig).mockReset();
-    vi.mocked(listRepoBranches).mockReset();
-    vi.mocked(listRepoBranches).mockResolvedValue({ default: 'dev', branches: ['dev'] });
-    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
-  });
-
-  afterEach(() => cleanup());
-
-  const thinking = config({
-    models: ['model-a', 'model-plain'],
-    runtime_reasoning_efforts: { 'claude-code': ['low', 'medium', 'high', 'xhigh', 'max'] },
-    // Read as a yes/no — does this model take the parameter — not as a
-    // vocabulary. The levels offered are the platform's four.
-    model_reasoning_efforts: { 'model-a': ['low', 'high', 'max'] },
-  });
-
-  it('offers the platform levels the runtime can express', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
-
-    render(<TaskComposer />);
-
-    const picker = await screen.findByLabelText('Reasoning');
-    fireEvent.click(picker);
-    const offered = screen.getAllByRole('option').map((o) => o.textContent);
-    // `medium` although the model's entry omits it — that entry is a yes/no.
-    // `xhigh` dropped although claude-code can say it — not a platform level.
-    expect(offered).toEqual(['low', 'medium', 'high', 'max']);
-  });
-
-  it('drops a platform level the runtime cannot express', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(
-      config({
-        models: ['model-a'],
-        // pi's real shape: it has no `max`.
-        runtimes: ['pi'],
-        runtime_reasoning_efforts: { pi: ['minimal', 'low', 'medium', 'high'] },
-        model_reasoning_efforts: { 'model-a': ['low', 'high', 'max'] },
-      }),
-    );
-
-    render(<TaskComposer />);
-
-    const picker = await screen.findByLabelText('Reasoning');
-    fireEvent.click(picker);
-    const offered = screen.getAllByRole('option').map((o) => o.textContent);
-    expect(offered).toEqual(['low', 'medium', 'high']);
-  });
-
-  it('shows no control when the model takes no effort', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(
-      config({
-        models: ['model-plain'],
-        runtime_reasoning_efforts: { 'claude-code': ['low', 'high'] },
-        model_reasoning_efforts: {},
-      }),
-    );
-
-    render(<TaskComposer />);
-
-    await screen.findByLabelText('Model');
-    expect(screen.queryByLabelText('Reasoning')).not.toBeInTheDocument();
-  });
-
-  it('shows no control against a backend that does not report efforts', async () => {
-    // The upgrade path: an older control plane answers neither map, and the
-    // composer must look exactly as it did before the control existed.
-    vi.mocked(getAgentConfig).mockResolvedValue(config());
-
-    render(<TaskComposer />);
-
-    await screen.findByLabelText('Model');
-    expect(screen.queryByLabelText('Reasoning')).not.toBeInTheDocument();
-  });
-
-  // A successful submit navigates away, so each of these is its own render
-  // rather than two clicks on one composer.
-  async function submit(effort?: string) {
-    render(<TaskComposer />);
-    await chooseRepository();
-    const textarea = await screen.findByRole('textbox');
-    fireEvent.change(textarea, { target: { value: 'do it' } });
-    if (effort) {
-      fireEvent.click(screen.getByLabelText('Reasoning'));
-      fireEvent.click(screen.getByRole('option', { name: effort }));
-    }
-    await runWhenReady();
-    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
-    return vi.mocked(createAgentJob).mock.calls[0][0];
-  }
-
-  it('selects the deepest level on offer and sends it untouched', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
-
-    render(<TaskComposer />);
-    expect(await screen.findByLabelText('Reasoning')).toHaveValue('max');
-    await chooseRepository();
-    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'do it' } });
-    await runWhenReady();
-
-    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
-    expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ reasoning_effort: 'max' });
-  });
-
-  it('sends the chosen level', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
-
-    expect(await submit('low')).toMatchObject({ reasoning_effort: 'low' });
-  });
-
-  it('sends nothing when the pair offers no control', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ models: ['model-plain'], default_model: 'model-plain' }),
-    );
-
-    expect(await submit()).not.toHaveProperty('reasoning_effort');
-  });
-
-  it("falls back to the new pair's deepest when the model stops offering one", async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
-
-    render(<TaskComposer />);
-    await chooseRepository();
-    fireEvent.click(await screen.findByLabelText('Reasoning'));
-    fireEvent.click(screen.getByRole('option', { name: 'low' }));
-    // model-plain takes no effort at all, so the control goes away entirely —
-    // and the pending selection must not survive to be submitted.
-    fireEvent.click(screen.getByLabelText('Model'));
-    fireEvent.click(screen.getByRole('option', { name: 'model-plain' }));
-
-    await waitFor(() => expect(screen.queryByLabelText('Reasoning')).not.toBeInTheDocument());
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'do it' } });
-    await runWhenReady();
-
-    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
-    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('reasoning_effort');
-  });
-});
-
 // `/goal` is the one thing this composer can be told that is not a message. The
 // rule that separates the two is the feature; the request it produces is the
 // contract with the control plane.
@@ -3161,6 +2915,7 @@ describe('TaskComposer goal command', () => {
       goal: { objective: 'make the suite pass' },
       runtime: 'claude-code',
       model: 'model-a',
+      model_connection_id: TEST_CONNECTION,
       base_ref: 'dev',
     });
     expect(vi.mocked(createAgentJob).mock.calls[0][0].goal).not.toHaveProperty('max_rounds');

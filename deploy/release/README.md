@@ -135,7 +135,7 @@ The tests also check `org.opencontainers.image.revision`,
 `io.hybridinference.artifact.role`, and the web variant's
 `io.hybridinference.artifact.base_path`. Dockerfiles default the revision to
 `unknown`; publication must supply the source commit. These checks establish
-startup behavior, not successful job execution, real Gateway integration, or
+startup behavior, not successful job execution or
 Kata readiness on an execution host.
 
 ## Control-plane integration acceptance
@@ -150,7 +150,7 @@ compares running containers with the manifest through
 |---|---|
 | Checkout-free installation with no image build | Execution host, Kata, and real jobs |
 | Registry pulls and digest identity of running containers | Any additional architecture |
-| Real Postgres migrations and identity-namespace check | Gateway contracts and browser sign-in |
+| The read-only account-namespace check, then real Postgres migrations | Browser sign-in |
 | Healthy API and MCP listeners; correct web variant labels | User-visible console behavior |
 | Refusal of conflicting configured images before pulling | Independent registry validation by the downstream resolver |
 

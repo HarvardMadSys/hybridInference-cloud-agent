@@ -50,7 +50,7 @@ class ControlPlaneEndpoint(ComputeValue):
 
 def tunnel_username(setup_id: str, role: str) -> str:
     """Derive separate stable service accounts, never reuse a management account."""
-    if role not in {"inference", "mcp", "control"}:
+    if role not in {"mcp", "control"}:
         raise ProviderError("setup_configuration", "Unknown tunnel role")
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", setup_id):
         raise ProviderError("setup_configuration", "Invalid server setup identifier")
@@ -135,34 +135,6 @@ class SshTunnelSetup:
             raise ProviderError(
                 "invalid_response", "Control-plane discovery returned an invalid endpoint"
             ) from None
-
-    async def check_gateway(self, connection: SshConnection, port: int = 8080) -> str:
-        """Check the inference listener and return the verified machine's hashed identity."""
-        _validate_port(port)
-        result = await self._run(connection, {"action": "check_gateway", "port": port})
-        identity = result.get("machine_identity")
-        if not isinstance(identity, str) or not re.fullmatch(r"[a-f0-9]{64}", identity):
-            raise ProviderError(
-                "invalid_response", "Gateway discovery returned an invalid machine identity"
-            )
-        return identity
-
-    async def provision_gateway(
-        self, connection: SshConnection, public_key: str, port: int, setup_id: str
-    ) -> None:
-        """Authorize just the inference destination under an idempotent setup marker."""
-        _validate_port(port)
-        _validate_identity(setup_id, public_key)
-        await self._run(
-            connection,
-            {
-                "action": "gateway",
-                "port": port,
-                "key": public_key,
-                "setup_id": setup_id,
-                "inference_username": tunnel_username(setup_id, "inference"),
-            },
-        )
 
     async def provision_control(
         self,
@@ -588,8 +560,6 @@ def key_path(username):
 def entries(params):
     prefix = 'command="",restrict,port-forwarding,'
     tag = ' cloud-agent-setup:' + params['setup_id'] + ':'
-    if params['action'] == 'gateway':
-        return [prefix + 'permitopen="127.0.0.1:' + str(params['port']) + '" ' + params['key'] + tag + 'inference']
     endpoint = params['endpoint']
     return [
         prefix + 'permitopen="127.0.0.1:' + str(endpoint['mcp_port']) + '" ' + params['mcp_key'] + tag + 'mcp',
@@ -617,13 +587,10 @@ def provision_account(username, entry, port, reverse=None):
 
 def provision(params):
     expected = entries(params)
-    if params['action'] == 'gateway':
-        provision_account(params['inference_username'], expected[0], params['port'])
-    else:
-        endpoint = params['endpoint']
-        provision_account(params['mcp_username'], expected[0], endpoint['mcp_port'])
-        reverse = endpoint['gateway_ip'] + ':' + str(params['reverse_port'])
-        provision_account(params['control_username'], expected[1], endpoint['main_port'], reverse)
+    endpoint = params['endpoint']
+    provision_account(params['mcp_username'], expected[0], endpoint['mcp_port'])
+    reverse = endpoint['gateway_ip'] + ':' + str(params['reverse_port'])
+    provision_account(params['control_username'], expected[1], endpoint['main_port'], reverse)
 
 def main():
     try:
@@ -631,21 +598,15 @@ def main():
         action = params['action']
         if action == 'discover':
             result = {'ok': True, 'endpoint': discover(params)}
-        elif action == 'check_gateway':
-            listening(params['port'])
-            result = {'ok': True, 'machine_identity': machine_identity()}
-        elif action in ('gateway', 'control'):
+        elif action == 'control':
             descriptor = os.open('/run/lock/cloud-agent-server-setup.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor, 'w') as lock:
                 info = os.fstat(lock.fileno())
                 if info.st_uid != 0 or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     refuse('setup_failed')
                 fcntl.flock(lock, fcntl.LOCK_EX)
-                if action == 'gateway':
-                    listening(params['port'])
-                else:
-                    listening(params['endpoint']['main_port'])
-                    listening(params['endpoint']['mcp_port'])
+                listening(params['endpoint']['main_port'])
+                listening(params['endpoint']['mcp_port'])
                 provision(params)
             result = {'ok': True}
         else:

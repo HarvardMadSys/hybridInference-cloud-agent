@@ -86,12 +86,16 @@ VARIANTS: dict[str, tuple[str, str]] = artifact_catalog.site_variants()
 
 #: What the deploy script prints on its way to the fence. Each line stands for a
 #: stage that has to have happened for the next one to mean anything, so they are
-#: asserted in order rather than as a set: a log that shows the identity check
-#: before the migration is a deployment that ran them in the wrong order.
+#: asserted in order rather than as a set: the read-only account check comes
+#: before the migration, because a deployment that migrates first has already
+#: changed a Gateway-era archive by the time the check would refuse it.
 STAGES: tuple[tuple[str, str], ...] = (
     ("pulling release images", "the release's digests were pulled, not built"),
+    (
+        "checking that the Agent database is empty or holds Cloud Agent accounts",
+        "the read-only account namespace check ran before anything changed the database",
+    ),
     ("migrating deployment database", "Alembic ran from the control image"),
-    ("checking the Agent database identity issuer", "the identity namespace check ran"),
     ("control plane: ok", "the control plane answered /healthz"),
     ("MCP relay: ok", "the MCP relay answered /healthz"),
     ("waiting for target", "the deployment reached the host readiness fence"),
@@ -225,7 +229,7 @@ def synthetic_environment(compose: Path, variant: str, project: str) -> dict[str
             "AGENT_WEB_API_URL": api_url,
             # A network of this run's own. The stack's network is *named*
             # rather than project-scoped — `${AGENT_NETWORK_NAME:-cloud-agent}`,
-            # deliberately, so the gateway's console can resolve `web` and
+            # deliberately, so a parent site's frontend can resolve `web` and
             # `control-plane` by name — which means two stacks on one machine
             # join the same bridge by default, each attaching a container
             # aliased `postgres`. Docker's DNS then round-robins between them.

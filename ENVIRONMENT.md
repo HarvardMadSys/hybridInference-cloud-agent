@@ -81,7 +81,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0106_user_model_connections`) before
+Run `alembic upgrade head` (through `0108_local_account_parity`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -132,12 +132,12 @@ keys, sandbox manager credentials, cookie/proxy policy, MCP target policy, and d
 execution profile. During an upgrade, the main listener imports only newly
 migrated fields that are missing. It never overwrites an existing value,
 including an empty reset, and the relay waits for the import to finish. The
-identity issuer stays pinned to this database. Existing user/compute encryption
+database stays bound to the account system. Existing user/compute encryption
 keys cannot be replaced or reset through the settings editor without a separate
 re-encryption procedure.
 
 The Settings page identifies missing required fields and incomplete optional
-integrations. If Gateway sign-in is not ready, an administrator can open
+integrations. Before any administrator account exists, an operator can open
 `<web base path>/setup` with `ADMIN_TOKEN`. Setup uses the same authenticated,
 audited settings API. The recovery token stays in page memory and is never saved
 in browser storage.
@@ -152,13 +152,14 @@ the control plane. Their names appear on the Settings page with hidden values.
 
 ## The one rule
 
-> The gateway's `API_KEY_SECRET` and `JWT_SECRET_KEY` must never appear in this
-> repository, in its configuration, or on any host that runs it.
+> The HybridInference Gateway's `API_KEY_SECRET` and `JWT_SECRET_KEY`, and its
+> database credentials, must never appear in this repository, in its
+> configuration, or on any host that runs it.
 
-The gateway mints and verifies inference grants. Cloud Agent verifies identity
-tokens with public JWKS keys and signs its own tokens with independent secrets.
-Any proposal to place either gateway signing secret here requires a design
-review.
+Cloud Agent keeps its own accounts and signs its own tokens with independent
+secrets; it has no Gateway dependency. A mail transport credential an
+operator chooses to reuse (SMTP) is configuration, kept in the operator's
+secret store, never in this repository.
 
 ## Provisioning status
 
@@ -216,7 +217,7 @@ deployed-service setting.
 
 | Variable | Value / who provisions |
 |---|---|
-| `AGENT_DATABASE_URL` | Postgres DSN for a database owned exclusively by Cloud Agent. Do not share the gateway's database. |
+| `AGENT_DATABASE_URL` | Postgres DSN for a database owned exclusively by Cloud Agent. A new deployment starts on an empty one; a database from before the independent-accounts release is refused and kept as an archive ([cutover](docs/developer/upgrade-notes.md#independent-accounts-cutover)). |
 | `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. |
 | `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | Read by `make test-db` and the CI `dbtest` tier as five separate values, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. The database name must contain `_test_`; fixtures refuse other names. With xdist, each worker appends its ID and needs a pre-created database. CI creates `<TEST_DB_NAME>_gw0`…`_gw3` for `-n 4`. |
 
@@ -238,35 +239,89 @@ accounts, sessions, and saved connections persist in `agent-pgadmin`.
 | `AGENT_PGADMIN_SERVERS_FILE` | *Optional.* Read-only server-definition JSON. Defaults to the bundled `pgadmin-servers.json`, which registers `postgres:5432` with database/user `cloudagent` and no password. Supply an absolute custom file if `AGENT_POSTGRES_USER` or `AGENT_POSTGRES_DB` differs. Artifact deployments resolve the default file from the selected release recipe. Imported on first initialization; later edits are made in pgAdmin. |
 | `AGENT_PGADMIN_COOKIE_SECURE` | *Optional.* pgAdmin Python boolean, default `True`. Use `False` only for an HTTP local stack. The proxy independently scopes pgAdmin cookies to its public route, sets HttpOnly and SameSite=Lax, and requires Secure on HTTPS. |
 
-### Gateway contracts
+### Public addresses
 
 | Variable | Value / who provisions |
 |---|---|
-| `GATEWAY_BASE_URL` | Origin of the HybridInference gateway this deployment federates with, e.g. `https://gateway.example.org`. A new value saved in Admin → Settings must use HTTPS unless it names localhost, a loopback address or a single-label name such as a Compose service; the same applies to `GATEWAY_JWKS_URL` and `GATEWAY_AUTHORIZE_URL`. A value imported or saved before that rule still loads. Because the dispatch token is sent to whatever URL is saved, changing this URL while a token is configured is refused unless the same update supplies the token again or clears it: on the settings page, clear the token, change the URL, then enter the token again. |
-| `GATEWAY_JWKS_URL` | Explicit URL of the gateway's public key set, typically `<GATEWAY_BASE_URL>/v1/identity/jwks`; it is not derived automatically. The verifier caches the JWKS set for five minutes and refreshes for an unknown `kid`. Publish current and retiring public keys through rotation; removal takes effect when the cache expires. |
-| `GATEWAY_GRANT_DISPATCH_TOKEN` | Bearer credential for minting, renewing, revoking and reading usage for inference grants. Generate random 32 bytes (a new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced); provision the same value on both sides and a distinct value for each environment. The saved token is sent only to `GATEWAY_BASE_URL`: Admin Settings refuses to change that URL while the token is kept, so clear the token, save the URL, then enter the token again, or save both in one update. |
-| `GATEWAY_GRANT_BASE_PATH` | *Optional initial import.* Grant service route prefix, default `/internal/agent-grants`; applies to mint, renew, revoke and usage queries. Use an absolute URL path without a query or fragment. Change it in Admin Settings; deployment clients apply it live. |
-| `GATEWAY_GRANT_BINDING_ID` | *Optional; recommended before the first ledger-enabled deployment.* Nonsecret identity of the logical gateway installation. When set, usage snapshots pin this identity across URL, grant-prefix and credential migrations. Change it when switching installations, including at the same URL. Without it, the fingerprint uses `GATEWAY_BASE_URL` and `GATEWAY_GRANT_BASE_PATH`, so changing either prevents refreshing old snapshots. Credential rotation always preserves the binding. Configure this only in the control plane; service credentials never enter snapshots or the browser. |
-| `GATEWAY_ISSUER` | *Required for Gateway access.* Exact `iss` signed by the Gateway. It identifies the user namespace and need not equal the HTTP origin. Recorded in the Agent database; changing it requires a separate database or an explicit ownership migration. See [minimal identity migration](docs/developer/minimal-identity.md). |
-| `GATEWAY_AUTHORIZE_URL` | Explicit consent-page URL, typically `<GATEWAY_BASE_URL>/authorize`; it is not derived automatically. The control plane performs the PKCE flow. Unset disables sign-in and reports it unavailable. |
-| `AGENT_SESSION_REDIRECT_URI` | Public URL of `GET /v1/session/callback`, for example `https://agents.example.org/api/v1/session/callback`. It must exactly match an entry in the gateway's `IDENTITY_ALLOWED_REDIRECTS`. It is configured explicitly, never derived from `Host` or forwarded headers. |
-| `AGENT_WEB_BASE_URL` | Public web-app URL, including its base path, for example `https://agents.example.org/agents`. Sign-in returns here after setting the cookie; unavailable sign-in returns with `?sign_in_error=unavailable`. Its origin is also one the main API accepts session-cookie writes from: a POST, PUT, PATCH or DELETE carrying the session cookie is refused with 403 when the browser reports it came from another origin (`Sec-Fetch-Site`, or `Origin` without it) that is neither this one, the request's own host, nor the pgAdmin public URL's. |
-| `AGENT_GATEWAY_URL` | Gateway URL as seen *from inside the sandbox* — the relay address, not the public URL. Differs from `GATEWAY_BASE_URL` by design. |
+| `AGENT_WEB_BASE_URL` | Public web-app URL, including its base path, for example `https://agents.example.org/agents`. Every emailed link is built from it, never from a request's `Host`. Its origin is also one the main API accepts session-cookie writes from: a POST, PUT, PATCH or DELETE carrying the session cookie is refused with 403 when the browser reports it came from another origin (`Sec-Fetch-Site`, or `Origin` without it) that is neither this one, the request's own host, nor the pgAdmin public URL's. |
+| `AGENT_PUBLIC_API_URL` | NEW. This API's public base URL, including its prefix, for example `https://agents.example.org/api`. OAuth callbacks (MCP sign-in, compute registration) are built from it. It replaces the address `AGENT_SESSION_REDIRECT_URI` used to give. |
+
+### Retired Gateway variables
+
+HybridInference Gateway sign-in, admission and inference were removed. Each of
+these is refused: the control plane stops at startup naming it, and
+`deploy/control-plane/deploy.sh` stops before pulling anything
+([cutover](docs/developer/upgrade-notes.md#independent-accounts-cutover)).
+
+| Variable | Status |
+|---|---|
+| ~~`GATEWAY_BASE_URL`~~ | **removed**, refused |
+| ~~`GATEWAY_JWKS_URL`~~ | **removed**, refused |
+| ~~`GATEWAY_GRANT_DISPATCH_TOKEN`~~ | **removed**, refused |
+| ~~`GATEWAY_GRANT_BASE_PATH`~~ | **removed**, refused |
+| ~~`GATEWAY_GRANT_BINDING_ID`~~ | **removed**, refused |
+| ~~`GATEWAY_ISSUER`~~ | **removed**, refused |
+| ~~`GATEWAY_AUTHORIZE_URL`~~ | **removed**, refused |
+| ~~`AGENT_SESSION_REDIRECT_URI`~~ | **removed**, refused |
+| ~~`AGENT_GATEWAY_URL`~~ | **removed**, refused |
+| ~~`AGENT_AUTH_MODE`~~ | **removed**, refused |
+| ~~`AGENT_GATEWAY_SSH_HOST`~~ | **removed**, refused |
+| ~~`AGENT_WEB_GATEWAY_URL`~~ | **removed**, refused |
+| ~~`AGENT_WEB_FEATURE_RAG`~~ | **removed**, refused |
+| ~~`AGENT_ONCALL_DISPATCH_TOKEN`~~ | **removed**, refused |
+| ~~`AGENT_ONCALL_USER_ID`~~ | **removed**, refused |
+| ~~`IDENTITY_ISSUER`~~ | **removed**, refused |
+| ~~`IDENTITY_JWT_PRIVATE_KEY`~~ | **removed**, refused |
+| ~~`IDENTITY_JWT_RETIRING_PUBLIC_KEYS`~~ | **removed**, refused |
+| ~~`IDENTITY_ALLOWED_REDIRECTS`~~ | **removed**, refused |
 
 ### Own secrets
 
 | Variable | Value / who provisions |
 |---|---|
 | `AGENT_SETTINGS_ENCRYPTION_KEY` | Optional dedicated key of at least 32 bytes for encrypted admin setting secrets. If absent, `AGENT_SESSION_SECRET` supplies the key. Keep the same effective key on the main API and MCP-only listener, and preserve it with database backups. Changing the effective key requires re-encrypting existing settings first; session-key rotation also changes it when the fallback is in use. |
-| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Encrypts stored source-control credentials, per-user MCP credentials, and reusable cloud-environment variables/overrides under separate domain separators. Generate random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced. Without a key, none store plaintext; MCP offers an empty picker and value-bearing environment operations fail closed. Credentials from the pre-extraction gateway key require re-wrapping, not copying. |
-| `AGENT_CONTROL_TOKEN_SECRET` | Signs host/worker control tokens. Generate random 32 bytes, unique per environment and independent of gateway secrets. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved earlier still loads, and startup logs `agent_weak_credential` until it is replaced. |
-| `AGENT_SESSION_SECRET` | Signs the web session cookie. Generate random 32 bytes, unique per environment. |
+| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Encrypts stored source-control credentials, per-user MCP credentials, and reusable cloud-environment variables/overrides under separate domain separators. Generate random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced. Without a key, none store plaintext; MCP offers an empty picker and value-bearing environment operations fail closed. |
+| `AGENT_CONTROL_TOKEN_SECRET` | Signs host/worker control tokens. Generate random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved earlier still loads, and startup logs `agent_weak_credential` until it is replaced. |
+| `AGENT_SESSION_SECRET` | Legacy. Only the fallback root for `AGENT_SETTINGS_ENCRYPTION_KEY` on an installation that never set that key; no session uses it. New deployments set `AGENT_SETTINGS_ENCRYPTION_KEY` instead. If both it and `AGENT_LOCAL_SESSION_SECRET` are set, they must differ. |
 | `AGENT_DEFAULT_EXECUTION_PROFILE` | Server-owned policy for new root threads. Application default: `trusted-v1`; supported production Compose default: `untrusted-kata-v1`; local Compose uses `trusted-v1`. The untrusted profile requires the current enrolled Host credential and the exact claiming replica's attestation of `io.containerd.kata.v2` with a guest kernel different from the host. The trusted profile permits runc for trusted internal/dev repositories. Follow-ups and Fork inherit the stored policy; callers cannot select it. |
-| `AGENT_ONCALL_DISPATCH_TOKEN` | Authenticates the gateway alert relay on `/v1/agent/service/oncall/*` — one credential, one door. Random 32 bytes (a new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced), same value in the relay's `.env.oncall`, distinct per environment. Unset opens nothing (the door then answers only to `ADMIN_TOKEN`). |
-| `AGENT_ONCALL_USER_ID` | Gateway user id every on-call job runs as. Its Gateway permissions decide which models the job's grant may carry, and its quota is what the analysis spends. Unset: the on-call door answers 503, the rest of the service is unaffected. |
 | `AGENT_ALERT_WEBHOOK_URL` | Operator-owned JSON webhook for queue incidents, recovery and compute replacement events. Queue monitoring runs every minute, reports ten-minute-old runnable queue heads after two observations, retries delivery on the next pass and repeats unchanged incidents at most every 30 minutes. Delivery timeout: five seconds. Queue payloads contain event, deployment SHA and aggregate counts; compute events also contain Host identity and reason codes. Unset retains structured logs. Downstream distributions own deployment-workflow alerts. This URL never enters runners or sandboxes. |
-| `AGENT_RESIDENCY_TTL_S` | How long a member's independently fenced live-process residency and short-lived inference grant survive between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
+| `AGENT_RESIDENCY_TTL_S` | How long a member's independently fenced live-process residency survives between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
 | `ADMIN_TOKEN` | Optional machine-to-machine admin credential. An unset value opens no token access; admin sessions remain a separate authorization path. Use at least 32 random bytes; startup logs `agent_weak_credential` for a shorter value. |
+
+### Accounts
+
+`AGENT_LOCAL_SESSION_SECRET` is read from the process environment only, never
+from Admin Settings, by both listeners. Every other variable
+here is the initial value of a setting in Admin → Settings → Accounts: imported once, the
+first time the settings registry sees it, and edited there afterwards. Secrets are stored
+encrypted and never shown again. See [accounts](docs/developer/local-accounts.md).
+
+| Variable | Value / who provisions |
+|---|---|
+| `AGENT_LOCAL_SESSION_SECRET` | Required: at least 32 random bytes, different from `AGENT_SESSION_SECRET`. Keys the hashes of session cookies, emailed tokens and abuse counters. Rotating it ends every session and outstanding link. |
+| `AGENT_LOCAL_SIGNUP_ENABLED` | Defaults to on. `false` closes public sign-up, by email and by phone; existing accounts still sign in. Signing up never grants Agent use. |
+| `AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION` | NEW. Defaults to `true`. `false` treats a new email account as verified at sign-up and sends it no link, so sign-up works without SMTP. Such an address is accepted, not proven: it matches neither the signup domain list nor `AGENT_LOCAL_ADMIN_EMAILS` until a link sent to it is followed. Accounts created while it was on still verify. |
+| `AGENT_LOCAL_SIGNUP_APPROVAL` | NEW. `manual` (default): every account waits for an administrator. `domains`: a verified account whose proven email domain is on the signup domain list (Admin → Accounts) is approved at once; with an empty list, every verified account is. |
+| `AGENT_LOCAL_SIGNUP_ADMIN_NOTIFY` / `AGENT_LOCAL_SIGNUP_NOTIFY_EMAILS` | NEW. Mail administrators when a sign-up waits for approval (default on). Recipients are the comma-separated list, or every local administrator with a verified email when it is empty. |
+| `AGENT_LOCAL_TERMS_URL` | NEW. Optional link to the Terms of Service the sign-up forms ask every new account to accept. Acceptance is required either way. |
+| `AGENT_LOCAL_SMS_ENABLED` / `AGENT_LOCAL_SMS_PROVIDER` | NEW. Phone sign-up, sign-in and binding with a code sent by text message. Off (`false` / `none`) by default; on needs a configured provider (`tencent`). |
+| `AGENT_LOCAL_SMS_DEFAULT_COUNTRY_CODE` / `AGENT_LOCAL_SMS_ALLOWED_PREFIXES` | NEW. Digits prepended to a number typed without `+`, and the comma-separated `+` prefixes codes may be sent to (empty: any). |
+| `AGENT_TENCENT_CLOUD_SECRET_ID` / `AGENT_TENCENT_CLOUD_SECRET_KEY` / `AGENT_TENCENT_CLOUD_TOKEN` | NEW. Tencent Cloud CAM credentials of the `tencent` text message provider (the token only for temporary credentials). This deployment's own; never sent to a host or sandbox. |
+| `AGENT_TENCENT_SMS_REGION` / `AGENT_TENCENT_SMS_SDK_APP_ID` / `AGENT_TENCENT_SMS_SIGN_NAME` / `AGENT_TENCENT_SMS_TEMPLATE_ID` | NEW. The Tencent SMS application, its approved signature and its approved template, which takes the code and its lifetime in minutes. Region defaults to `ap-guangzhou`. |
+| `AGENT_TURNSTILE_SITE_KEY` / `AGENT_TURNSTILE_SECRET_KEY` | NEW. Cloudflare Turnstile for sign-up and phone codes. With no secret key nothing is checked; with one, a missing or rejected token, or no answer from Cloudflare, refuses. |
+| `AGENT_LOCAL_ADMIN_EMAILS` | NEW. Comma-separated, as HybridInference's `ADMIN_EMAILS`: an account whose **proven** email is listed is approved and made an administrator when it signs in. Proven means a link sent to the address was followed (verification, address change or password reset) or the operator created the account, never an address accepted while verification is off. The list stays in charge: withdrawing a listed account's administration or access is refused until the address is removed from it. |
+| `AGENT_LOCAL_TERMS_TEXT` | NEW. Plain-text Terms of Service shown at `/terms` and in the sign-up consent when `AGENT_LOCAL_TERMS_URL` is empty. |
+| `AGENT_LOCAL_SESSION_TTL_DAYS` | NEW. Lifetime of a new sign-in, default 30 days, never extended by use. |
+| `AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_15MIN` / `AGENT_LOCAL_LOGIN_ACCOUNT_RATE_LIMIT_PER_15MIN` / `AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_HOUR_PER_IP` | NEW. Sign-in windows: per account per address (5, also a recognized browser's own window), per account from every address (50, counting only attempts the per-address windows let through) and per address (20 an hour). |
+| `AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_HOUR` / `AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_DAY` | NEW. Sign-ups per client address, 5 an hour and 10 a day. |
+| `AGENT_LOCAL_SIGNUP_REQUIRE_RESOLVED_CLIENT_IP` / `AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_HOUR` / `AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_DAY` | NEW. A sign-up whose client address cannot be told shares one budget (5 an hour, 10 a day) with every other such sign-up, or with the first set to `true` is refused (503). |
+| `AGENT_LOCAL_EMAIL_PROVIDER` | NEW. `smtp` (default), `tencent_ses`, or a registered transport. No fallback between them. |
+| `AGENT_TENCENT_SES_REGION` / `AGENT_TENCENT_SES_FROM_EMAIL` / `AGENT_TENCENT_SES_FROM_NAME` | NEW. Tencent SES region (`ap-guangzhou` or `ap-hongkong`), approved sender address and display name, with the `AGENT_TENCENT_CLOUD_*` credentials. |
+| `AGENT_TENCENT_SES_TEMPLATE_VERIFICATION` / `AGENT_TENCENT_SES_TEMPLATE_PASSWORD_RESET` / `AGENT_TENCENT_SES_TEMPLATE_APPROVAL` / `AGENT_TENCENT_SES_TEMPLATE_REJECTION` / `AGENT_TENCENT_SES_TEMPLATE_ADMIN_SIGNUP` / `AGENT_TENCENT_SES_TEMPLATE_NOTICE` | NEW. Approved SES template ids (0: none). Verification and password reset are required; any other mail without its own template goes through the notice template. |
+| `AGENT_SMTP_HOST` / `AGENT_SMTP_PORT` | Mail relay for verification, password-reset and address-change links and the account notices. Port defaults to 587, or 465 with `AGENT_SMTP_SECURITY=tls`. Without a host and sender, email sign-up is closed while verification is required, and recovery answers 503. |
+| `AGENT_SMTP_SECURITY` | `starttls` (default), `tls` for implicit TLS, or `none` for a local relay. |
+| `AGENT_SMTP_USERNAME` / `AGENT_SMTP_PASSWORD` | Optional relay credentials. Never logged. |
+| `AGENT_SMTP_FROM` | Sender address of account mail, e.g. `Cloud Agent <no-reply@example.org>`. Links in it are built from `AGENT_WEB_BASE_URL` only. |
 
 ### Sandbox deletion archives
 
@@ -323,7 +378,7 @@ permissions, retention and verification requirements.
 ### MCP
 
 Cloud Agent owns MCP discovery, per-user credentials, authorization and attempt
-fencing. The gateway serves inference and has no MCP role.
+fencing.
 
 Users add remote URLs, imported `mcpServers` snippets or stdio launch specs.
 Templates only prefill the connection form; environment variables neither add
@@ -340,12 +395,12 @@ relay reachability and connection target policy.
 | `AGENT_MCP_HOSTNAME` | The relay's alias on both container networks. Defaults to `agent-mcp`. |
 | `AGENT_CONTROL_PLANE_TUNNEL_*` | Runner-only SSH tunnel to the main API. Required suffixes: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`. Defaults for `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT` / `LISTEN_PORT`: `22` / `127.0.0.1` / `8000` / `8000`. It joins only the runner network and is unreachable from sandboxes. Use a key distinct from the MCP and inference keys. |
 | `AGENT_CONTROL_PLANE_HOSTNAME` | That tunnel's alias, on the runner network only. Defaults to `agent-control-plane`. |
-| `AGENT_MCP_PUBLIC_BASE_URL` | *Optional override.* The public API base URL used to register and receive MCP OAuth callbacks, including the API prefix — for example `https://example.com/agents/api`. The callback is `<base>/v1/agent/mcp/oauth/callback/<connection-id>`. After processing it, the service returns the browser to `<AGENT_WEB_BASE_URL>/integrations`; the web and API bases may differ. When unset, reuse `AGENT_SESSION_REDIRECT_URI` with its exact `/v1/session/callback` suffix removed, preserving the public API origin and proxy prefix. This works with the existing required sign-in configuration; use the override only if MCP callbacks have a separate public address. Never derived from request headers. If neither setting supplies a callback address, browser authorization is unavailable; static credentials still work. |
+| `AGENT_MCP_PUBLIC_BASE_URL` | *Optional override.* The public API base URL used to register and receive MCP OAuth callbacks, including the API prefix — for example `https://example.com/agents/api`. The callback is `<base>/v1/agent/mcp/oauth/callback/<connection-id>`. After processing it, the service returns the browser to `<AGENT_WEB_BASE_URL>/integrations`; the web and API bases may differ. When unset, `AGENT_PUBLIC_API_URL` is used; set the override only if MCP callbacks have a separate public address. Never derived from request headers. If neither setting supplies a callback address, browser authorization is unavailable; static credentials still work. |
 | `AGENT_MCP_GITHUB_CLIENT_ID` / `AGENT_MCP_GITHUB_CLIENT_SECRET` | *Optional legacy import.* Configure GitHub MCP browser sign-in in Admin Settings → MCP. Register a service-owned GitHub OAuth App or GitHub App with callback `<public API base>/v1/agent/mcp/oauth/callback/github` (including the API proxy prefix). Both client values and a public callback base are required. The preset then defaults to browser sign-in; each user authorizes their own account without registering an app or pasting a token. The client secret stays in encrypted settings and pending OAuth flows, while user tokens remain in separate MCP connections. Prefer a GitHub App limited to the required repositories and permissions, including Contents and Pull requests read and write access when agents publish changes; OAuth Apps request `repo` and `read:org` scopes (GitHub's `repo` scope permits writes). A personal access token remains available for narrower repository access. |
 | `AGENT_MCP_ALLOW_PRIVATE_TARGETS` | Whether a user-added MCP connection may dial private and loopback addresses. Off by default: a remote connection that reaches loopback reaches **this** service, and a user who needs a private network should run a connector instead. Turning it on still refuses the ranges this platform never dials, so it cannot be used to reach the cloud metadata service. |
 | `AGENT_MCP_ALLOW_PLAIN_HTTP` | Whether a user-added MCP connection may use `http://` as well as `https://`. Off by default because the credential would travel in the clear. A deployment whose connector bridge is genuinely HTTP inside a private network turns it on deliberately; it is a separate variable from the private-target one because it is a separate risk. |
-| `AGENT_MODEL_CONNECTIONS_ENABLED` | Whether owners may add their own model connections (OpenAI Chat Completions or Responses, Anthropic Messages) and start turns on them. Off by default. Turn it on only once **every** control-plane replica, and every host, runs a release that knows connections: a turn on a connection stores its source in columns an older control plane does not read, so an older replica would claim, resume or queue it as a Gateway turn — a host capability cannot stop that, because the older control plane hands the host a claim that looks like a Gateway one. Once any owner has used a connection, do not roll the control plane back to an older release at all, even with this turned off: the conversations that ran on one keep their source and would continue on the Gateway under older code. Turning it off again stops new connections, edits that re-enable one, and new turns on one; turns already admitted still run on their connection or fail, never on the Gateway. See [owner model connections](docs/developer/operations.md#owner-model-connections). |
-| `AGENT_DEFAULT_MODEL` | *Optional legacy import.* The model a new task starts on when its owner has not chosen one — their pinned model in My Settings outranks it, and so does the model their last task used. A model this deployment's gateway does not offer to a user is skipped rather than forced, so a value that is wrong for someone cannot strand them: they are asked to choose instead. Defaults to `deepseek-v4-flash`, which is what the composer hardcoded before this setting existed. Empty means this deployment offers no default and every new owner picks. Imported once; after that, edit it in Admin Settings → Sandbox execution. |
+| `AGENT_MODEL_CONNECTIONS_ENABLED` | Whether owners may add their own model connections (OpenAI Chat Completions or Responses, Anthropic Messages) and start turns on them. On unless set to `0`, `false` or `no`; unset or empty is on, as the shipped Compose file passes it. Connections are the only inference, so with it off no new turn starts anywhere. Set it to `false` for maintenance, or before the cutover while some host or control-plane replica still runs an earlier release if you want new turns held until all run this one; then unset it. Turning it off stops new connections and new turns on them; turns already admitted still run on their connection or fail. |
+| ~~`AGENT_DEFAULT_MODEL`~~ | **removed**. A new task starts on the model and connection of its owner's newest turn, or the owner picks one; nothing reads this. |
 | `AGENT_MCP_SERVERS` | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
 | `AGENT_MCP_TOKEN` | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the relay credential the runner injects at launch: the chat process's residency credential. A value put here by hand would be a static tool credential shared by every job, which is the thing these scoped credentials exist to avoid. |
 | `AGENT_COMPAT_CLIENT` / `AGENT_COMPAT_UPSTREAM_URL` / `AGENT_COMPAT_UPSTREAM_KEY` / `AGENT_COMPAT_MODEL` / `AGENT_COMPAT_TOKEN` | **Not operator-set — listed so nobody provisions it.** NEW. What a host hands the model protocol compatibility launcher when Codex or Claude Code runs on an owner's Chat Completions connection: the CLI's protocol, the connection's URL and key, the model it is locked to, and the member's loopback token, which the control plane issues with the claim. The launcher reads and removes all five before it becomes the CLI, so the CLI never holds the provider key. Set by hand they would start nothing: the launcher only runs in front of a translated member. |
@@ -442,9 +497,8 @@ for deployment profiles, verified SSH access and CloudLab endpoint setup.
 | `AGENT_COMPUTE_CONFIG` | Absolute path inside the control-plane process to the operator-owned JSON deployment configuration. |
 | `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
 | `AGENT_CONTROL_PLANE_SSH_HOST` | Editable first-time Server setup address for the service node. The supported deployer defaults to the node's FQDN, falling back to its hostname; set an SSH address explicitly when using another deployment system or a different SSH alias. Saved setups take precedence. |
-| `AGENT_GATEWAY_SSH_HOST` | Optional first-time Server setup gateway address override. Defaults to the hostname of the saved Gateway API URL, such as `gateway.example.org`; use an override when SSH uses a different address. |
 | `AGENT_CLOUDLAB_API_URL` | Operator-verified HTTPS Portal API base: `https://boss.emulab.net:43794` for CloudLab, not the portal's web address `www.cloudlab.us`. Leave unset to disable the CloudLab adapter. |
-| `AGENT_COMPUTE_REGISTRATION_URL` | Optional. The HTTPS address new CloudLab nodes post their SSH host keys to, ending in `/v1/compute/node-registrations`. When unset it is derived from `AGENT_SESSION_REDIRECT_URI` (its `/v1/session/callback` suffix replaced), like MCP callbacks. Only HTTPS is used: a node checks the control plane's certificate before sending its one-time token. Without either, nodes set to register their keys cannot be created. |
+| `AGENT_COMPUTE_REGISTRATION_URL` | Optional. The HTTPS address new CloudLab nodes post their SSH host keys to, ending in `/v1/compute/node-registrations`. When unset it is `AGENT_PUBLIC_API_URL` followed by `/v1/compute/node-registrations`, like MCP callbacks, and only when that URL is HTTPS. Only HTTPS is used: a node checks the control plane's certificate before sending its one-time token. Without either, nodes set to register their keys cannot be created. |
 
 Without this configuration the existing Host management remains available;
 resource creation requires configured credentials and deployment profiles.
@@ -488,8 +542,8 @@ compose, because they name the stack rather than configure it.
 | `AGENT_SANDBOX_MANAGER_TOKEN` | Pool-wide sandbox manager credential: provision the same value in the control plane and every host. Host records contain sandbox manager URLs, not separate credentials. A compromised host's token therefore authenticates to other sandbox managers. Compare SHA-256 fingerprints during provisioning without displaying the secret; a mismatch causes sandbox manager 401 responses. Per-host sandbox manager credentials require a separate distribution design. |
 | `AGENT_SANDBOX_MANAGER_REVERSE_BIND` / `AGENT_SANDBOX_MANAGER_REVERSE_PORT` | Required reverse listener for standalone host deployments. Bind the actual stable control-plane Docker bridge gateway address, never loopback or `0.0.0.0`; use a distinct port per simultaneously deployed Host. The advertised sandbox manager URL must match it. |
 | `AGENT_SANDBOX_MANAGER_REVERSE_TARGET_HOST` / `AGENT_SANDBOX_MANAGER_REVERSE_TARGET_PORT` | Host-side target of that reverse forward, defaults `sandbox-manager` / `8092`. |
-| `AGENT_TUNNEL_*` | Inference SSH tunnel. Required suffixes: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`. Defaults for `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT` / `LISTEN_PORT`: `22` / `127.0.0.1` / `8080` / `8080`. Use a dedicated key restricted to this forward, without shell authority. |
-| `AGENT_GATEWAY_HOSTNAME` | Inference relay alias on runner and relay-discovery networks, default `agent-gateway`. |
+| ~~`AGENT_TUNNEL_*`~~ (~~`AGENT_TUNNEL_SSH_DESTINATION`~~) (~~`AGENT_TUNNEL_SSH_PORT`~~) (~~`AGENT_TUNNEL_SSH_KEY`~~) (~~`AGENT_TUNNEL_SSH_KNOWN_HOSTS`~~) (~~`AGENT_TUNNEL_REMOTE_HOST`~~) (~~`AGENT_TUNNEL_REMOTE_PORT`~~) (~~`AGENT_TUNNEL_LISTEN_PORT`~~) | **removed**, refused by the host: the inference tunnel is gone. |
+| ~~`AGENT_GATEWAY_HOSTNAME`~~ | **removed**, refused by the host. |
 | `AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS` | Control-plane allowlist for sandbox manager addresses, comma-separated. A bare hostname admits that host on any scheme and port; a `scheme://host:port` origin admits exactly that origin, which is what separates sandbox managers sharing one reverse-tunnel address. Hosts propose their sandbox manager URL at enrollment; restrict it to prevent a mistaken or compromised registration receiving the pool credential at an arbitrary address. Unset permits any hostname for upgrade compatibility. Sandbox manager URLs are always origins: a path, query, fragment or userinfo is refused. Automatic CloudLab setup checks for the bridge address as a bare hostname entry. Link-local addresses, where cloud metadata services answer, are refused whatever this is set to, including for sandbox manager URLs already stored. |
 | `AGENT_CONTROL_PLANE_URL` | Runner URL for registration, claims and heartbeats. Standalone Compose derives it from the main-API tunnel alias `AGENT_CONTROL_PLANE_HOSTNAME`, not the MCP alias. Pointing it at the MCP-only listener returns 404 for control requests. |
 | `AGENT_WORKER_ID` | Worker-name prefix, default `runner`. The runner appends process identity so concurrent turn children have distinct worker names. |
@@ -610,7 +664,7 @@ Existing host credentials and retained sandboxes stay in place.
 | `AGENT_EGRESS_CHAT_NETWORK_POOL` | *Required.* This deployment's RFC1918 IPv4 pool; Docker allocates one `/29` from it per active sandbox group bridge (a `/16` holds 8192). No default: it must not overlap another deployment on the same machine — of two whose pools overlap, the host rules refuse the one installed later — nor any network the host already routes (LAN, VPN, private services): preflight reads the host's routes and refuses a pool that shares addresses with one, because Docker takes an explicit subnet as given and a bridge there would draw the host's own traffic. Idle and lost stops remove a group's bridge immediately; sandbox manager reconciliation removes stale interrupted-create bridges after a five-minute grace period so it cannot delete one between creation and sandbox attachment. |
 | `AGENT_EGRESS_DNS_SERVER` | *Required.* The one IPv4 resolver sandboxes may use, on TCP and UDP 53. It is the only exception to the protected ranges, so a site resolver on a private address, or on this host, works. Under runc Docker's embedded resolver forwards to it; a Kata guest is given it in `/etc/resolv.conf` by the trusted guest helper. Not loopback: a sandbox cannot reach the host's `127.0.0.53`. |
 | `AGENT_EGRESS_PROTECTED_CIDRS` | Comma-separated IPv4 blocks sandboxes must not reach, on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection. The control plane reads the same variable when it checks an owner's SSH server, so set it there to the hosts' value. |
-| `AGENT_RELAY_NETWORK` | The route-less network the two relays are discovered on; no sandbox joins it. Group lifecycle attaches the relays found here, under their aliases, to each group's bridge. The host stack derives `<COMPOSE_PROJECT>-agent-relays`, so sibling stacks never find each other's relays; set it only to name an existing network. |
+| `AGENT_RELAY_NETWORK` | The route-less network the MCP relay is discovered on; no sandbox joins it. Group lifecycle attaches the relay found here, under its alias, to each group's bridge. The host stack derives `<COMPOSE_PROJECT>-agent-relays`, so sibling stacks never find each other's relays; set it only to name an existing network. |
 | ~~`AGENT_EGRESS_SETUP_TIER`, `AGENT_EGRESS_AGENT_TIER`, `AGENT_EGRESS_ALLOWLIST`, `AGENT_EGRESS_NETWORK_*`, `AGENT_EGRESS_PROXY_*`, `AGENT_EGRESS_STOP_GRACE`, `AGENT_SANDBOX_NETWORK`, `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`~~ | *Removed.* Retired with the network tiers and the Squid proxy when sandboxes moved to one network ([design](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md)). Nothing reads them: there is no tier to select, no proxy to point at and no open-network switch. Delete them from `.env`; setting one changes nothing. |
 | `AGENT_LIVE_SESSION_ID` / `AGENT_LIVE_WORKDIR` | *Internal.* Generated by the runtime adapter for the private OpenCode/Kilo stdio bridge. Operators must not set these. They select the already-authorized native session and fixed `/workspace` path inside one member process; neither is a credential or host path. |
 | `AGENT_PLUGIN_PATHS` | *Internal.* Generated by the host plugin installer for pi, OpenCode, and Kilo. A JSON array of absolute paths to the selected plugins installed in the member's private home; defaults to `[]`. CLI wrappers load these paths explicitly while retaining disabled project plugin discovery. Operators must not set this; each chat's saved selections determine it. |
@@ -727,7 +781,7 @@ The suite derives its parametrization from those `ARG` lines
 environment variable, not from a built image and not from the deployed `.env`:
 setting `CLAUDE_CODE_EXTRA_VERSIONS=2.2.0` in the shell changes nothing about
 what runs. It then fetches each version with `npx` at exactly that version and
-drives it against a fake gateway, so the measurement is of the real binary — but
+drives it against a fake model provider, so the measurement is of the real binary — but
 it is a measurement of the **repository's** Dockerfile, so the candidate must be
 on that `ARG` line first.
 
@@ -778,7 +832,7 @@ configuration.
 
 | Variable | Compose build argument | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_BASE_PATH` | `AGENT_WEB_BASE_PATH` | Prefix the app is mounted under. `/agents` serves it inside the gateway's own hostname — same origin, so the session cookie needs no CORS and no DNS record is involved, and a rollback is a reverse-proxy edit rather than a DNS change waiting out a TTL. Empty for a deployment that owns its hostname. The redirect URI the gateway allowlists is no longer derived from this: sign-in returns to the control plane's `AGENT_SESSION_REDIRECT_URI`, not to a page in this app. This value still has to match `AGENT_WEB_BASE_URL`, which is where the control plane sends the browser afterwards. |
+| `NEXT_PUBLIC_BASE_PATH` | `AGENT_WEB_BASE_PATH` | Prefix the app is mounted under. `/agents` serves it inside another site's hostname — same origin, so the session cookie needs no CORS and no DNS record is involved, and a rollback is a reverse-proxy edit rather than a DNS change waiting out a TTL. Empty for a deployment that owns its hostname. It has to match the path in `AGENT_WEB_BASE_URL`, from which the control plane builds every emailed link. |
 | `NEXT_PUBLIC_AGENT_API_URL` | `AGENT_WEB_API_URL` | Browser API base. For the shipped standalone edge, use `/api`; under a mount prefix use `<AGENT_WEB_BASE_PATH>/api`, for example `/agents/api`. Empty sends `/v1/...` requests directly to the browser origin and requires routing that exposes those paths. Cross-origin URLs need control-plane CORS with credentials because authentication uses a session cookie. |
 | `NEXT_PUBLIC_BUILD_SHA` | `BUILD_SHA` | Optional build identity, baked in by the deploy script. |
 | `NEXT_PUBLIC_BUILD_TIMESTAMP` | `BUILD_TIMESTAMP` | Optional build identity. |
@@ -801,8 +855,6 @@ development. Deployment time remains web runtime metadata.
 | `AGENT_WEB_STATUS_URL` | Status page, opened in a new tab from the header. Empty hides the link — an empty `href` resolves to the current page, so a Status link that is rendered anyway reopens the page the user is standing on. |
 | `AGENT_WEB_DOCS_URL` | User documentation for this deployment, opened in a new tab from Help in the account menu and from the My Settings page. Empty hides the link. Point it at the distribution's own user guide; this repository's developer documentation is for operators and contributors. |
 | `AGENT_WEB_CONTACT_URL` | Where users reach the deployment's operators: an http(s) support page, or `mailto:` and a single address (no `?subject=` or other fields). Shown as Contact us under Help in the account menu. Empty hides the link. |
-| `AGENT_WEB_GATEWAY_URL` | `${GATEWAY_BASE_URL}`. The gateway's origin, for the links this app does not host itself — nothing to do with sign-in. It replaced `NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only while it built the authorize URL and redeemed the code itself; both are the control plane's job now (`GATEWAY_AUTHORIZE_URL`). A path in this value is ignored; empty hides the links. |
-| `AGENT_WEB_FEATURE_RAG` | `true` shows the gateway's Docs Assistant link. `false` or empty hides it; any other value is refused. The page belongs to the gateway, not to this service. |
 | `AGENT_WEB_DEPLOYED_AT` | ISO timestamp with a timezone for the deployment footer. The control-plane deploy script sets the activation time in UTC and records it in `.deployed-at` after successful health checks; deploying the same release again preserves it. When starting Compose manually, supply the actual deployment time. Empty shows `Not available`. |
 
 The web service also receives the existing `AGENT_DEPLOYMENT_SHA` for the footer's
@@ -812,21 +864,7 @@ build date.
 
 Saved URLs and booleans are validated before an admin update is committed.
 The standalone environment fallback validates them when rendering.
-The gateway's `/site-config` endpoint is outside the contracts Cloud Agent
-consumes; public saved appearance comes from this service's own endpoint.
-
-## Set on the HybridInference side — not here
-
-These are provisioned in the gateway's environment. Listed so the contract has
-one place to be read from end to end.
-
-| Variable | Notes |
-|---|---|
-| `IDENTITY_JWT_PRIVATE_KEY` | RS256 private key, PEM. Public half is served at `/v1/identity/jwks`. |
-| `IDENTITY_JWT_RETIRING_PUBLIC_KEYS` | Optional. Public PEMs of previously-active signing keys, concatenated and published alongside the current key so tokens issued before a rotation still verify. Keep a key here for at least the maximum token lifetime plus the JWKS cache window, then drop it. Public halves only — a retiring key must not be able to sign. |
-| `IDENTITY_ISSUER` | The `iss` claim in identity tokens. Falls back to the gateway's `base_url`; unset means issuance is switched off rather than tokens minted with an empty `iss`. Must equal the value this service verifies against. |
-| `IDENTITY_ALLOWED_REDIRECTS` | Comma-separated exact-match redirect URIs. Matching is equality — no prefix, no suffix — so the agent web callback must be listed verbatim. |
-| `GATEWAY_GRANT_DISPATCH_TOKEN` | Same value as the control plane's copy above. |
+Public saved appearance comes from this service's own endpoint.
 
 ## Infrastructure (not environment variables)
 
@@ -834,19 +872,14 @@ Recorded here as *what has to be decided*, not as anyone's actual answer.
 
 - **Domains**: one host for the web app and the control-plane API, the API
   under `/api` — e.g. `agents.example.org` and a staging sibling. The exact names
-  go in the overlay, and must match `IDENTITY_ALLOWED_REDIRECTS` on the gateway
-  exactly.
-- **Reaching the gateway**: the control plane needs a route to `GATEWAY_BASE_URL`.
-  The sandbox reaches its two relays, the resolver in `AGENT_EGRESS_DNS_SERVER`
-  and public IPv4 on TCP 80/443 — the same during setup and the agent run.
-  Tool calls remain confined to the MCP-only listener. Inference keeps the
-  existing gateway endpoint (`AGENT_TUNNEL_REMOTE_PORT` defaults to 8080);
-  a separate inference listener or credential-substitution relay is not a
-  deployment prerequisite. Public replay of a leaked inference grant is an
-  [accepted risk](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md),
-  subject to its owner's existing model permissions, quota and grant lifecycle.
-  If a deployment fronts either relay through a tunnel, the port allocation
-  is overlay detail.
+  go in the overlay and in `AGENT_WEB_BASE_URL` and `AGENT_PUBLIC_API_URL`.
+- **What a sandbox reaches**: its MCP relay, the resolver in
+  `AGENT_EGRESS_DNS_SERVER` and public IPv4 on TCP 80/443 — the same during
+  setup and the agent run. Model calls go to each owner's provider over that
+  public HTTPS. Tool calls remain confined to the MCP-only listener. A
+  sandbox holds its owner's provider key for the turn it runs; that exposure
+  is [accepted](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md)
+  and limited to the owner's own key and quota.
 - **Sandbox image registry**: choose where hosts pull `AGENT_SANDBOX_IMAGE` before deploying them.
 
 ## Adding a variable

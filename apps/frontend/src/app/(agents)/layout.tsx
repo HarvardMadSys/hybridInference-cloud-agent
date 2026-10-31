@@ -1,9 +1,10 @@
 'use client';
 
 import Link from 'next/link';
+import { WaitlistPanel } from '@/components/features/auth/WaitlistPanel';
+
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import { GatewayAccountBanner } from '@/components/features/auth/GatewayAccountBanner';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { SessionSwitchWatcher } from '@/components/features/auth/SessionSwitchWatcher';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
@@ -50,7 +51,7 @@ function AgentsHeader({
 }) {
   const pathname = usePathname() ?? '/';
   const { state } = useAuth();
-  const { branding, features } = useSiteConfig();
+  const { branding } = useSiteConfig();
   const t = useT();
 
   // Which nav item is lit has to follow the route. The highlight used to be
@@ -127,15 +128,6 @@ function AgentsHeader({
             {t('nav.status')}
           </a>
         )}
-        {/* Docs Assistant and Dashboard are the gateway's pages, not ours. In
-            the monorepo they were same-origin routes; here they are absolute
-            links to the gateway, and they disappear on a deployment that has
-            not been told where the gateway is. */}
-        {features.rag && branding.gatewayUrl && (
-          <a href={`${branding.gatewayUrl}/chat`} className={NAV_ITEM}>
-            {t('nav.docsAssistant')}
-          </a>
-        )}
         <Link
           href="/"
           className={onTasks ? NAV_ITEM_CURRENT : NAV_ITEM}
@@ -149,8 +141,7 @@ function AgentsHeader({
             className={pathname === '/approvals' ? NAV_ITEM_CURRENT : NAV_ITEM}
           />
         )}
-        {/* This service's own operations page, so it is a route rather than a
-            link back to the gateway. Admin-only, matching the endpoints it
+        {/* Admin-only, matching the endpoints it
             calls — the guard on the page is the one that counts; hiding the
             link only keeps it out of the way of everyone else. */}
         {hasAgentPermission(state.user?.agent_access, 'agent.admin') && (
@@ -236,27 +227,10 @@ function AgentsShell({
   settingsNavigation?: { backHref: string };
 }) {
   const { state } = useAuth();
-  const { branding } = useSiteConfig();
-  const t = useT();
 
-  // The Gateway decides admission; account role is only profile metadata.
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.use')) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-          {t('shell.accessRequired.title')}
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">{t('shell.accessRequired.body')}</p>
-        {branding.gatewayUrl && (
-          <a
-            href={`${branding.gatewayUrl}/dashboard`}
-            className="text-sm font-medium text-crimson hover:underline dark:text-crimson-light"
-          >
-            {t('shell.accessRequired.back')}
-          </a>
-        )}
-      </div>
-    );
+  // Current admission decides access; without it the account applies or waits.
+  if (!hasAgentPermission(state.user?.agent_access, 'agent.use') && state.user) {
+    return <WaitlistPanel key={state.user.id} />;
   }
 
   // One first-run answer for the sidebar and every page, asked for here once
@@ -453,7 +427,6 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
                 ) : undefined
               }
             />
-            <GatewayAccountBanner />
             <AgentsShell
               settingsNavigation={
                 onSettings

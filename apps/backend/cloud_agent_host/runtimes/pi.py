@@ -120,7 +120,7 @@ class PiRuntime(AgentRuntime):
         *,
         workdir: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -132,10 +132,10 @@ class PiRuntime(AgentRuntime):
         """Build pi's bidirectional JSONL RPC process."""
         del workdir, provides_isolation
         effort = self._check_effort(reasoning_effort)
-        env = self._wrapper_env(gateway_base_url, credential)
+        env = self._wrapper_env(model_base_url, credential)
         # The relay endpoints go to the bridge extension rather than the CLI:
         # pi is the one runtime whose MCP client is not the CLI.
-        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
+        self._accept_mcp(mcp_config, model_base_url=model_base_url, env=env)
         # models.json wants the model listed under the provider; the wrapper
         # cannot parse it back out of pi's argv without reimplementing pi's
         # option handling, so hand it over explicitly.
@@ -467,7 +467,7 @@ class PiRuntime(AgentRuntime):
         return []
 
     def _accept_mcp(
-        self, config: RuntimeMCPConfig, *, gateway_base_url: str, env: dict[str, str]
+        self, config: RuntimeMCPConfig, *, model_base_url: str, env: dict[str, str]
     ) -> None:
         """Publish the relay endpoints for the image's own bridge to read.
 
@@ -479,7 +479,7 @@ class PiRuntime(AgentRuntime):
         run with tools and one without, so an injected extension has nowhere to
         hide behind a turn that did not need one.
         """
-        self._wrapper_mcp_env(config, gateway_base_url=gateway_base_url, env=env)
+        self._wrapper_mcp_env(config, model_base_url=model_base_url, env=env)
 
     def capabilities(self) -> RuntimeCapabilities:
         """Take the platform's MCP relay, through the image's bridge, and an effort level.

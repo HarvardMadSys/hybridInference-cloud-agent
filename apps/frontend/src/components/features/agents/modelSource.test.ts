@@ -19,7 +19,6 @@ const t = (key: Parameters<typeof translate>[1], vars?: Record<string, string | 
 const config = {
   repos: [],
   runtimes: ['claude-code', 'codex', 'opencode'],
-  models: ['gpt-5', '[odd]'],
   model_connections: [
     { id: A, name: 'Alpha', models: ['gpt-5'], model_runtimes: { 'gpt-5': ['codex', 'opencode'] } },
     { id: B, name: 'Beta', models: ['gpt-5'], model_runtimes: { 'gpt-5': ['opencode'] } },
@@ -32,23 +31,34 @@ describe('model choices', () => {
   it('gives every source of one model name its own identity', () => {
     const keys = offeredChoices(config, 'opencode').map(choiceKey);
     expect(new Set(keys).size).toBe(keys.length);
-    // A Gateway name keeps its own spelling; one that looks like a key cannot pass for one.
-    expect(keys.slice(0, 2)).toEqual(['gpt-5', '[null,"[odd]"]']);
+    expect(keys).toEqual([`["${A}","gpt-5"]`, `["${B}","gpt-5"]`]);
+    // A name that looks like a key cannot pass for one.
+    expect(choiceKey({ model: '[odd]', connectionId: null })).toBe('[null,"[odd]"]');
+  });
+
+  it('keys and labels a model by its name alone where only one source offers it', () => {
+    const picker = modelPicker(
+      config,
+      offeredChoices(config, 'codex'),
+      {
+        model: 'gpt-5',
+        connectionId: A,
+      },
+      () => {},
+      t,
+    );
+    expect(picker.options).toEqual(['gpt-5']);
+    expect(picker.value).toBe('gpt-5');
+    // Two connections list it, so the label still says which one this is.
+    expect(picker.optionLabels['gpt-5']).toBe('gpt-5 · Alpha');
   });
 
   it('filters connections by the runtime’s protocol', () => {
-    expect(offeredChoices(config, 'claude-code')).toEqual([
-      { model: 'gpt-5', connectionId: null },
-      { model: '[odd]', connectionId: null },
-    ]);
-    expect(offeredChoices(config, 'codex').map((choice) => choice.connectionId)).toEqual([
-      null,
-      null,
-      A,
-    ]);
+    expect(offeredChoices(config, 'claude-code')).toEqual([]);
+    expect(offeredChoices(config, 'codex').map((choice) => choice.connectionId)).toEqual([A]);
   });
 
-  it('reads a legacy draft string as a Gateway model, never as an encoded key', () => {
+  it('reads a legacy draft string as a model with no source, never as an encoded key', () => {
     expect(storedChoice(`["${A}","gpt-5"]`, undefined)).toEqual({
       model: `["${A}","gpt-5"]`,
       connectionId: null,
@@ -66,10 +76,11 @@ describe('model choices', () => {
     expect(picker.optionLabels[choiceKey({ model: 'gpt-5', connectionId: A })]).toBe(
       'gpt-5 · Alpha',
     );
+    expect(picker.options).toHaveLength(2);
   });
 
   it('offers nothing to pick when nothing can run, so the inherited model is named', () => {
-    const empty = { ...config, models: [], model_connections: [] };
+    const empty = { ...config, model_connections: [] };
     const inherited = { model: 'gpt-5', connectionId: A };
     expect(turnModelPicker(empty, 'codex', inherited, () => {}, t, inherited)).toBeNull();
   });
@@ -102,7 +113,6 @@ describe('modelOverride', () => {
 describe('per-model availability', () => {
   const mixed = {
     ...config,
-    models: [],
     model_connections: [
       {
         id: A,
@@ -123,12 +133,12 @@ describe('per-model availability', () => {
 
   it('never names the API an agent reaches a model on', () => {
     const choice = { model: 'verified', connectionId: A };
-    expect(choiceLabel(mixed, choice, t, { runtime: 'codex' })).toBe('verified · Mixed');
+    expect(choiceLabel(mixed, choice, t, { runtime: 'codex' })).toBe('verified');
     expect(
       choiceLabel(mixed, { model: 'fresh', connectionId: A }, t, {
         runtime: 'codex',
         unavailable: true,
       }),
-    ).toBe('fresh · Mixed (unavailable)');
+    ).toBe('fresh (unavailable)');
   });
 });

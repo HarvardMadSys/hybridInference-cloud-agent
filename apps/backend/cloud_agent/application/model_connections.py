@@ -4,7 +4,7 @@ Every path that hands a connection to a turn -- admission, a follow-up, a
 waiting message, a goal round, a claim, a residency and a Fork -- reads it
 scoped to the turn's owner and asks :func:`require_usable`, so a disabled,
 deleted, rotated or foreign connection is refused wherever the turn is, and
-nothing falls back to the Gateway or to another model.
+nothing falls back to another connection or model.
 
 The key is decrypted only for a claim and a residency of its owner's own turn,
 and for the owner's explicit verification or model listing. A change that
@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import contextlib
 import secrets
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from fastapi import HTTPException
 
-from cloud_agent.application.residency import _mint_residency_grant, close_released_residencies
+from cloud_agent.application.residency import close_released_residencies
 from cloud_agent.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports import (
         AttemptCommands,
-        GrantRepository,
         HostPoolRepository,
         ModelConnectionRepository,
         ResidencyRepository,
@@ -147,14 +146,14 @@ async def trusted_scan_secrets(
 
 
 def model_connections_enabled() -> bool:
-    """Whether this deployment lets owners add connections and start turns on them.
+    """Whether owners may add connections and start turns on them.
 
-    Off until an operator turns it on after the whole control plane runs a
-    release that knows connections (``AGENT_MODEL_CONNECTIONS_ENABLED``): an
-    older replica would run a connection's turn as a Gateway turn.
+    On unless an operator switches it off (``AGENT_MODEL_CONNECTIONS_ENABLED``
+    set to ``0``, ``false`` or ``no``) for maintenance. Connections are the
+    only inference source, so with it off no new turn starts anywhere.
     """
     raw = setting_env("AGENT_MODEL_CONNECTIONS_ENABLED", "") or ""
-    return raw.strip().lower() in ("1", "true", "yes")
+    return raw.strip().lower() not in ("0", "false", "no")
 
 
 def new_connection_id() -> str:
@@ -253,7 +252,9 @@ async def access_for_job(
     *,
     member: str | None = None,
 ) -> ModelConnectionAccess | None:
-    """The connection access a job's turn runs on, ``None`` for a Gateway turn.
+    """The connection access a job's turn runs on; ``None`` when it names none.
+
+    Every caller refuses a turn without one: there is no other source.
 
     ``job`` is a job row: its owner, runtime, model, effort and connection id
     are all re-read from it, never from a request. ``member`` is the thread
@@ -306,7 +307,6 @@ async def bind_residency_access(
 
 async def invalidate_connection(
     store: ModelConnectionStorage,
-    grants: Any,
     *,
     user_id: str,
     connection_id: str,
@@ -331,7 +331,7 @@ async def invalidate_connection(
                 "count": len(released),
             },
         )
-        await close_released_residencies(store.host_pool, grants, released)
+        await close_released_residencies(store.host_pool, released)
     return len(released)
 
 
@@ -341,7 +341,6 @@ class _ClaimStorage(Protocol):
 
 
 class _ResidencyStorage(Protocol):
-    grants: GrantRepository
     model_connections: ModelConnectionRepository
     residency: ResidencyRepository
 
@@ -366,23 +365,24 @@ def unusable_error(exc: ModelConnectionUnusable, *, status: int) -> HTTPExceptio
 
 async def claim_model_connection(
     store: _ClaimStorage, claim: Mapping[str, Any], capabilities: Sequence[str]
-) -> ModelConnectionAccess | None:
-    """The connection a claimed turn runs on, or ``None`` for a Gateway turn.
+) -> ModelConnectionAccess:
+    """The connection a claimed turn runs on.
 
-    Settled before any credential is minted. A host that cannot launch a
+    Settled before the turn is handed to the host. A host that cannot launch a
     member on a connection gets the claim back, as does a deployment that
-    cannot read the key: neither is the owner's to fix, and both pass. A
-    connection the owner disabled, deleted or changed so that it no longer
-    serves this turn ends the turn with that reason; it is never run anywhere
+    cannot read the key: neither is the owner's to fix, and both pass. A turn
+    with no connection (one queued before connections were the only source),
+    or one whose connection the owner disabled, deleted or changed so that it
+    no longer serves the turn, ends with that reason; it is never run anywhere
     else instead.
     """
-    if not claim.get("model_connection_id"):
-        return None
     fence = {
         "job_id": claim["id"],
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
+    if not claim.get("model_connection_id"):
+        await _end_unusable(store, claim, fence, ModelConnectionUnusable("no_connection"))
     waiting = HTTPException(
         503, "Waiting for a model-connection-capable host or available encryption"
     )
@@ -393,8 +393,9 @@ async def claim_model_connection(
         access = await access_for_job(store.model_connections, claim, model_connection_cipher())
         # A translated plan also needs a host that can run the helper; an
         # older one gets the claim back rather than a turn it cannot launch.
-        needs_compat = access is not None and access.plan.translated
-        if needs_compat and MODEL_PROTOCOL_COMPAT_CAPABILITY not in capabilities:
+        if access is None:
+            raise ModelConnectionUnusable("not_found")
+        if access.plan.translated and MODEL_PROTOCOL_COMPAT_CAPABILITY not in capabilities:
             await store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise waiting
         return access
@@ -402,18 +403,28 @@ async def claim_model_connection(
         await store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
         raise waiting from None
     except ModelConnectionUnusable as exc:
-        await store.attempt_commands.transition(
-            **fence, from_states=(RUNNING,), to_state=FAILED, detail=str(exc)
-        )
-        logger.warning(
-            "agent_job_model_connection_unusable",
-            extra={
-                "event": "agent_job_model_connection_unusable",
-                "job_id": claim["id"],
-                "reason": exc.reason,
-            },
-        )
-        raise unusable_error(exc, status=403) from None
+        await _end_unusable(store, claim, fence, exc)
+
+
+async def _end_unusable(
+    store: _ClaimStorage,
+    claim: Mapping[str, Any],
+    fence: Mapping[str, Any],
+    exc: ModelConnectionUnusable,
+) -> NoReturn:
+    """End a claimed turn its connection cannot run, with the owner-facing reason."""
+    await store.attempt_commands.transition(
+        **fence, from_states=(RUNNING,), to_state=FAILED, detail=str(exc)
+    )
+    logger.warning(
+        "agent_job_model_connection_unusable",
+        extra={
+            "event": "agent_job_model_connection_unusable",
+            "job_id": claim["id"],
+            "reason": exc.reason,
+        },
+    )
+    raise unusable_error(exc, status=403) from None
 
 
 async def connection_residency_credential(
@@ -445,7 +456,6 @@ async def connection_residency_credential(
 
 async def residency_credential(
     store: _TurnResidencyStorage,
-    grants: Any,
     *,
     job: Mapping[str, Any],
     row: dict[str, Any],
@@ -458,16 +468,15 @@ async def residency_credential(
     model's verification may have moved it between a native and a translated
     plan, while the turn was starting.
 
-    A Gateway turn's residency gets its worker-fenced grant, as it always has.
-    A turn on an owner connection gets that connection's key and no grant at
-    all: neither the Gateway's grant nor its quota stands between an owner
-    and their own provider. When the connection cannot serve it, the residency
-    is released before anything holds a credential, and the turn -- ``fence``
-    names its attempt -- ends with the reason, as it would have at its claim.
+    The residency gets its connection's key: nothing stands between an owner
+    and their own provider. When the connection cannot serve it (or the turn
+    names none), the residency is released before anything holds a
+    credential, and the turn -- ``fence`` names its attempt -- ends with the
+    reason, as it would have at its claim.
     """
-    if not job.get("model_connection_id"):
-        return await _mint_residency_grant(store.grants, grants, row=row), None, None
     try:
+        if not job.get("model_connection_id"):
+            raise ModelConnectionUnusable("no_connection")
         access = await connection_residency_credential(store, job, row=row)
     except (ModelConnectionUnusable, CredentialCipherError) as exc:
         with contextlib.suppress(Exception):

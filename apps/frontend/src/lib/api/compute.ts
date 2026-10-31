@@ -183,7 +183,6 @@ export interface AutomaticComputeSetupStatus {
   deployment_sha: string | null;
   blocked_reasons: BlockedReason[];
   machine_defaults?: {
-    gateway: { address: string };
     control: { address: string };
   };
   defaults?: Omit<AutomaticComputeSetupRequest, 'request_id'>;
@@ -192,9 +191,7 @@ export interface AutomaticComputeSetupStatus {
 
 export interface AutomaticComputeSetupRequest {
   request_id: string;
-  gateway: { connection_id: string; address: string; port: number; username: string };
   control: { connection_id: string; address: string; port: number; username: string };
-  gateway_port: number;
   chat_network_pool: string;
   dns_server: string;
   protected_cidrs: string[];

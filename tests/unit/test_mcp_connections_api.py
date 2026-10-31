@@ -27,8 +27,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
+from tests.support.owners import SESSIONS, FakeOwners, use_session_secret
 from tests.support.storage import AllCapabilities, OneFake
 
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.api import mcp_connections
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
@@ -76,6 +78,7 @@ class FakeStore(AllCapabilities):
 
     def __init__(self) -> None:
         """Start empty, with connection ids handed out in order."""
+        self.local_accounts = SESSIONS
         self.connections: dict[int, dict[str, Any]] = {}
         self.capabilities: dict[int, dict[str, Any]] = {}
         self.bindings: dict[str, list[dict[str, Any]]] = {}
@@ -1264,7 +1267,7 @@ class TestAuthorization:
         from cloud_agent.mcp import oauth
 
         monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", override)
-        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", f"{session_base}/v1/session/callback")
+        monkeypatch.setenv("AGENT_PUBLIC_API_URL", session_base)
         metadata = oauth.AuthorizationServerMetadata(
             issuer="https://mcp.slack.com",
             authorization_endpoint="https://mcp.slack.com/authorize",
@@ -1424,7 +1427,7 @@ class TestAuthorization:
         from cloud_agent.mcp import oauth
 
         monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", override)
-        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", f"{session_base}/v1/session/callback")
+        monkeypatch.setenv("AGENT_PUBLIC_API_URL", session_base)
         monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://web.example.com/agents")
         metadata = oauth.AuthorizationServerMetadata(
             issuer="https://mcp.notion.com",
@@ -1491,18 +1494,16 @@ class TestAuthorization:
         )
 
     @pytest.mark.parametrize(
-        "callback",
+        "address",
         [
             "",
-            "https://example.com/integrations",
-            "https://example.com/v1/session/callback?next=other",
+            "example.com/api",
+            "https://example.com/api?next=other",
         ],
     )
-    def test_missing_or_unrecognized_callback_does_not_guess_an_address(
-        self, monkeypatch, callback
-    ):
+    def test_a_missing_or_unusable_public_address_is_not_guessed_at(self, monkeypatch, address):
         monkeypatch.delenv("AGENT_MCP_PUBLIC_BASE_URL", raising=False)
-        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", callback)
+        monkeypatch.setenv("AGENT_PUBLIC_API_URL", address)
         assert mcp_connections._public_base_url() == ""
 
     def test_a_client_id_can_be_supplied_before_the_flow(self) -> None:
@@ -1545,11 +1546,9 @@ class TestAuthorization:
         usable session, are both refused before the code is exchanged, and the
         flow is left for the account that started it, which can still finish.
         """
-        from cloud_agent import identity
         from cloud_agent.mcp import oauth
 
-        monkeypatch.setenv(identity.ENV_SESSION_SECRET, "mcp-callback-session-secret-for-tests")
-        monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+        use_session_secret(monkeypatch)
         monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", "https://example.com/agents/api")
         monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://example.com/agents")
         metadata = oauth.AuthorizationServerMetadata(
@@ -1578,6 +1577,8 @@ class TestAuthorization:
         with _client(store) as client:
             # Started as the owner; finished by whatever session the browser has.
             del client.app.dependency_overrides[mcp_connections._callback_session_user]
+            owners = FakeOwners()
+            client.app.state.owners = owners
             started = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
             assert started.status_code == 200, started.text
             state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
@@ -1585,7 +1586,7 @@ class TestAuthorization:
             def finish(session: str | None) -> httpx.Response:
                 client.cookies.clear()
                 if session is not None:
-                    client.cookies.set(identity.SESSION_COOKIE, session)
+                    client.cookies.set(LOCAL_SESSION_COOKIE, session)
                 return client.get(
                     f"/v1/agent/mcp/oauth/callback/{connection_id}",
                     params={"state": state, "code": "consented-code"},
@@ -1593,7 +1594,7 @@ class TestAuthorization:
                 )
 
             for session, reason in (
-                (identity.mint_session(user_id=_OTHER), "started by another account"),
+                (SESSIONS.sign_in(_OTHER), "started by another account"),
                 (None, "sign in to the account that started this authorization"),
                 ("not-a-session", "sign in to the account that started this authorization"),
             ):
@@ -1610,7 +1611,21 @@ class TestAuthorization:
                 assert store.credential_writes == []
                 assert store.oauth_flow is not None
 
-            completed = finish(identity.mint_session(user_id=_OWNER))
+            # The starting account itself, after its agent.use was withdrawn:
+            # a live session is not enough, and the flow is left unconsumed.
+            owners.grant(_OWNER)
+            revoked = finish(SESSIONS.sign_in(_OWNER))
+            assert revoked.status_code == 302
+            result = parse_qs(urlsplit(revoked.headers["location"]).query)
+            assert result["mcp_authorized"] == ["0"]
+            assert "sign in to the account that started" in result["mcp_message"][0]
+            exchange.assert_not_awaited()
+            assert store.credential_writes == []
+            assert store.oauth_flow is not None
+            assert _OWNER in owners.asked
+
+            owners.grant(_OWNER, "agent.use")
+            completed = finish(SESSIONS.sign_in(_OWNER))
         assert parse_qs(urlsplit(completed.headers["location"]).query)["mcp_authorized"] == ["1"]
         exchange.assert_awaited_once()
         assert store.oauth_flow is None
@@ -1802,57 +1817,6 @@ class TestTheDynamicClientIdentity:
         monkeypatch.setattr(store, "set_mcp_credential", write_then_test)
         assert "mcp_authorized=1" in await self._complete(store, connection_id, monkeypatch)
         assert store.connections[connection_id]["status"] == "active"
-
-
-class TestTheClientSecretIsNotACredential:
-    """A client secret authenticates to the authorization server, never upstream.
-
-    A user who brings a client id and secret has them stored before the browser
-    flow starts, so an abandoned or failed sign-in leaves a row holding a client
-    secret and no access token. That row needs authorizing; it has no credential.
-    """
-
-    def test_an_unfinished_sign_in_needs_authorizing_rather_than_reconnecting(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        store = FakeStore()
-        connection_id = _seed(
-            store, auth_kind="oauth", auth_config={}, access_token_ciphertext=None
-        )
-        with _client(store) as client:
-            client.post(
-                f"/v1/agent/mcp/connections/{connection_id}/authorize",
-                json={"client_id": "our-client", "client_secret": "shh"},
-            )
-            assert store.connections[connection_id]["client_secret_ciphertext"]
-            view = client.get(f"/v1/agent/mcp/connections/{connection_id}").json()
-            with caplog.at_level("WARNING"):
-                result = client.post(f"/v1/agent/mcp/connections/{connection_id}/test").json()
-        assert view["has_credential"] is False
-        assert result["ok"] is False
-        assert result["error_kind"] == "needs_authorization"
-        assert result["message"] == "This connection needs to be authorized."
-        assert "agent_mcp_credential_unreadable" not in caplog.text
-
-    async def test_a_client_secret_is_never_resolved_as_the_bearer(self) -> None:
-        """Not even one the credential cipher could read."""
-        from cloud_agent.mcp.registry import resolve_connection, server_for
-
-        store = FakeStore()
-        connection_id = _seed(
-            store,
-            auth_kind="oauth",
-            auth_config={},
-            access_token_ciphertext=None,
-            client_secret_ciphertext=mcp_cipher(_ENCRYPTION_KEY).encrypt("client-secret"),
-        )
-        resolved = await resolve_connection(store, row=store._row(connection_id))
-        assert not resolved.usable
-        assert "client-secret" not in json.dumps(dict(resolved.credential))
-        assert resolved.error == "This connection needs to be authorized."
-        assert "client-secret" not in json.dumps(
-            server_for(resolved, _binding(connection_id)).headers
-        )
 
 
 class TestATokenStaysWithItsResource:

@@ -29,8 +29,9 @@ from tests.servers.test_agent_jobs_api import (
     _build_app,
     _create_job,
 )
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity, measurement_ingest, sandbox_manager_routing
+from cloud_agent import measurement_ingest, sandbox_manager_routing
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app
 from cloud_agent.measurement_ingest import Owner
@@ -56,8 +57,7 @@ def _deployment(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
     monkeypatch.setenv("ADMIN_TOKEN", "admin-e2e-test")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "e2e-session-secret-long-enough-32")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
     monkeypatch.setenv(
         operation_profiling.ENV_PROFILING_RUN,
@@ -264,7 +264,7 @@ async def reader(store: FakeStorage):
     capability = _Stored()
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        operation_measurements=capability
+        local_accounts=SESSIONS, operation_measurements=capability
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         yield http, capability
