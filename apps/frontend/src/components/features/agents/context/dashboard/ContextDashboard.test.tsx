@@ -704,6 +704,38 @@ describe('ContextDashboard', () => {
     expect(within(trend).getByText('Showing 11–130 of 135')).toBeInTheDocument();
   });
 
+  it('translates, but does not move, the saved range on a granularity change after append', () => {
+    const points = (count: number) =>
+      Array.from({ length: count }, (_, i) =>
+        point(i, { turn_no: 1 + Math.floor(i / 10), event_id: 100 + i, usage_id: null }),
+      );
+    const first = view();
+    first.requests = points(130);
+    first.latest = { ...first.latest!, point: first.requests[129] };
+    const grown = view();
+    grown.requests = points(135);
+    grown.latest = { ...grown.latest!, point: grown.requests[134] };
+    const { rerender } = render(
+      <LocaleProvider>
+        <Harness data={first} />
+      </LocaleProvider>,
+    );
+    const trend = card('Context Trend');
+    expect(within(trend).getByText('Showing 11–130 of 130')).toBeInTheDocument();
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    rerender(
+      <LocaleProvider>
+        <Harness data={grown} />
+      </LocaleProvider>,
+    );
+    // No request was picked: the append only advanced the default latest one.
+    fireEvent.click(within(trend).getByRole('button', { name: 'Turn' }));
+    expect(within(trend).getByText('Showing 1–14 of 14')).toBeInTheDocument();
+    fireEvent.click(within(trend).getByRole('button', { name: 'Overview' }));
+    // The turns the original step range covered, not the appended turn 14.
+    expect(within(trend).getByText('Showing 2–13 of 14')).toBeInTheDocument();
+  });
+
   it('leaves Overview when the conversation changes', () => {
     const { rerender } = show();
     const trend = card('Context Trend');

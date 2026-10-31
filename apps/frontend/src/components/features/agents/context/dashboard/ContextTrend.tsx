@@ -134,26 +134,35 @@ function useWindowView({
   // stays what the browser and the strip show. While Overview is on the whole
   // conversation is shown, so only the saved range moves, just as far as that
   // request would have needed: turning Overview off still shows it.
+  //
+  // What counts is the selected request's identity, not its column: changing
+  // granularity remaps every column without anyone picking a request, so the
+  // saved bounds are only translated, never moved.
   const selectedAt = columnOf(columns, points, selected);
-  // A request appended to the conversation becomes the latest default
-  // selection; that is not an outside pick and leaves the saved range alone.
-  const lastSelected = useRef(selectedAt);
-  const lastCount = useRef(n);
+  // The column depends on the granularity; the effect below runs on the request
+  // identity and reads the column current at that moment.
+  const selectedAtRef = useRef(selectedAt);
+  selectedAtRef.current = selectedAt;
+  const latestRequest = points.at(-1)?.index ?? null;
+  const latestRequestRef = useRef(latestRequest);
+  latestRequestRef.current = latestRequest;
+  const lastPick = useRef({ selected, latest: latestRequest });
   useEffect(() => {
+    const previous = lastPick.current;
     const latestAdvanced =
-      n > lastCount.current &&
-      selectedAt === n - 1 &&
-      lastSelected.current === lastCount.current - 1;
-    lastSelected.current = selectedAt;
-    lastCount.current = n;
+      previous.latest !== latestRequestRef.current &&
+      previous.selected === previous.latest &&
+      selected === latestRequestRef.current;
+    lastPick.current = { selected, latest: latestRequestRef.current };
     if (overviewRef.current) {
-      if (latestAdvanced || selectedAt < 0) return;
+      const at = selectedAtRef.current;
+      if (latestAdvanced || selected === null || at < 0) return;
       const current = restoreBrowsingWindow(
         saved.current,
         columnsRef.current,
         granularityRef.current,
       );
-      const around = windowAround(current.from, current.to, selectedAt, n);
+      const around = windowAround(current.from, current.to, at, columnsRef.current.length);
       if (around.from !== current.from || around.to !== current.to)
         saved.current = savedRangeOf(
           columnsRef.current,
@@ -163,11 +172,13 @@ function useWindowView({
         );
       return;
     }
-    setWin((current) => windowAround(current.from, current.to, selectedAt, n));
-    // Only the selected column and the column count may move the window: a
-    // refresh that rebuilds the same columns, or a Total/Delta switch, is not a
-    // pick and must not shift the saved range.
-  }, [selectedAt, n]);
+    setWin((current) =>
+      windowAround(current.from, current.to, selectedAtRef.current, columnsRef.current.length),
+    );
+    // Only an actual selection change may move the window: a refresh that
+    // rebuilds equal columns, a Total/Delta switch or a granularity change is
+    // not a pick. Appends are filtered above as the default latest selection.
+  }, [selected]);
   const browsing = clampWindow(win.from, win.to, n);
   const shown = overview ? { from: 0, to: Math.max(0, n - 1) } : browsing;
   const toggleOverview = (next: boolean) => {
