@@ -932,3 +932,12 @@ async def test_a_raw_control_character_in_image_data_keeps_it_invalid(db, store)
 )
 async def test_an_invalid_json_escape_in_image_data_keeps_it_invalid(db, store, escaped):
     assert await _read_result(db, store, "fa_bad_escape", escaped) == (0, 1)
+
+
+async def test_a_valid_unicode_escape_before_a_big_image_still_counts(db, store):
+    """A well-formed \\u escape is part of a valid JSON string, not a defect."""
+    content = (
+        '[{"type":"text","text":"A\\u0041 and \\u4e2d\\u6587 before the shot."},'
+        '{"type":"image","source":{"media_type":"image/png","data":"' + "D" * 120_000 + '"}}]'
+    )
+    assert await _read_result(db, store, "fa_unicode_ok", content) == (1, 0)

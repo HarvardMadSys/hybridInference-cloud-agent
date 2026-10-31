@@ -266,11 +266,11 @@ FILE_ACTIVITY_EVENT_SQL = rf"""
            -- malformed input stays malformed for the reducer's json.loads.
            left(regexp_replace(regexp_replace(regexp_replace(
                  COALESCE(result.payload->>'content', ''),
-                 '"data"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"',
+                 '"data"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{{4}})*"',
                  '"data":""', 'g'),
-                 '"text"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"',
+                 '"text"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{{4}})*"',
                  '"text":""', 'g'),
-                 '"content"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"',
+                 '"content"[ \t\r\n]*:[ \t\r\n]*"(?:[^"\\[:cntrl:]]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{{4}})*"',
                  '"content":""', 'g'),
                  4000) AS result_skeleton
     FROM agent_job_events e
