@@ -11,7 +11,7 @@ import type {
   FileOperationKind,
   FileOperationStatus,
   FilePathBasis,
-} from '@/lib/api/agents/context';
+} from '@/lib/api/agents';
 import type { TranslationKey } from '@/lib/i18n/translate';
 
 export const SORT_LABEL: Record<FileActivitySort, TranslationKey> = {
@@ -140,8 +140,8 @@ export const KIND_MARK: Record<string, string> = {
   markup: 'bg-violet-500/15 text-violet-600 dark:text-violet-300',
   image: 'bg-pink-500/15 text-pink-600 dark:text-pink-300',
   shell: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300',
-  text: 'bg-slate-500/15 text-slate-600 dark:text-slate-300',
-  other: 'bg-slate-500/10 text-muted',
+  text: 'bg-slate-500/15 text-slate-600 dark:bg-slate-400/20 dark:text-slate-300',
+  other: 'bg-slate-500/10 text-muted dark:bg-slate-400/15',
 };
 
 /** A stable key for a row across re-reads: the normalized path is the identity. */

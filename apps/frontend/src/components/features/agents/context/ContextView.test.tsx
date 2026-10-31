@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import {
+  getAgentFileActivity,
+  getAgentFileOperations,
   getAgentThreadContext,
   getEventContent,
   getRequestComposition,
@@ -25,6 +27,9 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getEventContent: vi.fn(),
   getThreadContextTiming: vi.fn(),
   getThreadContextDna: vi.fn(),
+  // The File Activity section reads its own page; absent is enough here.
+  getAgentFileActivity: vi.fn().mockResolvedValue(null),
+  getAgentFileOperations: vi.fn().mockResolvedValue(null),
 }));
 
 function point(
@@ -294,6 +299,10 @@ beforeEach(() => {
   vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
     composition(eventId),
   );
+  // resetAllMocks() below drops every implementation, so this section's read
+  // is restored with the rest on each test.
+  vi.mocked(getAgentFileActivity).mockResolvedValue(null);
+  vi.mocked(getAgentFileOperations).mockResolvedValue(null);
 });
 
 afterEach(() => {

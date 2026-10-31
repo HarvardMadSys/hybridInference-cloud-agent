@@ -4,7 +4,13 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-import { createAgentJob, getAgentThreadContext, type ThreadContextApi } from '@/lib/api/agents';
+import {
+  createAgentJob,
+  getAgentFileActivity,
+  getAgentFileOperations,
+  getAgentThreadContext,
+  type ThreadContextApi,
+} from '@/lib/api/agents';
 import { submitThreadMessage } from '@/lib/api/pendingMessages';
 import { JobDetail } from './JobDetail';
 import type { AgentJob } from './types';
@@ -35,6 +41,9 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentJobGitMetadata: vi.fn().mockRejectedValue(new Error('offline')),
   getThreadContextTiming: vi.fn().mockResolvedValue(null),
   getThreadContextDna: vi.fn().mockResolvedValue(null),
+  // The File Activity section reads its own page; absent is enough here.
+  getAgentFileActivity: vi.fn().mockResolvedValue(null),
+  getAgentFileOperations: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => ({
@@ -144,6 +153,9 @@ beforeEach(() => {
   vi.mocked(getAgentThreadContext).mockImplementation(async (jobId: string) =>
     jobId === 'job-b' ? contextOf('thread-b', 8_765) : contextOf('thread-a', 4_321),
   );
+  // The File Activity section reads its own page; absent is enough here.
+  vi.mocked(getAgentFileActivity).mockResolvedValue(null);
+  vi.mocked(getAgentFileOperations).mockResolvedValue(null);
 });
 
 afterEach(() => {
