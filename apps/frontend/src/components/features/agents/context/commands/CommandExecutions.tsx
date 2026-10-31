@@ -318,10 +318,10 @@ export function CommandExecutions({
             {railOpen ? t('executions.rail.hide') : t('executions.rail.show')}
           </button>
         </div>
-        <div className="grid min-h-0 flex-1 gap-3 p-2.5 lg:grid-cols-[minmax(180px,1fr)_minmax(0,2fr)]">
+        <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2.5 lg:grid lg:grid-cols-[minmax(180px,1fr)_minmax(0,2fr)] lg:gap-3 lg:overflow-hidden">
           <div
             id="command-executions-rail"
-            className={`${railClass(railOpen)} min-h-0 min-w-0 flex-col gap-2 lg:flex`}
+            className={`${railClass(railOpen)} min-h-0 min-w-0 shrink-0 flex-col gap-2 lg:flex`}
           >
             <SummaryRail page={page} />
             {page ? <Attention page={page} onSelectProgram={selectProgram} /> : null}
@@ -334,7 +334,7 @@ export function CommandExecutions({
               />
             ) : null}
           </div>
-          <div className="flex min-h-0 min-w-0 flex-col">
+          <div className="flex min-h-[220px] min-w-0 flex-1 flex-col lg:min-h-0">
             <div className="flex flex-wrap items-center gap-1.5">
               <input
                 type="search"

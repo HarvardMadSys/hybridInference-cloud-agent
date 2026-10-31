@@ -136,7 +136,7 @@ export function Programs({
         aria-label={t('executions.rail.programs', {
           count: page.programs.length.toLocaleString(locale),
         })}
-        className="grid min-h-0 flex-1 gap-px overflow-y-auto overscroll-contain"
+        className="grid max-h-40 min-h-0 flex-1 gap-px overflow-y-auto overscroll-contain lg:max-h-none"
       >
         {programs.map((program) => (
           <li key={program.name}>
