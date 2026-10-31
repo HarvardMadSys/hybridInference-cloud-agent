@@ -38,7 +38,7 @@ from cloud_agent_host.member_preparation import (
     MemberStep,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
 _SPEC = ChatSandboxSpec(
@@ -238,10 +238,15 @@ def test_each_step_sees_the_environment_its_own_exec_gave_it(tmp_path):
 
     preparation.run()
 
-    alone = subprocess.run(
-        ["/bin/sh", "-c", "env"], env=exec_environment, cwd="/", capture_output=True, check=True
+    alone = tmp_path / "alone"
+    subprocess.run(
+        ["/bin/sh", "-c", f"env > {alone}"],
+        env=exec_environment,
+        cwd="/",
+        capture_output=True,
+        check=True,
     )
-    assert sorted(seen.read_bytes().splitlines()) == sorted(alone.stdout.splitlines())
+    assert sorted(seen.read_bytes().splitlines()) == sorted(alone.read_bytes().splitlines())
     assert b"LC_CTYPE" not in seen.read_bytes()
 
 
@@ -297,6 +302,78 @@ def test_a_runner_that_ends_early_fails_the_step_it_was_in(tmp_path, capsys):
     assert "hooks not merged: step failed: killed" in capsys.readouterr().err
     assert after.exists(), "what the killed runner never reached runs in an exec of its own"
     assert calls[-1] == ["/bin/sh", "-c", f"touch {after}"]
+
+
+def test_kata_executes_member_steps_individually(tmp_path):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    log = tmp_path / "log"
+    _queue(preparation, _step(f"echo first >> {log}"), _step(f"echo second >> {log}"))
+
+    preparation.run()
+
+    assert log.read_text() == "first\nsecond\n"
+    assert len(manager.calls) == 2
+    assert all(call[0][0] == "/bin/sh" for call in manager.calls)
+
+
+def test_kata_reap_failure_stops_all_following_steps(tmp_path):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    after = tmp_path / "after"
+    reap = _step(
+        'read line; test "$line" = baseline || exit 12; exit 9',
+        failure="reap",
+        input_bytes=b"baseline\n",
+        reaps=True,
+    )
+    _queue(preparation, reap, _step(f"touch {after}"))
+
+    with pytest.raises(SandboxError, match=r"^reap:"):
+        preparation.run()
+
+    assert manager.reaper_ensured == 1
+    assert len(manager.calls) == 1
+    assert manager.calls[0][1]["input_bytes"] == b"baseline\n"
+    assert not after.exists()
+
+
+def test_kata_soft_failure_continues_and_retry_preserves_order(tmp_path, capsys):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    secured = tmp_path / "secured"
+    after = tmp_path / "after"
+    _queue(
+        preparation,
+        _step("echo hooks-error >&2; exit 2", soft="hooks not installed"),
+        _step(
+            f"test -f {secured} || exit 75",
+            retry_status=75,
+            before_retry=lambda: secured.touch(),
+        ),
+        _step(f"touch {after}"),
+    )
+
+    preparation.run()
+
+    assert "hooks not installed: step failed: hooks-error" in capsys.readouterr().err
+    assert secured.exists() and after.exists()
+    assert len(manager.calls) == 4
+
+
+def test_successful_runner_with_missing_reports_does_not_blame_next_step():
+    def truncated(_spec, argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, b'{"status": 0, "stderr": ""}\n', b"")
+
+    preparation = _preparation(SimpleNamespace(exec_capture=truncated))
+    _queue(preparation, _step("true"), _step("true", failure="stale cleanup"))
+    with pytest.raises(
+        SandboxError, match=r"incomplete report \(1 of 2 steps\); outcome is unknown"
+    ):
+        preparation.run()
 
 
 def test_a_step_for_another_uid_is_refused():
