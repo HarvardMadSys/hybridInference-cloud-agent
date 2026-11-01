@@ -1,3 +1,4 @@
+import { composerZhCN } from './composer';
 import { modelSelectionZhCN } from './modelSelection';
 import { usageZhCN } from './usage';
 
@@ -314,12 +315,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'turnResults.backToWorkspace': '返回当前工作区',
   'turnResults.recordedTurn': '记录的改动 · 第 {number} 轮',
   'turnResults.recordedHint': '此视图显示本轮记录的改动。',
-  'composer.send': '发送',
-  'composer.sendHint': '发送 — 回车发送，Shift+回车换行',
-  'composer.queue': '排队',
-  'composer.queueHint': '当前轮次结束后发送',
-  'composer.steer': '立即引导',
-  'composer.steerHint': '发送到当前轮次 — {keys}',
   'deployment.version': '版本',
   'deployment.date': '部署日期',
   'deployment.unavailable': '暂无信息',
@@ -634,6 +629,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.projectMemory.projectsError': '无法加载仓库列表。',
   'settings.projectMemory.noProjects': '你在仓库中发起任务后，这里会出现该仓库。',
   'settings.projectMemory.confirmTitle': '清除 {repo} 的记忆？',
+  ...composerZhCN,
   ...modelSelectionZhCN,
   'settings.notifications.title': '通知',
   'settings.notifications.description':

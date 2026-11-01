@@ -231,6 +231,7 @@ describe('follow-up model sources', () => {
     render(<JobDetail job={makeJob({ modelConnectionId: CONNECTION })} />);
     await waitFor(() => expect(getAgentConfig).toHaveBeenCalled());
     fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'Tidy' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Prompt options' }));
     expect(screen.getByRole('button', { name: 'Rewrite prompt' })).toBeDisabled();
     chooseModel('shared');
     expect(screen.getByRole('button', { name: 'Rewrite prompt' })).toBeEnabled();

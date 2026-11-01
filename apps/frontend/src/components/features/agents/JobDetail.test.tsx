@@ -441,25 +441,25 @@ const HISTORY = [
 
 describe('JobDetail', () => {
   it('uses a rewritten follow-up only after the owner sends it', async () => {
-    vi.mocked(rewritePrompt).mockResolvedValue({
-      kind: 'prompt',
-      prompt: 'Add regression coverage for CSV exports, including empty records.',
-    });
+    const rewritten = 'Add regression coverage for CSV exports, including empty records.';
+    vi.mocked(rewritePrompt).mockResolvedValue({ kind: 'prompt', prompt: rewritten });
     render(<JobDetail job={makeJob({ state: 'done' })} />);
     const box = screen.getByRole('textbox', { name: 'Add a follow-up' });
     fireEvent.change(box, { target: { value: 'Add tests' } });
+    // Rewriting is a secondary control behind the composer's options button.
+    const options = screen.getByRole('button', { name: 'Prompt options' });
+    expect(options).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', { name: 'Rewrite prompt' })).not.toBeInTheDocument();
+    fireEvent.click(options);
+    expect(options).toHaveAttribute('aria-expanded', 'true');
     fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
-    await waitFor(() =>
-      expect(box).toHaveValue('Add regression coverage for CSV exports, including empty records.'),
-    );
+    await waitFor(() => expect(box).toHaveValue(rewritten));
     expect(submitThreadMessage).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith(
         'ajob_1',
-        expect.objectContaining({
-          prompt: 'Add regression coverage for CSV exports, including empty records.',
-        }),
+        expect.objectContaining({ prompt: rewritten }),
       ),
     );
   });

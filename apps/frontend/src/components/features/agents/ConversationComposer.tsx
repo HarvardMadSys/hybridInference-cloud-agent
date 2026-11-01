@@ -125,24 +125,37 @@ export function ComposerMessageActions({
           disabled={disabled || busy}
           aria-keyshortcuts={chordAriaLabel('Enter', apple)}
           title={steerTitle}
-          className="ui-button ui-button-secondary min-h-9 border-border px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
+          className="ui-button ui-button-secondary min-h-8 rounded-full border-border px-3 py-1 text-xs [@media(pointer:coarse)]:min-h-11"
         >
           {steerLabel}
         </button>
       ) : null}
+      {/* A round arrow; its name is the action it takes (Send or Queue). */}
       <button
         type="submit"
         disabled={disabled || busy}
+        aria-label={label}
+        aria-busy={busy || undefined}
         title={title}
-        className="ui-button ui-button-primary min-h-9 px-3 py-1.5 text-xs shadow-sm [@media(pointer:coarse)]:min-h-11"
+        className="ui-focus-ring ui-button-primary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
       >
         {busy ? (
           <span
             aria-hidden="true"
-            className="h-3 w-3 animate-spin rounded-full border-2 border-accent-foreground/40 border-t-accent-foreground motion-reduce:animate-none"
+            className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent-foreground/40 border-t-accent-foreground motion-reduce:animate-none"
           />
-        ) : null}
-        {label}
+        ) : (
+          <svg
+            aria-hidden="true"
+            className="h-4 w-4"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0-6 6m6-6 6 6" />
+          </svg>
+        )}
       </button>
     </div>
   );
