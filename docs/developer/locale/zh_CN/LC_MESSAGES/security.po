@@ -53,8 +53,8 @@ msgid "The account system, its sessions and its waiting list."
 msgstr "账号系统、它的会话和等候名单。"
 
 #: ../../SECURITY.md:17
-msgid "The committed API contract under `api_contracts/`."
-msgstr "`api_contracts/` 下已提交的 API 契约。"
+msgid "The committed API contract, `apps/backend/openapi.json`."
+msgstr "已提交的 API 契约，即 `apps/backend/openapi.json`。"
 
 #: ../../SECURITY.md:19
 msgid ""

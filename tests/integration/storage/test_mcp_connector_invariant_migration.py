@@ -28,8 +28,7 @@ _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
 
 def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     """The repair extends the one post-merge migration line."""
-    config = Config(str(REPO / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO / "migrations"))
+    config = Config(toml_file=str(REPO / "pyproject.toml"))
     script = ScriptDirectory.from_config(config)
 
     assert script.get_revision(_THIS).down_revision == _BEFORE

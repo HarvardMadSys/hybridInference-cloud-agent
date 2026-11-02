@@ -877,7 +877,7 @@ async def test_downgrade_allows_unused_empty_binding_but_guards_execution(store,
     import asyncpg
 
     migration = runpy.run_path(
-        str(Path(__file__).resolve().parents[3] / "migrations/versions/0065_environments.py")
+        str(Path(__file__).resolve().parents[3] / "apps/backend/migrations/versions/0065_environments.py")
     )
     statements = []
     migration["downgrade"].__globals__["op"] = SimpleNamespace(execute=statements.append)

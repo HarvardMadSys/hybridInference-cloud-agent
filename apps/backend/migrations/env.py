@@ -25,7 +25,7 @@ def _database_url() -> str:
 
     Raises:
         RuntimeError: If neither source supplies one — better than migrating
-            whatever default happened to be in alembic.ini.
+            whatever default a configuration file happened to carry.
     """
     url = os.environ.get(ENV_DATABASE_URL) or config.get_main_option("sqlalchemy.url")
     if not url:

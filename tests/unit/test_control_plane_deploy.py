@@ -153,8 +153,11 @@ def test_the_image_ships_the_host_package() -> None:
 def test_the_image_ships_the_migrations_it_is_told_to_run() -> None:
     """The `migrate` service runs `alembic upgrade head` in *this* image."""
     dockerfile = DOCKERFILE_PATH.read_text()
-    assert "COPY alembic.ini" in dockerfile
-    assert re.search(r"^COPY migrations/ migrations/", dockerfile, re.MULTILINE)
+    assert re.search(
+        r"^COPY apps/backend/migrations/ apps/backend/migrations/", dockerfile, re.MULTILINE
+    )
+    # `alembic` finds its configuration in the pyproject.toml beside the venv.
+    assert re.search(r"^COPY pyproject\.toml ", dockerfile, re.MULTILINE)
 
 
 def test_the_container_does_not_run_as_root() -> None:

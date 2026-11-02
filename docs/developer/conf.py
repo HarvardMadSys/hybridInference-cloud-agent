@@ -156,7 +156,6 @@ INCLUDED_PAGES = {
     "configuration": "ENVIRONMENT.md",
     "local-stack": "deploy/local/README.md",
     "releases": "deploy/release/README.md",
-    "api-contracts": "api_contracts/README.md",
     "security": "SECURITY.md",
     "contributing": "CONTRIBUTING.md",
 }

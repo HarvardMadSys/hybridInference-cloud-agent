@@ -337,7 +337,7 @@ def test_the_database_revision_is_alembics_head() -> None:
     """A property, not the current value: a head is whatever the chain ends at."""
     revisions: set[str] = set()
     parents: set[str] = set()
-    for path in (REPO_ROOT / "migrations/versions").glob("*.py"):
+    for path in (REPO_ROOT / "apps/backend/migrations/versions").glob("*.py"):
         text = path.read_text()
         revision = next(
             (line for line in text.splitlines() if line.startswith("revision = ")), None

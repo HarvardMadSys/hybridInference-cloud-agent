@@ -58,10 +58,10 @@ COPY apps/backend/cloud_agent_shared/ apps/backend/cloud_agent_shared/
 COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/
 
 # Alembic owns the schema. Nothing in this service creates a table at startup,
-# so these are not optional extras — an image without them can only run against
-# a database somebody else migrated.
-COPY alembic.ini ./
-COPY migrations/ migrations/
+# so this is not an optional extra — an image without it can only run against
+# a database somebody else migrated. Its configuration is `[tool.alembic]` in
+# the pyproject.toml copied above.
+COPY apps/backend/migrations/ apps/backend/migrations/
 COPY --from=host-release /compute-host-release/ /app/compute-host-release/
 
 RUN uv sync --frozen --no-dev --no-editable \

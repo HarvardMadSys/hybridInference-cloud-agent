@@ -22,8 +22,7 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 def _oldest_first() -> list[Script]:
     """Every revision, each after all of its ancestors."""
-    config = Config(str(REPO / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO / "migrations"))
+    config = Config(toml_file=str(REPO / "pyproject.toml"))
     return list(reversed(list(ScriptDirectory.from_config(config).walk_revisions())))
 
 

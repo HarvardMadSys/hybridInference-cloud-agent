@@ -566,7 +566,7 @@ async def log_admin_action(
     """Append one admin action to this service's audit trail.
 
     Rows go to the ``agent_admin_audit_log`` table, created with the rest of the schema by
-    ``migrations/versions/0001_schema_baseline.py``. The
+    ``apps/backend/migrations/versions/0001_schema_baseline.py``. The
     actions logged here revoke a machine's credential, retarget every future
     claim and remove hosts from the pool; a service that owns that surface and
     keeps no record of who used it has no answer to the only question asked

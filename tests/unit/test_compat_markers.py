@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-SCANNED = ("apps/backend", "apps/frontend/src", "deploy", "scripts", "migrations")
+SCANNED = ("apps/backend", "apps/frontend/src", "deploy", "scripts")
 CANDIDATE = re.compile(r"\bCOMPAT\b", re.IGNORECASE)
 MARKER = re.compile(r"COMPAT\(remove-after=(?P<date>\d{4}-\d{2}-\d{2})\): \S")
 

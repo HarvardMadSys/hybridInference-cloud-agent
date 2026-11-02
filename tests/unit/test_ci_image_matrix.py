@@ -35,8 +35,11 @@ from tests.unit.deploy.test_artifacts_workflow import (
         ),
         (["apps/backend/cloud_agent/api/jobs.py"], "backend", {"control", "runner", "sandbox"}),
         (["apps/backend/cloud_agent_host/runner.py"], "backend", {"control", "runner", "sandbox"}),
-        (["migrations/versions/next.py"], "backend", {"control", "runner", "sandbox"}),
-        (["alembic.ini"], "backend", {"control", "runner", "sandbox"}),
+        (
+            ["apps/backend/migrations/versions/next.py"],
+            "backend",
+            {"control", "runner", "sandbox"},
+        ),
     ],
 )
 def test_source_only_changes_select_their_images(

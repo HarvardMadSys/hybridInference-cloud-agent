@@ -88,7 +88,7 @@ def test_alembic_env_normalises_what_the_environment_gives_it(monkeypatch) -> No
     """**The wiring, not just the helper.**
 
     A correct function nothing calls is the shape of the original bug. This
-    drives `migrations/env.py`'s own resolver with a bare DSN and asserts what
+    drives `apps/backend/migrations/env.py`'s own resolver with a bare DSN and asserts what
     Alembic would actually be handed.
     """
     import importlib.util
@@ -96,7 +96,7 @@ def test_alembic_env_normalises_what_the_environment_gives_it(monkeypatch) -> No
     from unittest.mock import MagicMock
 
     repo = Path(__file__).resolve().parents[2]
-    spec = importlib.util.spec_from_file_location("_agent_alembic_env", repo / "migrations/env.py")
+    spec = importlib.util.spec_from_file_location("_agent_alembic_env", repo / "apps/backend/migrations/env.py")
     assert spec and spec.loader
 
     # `env.py` runs migrations as an import side effect under Alembic. Stub the

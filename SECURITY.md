@@ -13,7 +13,7 @@ what we changed, and when the change shipped.
 
 - The control plane, web app, runner host, and sandbox image in this repository.
 - The account system, its sessions and its waiting list.
-- The committed API contract under `api_contracts/`.
+- The committed API contract, `apps/backend/openapi.json`.
 
 A model provider that owners connect is not part of this service; report a
 provider's issues to that provider.

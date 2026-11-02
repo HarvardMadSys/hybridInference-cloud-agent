@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-VERSIONS = REPO / "migrations/versions"
+VERSIONS = REPO / "apps/backend/migrations/versions"
 BASELINE = VERSIONS / "0001_schema_baseline.py"
 STORAGE = REPO / "apps" / "backend" / "cloud_agent/storage"
 
