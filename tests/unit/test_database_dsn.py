@@ -96,7 +96,9 @@ def test_alembic_env_normalises_what_the_environment_gives_it(monkeypatch) -> No
     from unittest.mock import MagicMock
 
     repo = Path(__file__).resolve().parents[2]
-    spec = importlib.util.spec_from_file_location("_agent_alembic_env", repo / "apps/backend/migrations/env.py")
+    spec = importlib.util.spec_from_file_location(
+        "_agent_alembic_env", repo / "apps/backend/migrations/env.py"
+    )
     assert spec and spec.loader
 
     # `env.py` runs migrations as an import side effect under Alembic. Stub the

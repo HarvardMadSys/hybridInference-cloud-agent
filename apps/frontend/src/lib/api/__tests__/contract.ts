@@ -38,10 +38,7 @@ type Document = {
   components: { schemas: Record<string, Schema> };
 };
 
-const CONTRACT = resolve(
-  __dirname,
-  '../../../../../backend/openapi.json',
-);
+const CONTRACT = resolve(__dirname, '../../../../../backend/openapi.json');
 
 let contract: Document | null = null;
 

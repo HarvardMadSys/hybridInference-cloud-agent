@@ -283,6 +283,11 @@ _REMOVED_CODE = re.compile(
 )
 
 
+#: Applied revisions are a dated record: a docstring naming the mode it was
+#: written under is history, not configuration an operator reads.
+_REVISIONS = _REPO / "apps/backend/migrations/versions"
+
+
 def _deployment_surfaces() -> list[Path]:
     """Everything a deployment or a release is configured from, and the code that ships."""
     found: list[Path] = []
@@ -290,6 +295,7 @@ def _deployment_surfaces() -> list[Path]:
         for path in (_REPO / root).rglob("*"):
             if (
                 path.is_file()
+                and not path.is_relative_to(_REVISIONS)
                 and "__pycache__" not in path.parts
                 and "egg-info" not in str(path)
                 and path.suffix not in {".pyc", ".png"}
