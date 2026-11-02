@@ -143,6 +143,9 @@ def test_real_snapshot_freezes_and_thaws_environment_services_and_actions(
     retained_command_container, tmp_path
 ):
     backend = retained_command_container
+    backend.manager.exec_capture(
+        backend.spec, ["/bin/sh", "-c", "chmod 2770 /workspace"], timeout_s=10
+    )
     prepare = EnvironmentPreparation(tmp_path)
     prepare.prepare(
         backend, BoundEnvironment(binding_id="writer-binding", start_script="sleep 60 &")
