@@ -3,8 +3,7 @@
 This page is for developers changing the owner-facing web app. It records the
 rules each feature follows, the endpoints behind it and what only a real browser
 can check. How to use the app is user documentation, which belongs to a
-distribution; FreeInference's is the
-[Cloud Agents guide](https://doc.freeinference.org/agents.html).
+distribution; the app's Help link opens it (`AGENT_WEB_DOCS_URL`).
 
 ## Sidebar and conversation list
 
