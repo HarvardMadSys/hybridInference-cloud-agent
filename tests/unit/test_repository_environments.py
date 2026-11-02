@@ -454,29 +454,44 @@ async def test_environment_metadata_size_limit_is_enforced_before_json(monkeypat
     assert "metadata exceeds size limit" in caught.value.detail
 
 
-def test_wait_reads_foreground_failure_even_inside_poll_throttle():
+def test_wait_reads_foreground_failure_even_while_a_guest_wait_is_in_flight():
     import threading
-    import time
     from unittest.mock import Mock
 
     from cloud_agent_host.environment_process import EnvironmentProcess
 
     process = EnvironmentProcess.__new__(EnvironmentProcess)
     process._code = None
-    process._next_poll = time.monotonic() + 60
+    process._guest_wait = None
+    process._next_wait = 0.0
     process._lock = threading.Lock()
     process.uid = 30000
     process.status_path = "/private/status"
-    capture = Mock(return_value=SimpleNamespace(returncode=0, stdout="7"))
+    waiting = threading.Event()
+    release = threading.Event()
+    limits = []
+
+    def exec_capture(_spec, argv, **_kwargs):
+        limits.append(argv[-1])
+        if argv[-1] == "0":
+            return SimpleNamespace(returncode=0, stdout=b"7")
+        # The guest wait, still waiting when wait() reads.
+        waiting.set()
+        release.wait(5)
+        return SimpleNamespace(returncode=3, stdout=b"")
+
     process.backend = SimpleNamespace(
-        spec=None, manager=SimpleNamespace(exec_capture=capture, backend=SimpleNamespace(gid=10001))
+        spec=None,
+        manager=SimpleNamespace(exec_capture=exec_capture, backend=SimpleNamespace(gid=10001)),
     )
     process.process = Mock()
     process.process.wait.return_value = 0
     assert process.poll() is None
+    assert waiting.wait(5)
     assert process.wait() == 7
-    capture.assert_called_once()
+    assert limits == ["30", "0"]
     process.process.wait.assert_not_called()
+    release.set()
 
 
 def test_missing_completion_receipt_never_reports_success():
@@ -487,7 +502,6 @@ def test_missing_completion_receipt_never_reports_success():
 
     process = EnvironmentProcess.__new__(EnvironmentProcess)
     process._code = None
-    process._next_poll = 0
     process._lock = threading.Lock()
     process.uid = 30000
     process.status_path = "/private/status"
