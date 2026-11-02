@@ -73,13 +73,12 @@ INITIAL_ARCHIVE_MARKER_FORMAT_VERSION: Final = 2
 # object is stored. So a level is rebuilt here one release before it is
 # written, and one a retained marker may still name is never dropped.
 #
-# Level 1 is about 2.4 times as fast as 6 for 10-14% more bytes (a 598 MB
-# checkout: 18.5 s at 6, 7.6 s at 1; #760), and a new chat's first prompt
-# waits for this archive. A host rolled back to this release rebuilds what the
-# next one writes at 1.
-# COMPAT(remove-after=2026-12-31): write at 1, as (1, 6, 9), once every
-# supported release rebuilds level 1.
-INITIAL_ARCHIVE_COMPRESSION_LEVELS: Final = (6, 9, 1)
+# A new chat's first prompt waits for this archive, so it is written at level
+# 1: about 2.4 times as fast as 6 for 10-14% more bytes (a 598 MB checkout:
+# 18.5 s at 6, 7.6 s at 1; #1044). The releases since #1060 rebuild level 1,
+# so a host rolled back by one release still proves what this one stores.
+# Level 6 (#760 to #1060) and 9 (before #760) stay for the markers they wrote.
+INITIAL_ARCHIVE_COMPRESSION_LEVELS: Final = (1, 6, 9)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _ERROR_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
