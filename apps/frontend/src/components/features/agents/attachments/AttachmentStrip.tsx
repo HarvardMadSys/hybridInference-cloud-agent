@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatBytes } from '@/lib/attachmentLimits';
 import { useT } from '@/components/providers';
 import type { AttachmentEntry } from './useAttachments';
+import { useCollapseHeight } from './useCollapseHeight';
 
 /**
  * What is attached to this message, above the text inside the composer body.
@@ -273,13 +274,28 @@ export function AttachmentStrip({
     (key: string) => setBroken((old) => (old.has(key) ? old : new Set(old).add(key))),
     [],
   );
+  // Pictures first, as one row of their own, then everything else as chips:
+  // mixing a short chip into a row of tall pictures leaves both ragged.
+  const groups = groupAttachments(entries);
+  const { frameRef, contentRef, mounted } = useCollapseHeight(groups.length);
+  const shown = (group: Group) => previewable(group) && !broken.has(group.key);
+  const pictures = groups.filter(shown);
+  const files = groups.filter((group) => !shown(group));
+
   useEffect(() => {
     const next = pending.current;
     pending.current = null;
-    if (!next || (document.activeElement && document.activeElement !== document.body)) return;
+    if (!next) return;
+    // Only a caret that has nowhere to be is moved. A user who has already put
+    // focus somewhere else since the click keeps it.
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
     const buttons = next.scope.querySelectorAll<HTMLButtonElement>('[data-attachment-remove]');
     const target =
       buttons[Math.min(next.index, buttons.length - 1)] ?? next.scope.querySelector('textarea');
+    // The clicked button was focused when it was removed, so the caret is on
+    // its way to the page; put it back in the composer before the next key
+    // press (Escape there stops a running task) can land.
     target?.focus();
   }, [entries]);
   const remove: Remove = (group, button) => {
@@ -290,35 +306,36 @@ export function AttachmentStrip({
     }
     group.members.forEach((member) => onRemove(member.key));
   };
-  if (entries.length === 0) return null;
-  // Pictures first, as one row of their own, then everything else as chips:
-  // mixing a short chip into a row of tall pictures leaves both ragged.
-  const groups = groupAttachments(entries);
-  const shown = (group: Group) => previewable(group) && !broken.has(group.key);
-  const pictures = groups.filter(shown);
-  const files = groups.filter((group) => !shown(group));
+  // The strip is a block in a column, so adding the first picture or removing
+  // the last one used to move the message box by a full row in one frame. One
+  // height, animated, keeps that growth and shrinkage continuous; nothing about
+  // when an entry is really attached, removed or sent changes. While the space
+  // closes there is simply nothing inside it — the entries are already gone.
+  if (!mounted) return null;
   return (
-    <div data-attachment-strip="" className="flex flex-col gap-2 px-4 pt-3">
-      {pictures.length ? (
-        <ul className="flex flex-wrap gap-2">
-          {pictures.map((group) => (
-            <ImageThumb
-              key={group.key}
-              group={group}
-              onRemove={remove}
-              onBroken={markBroken}
-              disabled={disabled}
-            />
-          ))}
-        </ul>
-      ) : null}
-      {files.length ? (
-        <ul className="flex flex-wrap gap-1.5">
-          {files.map((group) => (
-            <FileChip key={group.key} group={group} onRemove={remove} disabled={disabled} />
-          ))}
-        </ul>
-      ) : null}
+    <div ref={frameRef} data-attachment-strip="">
+      <div ref={contentRef} className="flex flex-col gap-2 px-4 pt-3">
+        {pictures.length ? (
+          <ul className="flex flex-wrap gap-2">
+            {pictures.map((group) => (
+              <ImageThumb
+                key={group.key}
+                group={group}
+                onRemove={remove}
+                onBroken={markBroken}
+                disabled={disabled}
+              />
+            ))}
+          </ul>
+        ) : null}
+        {files.length ? (
+          <ul className="flex flex-wrap gap-1.5">
+            {files.map((group) => (
+              <FileChip key={group.key} group={group} onRemove={remove} disabled={disabled} />
+            ))}
+          </ul>
+        ) : null}
+      </div>
     </div>
   );
 }
