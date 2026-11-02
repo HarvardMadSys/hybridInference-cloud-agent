@@ -31,6 +31,10 @@ function file(name: string, size = 4) {
   return new File(['x'.repeat(size)], name);
 }
 
+function image(name = 'image.png') {
+  return new File(['pixels'], name, { type: 'image/png' });
+}
+
 function saved(id: number): AttachmentApi {
   return { id, path: 'file.txt', size_bytes: 4, content_type: 'text/plain' };
 }
@@ -245,5 +249,74 @@ describe('uploads a composer leaves behind', () => {
 
     if (deletes) expect(deleteAttachment).toHaveBeenCalledExactlyOnceWith(1, { keepalive: true });
     else expect(deleteAttachment).not.toHaveBeenCalled();
+  });
+
+  it('gives a pasted image a local preview it revokes when the file is discarded', async () => {
+    let made = 0;
+    const created = vi.fn<(blob: Blob) => string>(() => `blob:${(made += 1)}`);
+    const revoked = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL: created, revokeObjectURL: revoked });
+    vi.mocked(uploadAttachment).mockResolvedValueOnce(saved(1));
+    const { result } = renderHook(() => useAttachments(t, limits), { wrapper });
+
+    await act(async () => result.current.add([image()]));
+
+    expect(created).toHaveBeenCalledOnce();
+    expect(result.current.entries[0]!.previewUrl).toBe('blob:1');
+    // The preview does not change what is sent: still the staged upload id.
+    expect(result.current.ids).toEqual([1]);
+
+    act(() => result.current.remove(result.current.entries[0]!.key));
+    expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:1');
+    vi.unstubAllGlobals();
+  });
+
+  it('revokes every live preview on reset, and leaves plain files without one', async () => {
+    let made = 0;
+    const created = vi.fn<(blob: Blob) => string>(() => `blob:${(made += 1)}`);
+    const revoked = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL: created, revokeObjectURL: revoked });
+    vi.mocked(uploadAttachment).mockResolvedValue(saved(1));
+    const bounds = { ...limits, max_files: 10 };
+    const { result } = renderHook(() => useAttachments(t, bounds), { wrapper });
+
+    await act(async () => result.current.add([image(), file('notes.txt')]));
+
+    expect(created).toHaveBeenCalledOnce();
+    expect(result.current.entries.map((row) => row.previewUrl)).toEqual(['blob:1', undefined]);
+
+    act(() => result.current.reset());
+    expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:1');
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps no preview for an image that was rejected, and revokes the one it made', () => {
+    const created = vi.fn<(blob: Blob) => string>(() => 'blob:rejected');
+    const revoked = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL: created, revokeObjectURL: revoked });
+    const { result } = renderHook(() => useAttachments(t, { ...limits, max_files: 0 }), {
+      wrapper,
+    });
+
+    act(() => result.current.add([image()]));
+
+    expect(result.current.entries).toMatchObject([
+      { path: 'image.png', status: 'rejected', error: 'attach.errorTooMany' },
+    ]);
+    expect(result.current.entries[0]!.previewUrl).toBeUndefined();
+    expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:rejected');
+    vi.unstubAllGlobals();
+  });
+
+  it('falls back to a chip when the browser cannot make object URLs', async () => {
+    vi.stubGlobal('URL', {});
+    vi.mocked(uploadAttachment).mockResolvedValueOnce(saved(1));
+    const { result } = renderHook(() => useAttachments(t, limits), { wrapper });
+
+    await act(async () => result.current.add([image()]));
+
+    expect(result.current.entries[0]!.previewUrl).toBeUndefined();
+    expect(result.current.ids).toEqual([1]);
+    vi.unstubAllGlobals();
   });
 });

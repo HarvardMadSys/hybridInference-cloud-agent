@@ -692,6 +692,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           onHighlight={goalCommand.onHighlight}
           onChoose={goalCommand.onChoose}
         />
+        <AttachmentStrip
+          entries={attachments.entries}
+          onRemove={attachments.remove}
+          disabled={submitting}
+        />
+
         <textarea
           ref={taskBox}
           rows={4}
@@ -727,12 +733,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           aria-labelledby={headingId}
           aria-describedby={keyboardHintId}
           className="block min-h-[88px] w-full resize-y rounded-t-xl border-0 bg-transparent px-4 pb-2 pt-3 text-sm leading-6 text-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed sm:min-h-[104px]"
-        />
-
-        <AttachmentStrip
-          entries={attachments.entries}
-          onRemove={attachments.remove}
-          disabled={submitting}
         />
 
         <EnvironmentPicker

@@ -312,6 +312,11 @@ export function JobComposer({
                 onHighlight={goalCommand.onHighlight}
                 onChoose={goalCommand.onChoose}
               />
+              <AttachmentStrip
+                entries={attachments.entries}
+                onRemove={attachments.remove}
+                disabled={contextLost || submitting}
+              />
               <ComposerTextarea
                 textareaRef={followUpBox}
                 rows={2}
@@ -353,11 +358,6 @@ export function JobComposer({
                 aria-label="Add a follow-up"
                 aria-describedby={`${noteId}-note ${noteId}-queued`}
                 className="block max-h-[30vh] min-h-14 w-full resize-y rounded-t-2xl border-0 bg-transparent px-4 pb-1 pt-3 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
-              />
-              <AttachmentStrip
-                entries={attachments.entries}
-                onRemove={attachments.remove}
-                disabled={contextLost || submitting}
               />
               <ComposerOptionsPanel options={options}>
                 {/* Standing help for the next message; the box is described by it. */}

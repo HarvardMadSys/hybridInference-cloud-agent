@@ -483,6 +483,11 @@ function SideChatContent({
               onSubmit={(event) => void send(event)}
               className="rounded-xl border border-gray-200 bg-white focus-within:border-crimson/30 dark:border-white/10 dark:bg-gray-900"
             >
+              <AttachmentStrip
+                entries={attachments.entries}
+                onRemove={attachments.remove}
+                disabled={unavailable || submitting}
+              />
               <ComposerTextarea
                 aria-label={t('sideChat.message')}
                 placeholder={t('sideChat.message')}
@@ -495,11 +500,6 @@ function SideChatContent({
                   attachments.onPaste(event);
                 }}
                 className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0 dark:text-gray-50 dark:placeholder:text-gray-500"
-              />
-              <AttachmentStrip
-                entries={attachments.entries}
-                onRemove={attachments.remove}
-                disabled={unavailable || submitting}
               />
               <div className="flex flex-wrap items-center gap-0.5 px-2.5 pb-1.5">
                 {picker ? (

@@ -272,7 +272,7 @@ describe('Side Chat', () => {
     const [file, path] = vi.mocked(uploadAttachment).mock.calls[0]!;
     expect(file.name).toMatch(/^pasted-image-.+\.png$/);
     expect(path).toBe(file.name);
-    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByRole('img', { name: file.name })).toBeVisible();
     expect(screen.getByText('uploading…')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeDisabled();
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message side chat' }), {
@@ -290,7 +290,9 @@ describe('Side Chat', () => {
         attachment_ids: [42],
       }),
     );
-    await waitFor(() => expect(screen.queryByText(file.name)).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole('img', { name: file.name })).not.toBeInTheDocument(),
+    );
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
   });
 
@@ -308,7 +310,7 @@ describe('Side Chat', () => {
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
       'Why keep the files?',
     );
-    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByRole('img', { name: file.name })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
     expect(submitThreadMessage).toHaveBeenLastCalledWith('side', {
@@ -316,7 +318,9 @@ describe('Side Chat', () => {
       attachment_ids: [42],
     });
     expect(uploadAttachment).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(screen.queryByText(file.name)).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole('img', { name: file.name })).not.toBeInTheDocument(),
+    );
   });
 
   it('removes a pasted image before sending and preserves ordinary text paste', async () => {
@@ -354,12 +358,12 @@ describe('Side Chat', () => {
     await ready();
     pasteImage();
     const [file] = vi.mocked(uploadAttachment).mock.calls[0]!;
-    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByRole('img', { name: file.name })).toBeVisible();
     act(() => {
       window.dispatchEvent(new CustomEvent('agents:side-chat-drafts-cleared', { detail: userId }));
     });
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
-    expect(screen.queryByText(file.name)).not.toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: file.name })).not.toBeInTheDocument();
   });
 
   it('does not stage another image while the message is being submitted', async () => {
@@ -877,7 +881,7 @@ describe('fixing completed side chat reviews', () => {
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
       'Unsent follow-up question',
     );
-    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByRole('img', { name: file.name })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveValue('model-b');
   });
 

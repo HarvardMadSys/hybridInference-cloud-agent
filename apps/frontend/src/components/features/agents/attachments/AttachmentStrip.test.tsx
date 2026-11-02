@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AttachmentStrip, groupAttachments } from './AttachmentStrip';
@@ -72,6 +72,84 @@ describe('AttachmentStrip', () => {
     expect(screen.getByText('10 B')).toBeInTheDocument();
     expect(screen.queryByText('uploading…')).not.toBeInTheDocument();
     expect(screen.queryByText(warning)).not.toBeInTheDocument();
+  });
+
+  it('draws an image as a thumbnail above the text instead of a file chip', () => {
+    render(
+      <AttachmentStrip
+        entries={[
+          entry({ key: '1', path: 'pasted-image-a.png', previewUrl: 'blob:shot' }),
+          entry({ key: '2', path: 'notes.md' }),
+        ]}
+        onRemove={vi.fn()}
+      />,
+    );
+    const image = screen.getByRole('img', { name: 'pasted-image-a.png' });
+    expect(image).toHaveAttribute('src', 'blob:shot');
+    // The generated upload name is not repeated as a chip label.
+    expect(screen.queryByText('pasted-image-a.png')).not.toBeInTheDocument();
+    // An ordinary file keeps its chip, in the same list.
+    expect(screen.getByText('notes.md')).toBeInTheDocument();
+  });
+
+  it('falls back to the file chip when the image cannot be decoded', () => {
+    render(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'broken.png', previewUrl: 'blob:broken' })]}
+        onRemove={vi.fn()}
+      />,
+    );
+    fireEvent.error(screen.getByRole('img', { name: 'broken.png' }));
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    // The entry itself is untouched: it is still attached and still sends.
+    expect(screen.getByText('broken.png')).toBeInTheDocument();
+    expect(screen.getByText('10 B')).toBeInTheDocument();
+  });
+
+  it('drops an image back to a chip when its upload failed', () => {
+    render(
+      <AttachmentStrip
+        entries={[
+          entry({ key: '1', path: 'rejected.png', status: 'rejected', error: 'over 5 MB' }),
+        ]}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByText('over 5 MB')).toBeInTheDocument();
+  });
+
+  it('names each thumbnail removal button after its file', () => {
+    const removed = vi.fn();
+    render(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'shot.png', previewUrl: 'blob:shot' })]}
+        onRemove={removed}
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'Remove shot.png' });
+    // Reachable and operable from the keyboard.
+    button.focus();
+    expect(button).toHaveFocus();
+    fireEvent.click(button);
+    expect(removed).toHaveBeenCalledExactlyOnceWith('1');
+  });
+
+  it('shows upload progress over the thumbnail until the file lands', () => {
+    const { rerender } = render(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'shot.png', status: 'uploading', previewUrl: 'blob:s' })]}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('uploading…')).toBeInTheDocument();
+    rerender(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'shot.png', previewUrl: 'blob:s' })]}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('uploading…')).not.toBeInTheDocument();
   });
 
   it('removes every file of a folder when its chip is dismissed', () => {
