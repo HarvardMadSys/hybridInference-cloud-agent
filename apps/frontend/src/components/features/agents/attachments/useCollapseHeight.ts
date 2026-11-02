@@ -1,6 +1,6 @@
 'use client';
 
-import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { useLayoutEffect, useReducer, useRef, useState, type RefObject } from 'react';
 
 /**
  * Make room for the attachment strip, and give it back, without a jump.
@@ -72,17 +72,22 @@ export function useCollapseHeight(count: number): CollapseHeight {
    * animate in from nothing.
    */
   const resting = useRef<number | null>(null);
+  const counted = useRef(count);
+  counted.current = count;
+  /** Bumped when the contents resized on their own, to run the motion again. */
+  const [resized, remeasure] = useReducer((n: number) => n + 1, 0);
 
-  // The contents can change height without a change in count: a row rewraps
-  // when the window is resized, a picture that cannot be decoded becomes a
-  // chip, a refused upload turns into its reason. Keep `resting` true to what
-  // is on screen, so the next motion starts where the strip really is.
+  // The contents can change height without a change in count: a picture that
+  // cannot be decoded becomes a chip, a refused upload turns into its reason,
+  // a row rewraps when the window is resized. That can happen in the middle
+  // of a motion, too. Whenever what the contents need differs from where the
+  // frame is resting or heading, run the motion again from where it is.
   useLayoutEffect(() => {
     const content = contentRef.current;
     if (!mounted || !content || typeof ResizeObserver !== 'function') return;
     const observer = new ResizeObserver(() => {
-      // A running motion owns the height; it lands on its own target.
-      if (!running.current) resting.current = content.offsetHeight;
+      const needed = counted.current > 0 ? content.offsetHeight : 0;
+      if (needed !== resting.current) remeasure();
     });
     observer.observe(content);
     return () => observer.disconnect();
@@ -152,7 +157,7 @@ export function useCollapseHeight(count: number): CollapseHeight {
       interruptedAt.current = frame.getBoundingClientRect().height;
       animation.cancel();
     };
-  }, [count, mounted]);
+  }, [count, mounted, resized]);
 
   return { frameRef, contentRef, mounted };
 }

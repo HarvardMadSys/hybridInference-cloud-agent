@@ -200,11 +200,44 @@ describe('useCollapseHeight', () => {
     animations = [];
 
     // The picture could not be decoded and became a short chip: no count
-    // change, so only the resize is there to say so.
+    // change, so only the resize is there to say so. The strip eases down to
+    // it rather than snapping.
     contentHeight = 40;
-    observers.forEach((callback) => callback([], {} as ResizeObserver));
+    drawnHeight = 40;
+    act(() => observers.forEach((callback) => callback([], {} as ResizeObserver)));
+    expect(animations.at(-1)!.keyframes).toEqual([{ height: '100px' }, { height: '40px' }]);
+    act(() => animations.at(-1)!.onfinish?.());
+    animations = [];
+
+    // Removing it then closes from the chip's height, not the picture's.
     rerender(<Probe count={0} />);
     expect(animations.at(-1)!.keyframes).toEqual([{ height: '40px' }, { height: '0px' }]);
+  });
+
+  it('retargets a running motion when the contents resize in the middle of it', () => {
+    installAnimationSupport();
+    const observers: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const { rerender } = render(<Probe count={0} />);
+    rerender(<Probe count={1} />);
+    expect(animations.at(-1)!.keyframes).toEqual([{ height: '0px' }, { height: '100px' }]);
+
+    // Part-way through growing to the picture, it falls back to a chip.
+    drawnHeight = 30;
+    contentHeight = 40;
+    act(() => observers.forEach((callback) => callback([], {} as ResizeObserver)));
+    // The motion continues from where it was to the chip's height.
+    expect(animations.at(-1)!.keyframes).toEqual([{ height: '30px' }, { height: '40px' }]);
+    expect(animations.at(-2)!.finished).toBe(true);
   });
 
   it('lands at once under prefers-reduced-motion instead of animating', () => {
