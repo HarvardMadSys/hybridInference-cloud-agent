@@ -48,6 +48,8 @@ export const modelConnectionsEn = {
   'connections.name': 'Connection name',
   'connections.url': 'Base URL',
   'connections.key': 'API key',
+  'connections.showKey': 'Show API key',
+  'connections.hideKey': 'Hide API key',
   'connections.keyKept': 'Leave blank to keep the saved key',
   'connections.secretHint':
     'The agent and the code it runs can read this key inside your sandbox. Use a dedicated key with limits set at your provider.',
@@ -159,6 +161,8 @@ export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, strin
   'connections.name': '连接名称',
   'connections.url': 'Base URL',
   'connections.key': 'API key',
+  'connections.showKey': '显示 API key',
+  'connections.hideKey': '隐藏 API key',
   'connections.keyKept': '留空则保留已保存的密钥',
   'connections.secretHint':
     'Agent 及其运行的代码可以在你的沙箱内读取此密钥。建议使用专用密钥，并在服务商处设置额度限制。',

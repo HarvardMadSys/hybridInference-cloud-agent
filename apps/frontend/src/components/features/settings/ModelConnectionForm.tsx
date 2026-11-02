@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useT } from '@/components/providers';
+import { PasswordInput } from '@/components/features/auth/PasswordInput';
 import {
   createModelConnection,
   invalidFields,
@@ -102,15 +103,15 @@ function Field({
 }: {
   label: string;
   problem: string;
-  children: (describedBy: string | undefined) => ReactNode;
+  children: (describedBy: string | undefined, inputId: string) => ReactNode;
 }) {
   const id = useId();
   return (
     <div>
-      <label className="block text-sm font-medium">
+      <label htmlFor={`${id}-input`} className="block text-sm font-medium">
         {label}
-        {children(problem ? id : undefined)}
       </label>
+      {children(problem ? id : undefined, `${id}-input`)}
       {problem ? (
         <p id={id} className="mt-1 text-xs leading-5 text-status-error">
           {problem}
@@ -230,8 +231,9 @@ export function ModelConnectionForm({
         </legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label={t('connections.name')} problem={problem('name')}>
-            {(describedBy) => (
+            {(describedBy, inputId) => (
               <input
+                id={inputId}
                 className={inputClass}
                 value={name}
                 onChange={(event) => edited(setName)(event.target.value)}
@@ -243,8 +245,9 @@ export function ModelConnectionForm({
             )}
           </Field>
           <Field label={t('connections.url')} problem={problem('base_url')}>
-            {(describedBy) => (
+            {(describedBy, inputId) => (
               <input
+                id={inputId}
                 className={inputClass}
                 type="url"
                 value={url}
@@ -260,10 +263,11 @@ export function ModelConnectionForm({
           </Field>
         </div>
         <Field label={t('connections.key')} problem={problem('api_key')}>
-          {(describedBy) => (
-            <input
+          {(describedBy, inputId) => (
+            <PasswordInput
+              id={inputId}
               className={inputClass}
-              type="password"
+              toggleLabels={{ show: t('connections.showKey'), hide: t('connections.hideKey') }}
               value={key}
               onChange={(event) => edited(setKey)(event.target.value)}
               maxLength={4096}

@@ -34,10 +34,17 @@ function EyeIcon({ crossed }: { crossed: boolean }): JSX.Element {
  */
 export const PasswordInput = forwardRef<
   HTMLInputElement,
-  Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>
->(({ className = '', id, ...props }, ref) => {
+  Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & {
+    toggleLabels?: { show: string; hide: string };
+  }
+>(({ className = '', id, toggleLabels, ...props }, ref) => {
   const t = useT();
   const [visible, setVisible] = useState(false);
+  const toggleLabel = toggleLabels
+    ? visible
+      ? toggleLabels.hide
+      : toggleLabels.show
+    : t('account.showPassword');
   return (
     <div className="relative">
       <input
@@ -50,7 +57,8 @@ export const PasswordInput = forwardRef<
       <button
         type="button"
         className="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-lg text-gray-400 dark:text-gray-500 transition-colors hover:text-gray-700 dark:hover:text-gray-200 focus:outline-none focus-visible:text-gray-900 dark:focus-visible:text-gray-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/40"
-        aria-label={t('account.showPassword')}
+        aria-label={toggleLabel}
+        title={toggleLabel}
         aria-controls={id}
         aria-pressed={visible}
         // Keep focus in the box: a click that took it would blur the field and
