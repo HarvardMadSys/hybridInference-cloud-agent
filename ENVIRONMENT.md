@@ -529,7 +529,7 @@ compose, because they name the stack rather than configure it.
 | Variable | Notes |
 |---|---|
 | `AGENT_HOST_CREDENTIAL` | What `/v1/agent/host/register` hands back. Authenticates this machine's heartbeats and claims and names it; there is no shared claim credential or request-body host fallback. Revoked by removing the host. The runner normally reads the persisted file instead of setting this variable. |
-| `AGENT_LEASE_TTL` | Attempt lease horizon, default 120 seconds. Inference grant TTL is independent: `grants.GRANT_TTL_S = RENEWAL_INTERVAL_S × RENEWAL_HEADROOM_PASSES = 30 × 4 = 120 seconds`. Changing the lease horizon does not change grant lifetime. See [lease troubleshooting](docs/developer/runner-lease-troubleshooting.md). |
+| `AGENT_LEASE_TTL` | Attempt lease horizon, default 120 seconds. See [lease troubleshooting](docs/developer/runner-lease-troubleshooting.md). |
 | `AGENT_TIMEOUT_S` | Hard watchdog for one actively executing Agent CLI turn (default 3600 seconds). Hitting it fails/fences that turn; it does not mean the chat was idle and is not an alternate sandbox lifecycle timeout. Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |
 | `AGENT_RUNNER_HOST` | Execution environment name redeemed by `AGENT_ENROLL_TOKEN` on first registration and shared by every turn the machine runs. After enrollment, the credential is authoritative; changing this value does not rename the environment. Use `AGENT_PHYSICAL_HOST` to group environments for display without changing existing identities. |
 
