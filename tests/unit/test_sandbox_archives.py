@@ -1025,7 +1025,7 @@ def _lost_upload() -> _Uploader:
     )
 
 
-def test_initial_and_final_bundles_are_written_at_gzip_level_6(
+def test_the_initial_bundle_is_written_at_gzip_level_1_and_the_final_at_6(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     levels = _record_write_levels(monkeypatch)
@@ -1047,14 +1047,15 @@ def test_initial_and_final_bundles_are_written_at_gzip_level_6(
     finally:
         service.close()
 
-    assert levels == [6, 6]
+    # A first prompt waits for the initial bundle; nothing waits for the final.
+    assert levels == [1, 6]
     assert [(call["phase"], _gzip_xfl(call["payload"])) for call in uploader.calls] == [
-        ("initial", 0),
+        ("initial", 4),
         ("final", 0),
     ]
 
 
-def test_a_new_marker_keeps_its_format_and_is_rebuilt_at_level_6(
+def test_a_new_marker_keeps_its_format_and_is_rebuilt_at_level_1(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = _spec()
@@ -1076,8 +1077,8 @@ def test_a_new_marker_keeps_its_format_and_is_rebuilt_at_level_6(
 
     original, retried = uploader.calls
     # The capture and then one rebuild, which matched at the first level.
-    assert levels == [6, 6]
-    assert _gzip_xfl(original["payload"]) == 0
+    assert levels == [1, 1]
+    assert _gzip_xfl(original["payload"]) == 4, "RFC 1952 XFL 4: the fastest level"
     assert retried["payload"] == original["payload"]
     assert status["stored"] is True
     assert manager.marker == marker
@@ -1108,8 +1109,8 @@ def test_a_marker_from_before_level_6_is_still_rebuilt_at_level_9(
 
     original, retried = uploader.calls
     assert _gzip_xfl(original["payload"]) == 2
-    # One fetch of the frozen workspace, written at 6 and then at 9.
-    assert levels == [6, 9]
+    # One fetch of the frozen workspace, written at 1, at 6 and then at 9.
+    assert levels == [1, 6, 9]
     assert [call["path"] for call in manager.export_calls] == ["/workspace", "/workspace"]
     assert retried["payload"] == original["payload"]
     assert (retried["size"], retried["sha256"]) == (original["size"], original["sha256"])
@@ -1123,17 +1124,17 @@ def test_a_marker_from_before_level_6_is_still_rebuilt_at_level_9(
     assert service.status()["phases"]["initial"] == {"pending": 0, "uploaded": 1, "failed": 1}
 
 
-def test_a_bundle_the_next_release_writes_at_level_1_is_rebuilt_here(
+def test_a_bundle_written_at_level_6_before_the_switch_is_rebuilt_here(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A host rolled back to this release still proves what the next one stored."""
+    """Markers from #760 to #1060 name level 6 bundles; a probe still proves them."""
     spec = _spec()
     manager = _Manager(spec, running=True)
     uploader = _lost_upload()
     service = _service(manager, uploader)
     service.start()
     try:
-        marker = _marked_without_upload(service, manager, spec, levels=(1,))
+        marker = _marked_without_upload(service, manager, spec, levels=(6,))
         levels = _record_write_levels(monkeypatch)
         status = service.probe_initial(
             RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
@@ -1145,14 +1146,14 @@ def test_a_bundle_the_next_release_writes_at_level_1_is_rebuilt_here(
         service.close()
 
     original, retried = uploader.calls
-    assert _gzip_xfl(original["payload"]) == 4, "RFC 1952 XFL 4: the fastest level"
-    assert levels == [6, 9, 1]
+    assert _gzip_xfl(original["payload"]) == 0
+    assert levels == [1, 6]
     assert (retried["size"], retried["sha256"]) == (original["size"], original["sha256"])
     assert status["stored"] is True
     assert manager.marker == marker
 
 
-@pytest.mark.parametrize("marker_level", [6, 9, 1])
+@pytest.mark.parametrize("marker_level", [1, 6, 9])
 def test_a_changed_workspace_fails_the_probe_at_every_level(
     monkeypatch: pytest.MonkeyPatch, marker_level: int
 ) -> None:
@@ -1175,7 +1176,7 @@ def test_a_changed_workspace_fails_the_probe_at_every_level(
     finally:
         service.close()
 
-    assert levels == [6, 9, 1]
+    assert levels == [1, 6, 9]
     assert manager.marker == marker
     assert len(uploader.calls) == 1
     assert [call["path"] for call in manager.export_calls] == ["/workspace", "/workspace"]
@@ -1201,17 +1202,17 @@ def test_a_rebuild_too_large_at_one_level_still_tries_the_next(
     attempted: list[int] = []
     write = SpooledSandboxArchive.write
 
-    def level_6_outgrows_the_ceiling(
+    def level_1_outgrows_the_ceiling(
         self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
     ) -> dict[str, object]:
         attempted.append(compression_level)
-        if compression_level == 6:
+        if compression_level == 1:
             out.write(bytes(ceiling + 1))
         return write(self, out, compression_level=compression_level)
 
     try:
         marker = _marked_without_upload(service, manager, spec, levels=(9,))
-        monkeypatch.setattr(SpooledSandboxArchive, "write", level_6_outgrows_the_ceiling)
+        monkeypatch.setattr(SpooledSandboxArchive, "write", level_1_outgrows_the_ceiling)
         status = service.probe_initial(
             RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
             expected_container_id=_CONTAINER_ID,
@@ -1221,7 +1222,7 @@ def test_a_rebuild_too_large_at_one_level_still_tries_the_next(
     finally:
         service.close()
 
-    assert attempted == [6, 9]
+    assert attempted == [1, 6, 9]
     assert status["stored"] is True
     assert uploader.calls[1]["payload"] == uploader.calls[0]["payload"]
     assert manager.marker == marker
@@ -1256,7 +1257,7 @@ def test_a_rebuild_failure_other_than_size_is_not_a_level_mismatch(
     finally:
         service.close()
 
-    assert attempted == [6]
+    assert attempted == [1]
     assert manager.marker == marker
     assert len(uploader.calls) == 1
 
