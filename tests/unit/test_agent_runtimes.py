@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from cloud_agent.thread_stats import summarize_attempt_rollup
 from cloud_agent_host.runtimes import (
     MAX_INIT_TOOLS,
     MERGED_MCP_SERVER_NAME,
@@ -514,13 +515,17 @@ def test_claude_previews_the_answer_text_and_nothing_else():
         ("msg_2:0", "Done."),
     ]
     # Thinking, a tool call's input and the message frame are consumed, not
-    # stored: the normalized transcript is the one the CLI gave without the flag.
+    # stored: the normalized transcript is the one the CLI gave without the flag,
+    # plus one usage event per model call, carrying the output count only its
+    # message_delta reports (see test_each_model_call_reports_its_output_as_it_ends).
     assert [event.event_type for event in events if event.event_type != "raw"] == [
         "thinking",
         "message",
         "tool_use",
+        "usage",
         "tool_result",
         "message",
+        "usage",
         "lifecycle",
     ]
     messages = [event.payload for event in events if event.event_type == "message"]
@@ -556,13 +561,82 @@ def test_a_preview_piece_is_not_a_model_response():
 
 
 def test_a_claude_subagents_text_is_not_previewed():
-    """A subagent's answer is reported by its complete lines only."""
+    """A subagent's answer is reported by its complete lines only.
+
+    Its stream yields nothing but each model call's output count, under the
+    subagent's own call ids and tagged with the Task call that owns it.
+    """
     runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
+    counted = []
     for line in _partial_stream_lines():
         record = json.loads(line)
         if record["type"] == "stream_event":
             record["parent_tool_use_id"] = "toolu_task"
-            assert runtime.parse_event(json.dumps(record)) is None
+            event = runtime.parse_event(json.dumps(record))
+            if event is not None:
+                assert event.event_type == "usage"
+                counted.append(event.payload)
+    assert counted == [
+        {"usage": {"output_tokens": 9}, "usage_id": "msg_1", "parent_tool_use_id": "toolu_task"},
+        {"usage": {"output_tokens": 5}, "usage_id": "msg_2", "parent_tool_use_id": "toolu_task"},
+    ]
+
+
+def test_each_model_call_reports_its_output_as_it_ends():
+    """The running stats see a call's real output once it ends, not at the result.
+
+    Claude's ``assistant`` lines repeat the usage a call reported as it began
+    (output ``1`` here, ``0`` through the gateway), so while a turn ran its
+    output read as nothing. Each call's ``message_delta`` carries the count.
+    """
+    runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
+    events = [e for line in _partial_stream_lines() if (e := runtime.parse_event(line))]
+
+    usage = [e.payload for e in events if e.event_type == "usage"]
+    assert usage == [
+        {"usage": {"output_tokens": 9}, "usage_id": "msg_1"},
+        {"usage": {"output_tokens": 5}, "usage_id": "msg_2"},
+    ]
+    blocks = [e.payload for e in events if e.event_type in {"thinking", "message", "tool_use"}]
+    assert {b["usage_id"] for b in blocks} == {"msg_1", "msg_2"}, "same ids as the blocks"
+    result = next(e for e in events if e.payload.get("usage_scope") == "attempt")
+    assert (
+        sum(u["usage"]["output_tokens"] for u in usage) == result.payload["usage"]["output_tokens"]
+    )
+
+    before_result = summarize_attempt_rollup(
+        attempt_id=1,
+        job_id="ajob_1",
+        events=[
+            {"event_type": e.event_type, "payload": e.payload, "seq": seq}
+            for seq, e in enumerate(events, start=1)
+            if e.payload.get("usage_scope") != "attempt"
+        ],
+    )
+    assert before_result.output_tokens == 14
+
+
+@pytest.mark.parametrize(
+    "delta",
+    [
+        {"type": "message_delta", "usage": {}},
+        {"type": "message_delta", "usage": {"output_tokens": "9"}},
+        {"type": "message_delta", "usage": {"output_tokens": True}},
+        {"type": "message_delta", "usage": {"output_tokens": -1}},
+        {"type": "message_delta"},
+    ],
+)
+def test_a_delta_without_a_usable_output_count_adds_nothing(delta):
+    runtime = ClaudeCodeRuntime()
+    start = {"type": "message_start", "message": {"id": "msg_1", "usage": {"input_tokens": 3}}}
+    assert runtime.parse_event(json.dumps({"type": "stream_event", "event": start})) is None
+    assert runtime.parse_event(json.dumps({"type": "stream_event", "event": delta})) is None
+
+
+def test_a_delta_with_no_call_started_adds_nothing():
+    runtime = ClaudeCodeRuntime()
+    delta = {"type": "message_delta", "usage": {"output_tokens": 9}}
+    assert runtime.parse_event(json.dumps({"type": "stream_event", "event": delta})) is None
 
 
 def _pi_contract_lines() -> list[str]:

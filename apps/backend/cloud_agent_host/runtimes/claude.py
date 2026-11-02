@@ -31,6 +31,7 @@ from .events import (
     THINKING,
     TOOL_RESULT,
     TOOL_USE,
+    USAGE,
     NormalizedEvent,
     _harness_inventory,
     _payload_text,
@@ -83,6 +84,10 @@ class ClaudeCodeRuntime(AgentRuntime):
         self._summary_anchor: str | None = None
         #: When the main agent's current content block started streaming.
         self._block_started: float | None = None
+        #: The model call each agent is streaming, by ``parent_tool_use_id``
+        #: (``""`` for the conversation's own agent), from its ``message_start``
+        #: until the ``message_delta`` that reports its output.
+        self._calls: dict[str, str] = {}
 
     def prepare_live(
         self,
@@ -344,12 +349,16 @@ class ClaudeCodeRuntime(AgentRuntime):
         model writes would otherwise arrive as thousands of fragments. A
         subagent's text is not the conversation's answer, so it is left out
         too. Every other line is consumed here and stored nowhere, which is
-        safe because the CLI repeats the complete content in ``assistant`` lines.
+        safe because the CLI repeats the complete content in ``assistant`` lines,
+        except a model call's output count (see :meth:`_call_output`).
         """
-        if event.get("parent_tool_use_id"):
-            return None
         stream = event.get("event")
         if not isinstance(stream, dict):
+            return None
+        counted = self._call_output(event, stream)
+        if counted is not None:
+            return counted
+        if event.get("parent_tool_use_id"):
             return None
         kind = stream.get("type")
         index = stream.get("index")
@@ -381,6 +390,43 @@ class ClaudeCodeRuntime(AgentRuntime):
             return None
         piece = self._preview.add(self._text_block, str(delta.get("text") or ""))
         return NormalizedEvent(RAW, piece) if piece else None
+
+    def _call_output(self, event: dict[str, Any], stream: dict[str, Any]) -> NormalizedEvent | None:
+        """A ``usage`` event carrying a finished model call's output count.
+
+        The ``assistant`` lines repeat the usage the call reported as it began,
+        when it had written nothing: its output is ``0`` (``1`` from Anthropic)
+        however long it runs. The count arrives once, in the call's
+        ``message_delta``, after its blocks. Under the same ``usage_id`` as
+        those blocks, it raises that call's output in the running thread stats
+        (which keep each call's largest count) as soon as the call ends,
+        rather than when the turn's ``result`` reports the total. Only the
+        output count: a gateway's delta may also restate the input, and the
+        stats keep the larger of the estimate and the exact value. Subagent
+        calls are counted the same way, under their own ids.
+        """
+        parent = event.get("parent_tool_use_id")
+        owner = parent if isinstance(parent, str) else ""
+        kind = stream.get("type")
+        if kind == "message_start":
+            message = stream.get("message")
+            call = message.get("id") if isinstance(message, dict) else None
+            if call:
+                self._calls[owner] = str(call)
+            else:
+                self._calls.pop(owner, None)
+            return None
+        if kind != "message_delta":
+            return None
+        call = self._calls.pop(owner, None)
+        usage = stream.get("usage")
+        output = usage.get("output_tokens") if isinstance(usage, dict) else None
+        if call is None or type(output) is not int or output < 0:
+            return None
+        payload: dict[str, Any] = {"usage": {"output_tokens": output}, "usage_id": call}
+        if owner:
+            payload["parent_tool_use_id"] = owner
+        return NormalizedEvent(USAGE, payload)
 
     def _from_assistant(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map an assistant turn to its most significant block."""
