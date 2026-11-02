@@ -1237,20 +1237,90 @@ def test_system_telemetry_does_not_become_408_milestones():
 
     Shape taken from the first real staging job, not from documentation: it
     stored 412 lifecycle events, 408 of them ``subtype: "thinking_tokens"``,
-    which the UI then drew as 408 ticked-off steps. The first occurrence is
-    kept as a raw diagnostic so a new subtype stays discoverable; the rest are
-    dropped.
+    which the UI then drew as 408 ticked-off steps. A subtype nobody has
+    classified keeps its first occurrence as a raw diagnostic so it stays
+    discoverable; the rest are dropped.
     """
     runtime = ClaudeCodeRuntime()
-    line = json.dumps({"type": "system", "subtype": "thinking_tokens", "session_id": "s1"})
+    line = json.dumps({"type": "system", "subtype": "brand_new_counter", "session_id": "s1"})
 
     first = runtime.parse_event(line)
     assert first is not None
     assert first.event_type == "raw", "an unclassified subtype must not pass as a milestone"
-    assert "thinking_tokens" in first.payload["reason"]
+    assert "brand_new_counter" in first.payload["reason"]
 
     for _ in range(407):
         assert runtime.parse_event(line) is None, "repeats must be suppressed, not stored"
+
+
+# Shapes copied from staging's event log (claude-code 2.1.300), ids shortened.
+_KNOWN_SILENT_LINES = [
+    {"type": "system", "subtype": "status", "status": "requesting", "session_id": "s"},
+    {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 1, "session_id": "s"},
+    {
+        "type": "system",
+        "subtype": "task_started",
+        "task_id": "b1",
+        "tool_use_id": "t1",
+        "description": "Create venv",
+        "task_type": "local_bash",
+    },
+    {
+        "type": "system",
+        "subtype": "task_progress",
+        "task_id": "a1",
+        "usage": {"total_tokens": 3044, "tool_uses": 1},
+    },
+    {"type": "system", "subtype": "task_updated", "task_id": "a1", "patch": {"status": "done"}},
+    {"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "completed"},
+    {"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "a1"}]},
+    {"type": "system", "subtype": "session_title_changed", "title": "R3-A"},
+    {"type": "system", "subtype": "vcs_state_changed", "kind": "commit", "cwd": "/workspace"},
+    {
+        "type": "tool_progress",
+        "tool_use_id": "t1-heartbeat-0",
+        "tool_name": "mcp__session__x",
+        "elapsed_time_seconds": 30,
+        "heartbeat": True,
+    },
+    {
+        "type": "control_request",
+        "request_id": "r1",
+        "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {}},
+    },
+    {"type": "control_response", "response": {"subtype": "success", "request_id": "r1"}},
+    {"type": "control_cancel_request", "request_id": "r1"},
+]
+
+
+@pytest.mark.parametrize(
+    "record", _KNOWN_SILENT_LINES, ids=lambda r: str(r.get("subtype") or r["type"])
+)
+def test_understood_telemetry_is_not_reported_as_unclassified(record):
+    """Lines the adapter understands are not stored, not even once per job.
+
+    Left unclassified, each arrived as a raw diagnostic in every job (staging:
+    100 jobs had ``status``, 43 ``task_started``), which buries a line that
+    really is new.
+    """
+    assert ClaudeCodeRuntime().parse_event(json.dumps(record)) is None
+
+
+def test_an_unknown_type_is_reported_once_per_job():
+    """A heartbeat of an unknown type must not be stored per emission either.
+
+    Before, only system subtypes were deduplicated: ``tool_progress`` stored
+    388 rows across 28 staging jobs.
+    """
+    runtime = ClaudeCodeRuntime()
+    line = json.dumps({"type": "brand_new_heartbeat", "elapsed_time_seconds": 30})
+
+    first = runtime.parse_event(line)
+    assert first is not None and first.event_type == "raw"
+    assert first.payload["reason"] == "unknown type 'brand_new_heartbeat'"
+    assert all(runtime.parse_event(line) is None for _ in range(50))
+    other = runtime.parse_event(json.dumps({"type": "another_new_type"}))
+    assert other is not None and other.event_type == "raw"
 
 
 def test_real_milestones_still_arrive_as_lifecycle():
@@ -1368,7 +1438,7 @@ def test_the_contract_fixture_carries_the_harness_fields():
 
 def test_suppression_does_not_leak_between_jobs():
     """Each job gets its own adapter, so its first occurrence is still reported."""
-    line = json.dumps({"type": "system", "subtype": "thinking_tokens"})
+    line = json.dumps({"type": "system", "subtype": "brand_new_counter"})
     assert ClaudeCodeRuntime().parse_event(line) is not None
     assert ClaudeCodeRuntime().parse_event(line) is not None
 
