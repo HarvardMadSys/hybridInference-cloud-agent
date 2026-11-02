@@ -2,7 +2,7 @@
 import '@testing-library/jest-dom/vitest';
 
 import { useState } from 'react';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AttachmentStrip, groupAttachments } from './AttachmentStrip';
@@ -91,6 +91,30 @@ describe('AttachmentStrip', () => {
     expect(screen.queryByText('pasted-image-a.png')).not.toBeInTheDocument();
     // An ordinary file keeps its chip, in the same list.
     expect(screen.getByText('notes.md')).toBeInTheDocument();
+  });
+
+  it('draws pictures as one row and file chips as another, in their own order', () => {
+    render(
+      <AttachmentStrip
+        entries={[
+          entry({ key: '1', path: 'one.png', previewUrl: 'blob:1' }),
+          entry({ key: '2', path: 'notes.md' }),
+          entry({ key: '3', path: 'two.png', previewUrl: 'blob:2' }),
+          entry({ key: '4', path: 'broken.png', previewUrl: 'blob:broken' }),
+        ]}
+        onRemove={vi.fn()}
+      />,
+    );
+    fireEvent.error(screen.getByRole('img', { name: 'broken.png' }));
+    const [pictures, files] = screen.getAllByRole('list');
+    expect(
+      within(pictures!)
+        .getAllByRole('img')
+        .map((image) => image.getAttribute('alt')),
+    ).toEqual(['one.png', 'two.png']);
+    // An image that could not be decoded joins the files, as a chip.
+    expect(within(files!).getByText('notes.md')).toBeInTheDocument();
+    expect(within(files!).getByText('broken.png')).toBeInTheDocument();
   });
 
   it('falls back to the file chip when the image cannot be decoded', () => {
@@ -187,14 +211,15 @@ describe('AttachmentStrip', () => {
       fireEvent.click(button);
     };
 
-    // The item that takes the removed one's place gets focus...
-    press('Remove notes.md');
+    // Pictures come first, then file chips. The item that takes the removed
+    // one's place gets focus...
+    press('Remove one.png');
     expect(screen.getByRole('button', { name: 'Remove three.png' })).toHaveFocus();
     // ...or the one before it, when the last was removed...
-    press('Remove three.png');
-    expect(screen.getByRole('button', { name: 'Remove one.png' })).toHaveFocus();
+    press('Remove notes.md');
+    expect(screen.getByRole('button', { name: 'Remove three.png' })).toHaveFocus();
     // ...and the message box once nothing is attached.
-    press('Remove one.png');
+    press('Remove three.png');
     expect(screen.getByRole('textbox', { name: 'Message' })).toHaveFocus();
   });
 

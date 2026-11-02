@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatBytes } from '@/lib/attachmentLimits';
 import { useT } from '@/components/providers';
 import type { AttachmentEntry } from './useAttachments';
@@ -200,23 +200,24 @@ function FileChip({
  *
  * It is decoded from the local object URL the composer made when the file
  * arrived, so it is on screen before the upload lands and stays readable
- * afterwards. Bytes that turn out not to be a decodable image drop back to the
- * plain chip: the entry is still valid and still sends, only its preview lied.
+ * afterwards. Bytes that turn out not to be a decodable image are reported
+ * through `onBroken`, and the strip draws them as a plain chip: the entry is
+ * still valid and still sends, only its preview lied.
  */
 function ImageThumb({
   group,
   onRemove,
+  onBroken,
   disabled,
 }: {
   group: Group;
   onRemove: Remove;
+  onBroken: (key: string) => void;
   disabled: boolean;
 }) {
   const t = useT();
-  const [broken, setBroken] = useState(false);
   const entry = group.members[0]!;
   const uploading = entry.status === 'uploading';
-  if (broken) return <FileChip group={group} onRemove={onRemove} disabled={disabled} />;
   return (
     <li className="relative h-28 w-28 shrink-0 overflow-hidden rounded-xl border border-border bg-surface-muted sm:h-32 sm:w-32">
       {/* The picture is named by its upload path, as its remove button is. */}
@@ -227,8 +228,9 @@ function ImageThumb({
         title={entry.path}
         decoding="async"
         draggable={false}
-        onError={() => setBroken(true)}
-        className={`h-full w-full object-cover transition-opacity ${
+        onError={() => onBroken(group.key)}
+        // A screenshot's heading is at its top; keep that in view when cropping.
+        className={`h-full w-full object-cover object-top transition-opacity ${
           uploading ? 'opacity-60' : 'opacity-100'
         }`}
       />
@@ -266,6 +268,11 @@ export function AttachmentStrip({
   // the message box this strip sits above. Losing focus to the page would
   // leave the next key press (Escape stops a running task) aimed at the page.
   const pending = useRef<{ scope: HTMLElement; index: number } | null>(null);
+  const [broken, setBroken] = useState<ReadonlySet<string>>(() => new Set());
+  const markBroken = useCallback(
+    (key: string) => setBroken((old) => (old.has(key) ? old : new Set(old).add(key))),
+    [],
+  );
   useEffect(() => {
     const next = pending.current;
     pending.current = null;
@@ -284,17 +291,34 @@ export function AttachmentStrip({
     group.members.forEach((member) => onRemove(member.key));
   };
   if (entries.length === 0) return null;
+  // Pictures first, as one row of their own, then everything else as chips:
+  // mixing a short chip into a row of tall pictures leaves both ragged.
+  const groups = groupAttachments(entries);
+  const shown = (group: Group) => previewable(group) && !broken.has(group.key);
+  const pictures = groups.filter(shown);
+  const files = groups.filter((group) => !shown(group));
   return (
-    <div data-attachment-strip="" className="px-4 pt-3">
-      <ul className="flex flex-wrap items-end gap-2">
-        {groupAttachments(entries).map((group) =>
-          previewable(group) ? (
-            <ImageThumb key={group.key} group={group} onRemove={remove} disabled={disabled} />
-          ) : (
+    <div data-attachment-strip="" className="flex flex-col gap-2 px-4 pt-3">
+      {pictures.length ? (
+        <ul className="flex flex-wrap gap-2">
+          {pictures.map((group) => (
+            <ImageThumb
+              key={group.key}
+              group={group}
+              onRemove={remove}
+              onBroken={markBroken}
+              disabled={disabled}
+            />
+          ))}
+        </ul>
+      ) : null}
+      {files.length ? (
+        <ul className="flex flex-wrap gap-1.5">
+          {files.map((group) => (
             <FileChip key={group.key} group={group} onRemove={remove} disabled={disabled} />
-          ),
-        )}
-      </ul>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }
