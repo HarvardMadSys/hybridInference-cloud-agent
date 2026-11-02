@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
 import pytest
+
 from cloud_agent.admin_usage import aggregate_jobs, breakdown, merge_aggregates
 from cloud_agent.storage.admin_usage_queries import UsageQueryUnavailable
 from cloud_agent.usage_batches import owner_usage

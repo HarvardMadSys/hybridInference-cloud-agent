@@ -459,10 +459,10 @@ describe('UsageSettings', () => {
     expect(await screen.findByText('由服务商计费')).toBeInTheDocument();
     expect(await tile('缓存命中率')).toBe('0%');
     expect(await tile('推理 Token')).toBe('—');
-    expect(screen.getByText('已计入输出 Token')).toBeInTheDocument();
-    expect(
-      await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
-    ).toBeInTheDocument();
+    expect(screen.getByText('仅 Codex 上报此项')).toBeInTheDocument();
+    expect(await screen.findByText(/^每天从 UTC 零点开始算/)).toBeInTheDocument();
+    // Attributable reports only, and the provider may bill more.
+    expect(screen.getByText(/部分调用不计入.*Codex 子智能体/)).toBeInTheDocument();
   });
 });
 
@@ -693,7 +693,7 @@ describe('UsageSettings: one range for History and Context insights', () => {
     vi.mocked(getOwnerTokens).mockResolvedValue(usage);
     section();
     const history = await screen.findByRole('region', { name: 'History' });
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
     // The global consumption metrics are the History's.
     expect(await tile('Tokens')).toBe('150K');
     expect(await tile('Cache hit rate')).toBe('30%');
@@ -734,11 +734,10 @@ describe('UsageSettings: one range for History and Context insights', () => {
     ]) {
       expect(within(insightsCard).queryByText(text)).not.toBeInTheDocument();
     }
-    // Each conversation keeps its own cost and cache hit, and opens its Context view.
+    // Each conversation keeps its own cache hit, and opens its Context view.
     const link = within(insightsCard).getByRole('link', { name: 'Long refactor' });
     expect(link).toHaveAttribute('href', '/job-ctx?view=context');
     const item = link.closest('li')!;
-    expect(within(item).getByText('$2.50')).toBeInTheDocument();
     expect(within(item).getByText('75%')).toBeInTheDocument();
     expect(within(item).getByText('90K · 30K')).toBeInTheDocument();
   });

@@ -47,7 +47,7 @@ function usage(spent: string | null, cacheRead: number | null): AdminUsageAggreg
     oldest_queried_at: null,
     runs_with_snapshot: 2,
     missing_attempts: 0,
-    status_counts: { available: 2, partial: 0, stale: 0, pending: 0, unavailable: 0 },
+    status_counts: { available: 2, partial: 0, pending: 0, unavailable: 0 },
     active_runs: 0,
     refreshing_runs: 0,
   };
@@ -144,18 +144,19 @@ describe('ContextInsights', () => {
     const item = link.closest('li')!;
     expect(within(item).getByText('120K · 40K')).toBeInTheDocument();
     expect(within(item).getByText('of a 272K window')).toBeInTheDocument();
-    expect(within(item).getByText('$1.50')).toBeInTheDocument();
+    // Cost stays with each owner's provider: no column shows it.
+    expect(within(item).queryByText('$1.50')).not.toBeInTheDocument();
     expect(within(item).getByText('80%')).toBeInTheDocument();
     expect(getContextInsights).toHaveBeenCalledWith(
       expect.objectContaining({ range: 'all', sort: 'recent', limit: 25 }),
     );
   });
 
-  it('keeps an unrecorded cost, cache hit and window a dash or a label, never zero', async () => {
+  it('keeps an unrecorded cache hit and window a dash or a label, never zero', async () => {
     show();
     const item = (await screen.findByRole('link', { name: 'Untitled chat' })).closest('li')!;
     expect(within(item).getByText('Window not reported')).toBeInTheDocument();
-    expect(within(item).getAllByText('—')).toHaveLength(2);
+    expect(within(item).getAllByText('—')).toHaveLength(1);
     expect(within(item).queryByText('$0')).not.toBeInTheDocument();
     expect(within(item).queryByText('0%')).not.toBeInTheDocument();
   });

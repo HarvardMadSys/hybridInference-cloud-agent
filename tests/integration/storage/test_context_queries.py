@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -24,15 +23,15 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db
-from tests.unit.test_ledger_snapshots import report_payload
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.admin_usage import MAX_USAGE_RUNS
 from cloud_agent.api import context as context_api, owner_usage as owner_usage_api
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.context_insights import ContextInsightsCursor, context_cursor_scope
 from cloud_agent.context_profile import CONTEXT_PROFILE_VERSION
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.thread_stats import ATTEMPT_ROLLUP_VERSION
 from cloud_agent.usage_batches import owner_usage
 from cloud_agent_shared.text_tokens import estimate_text_tokens
 
@@ -305,11 +304,37 @@ async def test_insights_rank_page_and_report_unprofiled_attempts(db, store):
     assert [row["thread_id"] for row in rest["page"]] == ["athr_r0"]
 
 
-async def _bulk_history(db, store, *, user_id: str, runs: int, span_days: int) -> Decimal:
-    """``runs`` one-turn conversations spread over ``span_days``; their exact cost."""
+#: Tokens each bulk run's agent reported, as its attempt's cached rollup.
+BULK_OUTPUT_TOKENS = 7
+
+
+async def _bulk_history(
+    db, store, *, user_id: str, runs: int, span_days: int, reported: bool = False
+) -> int:
+    """``runs`` one-turn conversations spread over ``span_days``; their output tokens.
+
+    With ``reported``, each attempt carries one event and the rollup the reducer
+    keeps for it at that event, so the usage read reuses the cache rather than
+    reducing ten thousand attempts. Without it the attempts have no events at
+    all: nothing to profile, and no usage reported.
+    """
     template_thread, template_job = await _template(db, store)
-    payload = report_payload()
-    payload["totals"] = {**payload["totals"], "spent_usd": "0.00000123"}
+    rollup = {
+        "tool_calls": 0,
+        "failed_tool_calls": 0,
+        "wall_seconds": 1.0,
+        "tool_seconds": 0.0,
+        "first_output_at": None,
+        "input_tokens": 3,
+        "output_tokens": BULK_OUTPUT_TOKENS,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": None,
+        "saw_usage": True,
+        "produced_text": True,
+        "rate_tokens": 0,
+        "rate_seconds": 0.0,
+    }
     async with db.acquire() as conn:
         await conn.execute(
             """
@@ -348,23 +373,35 @@ async def _bulk_history(db, store, *, user_id: str, runs: int, span_days: int) -
             """,
             user_id,
         )
+        if not reported:
+            return 0
         await conn.execute(
             """
-            INSERT INTO agent_attempt_ledger (attempt_id, grant_id, residency_generation,
-                binding_id, window_since, snapshot, queried_at, terminal_refresh_count)
-            SELECT a.id, 'agr_actual', 1, 'binding', a.started_at, $2::jsonb, NOW(), 1
+            INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload)
+            SELECT a.job_id, a.id, 1, 'status', '{}'::jsonb
             FROM agent_attempts a JOIN agent_jobs j ON j.id = a.job_id WHERE j.user_id = $1
             """,
             user_id,
-            json.dumps(payload),
         )
-    return Decimal("0.00000123") * runs
+        await conn.execute(
+            """
+            INSERT INTO agent_attempt_thread_stats (attempt_id, event_seq, reducer_version, rollup)
+            SELECT a.id, 1, $2, $3::jsonb
+            FROM agent_attempts a JOIN agent_jobs j ON j.id = a.job_id WHERE j.user_id = $1
+            """,
+            user_id,
+            ATTEMPT_ROLLUP_VERSION,
+            json.dumps(rollup),
+        )
+    return BULK_OUTPUT_TOKENS * runs
 
 
 async def test_all_sums_every_run_beyond_one_selections_bound(db, store, monkeypatch):
     runs = MAX_USAGE_RUNS + 250
-    expected = await _bulk_history(db, store, user_id=OWNER, runs=runs, span_days=400)
-    await _bulk_history(db, store, user_id=OTHER, runs=40, span_days=10)
+    expected = await _bulk_history(
+        db, store, user_id=OWNER, runs=runs, span_days=400, reported=True
+    )
+    await _bulk_history(db, store, user_id=OTHER, runs=40, span_days=10, reported=True)
     first = await store.owner_usage.first_record_at(OWNER)
     assert first is not None and first < BASE + timedelta(days=1)
 
@@ -375,23 +412,23 @@ async def test_all_sums_every_run_beyond_one_selections_bound(db, store, monkeyp
     assert usage.batches >= 2
     assert usage.summary.run_count == runs
     assert usage.summary.totals is not None
-    assert Decimal(usage.summary.totals.spent_usd) == expected
+    assert usage.summary.totals.tokens_out == expected
     assert sum(bucket.usage.run_count for bucket in usage.buckets) == runs
 
     # The same through the routes, with the range the page sends.
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "context-integration-session-secret-long")
+    use_session_secret(monkeypatch)
     app = FastAPI()
     app.include_router(owner_usage_api.router)
     app.include_router(context_api.router)
 
-    class _Gateway:
+    class _Owners:
         async def agent_access(self, owner):
             return {"user_id": owner, "allowed": True, "permissions": ["agent.use"]}
 
-    app.dependency_overrides[get_gateway_client] = lambda: _Gateway()
+    app.dependency_overrides[get_owner_directory] = lambda: _Owners()
+    store.local_accounts = SESSIONS
     app.dependency_overrides[get_storage] = lambda: store
-    headers = {"Authorization": f"Bearer {identity.mint_session(user_id=OWNER)}"}
+    headers = {"Authorization": f"Bearer {SESSIONS.sign_in(OWNER)}"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         tokens = (
             await http.get("/v1/agent/usage/tokens", params={"range": "all"}, headers=headers)
@@ -403,19 +440,19 @@ async def test_all_sums_every_run_beyond_one_selections_bound(db, store, monkeyp
             await http.get("/v1/agent/usage/context", params={"range": "all"}, headers=headers)
         ).json()
     assert tokens["summary"]["run_count"] == runs
-    assert Decimal(tokens["summary"]["totals"]["spent_usd"]) == expected
+    assert tokens["summary"]["totals"]["tokens_out"] == expected
+    assert tokens["summary"]["totals"]["spent_usd"] is None
     assert tokens["period"]["bucket"] == "week" and tokens["batches"] >= 2
     assert tokens["period"]["since"] == resources["period"]["since"] == insights["period"]["since"]
     assert insights["summary"]["conversations"] == runs
     assert len(insights["conversations"]) == 25 and insights["next_cursor"]
-    # Each listed conversation's cost is the server's own sum of its runs.
+    # Each listed conversation's usage is the server's own sum of its runs.
     for conversation in insights["conversations"]:
         assert conversation["usage"]["run_count"] == 1
-        assert Decimal(conversation["usage"]["totals"]["spent_usd"]) == Decimal("0.00000123")
-    # No events: nothing to read, nothing presented as zero.
+        assert conversation["usage"]["totals"]["tokens_out"] == BULK_OUTPUT_TOKENS
+    # No request was reported: no size is presented, least of all as zero.
     assert all(c["peak_prompt_tokens"] is None for c in insights["conversations"])
-    assert all(c["attempts_profiled"] == c["attempts"] == 1 for c in insights["conversations"])
-    assert insights["profiling"]["complete"] is True
+    assert all(c["attempts"] == 1 for c in insights["conversations"])
 
 
 async def _event_id(db, job_id: str, seq: int) -> int:
