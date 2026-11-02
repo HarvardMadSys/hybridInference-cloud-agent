@@ -150,9 +150,9 @@ the site locally.
 apps/backend/cloud_agent/         FastAPI control plane and PostgreSQL storage
 apps/backend/cloud_agent_host/    Host runner, sandboxes, sandbox manager, CLI adapters
 apps/backend/cloud_agent_shared/  Shared protocols, pins, errors, Git and archive helpers
+apps/backend/migrations/          Alembic revisions for the Agent database
+apps/backend/openapi.json         The committed snapshot of this service's OpenAPI
 apps/frontend/                    Next.js user interface and admin dashboard
-api_contracts/                    The committed snapshot of this service's OpenAPI
-migrations/                       Alembic revisions for the Agent database
 deploy/                           Control-plane, host, sandbox, local, and release recipes
 tests/                            Unit, API, integration, and external verification
 docs/                             Developer guides, user notes, and agent records

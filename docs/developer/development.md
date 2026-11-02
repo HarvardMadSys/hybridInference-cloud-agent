@@ -73,7 +73,7 @@ relative to `apps/backend/`.
 | Request or response validation | The owning module in `cloud_agent/schemas/`; public imports use `cloud_agent.schemas`. |
 | A new caller of task creation | `cloud_agent/application/job_admission.py`; `api/service_jobs.py` is an existing caller. |
 | Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host handling is in `cloud_agent_host/sandbox_manager.py`. |
-| A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `migrations/versions/` for schema changes. |
+| A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `apps/backend/migrations/versions/` for schema changes. |
 | Compute-resource lifecycle | `cloud_agent/application/compute_resources.py`, `compute_reconcile.py`, `workers/compute_resources.py`, and `providers/compute/`. |
 | Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `runner.py`. |
 | Retained-container values or lifecycle | `cloud_agent_host/chat_sandbox_models.py` for value types; `chat_sandbox.py` for Docker lifecycle. |
@@ -349,7 +349,7 @@ changes are selected. See
 
 ## Changing an API
 
-`api_contracts/agent-control-plane.openapi.json` records the API this service
+`apps/backend/openapi.json` records the API this service
 publishes, and the web client's contract tests check its requests against it.
 An intentional API change requires a reviewed snapshot update in the same PR.
 
@@ -362,7 +362,7 @@ from pathlib import Path
 
 from cloud_agent.app import create_app
 
-Path("api_contracts/agent-control-plane.openapi.json").write_text(
+Path("apps/backend/openapi.json").write_text(
     json.dumps(create_app().openapi(), sort_keys=True, indent=2, ensure_ascii=False) + "\n",
     encoding="utf-8",
 )
@@ -375,7 +375,7 @@ Review the generated diff and explain any compatibility implications. The
 surface tests also reject duplicate registrations and overlaps between the
 agent surface routers. A snapshot update records a change; the behavioral tests
 and review establish whether it is compatible. The
-[contract guide](../../api_contracts/README.md) has the one-line regeneration
+[contract guide](api-contracts.md) has the one-line regeneration
 command.
 
 ## Packaging and documentation
@@ -388,7 +388,7 @@ images, and its classifier tests derive shared package paths from the
 Dockerfiles.
 
 Schema changes use explicit additive Alembic revisions. The current chain
-starts at `migrations/versions/0001_schema_baseline.py`; keep schema creation out
+starts at `apps/backend/migrations/versions/0001_schema_baseline.py`; keep schema creation out
 of service startup. There is no SQLAlchemy model metadata for autogeneration.
 A database from before the independent-accounts release is archived, not
 upgraded; see [the cutover](upgrade-notes.md#independent-accounts-cutover).

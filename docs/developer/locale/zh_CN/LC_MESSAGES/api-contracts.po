@@ -20,18 +20,18 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../api_contracts/README.md:2
+#: ../developer/api-contracts.md:1
 msgid "Cloud Agent's public API contract"
 msgstr "Cloud Agent 的公开 API 契约"
 
-#: ../../api_contracts/README.md:4
+#: ../developer/api-contracts.md:3
 msgid ""
-"[agent-control-plane.openapi.json](agent-control-plane.openapi.json) is "
-"the committed snapshot of the API this service serves. The web client's "
-"types and the contract tests are checked against it, so a route or schema"
-" change shows up in review as a change to this file."
-msgstr "[agent-control-plane.openapi.json](agent-control-plane.openapi.json) 是本服务所提供 API 的已提交快照。Web 客户端的类型和契约测试都以它为准，因此路由或 schema 的改动会在审查中体现为这个文件的变化。"
+"[`apps/backend/openapi.json`](../../apps/backend/openapi.json) is the "
+"committed snapshot of the API this service serves. The web client's types"
+" and the contract tests are checked against it, so a route or schema "
+"change shows up in review as a change to this file."
+msgstr "[`apps/backend/openapi.json`](../../apps/backend/openapi.json) 是本服务所提供 API 的已提交快照。Web 客户端的类型和契约测试都以它为准，因此路由或 schema 的改动会在审查中体现为这个文件的变化。"
 
-#: ../../api_contracts/README.md:9
+#: ../developer/api-contracts.md:8
 msgid "Regenerate it from the repository root after changing a route or schema:"
 msgstr "修改路由或 schema 之后，在仓库根目录重新生成它："

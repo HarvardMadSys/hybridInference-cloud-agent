@@ -135,9 +135,9 @@ jobs:
             backend=false
           fi
 
-          # Web: the app itself, and the API contracts its client tests check
-          # their requests against.
-          if matches '^(apps/frontend/|api_contracts/)'; then
+          # Web: the app itself, and the backend's OpenAPI snapshot its client
+          # tests check their requests against.
+          if matches '^(apps/frontend/|apps/backend/openapi.json$)'; then
             web=true
           else
             web=false
@@ -148,8 +148,8 @@ jobs:
           # control-only code and migrations. .dockerignore changes every build
           # context even though no Dockerfile explicitly COPYs it. External
           # integration tests also select the jobs that provide their images.
-          if matches '^(deploy/|apps/backend/|apps/frontend/|migrations/|tests/external/)' \
-             || matches '^(pyproject\.toml|uv\.lock|README\.md|LICENSE|alembic\.ini|\.dockerignore)$'; then
+          if matches '^(deploy/|apps/backend/|apps/frontend/|tests/external/)' \
+             || matches '^(pyproject\.toml|uv\.lock|README\.md|LICENSE|\.dockerignore)$'; then
             docker=true
           else
             docker=false
@@ -177,11 +177,11 @@ jobs:
           # Keep backend's sandbox: MCP parity runs backend/host code against it.
           image_scope=all
           image_files="$(printf '%s\n' "${files}" | grep -E \
-            '^(deploy/|apps/backend/|apps/frontend/|migrations/|tests/external/|\.github/workflows/|scripts/ci_image_matrix\.py$|pyproject\.toml$|uv\.lock$|README\.md$|LICENSE$|alembic\.ini$|\.dockerignore$)' || true)"
+            '^(deploy/|apps/backend/|apps/frontend/|tests/external/|\.github/workflows/|scripts/ci_image_matrix\.py$|pyproject\.toml$|uv\.lock$|README\.md$|LICENSE$|\.dockerignore$)' || true)"
           if [ "${docker}" = true ] && [ -n "${image_files}" ]; then
             if ! printf '%s\n' "${image_files}" | grep -vE '^apps/frontend/' | grep . >/dev/null; then
               image_scope=web
-            elif ! printf '%s\n' "${image_files}" | grep -vE '^(apps/backend/|migrations/|alembic\.ini$)' | grep . >/dev/null; then
+            elif ! printf '%s\n' "${image_files}" | grep -vE '^apps/backend/' | grep . >/dev/null; then
               image_scope=backend
             fi
           fi

@@ -204,11 +204,11 @@ msgstr "契约"
 
 #: ../../CONTRIBUTING.md:102
 msgid ""
-"`api_contracts/agent-control-plane.openapi.json` records this service's "
-"own API. For an intentional change, regenerate it with [the developer-"
-"guide command](docs/developer/development.md#changing-an-api). Review the"
-" diff, and explain the compatibility implications in the PR."
-msgstr "`api_contracts/agent-control-plane.openapi.json` 记录本服务自己的 API。有意的改动请用[开发者指南中的命令](docs/developer/development.md#changing-an-api)重新生成。审查差异，并在 PR 中说明兼容性影响。"
+"`apps/backend/openapi.json` records this service's own API. For an "
+"intentional change, regenerate it with [the developer-guide "
+"command](docs/developer/development.md#changing-an-api). Review the diff,"
+" and explain the compatibility implications in the PR."
+msgstr "`apps/backend/openapi.json` 记录本服务自己的 API。有意的改动请用[开发者指南中的命令](docs/developer/development.md#changing-an-api)重新生成。审查差异，并在 PR 中说明兼容性影响。"
 
 #: ../../CONTRIBUTING.md:107
 msgid ""

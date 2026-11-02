@@ -152,7 +152,7 @@
     "database_revision": {
       "type": "string",
       "minLength": 1,
-      "description": "The Alembic revision this release migrates to, derived from migrations/versions rather than typed. A preflight compares it with the database it is about to migrate."
+      "description": "The Alembic revision this release migrates to, derived from apps/backend/migrations/versions rather than typed. A preflight compares it with the database it is about to migrate."
     },
     "compatibility": {
       "$ref": "#/$defs/compatibility"

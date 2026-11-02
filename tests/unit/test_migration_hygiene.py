@@ -36,8 +36,9 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-VERSIONS = REPO / "migrations/versions"
+VERSIONS = REPO / "apps/backend/migrations/versions"
 BACKEND = REPO / "apps" / "backend"
+MIGRATIONS = BACKEND / "migrations"
 
 #: Revision-number collisions that already happened and were resolved by hand.
 #: Listed so a *new* collision fails while these three stay documented. Each
@@ -144,10 +145,11 @@ def _live_tables() -> set[str]:
 
 
 def _backend_source() -> str:
+    """The service code, without the revisions: a table they create is not read."""
     return "\n".join(
         path.read_text(encoding="utf-8")
         for path in BACKEND.rglob("*.py")
-        if "__pycache__" not in str(path)
+        if "__pycache__" not in str(path) and not path.is_relative_to(MIGRATIONS)
     )
 
 

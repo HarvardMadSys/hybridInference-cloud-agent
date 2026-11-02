@@ -27,8 +27,7 @@ _COMMITTED_HEADS = (
 
 def _migration_head() -> str:
     """Return the sole repository head from an Alembic configuration."""
-    config = Config(str(REPO / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO / "migrations"))
+    config = Config(toml_file=str(REPO / "pyproject.toml"))
     head = ScriptDirectory.from_config(config).get_current_head()
     assert head is not None
     return head

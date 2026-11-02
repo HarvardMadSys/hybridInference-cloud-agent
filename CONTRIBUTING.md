@@ -98,7 +98,7 @@ Release publication has its own
 
 ## Contracts
 
-`api_contracts/agent-control-plane.openapi.json` records this service's own
+`apps/backend/openapi.json` records this service's own
 API. For an intentional change, regenerate it with
 [the developer-guide command](docs/developer/development.md#changing-an-api). Review the
 diff, and explain the compatibility implications in the PR.

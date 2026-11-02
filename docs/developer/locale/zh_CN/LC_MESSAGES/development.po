@@ -212,11 +212,11 @@ msgstr "查询或持久化字段"
 #: ../developer/development.md
 msgid ""
 "The relevant `cloud_agent/ports/` interface and `storage/` "
-"implementation, plus an additive revision under `migrations/versions/` "
-"for schema changes."
+"implementation, plus an additive revision under "
+"`apps/backend/migrations/versions/` for schema changes."
 msgstr ""
 "对应的 `cloud_agent/ports/` 接口和 `storage/` 实现；如果改了 schema，还要在 "
-"`migrations/versions/` 下加一个增量修订。"
+"`apps/backend/migrations/versions/` 下加一个增量修订。"
 
 #: ../developer/development.md
 msgid "Compute-resource lifecycle"
@@ -817,11 +817,11 @@ msgstr "修改 API"
 
 #: ../developer/development.md:352
 msgid ""
-"`api_contracts/agent-control-plane.openapi.json` records the API this "
-"service publishes, and the web client's contract tests check its requests"
-" against it. An intentional API change requires a reviewed snapshot "
-"update in the same PR."
-msgstr "`api_contracts/agent-control-plane.openapi.json` 记录本服务发布的 API，Web 客户端的契约测试用它来检查请求。有意的 API 改动必须在同一个 PR 中提交经过审查的快照更新。"
+"`apps/backend/openapi.json` records the API this service publishes, and "
+"the web client's contract tests check its requests against it. An "
+"intentional API change requires a reviewed snapshot update in the same "
+"PR."
+msgstr "`apps/backend/openapi.json` 记录本服务发布的 API，Web 客户端的契约测试用它来检查请求。有意的 API 改动必须在同一个 PR 中提交经过审查的快照更新。"
 
 #: ../developer/development.md:356
 msgid "Regenerate the control-plane snapshot from the repository root:"
@@ -833,9 +833,8 @@ msgid ""
 " surface tests also reject duplicate registrations and overlaps between "
 "the agent surface routers. A snapshot update records a change; the "
 "behavioral tests and review establish whether it is compatible. The "
-"[contract guide](../../api_contracts/README.md) has the one-line "
-"regeneration command."
-msgstr "审查生成的差异，并说明任何兼容性影响。接口测试还会拒绝重复注册以及 agent 各路由之间的重叠。快照更新只是记录变化；是否兼容由行为测试和审查来确定。[契约说明](../../api_contracts/README.md)给出了一行重新生成命令。"
+"[contract guide](api-contracts.md) has the one-line regeneration command."
+msgstr "审查生成的差异，并说明任何兼容性影响。接口测试还会拒绝重复注册以及 agent 各路由之间的重叠。快照更新只是记录变化；是否兼容由行为测试和审查来确定。[契约说明](api-contracts.md)给出了一行重新生成命令。"
 
 #: ../developer/development.md:381
 msgid "Packaging and documentation"
@@ -858,12 +857,12 @@ msgstr ""
 #: ../developer/development.md:390
 msgid ""
 "Schema changes use explicit additive Alembic revisions. The current chain"
-" starts at `migrations/versions/0001_schema_baseline.py`; keep schema "
-"creation out of service startup. There is no SQLAlchemy model metadata "
-"for autogeneration. A database from before the independent-accounts "
-"release is archived, not upgraded; see [the cutover](upgrade-notes.md"
-"#independent-accounts-cutover)."
-msgstr "schema 变更使用显式的、增量的 Alembic 修订。当前的迁移链从 `migrations/versions/0001_schema_baseline.py` 开始；不要在服务启动时创建 schema。没有用于自动生成的 SQLAlchemy 模型元数据。独立账号版本之前的数据库只归档、不升级；见[切换说明](upgrade-notes.md#independent-accounts-cutover)。"
+" starts at `apps/backend/migrations/versions/0001_schema_baseline.py`; "
+"keep schema creation out of service startup. There is no SQLAlchemy model"
+" metadata for autogeneration. A database from before the independent-"
+"accounts release is archived, not upgraded; see [the cutover](upgrade-"
+"notes.md#independent-accounts-cutover)."
+msgstr "schema 变更使用显式的、增量的 Alembic 修订。当前的迁移链从 `apps/backend/migrations/versions/0001_schema_baseline.py` 开始；不要在服务启动时创建 schema。没有用于自动生成的 SQLAlchemy 模型元数据。独立账号版本之前的数据库只归档、不升级；见[切换说明](upgrade-notes.md#independent-accounts-cutover)。"
 
 #: ../developer/development.md:396
 msgid ""

@@ -25,8 +25,7 @@ def dsn_from(db_config: dict[str, Any]) -> str:
 def _alembic_config(db_config: dict[str, Any]):
     from alembic.config import Config
 
-    config = Config(str(REPO / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO / "migrations"))
+    config = Config(toml_file=str(REPO / "pyproject.toml"))
     config.set_main_option("sqlalchemy.url", dsn_from(db_config))
     return config
 

@@ -73,8 +73,7 @@ REGISTRY_PREFIX = "ghcr.io/harvardmadsys/"
 #: deploy scripts compare against, and a manifest that named a different
 #: protocol would describe a deployment that cannot install it.
 DEPLOY_PROTOCOL_FILE = REPO_ROOT / "deploy" / "DEPLOY_PROTOCOL"
-ALEMBIC_INI = REPO_ROOT / "alembic.ini"
-MIGRATIONS_DIR = REPO_ROOT / "migrations"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 #: The published contract, and the document this module validates its own output
 #: against before writing it.
@@ -118,7 +117,7 @@ def deploy_protocol(path: Path = DEPLOY_PROTOCOL_FILE) -> str:
     return value
 
 
-def database_revision(alembic_ini: Path = ALEMBIC_INI) -> str:
+def database_revision(pyproject: Path = PYPROJECT) -> str:
     """The Alembic revision this release migrates to.
 
     Asked of Alembic rather than parsed or typed. A release that named a
@@ -126,10 +125,10 @@ def database_revision(alembic_ini: Path = ALEMBIC_INI) -> str:
     compare two different things and call it agreement; two heads is a
     repository state that cannot be released at all, so it raises.
     """
-    config = Config(str(alembic_ini))
-    # Explicit, so the answer does not depend on the working directory: a
-    # deploy job runs this from wherever it happens to be.
-    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    # `[tool.alembic]` anchors `script_location` at the file with `%(here)s`,
+    # so the answer does not depend on the working directory: a deploy job
+    # runs this from wherever it happens to be.
+    config = Config(toml_file=str(pyproject))
     try:
         head = ScriptDirectory.from_config(config).get_current_head()
     except CommandError as error:

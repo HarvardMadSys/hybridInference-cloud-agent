@@ -76,7 +76,7 @@ _PYTHON_SOURCES = (
     _CONTROL_PLANE_SOURCES,
     "apps/backend/cloud_agent_host/**/*.py",
     "apps/backend/cloud_agent_shared/**/*.py",
-    "migrations/**/*.py",
+    "apps/backend/migrations/**/*.py",
 )
 
 #: Control-plane modules that write a *host's* environment. Compute setup,

@@ -25,13 +25,13 @@ apps/
 │   ├── cloud_agent/           control plane (FastAPI): API, auth adapter,
 │   │                          scheduler, publishing, storage
 │   ├── cloud_agent_host/      host agent: runner, sandbox, runtimes, sandbox manager
-│   └── cloud_agent_shared/    vocabulary both images ship: capability strings,
-│       │                      protocol versions, pins, sandbox network, shared errors,
-│       │                      and the operation-profiling collector both sides run
-│       └── git/               the patch gate and the source-archive builders
+│   ├── cloud_agent_shared/    vocabulary both images ship: capability strings,
+│   │   │                      protocol versions, pins, sandbox network, shared errors,
+│   │   │                      and the operation-profiling collector both sides run
+│   │   └── git/               the patch gate and the source-archive builders
+│   ├── migrations/            Alembic migrations (agent-owned database only)
+│   └── openapi.json           the committed snapshot of this service's OpenAPI
 └── frontend/                  Next.js user UI + admin dashboard
-api_contracts/                 the committed snapshot of this service's OpenAPI
-migrations/                    Alembic migrations (agent-owned database only)
 deploy/{control-plane,host,sandbox}/
 tests/{unit,servers,integration,external}/  # plus fixtures/ and support/
 docs/{developer,user,agents}/  maintained guides, user notes, agent records
@@ -39,7 +39,7 @@ docs/{developer,user,agents}/  maintained guides, user notes, agent records
 
 Not every module is worth a line here; these are the ones a newcomer needs to
 find early. The control plane's database schema is **one baseline revision plus
-additive ones** (`migrations/versions/0001_schema_baseline.py` and on), not a
+additive ones** (`apps/backend/migrations/versions/0001_schema_baseline.py` and on), not a
 long chain — the extraction record's § *Schema baseline rewrite* explains why, and
 `docs/developer/operations.md` § *Rebuilding the agent database* is the runbook for a
 database stamped with the chain that predates it.
@@ -99,8 +99,7 @@ and build guards. `make setup-dev` installs backend dependencies only.
 The developer documentation site is published in English and Simplified
 Chinese. When a change edits a page under `docs/developer/` or a root guide the
 site includes (`ENVIRONMENT.md`, `CONTRIBUTING.md`, `SECURITY.md`,
-`deploy/local/README.md`, `deploy/release/README.md`,
-`api_contracts/README.md`), run `make docs-translate`, translate the
+`deploy/local/README.md`, `deploy/release/README.md`), run `make docs-translate`, translate the
 entries it adds or marks fuzzy, and run `make docs-verify`. On the stable
 pages (the home page, the developer guide, the code structure page, and the
 `SECURITY.md` and `CONTRIBUTING.md` the site includes), CI fails while a string

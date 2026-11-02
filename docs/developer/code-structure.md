@@ -12,9 +12,9 @@ apps/
     cloud_agent/          Control plane and its HTTP APIs
     cloud_agent_host/     Host execution and retained sandbox management
     cloud_agent_shared/   Contracts and algorithms shipped in both images
+    migrations/           Agent-owned database schema, managed by Alembic
+    openapi.json          The committed snapshot of this service's OpenAPI
   frontend/              Next.js browser UI and backend-for-frontend routes
-api_contracts/           The committed snapshot of this service's OpenAPI
-migrations/              Agent-owned database schema, managed by Alembic
 deploy/                  Image builds and deployment entry points
 scripts/                 Development, qualification, and release tooling
 tests/                   Backend behavior, integration, and boundary checks
