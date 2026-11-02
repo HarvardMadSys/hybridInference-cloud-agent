@@ -1097,11 +1097,7 @@ export function EventRow({
       </pre>
     );
   }
-  return (
-    <p data-block-key={blockKey} className="py-1 text-[11px] text-gray-400 dark:text-gray-500">
-      {event.text}
-    </p>
-  );
+  return null;
 }
 
 export function HistoryTurn({

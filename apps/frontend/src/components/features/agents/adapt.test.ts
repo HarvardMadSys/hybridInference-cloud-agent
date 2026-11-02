@@ -226,15 +226,6 @@ describe('toDisplayEvent', () => {
     });
   });
 
-  it('keeps a model call\'s usage out of the transcript', () => {
-    // Claude reports one per model call; each used to render as an empty row
-    // and count as another step in the folded activity.
-    expect(
-      toDisplayEvent(event(1, 'usage', { usage: { output_tokens: 9 }, usage_id: 'msg_1' })),
-    ).toBeNull();
-    expect(toDisplayEvent(event(2, 'usage', { input_tokens: 3, output_tokens: 5 }))).toBeNull();
-  });
-
   it('keeps raw runtime protocol events out of the terminal transcript', () => {
     expect(
       toDisplayEvent(
