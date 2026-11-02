@@ -73,17 +73,14 @@ _RESOLVED_BASE_SHA = "a" * 40
 async def _run_turn(store: Storage, claim: dict[str, Any]) -> None:
     """Drive one claimed turn the way a runner drives it through the old API.
 
-    The worker routes in the order a turn calls them: link its grant, renew
-    its lease, report an event, reserve the chat's group (a new one, or the
-    retained group of a follow-up), start it, establish the member's residency,
-    record the CLI process, admit and settle the turn, fence the workspace and
+    The worker routes in the order a turn calls them: renew its lease, report
+    an event, reserve the chat's group (a new one, or the retained group of a
+    follow-up), start it, establish the member's residency, record the CLI
+    process, admit and settle the turn, fence the workspace and
     finish. Then the host's own heartbeat renews that residency.
     """
     thread_id = str(claim["thread_id"])
     lease = {"attempt_id": claim["attempt_id"], "lease_generation": claim["lease_generation"]}
-    assert await store.grants.record_attempt_grant(
-        **lease, grant_id=f"rolling-attempt-grant-{claim['attempt_id']}"
-    )
     beat = await store.attempt_commands.heartbeat(**lease, lease_ttl_seconds=_LEASE_TTL_S)
     assert beat["ok"], beat
     assert (
@@ -133,11 +130,6 @@ async def _run_turn(store: Storage, claim: dict[str, Any]) -> None:
     )
     assert residency is not None, "the residency lost its lease"
     generation = int(residency["generation"])
-    assert await store.grants.link_residency_grant(
-        thread_id=thread_id,
-        generation=generation,
-        grant_id=f"rolling-residency-grant-{claim['attempt_id']}",
-    )
     assert await store.sandbox.record_shared_thread_residency(
         thread_id=thread_id,
         **lease,
@@ -170,8 +162,12 @@ async def _run_turn(store: Storage, claim: dict[str, Any]) -> None:
     assert await store.host_pool.record_host_heartbeat(
         host=_HOST, capabilities=_CAPABILITIES, sandbox_image_digest=_IMAGE
     )
-    assert await store.residency.heartbeat_residency(
-        thread_id=thread_id, generation=generation, host=_HOST, ttl_seconds=_RESIDENCY_TTL_S
+    # `None` is a lost lease; a residency without a grant beats with "".
+    assert (
+        await store.residency.heartbeat_residency(
+            thread_id=thread_id, generation=generation, host=_HOST, ttl_seconds=_RESIDENCY_TTL_S
+        )
+        is not None
     )
 
 
