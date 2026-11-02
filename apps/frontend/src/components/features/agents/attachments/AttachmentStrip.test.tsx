@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
+import { useState } from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -150,6 +151,51 @@ describe('AttachmentStrip', () => {
       />,
     );
     expect(screen.queryByText('uploading…')).not.toBeInTheDocument();
+  });
+
+  it('announces upload progress on a thumbnail, not only draws it', () => {
+    render(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'shot.png', status: 'uploading', previewUrl: 'blob:s' })]}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('uploading…').closest('[aria-hidden="true"]')).toBeNull();
+  });
+
+  it('keeps keyboard focus in the composer after a removal', () => {
+    function Composer() {
+      const [entries, setEntries] = useState([
+        entry({ key: '1', path: 'one.png', previewUrl: 'blob:1' }),
+        entry({ key: '2', path: 'notes.md' }),
+        entry({ key: '3', path: 'three.png', previewUrl: 'blob:3' }),
+      ]);
+      return (
+        <div>
+          <AttachmentStrip
+            entries={entries}
+            onRemove={(key) => setEntries((old) => old.filter((row) => row.key !== key))}
+          />
+          <textarea aria-label="Message" />
+        </div>
+      );
+    }
+    render(<Composer />);
+    const press = (name: string) => {
+      const button = screen.getByRole('button', { name });
+      button.focus();
+      fireEvent.click(button);
+    };
+
+    // The item that takes the removed one's place gets focus...
+    press('Remove notes.md');
+    expect(screen.getByRole('button', { name: 'Remove three.png' })).toHaveFocus();
+    // ...or the one before it, when the last was removed...
+    press('Remove three.png');
+    expect(screen.getByRole('button', { name: 'Remove one.png' })).toHaveFocus();
+    // ...and the message box once nothing is attached.
+    press('Remove one.png');
+    expect(screen.getByRole('textbox', { name: 'Message' })).toHaveFocus();
   });
 
   it('removes every file of a folder when its chip is dismissed', () => {

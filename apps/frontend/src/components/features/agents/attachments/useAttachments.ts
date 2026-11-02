@@ -50,8 +50,11 @@ function accepted(entries: AttachmentEntry[]): AttachmentEntry[] {
  * test environments, and a missing preview is only a cosmetic loss, so the
  * composer then falls back to its file chip.
  */
-function previewUrlFor(file: File): string | undefined {
+function previewUrlFor(file: File, path: string): string | undefined {
   if (!file.type.startsWith('image/')) return undefined;
+  // A file inside a picked folder is drawn as that folder's chip, never as a
+  // picture, so a folder of screenshots must not hold a handle per file.
+  if (path.includes('/')) return undefined;
   if (typeof URL.createObjectURL !== 'function') return undefined;
   try {
     return URL.createObjectURL(file);
@@ -161,20 +164,10 @@ export function useAttachments(
       for (const file of files) {
         const key = `a${nextKey.current++}`;
         const path = uploadPathFor(file);
-        // A rejected file keeps no preview: nothing will carry it anywhere,
-        // and the reason is what the user has to read.
-        const previewUrl = previewUrlFor(file);
-        const entry: AttachmentEntry = {
-          key,
-          path,
-          size: file.size,
-          status: 'uploading',
-          previewUrl,
-        };
-        const reject = (error: string) => {
-          revokePreview(previewUrl);
-          queued.push({ ...entry, previewUrl: undefined, status: 'rejected', error });
-        };
+        const entry: AttachmentEntry = { key, path, size: file.size, status: 'uploading' };
+        // A rejected file gets no preview: nothing will carry it anywhere, and
+        // the reason is what the user has to read.
+        const reject = (error: string) => queued.push({ ...entry, status: 'rejected', error });
         if (!isSafeUploadPath(path, limits.max_path_length)) {
           reject(t('attach.errorPath'));
           continue;
@@ -193,8 +186,9 @@ export function useAttachments(
         }
         tally.current.count += 1;
         tally.current.bytes += file.size;
+        const previewUrl = previewUrlFor(file, path);
         reservations.current.set(key, { size: file.size, previewUrl });
-        queued.push(entry);
+        queued.push({ ...entry, previewUrl });
         void uploadAttachment(file, path)
           .then((saved) => {
             const reservation = reservations.current.get(key);
@@ -213,20 +207,14 @@ export function useAttachments(
             // tally has to describe what is actually attached, or the next
             // pick is admitted against bytes nobody is holding.
             if (!release(key)) return;
-            setEntries((old) =>
-              old.map((row) =>
-                row.key === key
-                  ? {
-                      // `release` above revoked this entry's preview with the
-                      // slot; drop the dead URL so nothing tries to draw it.
-                      ...row,
-                      previewUrl: undefined,
-                      status: 'rejected',
-                      error: getErrorMessage(cause),
-                    }
-                  : row,
-              ),
-            );
+            // `release` revoked this entry's preview with the slot; drop the
+            // dead URL so nothing tries to draw it.
+            const refused = {
+              previewUrl: undefined,
+              status: 'rejected' as const,
+              error: getErrorMessage(cause),
+            };
+            setEntries((old) => old.map((row) => (row.key === key ? { ...row, ...refused } : row)));
           });
       }
       setEntries((old) => [...old, ...queued]);

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { formatBytes } from '@/lib/attachmentLimits';
 import { useT } from '@/components/providers';
 import type { AttachmentEntry } from './useAttachments';
@@ -128,6 +128,9 @@ function RemoveIcon({ className = 'h-3 w-3' }: { className?: string }) {
   );
 }
 
+/** Remove every file a strip item stands for; the button is where focus was. */
+type Remove = (group: Group, button: HTMLButtonElement) => void;
+
 /** The chip a folder, a plain file, or an unreadable image falls back to. */
 function FileChip({
   group,
@@ -135,7 +138,7 @@ function FileChip({
   disabled,
 }: {
   group: Group;
-  onRemove: (key: string) => void;
+  onRemove: Remove;
   disabled: boolean;
 }) {
   const t = useT();
@@ -182,7 +185,8 @@ function FileChip({
         type="button"
         disabled={disabled}
         aria-label={t('attach.remove', { name: group.label })}
-        onClick={() => group.members.forEach((member) => onRemove(member.key))}
+        data-attachment-remove=""
+        onClick={(event) => onRemove(group, event.currentTarget)}
         className="shrink-0 rounded text-gray-400 hover:text-gray-700 disabled:opacity-50 dark:text-gray-500 dark:hover:text-gray-200"
       >
         <RemoveIcon />
@@ -192,7 +196,7 @@ function FileChip({
 }
 
 /**
- * One picture, at thumbnail size.
+ * One picture, large enough to recognise what is in it.
  *
  * It is decoded from the local object URL the composer made when the file
  * arrived, so it is on screen before the upload lands and stays readable
@@ -205,7 +209,7 @@ function ImageThumb({
   disabled,
 }: {
   group: Group;
-  onRemove: (key: string) => void;
+  onRemove: Remove;
   disabled: boolean;
 }) {
   const t = useT();
@@ -214,38 +218,36 @@ function ImageThumb({
   const uploading = entry.status === 'uploading';
   if (broken) return <FileChip group={group} onRemove={onRemove} disabled={disabled} />;
   return (
-    <li className="relative">
-      <div className="relative h-14 w-14 overflow-hidden rounded-lg border border-border bg-surface-muted">
-        {/* The remove button carries the accessible name; the picture itself
-            is described by the upload's own name. */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={entry.previewUrl}
-          alt={entry.path}
-          title={entry.path}
-          onError={() => setBroken(true)}
-          className={`h-full w-full object-cover ${
-            uploading ? 'opacity-60' : 'opacity-100'
-          } transition-opacity`}
-        />
-        {uploading ? (
-          <span
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 bottom-0 bg-surface/80 px-1 py-0.5 text-center text-[10px] leading-3 text-muted"
-          >
-            {t('attach.uploading')}
-          </span>
-        ) : null}
-        <button
-          type="button"
-          disabled={disabled}
-          aria-label={t('attach.remove', { name: entry.path })}
-          onClick={() => onRemove(entry.key)}
-          className="absolute right-1 top-1 rounded-full bg-gray-900/60 p-0.5 text-white shadow-sm transition-colors hover:bg-gray-900/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-1 focus-visible:ring-offset-surface disabled:opacity-50"
-        >
-          <RemoveIcon className="h-3 w-3" />
-        </button>
-      </div>
+    <li className="relative h-28 w-28 shrink-0 overflow-hidden rounded-xl border border-border bg-surface-muted sm:h-32 sm:w-32">
+      {/* The picture is named by its upload path, as its remove button is. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={entry.previewUrl}
+        alt={entry.path}
+        title={entry.path}
+        decoding="async"
+        draggable={false}
+        onError={() => setBroken(true)}
+        className={`h-full w-full object-cover transition-opacity ${
+          uploading ? 'opacity-60' : 'opacity-100'
+        }`}
+      />
+      {uploading ? (
+        // Read out as well as shown: a chip says it in text, so must this.
+        <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-surface/85 px-1.5 py-1 text-center text-[11px] leading-4 text-muted">
+          {t('attach.uploading')}
+        </span>
+      ) : null}
+      <button
+        type="button"
+        disabled={disabled}
+        aria-label={t('attach.remove', { name: entry.path })}
+        data-attachment-remove=""
+        onClick={(event) => onRemove(group, event.currentTarget)}
+        className="ui-focus-ring absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-gray-900/70 text-white shadow-sm ring-1 ring-white/40 transition-colors hover:bg-gray-900/90 disabled:opacity-50 [@media(pointer:coarse)]:h-8 [@media(pointer:coarse)]:w-8"
+      >
+        <RemoveIcon className="h-3.5 w-3.5" />
+      </button>
     </li>
   );
 }
@@ -259,15 +261,37 @@ export function AttachmentStrip({
   onRemove: (key: string) => void;
   disabled?: boolean;
 }) {
+  // Where keyboard focus goes once a removed item's button is gone: the
+  // button now in its place, the one before it, or — when nothing is left —
+  // the message box this strip sits above. Losing focus to the page would
+  // leave the next key press (Escape stops a running task) aimed at the page.
+  const pending = useRef<{ scope: HTMLElement; index: number } | null>(null);
+  useEffect(() => {
+    const next = pending.current;
+    pending.current = null;
+    if (!next || (document.activeElement && document.activeElement !== document.body)) return;
+    const buttons = next.scope.querySelectorAll<HTMLButtonElement>('[data-attachment-remove]');
+    const target =
+      buttons[Math.min(next.index, buttons.length - 1)] ?? next.scope.querySelector('textarea');
+    target?.focus();
+  }, [entries]);
+  const remove: Remove = (group, button) => {
+    const scope = button.closest('[data-attachment-strip]')?.parentElement;
+    if (scope && document.activeElement === button) {
+      const buttons = [...scope.querySelectorAll('[data-attachment-remove]')];
+      pending.current = { scope, index: buttons.indexOf(button) };
+    }
+    group.members.forEach((member) => onRemove(member.key));
+  };
   if (entries.length === 0) return null;
   return (
-    <div className="px-4 pt-3">
-      <ul className="flex flex-wrap items-center gap-1.5">
+    <div data-attachment-strip="" className="px-4 pt-3">
+      <ul className="flex flex-wrap items-end gap-2">
         {groupAttachments(entries).map((group) =>
           previewable(group) ? (
-            <ImageThumb key={group.key} group={group} onRemove={onRemove} disabled={disabled} />
+            <ImageThumb key={group.key} group={group} onRemove={remove} disabled={disabled} />
           ) : (
-            <FileChip key={group.key} group={group} onRemove={onRemove} disabled={disabled} />
+            <FileChip key={group.key} group={group} onRemove={remove} disabled={disabled} />
           ),
         )}
       </ul>
