@@ -151,14 +151,13 @@ describe('adding a connection', () => {
     expect(form.querySelector('textarea, select, datalist')).toBeNull();
     expect(form).not.toHaveTextContent(/Chat Completions|Responses|Anthropic Messages|Advanced/);
     expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
-    // The actions, in order: the model line's own two (listing is optional and
-    // waits for a URL and key), then the one primary action, then Cancel.
+    // Key visibility precedes the model actions, the one primary action and Cancel.
     expect(
       within(form)
         .getAllByRole('button')
         .filter((button) => button.getAttribute('type') !== null)
-        .map((button) => button.textContent),
-    ).toEqual(['Add', 'Load models from provider', 'Verify and save', 'Cancel']);
+        .map((button) => button.getAttribute('aria-label') ?? button.textContent),
+    ).toEqual(['Show API key', 'Add', 'Load models from provider', 'Verify and save', 'Cancel']);
     expect(form.querySelectorAll('.ui-button-primary')).toHaveLength(1);
     expect(within(form).getByRole('button', { name: 'Load models from provider' })).toBeDisabled();
     expect(within(form).getByText(/may bill/)).toBeVisible();
