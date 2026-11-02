@@ -3552,15 +3552,20 @@ read-only root filesystem — the `host_nft` function below has the same shape.
 Each guard step is a short Python step that runs `nft` for the install and its
 read-back together, or reads, compares and writes one bridge's relay
 exceptions. Starting a helper costs far more than the `nft` calls it makes, so
-each process keeps one helper running while it uses it and hands it one step
-at a time on its standard input. That helper has the same flags, listens on
-nothing, reads the kernel afresh for every step, and exits when its process
-does or after 15 seconds without a step; a fresh one replaces it every five
-minutes. A step that finds it busy runs in a helper of its own, as every step
-once did, and so does a step it fails or answers wrongly: the process then
-logs `network_guard_helper_discarded` and runs every step that way for five
-minutes. Every helper runs under runc whatever the daemon's default runtime
-is, because a Kata VM would change its own kernel's rules, not the host's.
+the runner and the sandbox manager each keep one helper running while they use
+it and hand it one step at a time on its standard input; a turn's own process
+starts a helper per step. That helper has the same flags and a name of its
+own, listens on nothing, reads the kernel afresh for every step, and exits when
+its process does or after 15 seconds without a step; a fresh one replaces it
+every five minutes. A step that finds it busy runs in a helper of its own, as
+every step once did. A step it fails or answers wrongly runs again in a helper
+of its own only once the failed helper has been removed by name and is
+confirmed gone, and within the minute a step always had; if that cannot be
+confirmed, the step fails. The process then logs
+`network_guard_helper_discarded` and runs every step in a helper of its own for
+five minutes. Every helper runs under runc whatever the daemon's default
+runtime is, because a Kata VM would change its own kernel's rules, not the
+host's.
 
 - **Installed before anything joins a bridge.** The runner's and the sandbox manager's
   startup preflight install the tables and read them back — every chain, its

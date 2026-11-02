@@ -569,6 +569,7 @@ class ContainerBackend(SandboxBackend):
         sandbox_network: SandboxNetwork | None = None,
         sandbox_namespace: str = "default",
         network_helper_image: str | None = None,
+        keep_network_helper: bool = False,
         uid: int = SANDBOX_UID,
         gid: int = SANDBOX_GID,
         home: str = SANDBOX_HOME,
@@ -590,6 +591,12 @@ class ContainerBackend(SandboxBackend):
         # process that runs outside a container (a benchmark, the external
         # network test) names one. Deliberately not an environment setting.
         self.network_helper_image = network_helper_image
+        # Whether the guard keeps a long-lived host-rule helper between steps.
+        # Only a process that outlives its steps asks for one: the runner's host
+        # service and the sandbox manager. A turn's own process ends with its
+        # turn, and the runner's first process, which would inherit the
+        # helper's client, reaps nothing.
+        self.keep_network_helper = keep_network_helper
         self._network_guard: HostNetworkGuard | None = None
         # Set in a turn's child that holds its host service's verification of
         # the rules (adopt_rules_verification); everywhere else the network
@@ -789,12 +796,14 @@ class ContainerBackend(SandboxBackend):
     def network_guard(self) -> HostNetworkGuard:
         """The one guard of this process, shared by every manager it builds."""
         if self._network_guard is None:
+            from cloud_agent_host import network_guard_helper
             from cloud_agent_host.network_guard import HostNetworkGuard
 
             self._network_guard = HostNetworkGuard(
                 self.require_sandbox_network(),
                 docker_binary=self.docker_binary,
                 helper_image=self.network_helper_image,
+                spawn=network_guard_helper.spawn_helper if self.keep_network_helper else None,
             )
         return self._network_guard
 
@@ -1058,7 +1067,10 @@ class ContainerBackend(SandboxBackend):
 
 
 def build_backend_from_env(
-    env: dict[str, str] | None = None, *, with_network: bool = True
+    env: dict[str, str] | None = None,
+    *,
+    with_network: bool = True,
+    keep_network_helper: bool = False,
 ) -> SandboxBackend:
     """Construct the configured backend.
 
@@ -1071,7 +1083,9 @@ def build_backend_from_env(
     ``AGENT_SANDBOX_UID``/``AGENT_SANDBOX_GID``/``AGENT_SANDBOX_HOME`` for a
     custom sandbox image whose user differs from the one we ship. The network
     comes from :func:`cloud_agent_shared.egress.network_from_env`; only the
-    candidate check, which runs no group, passes ``with_network=False``.
+    candidate check, which runs no group, passes ``with_network=False``. Only
+    a process that outlives its guard steps passes ``keep_network_helper``
+    (``ContainerBackend``).
     """
     source = env if env is not None else dict(os.environ)
     choice = (source.get("AGENT_SANDBOX_BACKEND") or "kata").strip().lower()
@@ -1105,6 +1119,7 @@ def build_backend_from_env(
             # naming a host table, nobody specified.
             sandbox_network=network_from_env(source) if with_network else None,
             sandbox_namespace=namespace,
+            keep_network_helper=keep_network_helper,
             uid=int(source.get("AGENT_SANDBOX_UID") or SANDBOX_UID),
             gid=int(source.get("AGENT_SANDBOX_GID") or SANDBOX_GID),
             home=source.get("AGENT_SANDBOX_HOME") or SANDBOX_HOME,

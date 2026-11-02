@@ -128,18 +128,12 @@ def _child_docker(monkeypatch, kernel=None) -> list[list[str]]:
 
     A helper container, or the inspect that finds the helper's image, fails
     unless ``kernel`` answers them: a child on a recent verification must not
-    need either. It answers only processes run to completion, so the guard's
-    long-lived helper finds no Docker to start, as on a host without a
-    ``docker`` binary, and every step runs on a helper of its own.
+    need either.
     """
     from types import SimpleNamespace
 
-    from cloud_agent_host import network_guard, sandbox as sandbox_mod
+    from cloud_agent_host import sandbox as sandbox_mod
 
-    def no_docker(argv: list[str]) -> Any:
-        raise FileNotFoundError(argv[0])
-
-    monkeypatch.setattr(network_guard, "spawn_helper", no_docker)
     calls: list[list[str]] = []
 
     def run(argv, **kwargs):

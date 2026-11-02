@@ -8,10 +8,11 @@ containers with the Docker socket, not in the host's network namespace, and
 hold no ``NET_ADMIN``. They change host rules through a helper: this process's
 own image, started in the host's network namespace under plain runc (a Kata VM
 would edit its own kernel, not the host's), with ``NET_ADMIN`` and no other
-capability, a read-only root and no-new-privileges, running ``nft``. Each
-guard process keeps one such helper running while it uses it
-(:mod:`cloud_agent_host.network_guard_helper`, where its threat analysis is
-written down) and starts a disposable one for a step it cannot take. Neither
+capability, a read-only root and no-new-privileges, running ``nft``. The
+runner's host service and the sandbox manager each keep one such helper
+running while they use it (:mod:`cloud_agent_host.network_guard_helper`, where
+its threat analysis is written down) and start a disposable one for a step it
+cannot take; a turn's own process uses disposable helpers only. Neither
 keeps anything; the kernel holds the rules, so they outlive the process that
 installed them and every restart of it. A host reboot clears them, and nothing
 starts a group until they are back.
@@ -72,6 +73,7 @@ drawing the host's own traffic for those addresses.
 from __future__ import annotations
 
 import contextlib
+import functools
 import ipaddress
 import json
 import math
@@ -84,12 +86,14 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from cloud_agent_host import network_guard_helper
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.network_guard_helper import (
+    HelperStuck,
     LongLivedHelper,
+    Remove,
     Spawn,
     serve_program,
-    spawn_helper,
 )
 from cloud_agent_shared.egress import (
     RELAY_FAMILIES,
@@ -139,8 +143,8 @@ _BASE_CHAIN = re.compile(r"^add chain (\w+) (\S+) (\w+) \{ type filter hook (\w+
 # ``render_relay_update`` renders it. Every nft call is checked, and the first
 # failure ends the step with nft's own message and no output. No shell or
 # cached kernel state is involved: a disposable helper runs this once, and the
-# long-lived helper runs it afresh, in a namespace of its own, for each request
-# (``serve_program``).
+# long-lived helper runs it afresh, with a fresh Python globals dict, for each
+# request (``serve_program``).
 _NFT_BATCH = """
 import json
 import subprocess
@@ -238,7 +242,9 @@ class _HeldRelays:
     confirmed_at: float
 
 
-Runner = Callable[[list[str], str | None], subprocess.CompletedProcess[str]]
+#: Runs one ``docker`` command: ``(argv, stdin)``, and ``timeout=`` too in a
+#: guard with a long-lived helper, for what it left of a step's minute.
+Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 class NetworkGuardError(SandboxError):
@@ -333,14 +339,16 @@ class _HelperLock:
                     del self._bridges[name]
 
 
-def _run(argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+def _run(
+    argv: list[str], stdin: str | None, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             argv,
             input=stdin,
             capture_output=True,
             text=True,
-            timeout=_HELPER_TIMEOUT_S,
+            timeout=_HELPER_TIMEOUT_S if timeout is None else timeout,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -434,17 +442,24 @@ class HostNetworkGuard:
         helper_image: str | None = None,
         run: Runner | None = None,
         spawn: Spawn | None = None,
+        remove: Remove | None = None,
     ) -> None:
         self.network = network
         self.docker_binary = docker_binary
         self._helper_image = helper_image
         self._run = run or _run
-        #: The helper kept running between steps. A guard given a runner of its
-        #: own runs every step on disposable helpers unless it is given
-        #: ``spawn`` as well, so a stand-in for Docker never meets a real one.
-        if spawn is None and run is None:
-            spawn = spawn_helper
-        self._long_lived = LongLivedHelper(spawn) if spawn is not None else None
+        #: The helper kept running between steps, for a process that outlives
+        #: them: only a guard given ``spawn`` has one. ``remove`` takes a helper
+        #: that failed a step out of the way before the step runs again.
+        self._long_lived = (
+            LongLivedHelper(
+                spawn,
+                remove or functools.partial(network_guard_helper.remove_helper, docker_binary),
+                name_prefix=f"{network.table}-helper",
+            )
+            if spawn is not None
+            else None
+        )
         #: Held across every helper run and the record kept of it, so kernel
         #: writes and what this guard remembers of them never interleave. An
         #: install, a read-back and what is concluded from them hold it
@@ -1035,7 +1050,8 @@ class HostNetworkGuard:
 
         On the long-lived helper when it is free. A step it cannot take, and
         any doubt about its answer, runs on a disposable helper, whose answer
-        is read and checked exactly as every answer was before.
+        is read and checked exactly as every answer was before. Either way the
+        step has the one minute a disposable helper always had.
         """
         request: dict[str, Any] = {"reads": reads}
         if install is not None:
@@ -1051,16 +1067,26 @@ class HostNetworkGuard:
                 result, len(reads), relays=relays is not None, ssh_targets=ssh_targets is not None
             )
 
-        if self._long_lived is not None:
+        if self._long_lived is None:
+            return read(self._helper("python3", ["-c", _NFT_BATCH], stdin=stdin, label="nft"))
+        deadline = time.monotonic() + _HELPER_TIMEOUT_S
+        try:
             served = self._long_lived.run(
                 self._command("python3", ["-c", _NFT_SERVE], interactive=True),
                 stdin,
-                timeout=_HELPER_TIMEOUT_S,
+                deadline=deadline,
                 accept=read,
             )
-            if served is not None:
-                return served
-        return read(self._helper("python3", ["-c", _NFT_BATCH], stdin=stdin, label="nft"))
+        except HelperStuck as exc:
+            raise NetworkGuardError(f"network guard helper could not run: {exc}") from exc
+        if served is not None:
+            return served
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise NetworkGuardError("network guard helper could not run: no time was left")
+        return read(
+            self._helper("python3", ["-c", _NFT_BATCH], stdin=stdin, label="nft", timeout=left)
+        )
 
     @staticmethod
     def _read_batch(
@@ -1094,11 +1120,16 @@ class HostNetworkGuard:
         stdin: str | None = None,
         net_admin: bool = True,
         label: str | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = self._command(
             entrypoint, args, interactive=stdin is not None, net_admin=net_admin
         )
-        result = self._run(command, stdin)
+        # ``timeout`` is what a long-lived helper left of the step's minute.
+        if timeout is None:
+            result = self._run(command, stdin)
+        else:
+            result = self._run(command, stdin, timeout=timeout)
         if result.returncode != 0:
             raise NetworkGuardError(
                 f"{label or ' '.join([entrypoint, *args[:4]])} failed: "

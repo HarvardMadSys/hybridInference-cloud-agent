@@ -1450,7 +1450,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     session_idle_timeout_s: float | None = None,
 ) -> FastAPI:
     """Create the internal sandbox manager app with injectable dependencies for tests."""
-    sandbox = backend or build_backend_from_env()
+    sandbox = backend or build_backend_from_env(keep_network_helper=True)
     environment_preparation = EnvironmentPreparation()
     expected_token = token if token is not None else manager_env("AGENT_SANDBOX_MANAGER_TOKEN", "")
     idle_ttl_s = (
