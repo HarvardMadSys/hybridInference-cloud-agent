@@ -1,4 +1,5 @@
 import { accountsZh } from './accounts';
+import { landingZh } from './landing';
 import { composerZhCN } from './composer';
 import { modelSelectionZhCN } from './modelSelection';
 import { usageZhCN } from './usage';
@@ -18,6 +19,7 @@ import type { TranslationKey } from './en';
  */
 export const zhCN: Record<TranslationKey, string> = {
   ...accountsZh,
+  ...landingZh,
   'environment.title': '环境',
   'environment.configure': '配置环境',
   'environment.sectionTitle': '环境',

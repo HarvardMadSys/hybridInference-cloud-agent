@@ -8,7 +8,13 @@ import { useCallback, useState, type FormEvent } from 'react';
 import { useT } from '@/components/providers/LocaleProvider';
 import { signupPhone, type SignupDetails } from '@/lib/api/accounts';
 import { getErrorMessage } from '@/lib/utils/errors';
-import { AccountField, AccountFrame, AccountNotice, BackToLogin } from './AccountFrame';
+import {
+  AccountField,
+  AccountFrame,
+  AccountNotice,
+  AccountSteps,
+  BackToLogin,
+} from './AccountFrame';
 import { PhoneCodeFields } from './PhoneCodeFields';
 import { SignupEmailForm } from './SignupForm';
 import { TermsConsent } from './TermsConsent';
@@ -139,6 +145,14 @@ function SignupClosed() {
   );
 }
 
+/** Account, then the email check when the deployment asks for one, then access. */
+function SignupSteps({ verify, sent }: { verify: boolean; sent: boolean }) {
+  const t = useT();
+  const steps = [t('signup.stepAccount'), t('signup.stepAccess')];
+  if (verify) steps.splice(1, 0, t('signup.stepVerify'));
+  return <AccountSteps steps={steps} current={sent ? 1 : 0} />;
+}
+
 export function SignupPage() {
   const t = useT();
   const options = useAuthOptions();
@@ -174,6 +188,7 @@ export function SignupPage() {
         sent && options.require_email_verification ? 'account.checkEmail' : 'account.signup',
       )}
       description={t('signup.description')}
+      steps={<SignupSteps verify={options.require_email_verification} sent={sent} />}
     >
       <div className="space-y-4">
         <AccountField id="user-name" label={t('signup.name')}>
