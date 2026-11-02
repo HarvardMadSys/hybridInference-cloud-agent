@@ -36,9 +36,9 @@ CHECK_INTERVAL_S = 0.05
 #: progress report cannot cut it short; then the service gets the stream.
 SCRIPT_OUTPUT_WAIT_S = 1.0
 #: How long the rest of a killed phase's stream may take to reach its end,
-#: time spent consuming it aside. All the script wrote was already in the
-#: stream, and nothing writes once the phase is reaped, so the end comes at
-#: once.
+#: time spent consuming it aside, and never past the deadline. All the script
+#: wrote was already in the stream, and nothing writes once the phase is
+#: reaped, so the end comes at once.
 REST_OUTPUT_S = 5.0
 #: How reading a successful start's output up to its byte count ended.
 _ENDED, _COMPLETE, _CUT = "ended", "complete", "cut"
@@ -126,19 +126,29 @@ class _Output:
             self.finished = True
             self.show(self.redactor.feed(self.decoder.decode(b"", final=True), final=True))
 
+    def end_at_count(self) -> None:
+        """End the script's output at its byte count, keeping what may begin a secret.
+
+        A character the count cut is shown. What the redactor holds back is
+        not: the bytes past the count are a service's, and a secret the
+        counted bytes began may run on into them, unmasked if its start were
+        shown alone.
+        """
+        self.show(self.redactor.feed(self.decoder.decode(b"", final=True)))
+
     def show(self, safe: str) -> None:
         """Keep and report text that is already masked."""
         self.tail.append(safe)
         if self.on_output and safe:
             self.on_output(safe)
 
-    def read_rest(self) -> None:
-        """Consume what a reaped phase's stream still holds, to its end."""
+    def read_rest(self, deadline: float) -> None:
+        """Consume what a reaped phase's stream still holds, to its end or the deadline."""
         waited = 0.0
-        while waited < REST_OUTPUT_S:
+        while waited < REST_OUTPUT_S and (left := deadline - time.monotonic()) > 0:
             asked = time.monotonic()
             try:
-                data = self.pump.get(timeout=REST_OUTPUT_S - waited)
+                data = self.pump.get(timeout=min(left, REST_OUTPUT_S - waited))
             except queue.Empty:
                 return
             waited += time.monotonic() - asked
@@ -197,7 +207,7 @@ def _hand_over(
     if code != 0 or not start:
         process.kill()
         output.reaped = True
-        output.read_rest()
+        output.read_rest(deadline)
         return
     count = getattr(process, "script_bytes", None)
     try:
@@ -205,8 +215,7 @@ def _hand_over(
         if ended == _ENDED:
             return
         if ended == _COMPLETE:
-            # The script's output is whole, so nothing it holds back can grow.
-            output.finish()
+            output.end_at_count()
     except BaseException:
         # The service's pipe must keep flowing whatever reporting did.
         output.hand_over()

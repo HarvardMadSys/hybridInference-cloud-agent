@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host import environment_process
+from cloud_agent_host.environment_preparation import run_step
 from cloud_agent_host.environment_process import EnvironmentProcess
 from cloud_agent_host.sandbox import SandboxError, _PopenProcess
 from cloud_agent_host.setup import SCRIPT_OUTPUT_WAIT_S, run_setup
@@ -53,18 +54,31 @@ class _Script:
     been read, ``last``: bytes the helper forwarded before writing the
     receipt, still crossing the exec, so a kill no longer stops them. The
     receipt counts all of them. A service may write after them, silent,
-    chatty or flooding, until the phase's kill, its first output in the same
-    chunk as the script's last bytes.
+    chatty or flooding, until the phase's kill, or on past it when it
+    ``escapes`` the reap; ``after`` and its first output share a chunk with the
+    script's last bytes.
     """
 
     def __init__(
-        self, *, code, last, service=None, in_flight=_IN_FLIGHT_S, runs_for=0.0, missing=0
+        self,
+        *,
+        code,
+        last,
+        service=None,
+        after=b"",
+        in_flight=_IN_FLIGHT_S,
+        runs_for=0.0,
+        missing=0,
+        escapes=False,
     ):
         self.code = code
         self.printed = [b"working\n"]
         pieces = last if isinstance(last, list) else [last]
         self.last = [piece.encode() if isinstance(piece, str) else piece for piece in pieces]
         self.service = service
+        self.after = after
+        self.escapes = escapes
+        self.done = threading.Event()
         self.in_flight = in_flight
         self.runs_for = runs_for
         # The receipt counts bytes that never arrive.
@@ -86,12 +100,13 @@ class _Script:
         time.sleep(self.in_flight)
         self.reaped_first = self.killed.is_set()
         yield from self.last[:-1]
-        if self.killed.is_set():
+        if self.killed.is_set() and not self.escapes:
             yield self.last[-1]
             return
-        yield self.last[-1] + _SERVICE.get(self.service, b"")
+        yield self.last[-1] + self.after + _SERVICE.get(self.service, b"")
         pause = {"chatty": 0.02, "flood": 0}.get(self.service, 0.5)
-        while self.service and not self.killed.wait(pause):
+        ends = self.done if self.escapes else self.killed
+        while self.service and not ends.wait(pause):
             if self.service != "silent":
                 self.service_chunks += 1
                 yield _SERVICE[self.service]
@@ -136,6 +151,7 @@ def scripts():
     # Ends the stream of a service the test handed over.
     for script in made:
         script.kill()
+        script.done.set()
 
 
 def _run(script, phase, output, *, on_output=None, timeout_s=60, stop=None, cancel=None):
@@ -166,15 +182,14 @@ def _run(script, phase, output, *, on_output=None, timeout_s=60, stop=None, canc
 
 @pytest.mark.parametrize("service", [None, "silent", "chatty", "flood"])
 def test_a_start_scripts_output_ends_exactly_where_its_receipt_counts(scripts, service):
-    # It ends on what could begin a mask marker: the script's output is whole
-    # there, so even the "[" held back for it is shown.
-    script = scripts(code=0, last=f"listening with {_SECRET} on [", service=service)
+    script = scripts(code=0, last=f"listening with {_SECRET}\n", service=service)
     output = []
 
     result, handed_over = _run(script, "start", output)
 
     assert result.exit_code == 0
-    assert "".join(output) == "working\nlistening with [secret:TOKEN] on ["
+    # A secret wholly inside the count is masked; nothing past it is kept.
+    assert "".join(output) == "working\nlistening with [secret:TOKEN]\n"
     # A started service keeps running, and gets its stream once the counted
     # bytes have crossed the exec, not after a second of its own output.
     assert not script.killed.is_set()
@@ -194,6 +209,68 @@ def test_the_split_counts_raw_bytes_before_decoding_and_masking(scripts):
 
     assert result.exit_code == 0
     assert "".join(output) == "working héllo é � [secret:TOKEN] ✓\n"
+
+
+class _Environment:
+    """What run_step reads of a bound environment."""
+
+    def values(self, _which):
+        return {}
+
+    def secrets(self):
+        return {"TOKEN": _SECRET}
+
+
+def test_a_secret_split_at_the_count_shows_no_part_of_it(scripts):
+    # A block-buffered service wrote the start of a secret before the script
+    # ended silently, so the count takes it in; the rest came with its next
+    # flush, past the count.
+    script = scripts(code=0, last=b"", service="chatty", after=b"cret-123456@db\n")
+    script.printed = [b"ready\n", b"service: db=postgres://app:demo-se"]
+    script.counted = len(b"ready\nservice: db=postgres://app:demo-se")
+    step = {"phase": "start", "state": "running", "output": ""}
+    reported = []
+
+    result = run_step(
+        _ScriptBackend(script),
+        _Environment(),
+        step,
+        script="./serve",
+        values="runtime",
+        timeout_s=60,
+        on_output=lambda step: reported.append(step["output"]),
+        cancel=None,
+    )
+
+    assert result.exit_code == 0
+    # Not one character of it reaches the durable step output or a report.
+    assert step["output"] == "ready\nservice: db=postgres://app:"
+    assert reported
+    assert all("demo" not in output for output in reported)
+
+
+def test_a_character_cut_at_the_count_is_shown_as_one_that_could_not_be_read(scripts):
+    # The script's last byte begins a character the service's first ends.
+    script = scripts(code=0, last=b"caf\xc3", service="chatty", after=b"\xa9 service\n")
+    output = []
+
+    result, _ = _run(script, "start", output)
+
+    assert result.exit_code == 0
+    assert "".join(output) == "working\ncaf\ufffd"
+
+
+def test_the_rest_of_a_reaped_phase_is_read_no_longer_than_its_deadline(scripts):
+    # A writer the reap did not reach keeps the stream flowing.
+    script = scripts(code=1, last="error: it failed\n", service="chatty", escapes=True)
+    output = []
+    started = time.monotonic()
+
+    result, _ = _run(script, "setup", output, timeout_s=1.0)
+
+    assert result.exit_code == 1
+    assert time.monotonic() - started < 1.0 + 0.3
+    assert "working\nerror: it failed\n" in "".join(output)
 
 
 def test_a_start_whose_service_output_was_read_first_hands_over_at_once(scripts):
