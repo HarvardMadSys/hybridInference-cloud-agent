@@ -187,11 +187,11 @@ msgstr "新增一处创建任务的调用"
 
 #: ../developer/development.md
 msgid ""
-"`cloud_agent/application/job_admission.py`; `api/service_jobs.py` is an "
-"existing caller."
+"`cloud_agent/application/job_admission.py`; `api/jobs.py` is an existing "
+"caller."
 msgstr ""
 "`cloud_agent/application/job_admission.py`；可以参考已有的调用方 "
-"`api/service_jobs.py`。"
+"`api/jobs.py`。"
 
 #: ../developer/development.md
 msgid "Workspace files, terminals, or Git views"

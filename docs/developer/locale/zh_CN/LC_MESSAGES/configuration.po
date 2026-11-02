@@ -2579,15 +2579,10 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"Attempt lease horizon, default 120 seconds. Inference grant TTL is "
-"independent: `grants.GRANT_TTL_S = RENEWAL_INTERVAL_S × "
-"RENEWAL_HEADROOM_PASSES = 30 × 4 = 120 seconds`. Changing the lease "
-"horizon does not change grant lifetime. See [lease "
+"Attempt lease horizon, default 120 seconds. See [lease "
 "troubleshooting](docs/developer/runner-lease-troubleshooting.md)."
 msgstr ""
-"attempt 租约的时长，默认 120 秒。推理授权的 TTL 和它无关：`grants.GRANT_TTL_S = "
-"RENEWAL_INTERVAL_S × RENEWAL_HEADROOM_PASSES = 30 × 4 = 120 "
-"seconds`。改租约时长不会改变授权的有效期。见[租约问题排查](docs/developer/runner-lease-"
+"attempt 租约的时长，默认 120 秒。见[租约问题排查](docs/developer/runner-lease-"
 "troubleshooting.md)。"
 
 #: ../developer/configuration.md:1
