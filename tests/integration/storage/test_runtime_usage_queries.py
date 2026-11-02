@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -475,14 +476,21 @@ async def _run_at(db, store, created_at: datetime, *, user_id: str = "owner-one"
     return job
 
 
-async def test_an_owners_run_bounds_read_the_runs_the_cohort_selects(db, store):
-    """The bounds an all-time period starts from count exactly the cohort's runs."""
+async def test_batches_partition_exactly_the_runs_the_cohort_selects(db, store):
+    """Batches read every selected run once, in order, with its attempts' usage.
+
+    The first run an all-time range starts from is the cohort's own: a Fork's
+    copy and another owner's run are neither counted nor where it starts.
+    """
     day = datetime(2026, 9, 1, tzinfo=UTC)
     until = day + timedelta(days=3, hours=18)
     first = await _run_at(db, store, day + timedelta(hours=10))
-    await _run_at(db, store, day + timedelta(days=1, hours=8))
-    await _run_at(db, store, day + timedelta(days=1, hours=9))
-    await _run_at(db, store, day + timedelta(days=2, hours=12))
+    others = [
+        await _run_at(db, store, day + timedelta(days=1, hours=8)),
+        await _run_at(db, store, day + timedelta(days=1, hours=9)),
+        await _run_at(db, store, day + timedelta(days=2, hours=12)),
+    ]
+    attempt_id = await _attempt(db, first, events=[("message", report("msg-first"))])
     copy = await _run_at(db, store, day - timedelta(days=5))
     async with db.acquire() as conn:
         await conn.execute(
@@ -491,21 +499,37 @@ async def test_an_owners_run_bounds_read_the_runs_the_cohort_selects(db, store):
     await _run_at(db, store, day - timedelta(days=9), user_id="owner-two")
     await _run_at(db, store, until)
 
-    bounds = store.admin_usage.owner_run_bounds
-    assert await bounds("owner-one", until=until, max_runs=10) == (day + timedelta(hours=10), None)
-    assert await bounds("nobody", until=until, max_runs=10) == (None, None)
-    earliest, overflow = await bounds("owner-one", until=until, max_runs=2)
-    assert earliest == day + timedelta(hours=10)
-    assert overflow == day + timedelta(days=1, hours=8)
+    assert await store.admin_usage.first_run_at("owner-one") == day + timedelta(hours=10)
+    assert await store.admin_usage.first_run_at("nobody") is None
 
-    async def cohort(since: datetime, max_runs: int) -> list[dict]:
-        rows, _ = await _selection(
-            store, since=since, until=until, user_id="owner-one", max_runs=max_runs
-        )
-        return rows
+    async def batches(**changes) -> list[tuple[list[dict], list[dict]]]:
+        arguments = {
+            "since": day - timedelta(days=30),
+            "until": until,
+            "user_id": "owner-one",
+            "thread_ids": None,
+            "max_runs": 2,
+            "max_attempts": MAX_USAGE_ATTEMPTS,
+            "deadline": time.monotonic() + 30,
+            **changes,
+        }
+        return [batch async for batch in store.admin_usage.batched_selection(**arguments)]
 
+    read = await batches()
+    assert [len(cohort) for cohort, _ in read] == [2, 2]
+    assert [row["id"] for cohort, _ in read for row in cohort] == [
+        first["id"],
+        *(job["id"] for job in others),
+    ]
+    (rows,) = [rows for _, rows in read if rows]
+    assert [(row["job_id"], row["attempt_id"], row["saw_usage"]) for row in rows] == [
+        (first["id"], attempt_id, True)
+    ]
+    assert rows[0]["output_tokens"] == 10
+    only = await batches(thread_ids=[others[0]["thread_id"]])
+    assert [row["id"] for cohort, _ in only for row in cohort] == [others[0]["id"]]
+    # Too many attempts in even the smallest batch is refused, never trimmed.
     with pytest.raises(admin_usage_queries.UsageQueryTooLarge):
-        await cohort(day + timedelta(days=1), 2)
-    assert len(await cohort(day + timedelta(days=2), 2)) == 1
-    assert (await bounds("owner-one", until=until, max_runs=3))[1] == day + timedelta(hours=10)
-    assert len(await cohort(day + timedelta(days=1), 3)) == 3
+        await batches(max_attempts=0)
+    with pytest.raises(admin_usage_queries.UsageQueryUnavailable):
+        await batches(deadline=time.monotonic() - 1)

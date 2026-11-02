@@ -92,7 +92,7 @@ export function GoalBar({
       aria-label={t('goal.region')}
       className={`bg-gray-50/80 px-3 py-2 text-gray-600 dark:bg-gray-950/40 dark:text-gray-300 ${
         attached
-          ? 'rounded-t-xl border-b border-gray-200/80 dark:border-white/10'
+          ? 'rounded-t-2xl border-b border-gray-200/80 dark:border-white/10'
           : 'mb-2 rounded-xl border border-gray-200 dark:border-white/10'
       }`}
     >

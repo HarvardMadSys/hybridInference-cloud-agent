@@ -443,8 +443,8 @@ verification, key handling and rollout requirements, and
 
 ## Data model
 
-Migration `0107_local_accounts`, after `0106_user_model_connections`, adds the
-tables; `0108_local_account_parity` splits sign-in identities from passwords
+Migration `0108_local_accounts`, after `0107_attempt_context_profiles`, adds the
+tables; `0109_local_account_parity` splits sign-in identities from passwords
 (carrying every account over) and adds the rest.
 
 | Table | Holds |

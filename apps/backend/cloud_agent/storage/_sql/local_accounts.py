@@ -9,7 +9,7 @@ locked in id order.
 
 Whether an account's identity is verified, may sign in or may use Agent is
 read from the view ``agent_local_account_access`` (migration
-``0108_local_account_parity``), which every SQL gate shares. No statement
+``0109_local_account_parity``), which every SQL gate shares. No statement
 here derives it again from one identity kind.
 """
 

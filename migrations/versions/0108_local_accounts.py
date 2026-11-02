@@ -7,14 +7,14 @@ startup keeps one database from serving both identity sources.
 None of the columns is named ``user_id``: the namespace guard discovers owner
 data by that column name, and an account record is not owner data.
 
-It follows ``0106_user_model_connections``: the two features were developed
+It follows ``0107_attempt_context_profiles``: the features were developed
 in parallel and this one was renumbered when they were integrated.
 """
 
 from alembic import op
 
-revision = "0107_local_accounts"
-down_revision = "0106_user_model_connections"
+revision = "0108_local_accounts"
+down_revision = "0107_attempt_context_profiles"
 branch_labels = None
 depends_on = None
 

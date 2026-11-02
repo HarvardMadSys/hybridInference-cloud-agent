@@ -47,6 +47,7 @@ const WORKSPACE_JOB_FIELDS = [
   'model',
   'reasoningEffort',
   'runtime',
+  'conversationState',
 ] as const;
 
 type WorkspaceJob = Pick<AgentJob, (typeof WORKSPACE_JOB_FIELDS)[number]>;

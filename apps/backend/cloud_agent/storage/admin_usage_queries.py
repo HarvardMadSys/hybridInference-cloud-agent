@@ -13,8 +13,8 @@ measurement script exercises exactly what the route runs.
 
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
@@ -26,6 +26,7 @@ from cloud_agent.storage._sql.attempt_rollups import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from datetime import datetime
 
     import asyncpg
 
@@ -39,7 +40,7 @@ logger = get_logger(__name__)
 #: also produce a filter link the database cannot match. Rows are only as wide
 #: as the stored identity, and the response budget bounds the total.
 _JOB_COLUMNS = """
-    j.id, j.user_id, j.model, j.runtime, t.repo, j.state, j.created_at
+    j.id, j.user_id, j.thread_id, j.model, j.runtime, t.repo, j.state, j.created_at
 """
 
 _FILTERS_SQL = """
@@ -51,10 +52,8 @@ _FILTERS_SQL = """
 
 #: The runs a selection counts, created in ``[$1, $2)`` and matching filters
 #: ``$3`` to ``$6``. A Fork's copies of its source's turns are left out. They
-#: are history copied for display, with no attempt and no ledger reference:
-#: counted, each was one more run, its usage unavailable, beside the run it
-#: copies. The cohort and the run bounds share this text, so a period the
-#: bounds narrow to the run budget is one the cohort then fits.
+#: are history copied for display, with no attempt of their own: counted, each
+#: was one more run, its usage unavailable, beside the run it copies.
 _SELECTED_RUNS_SQL = f"""
     FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id
     WHERE j.created_at >= $1 AND j.created_at < $2
@@ -69,20 +68,24 @@ _COHORT_SQL = f"""
     LIMIT $7
 """
 
-#: When the first selected run was created.
-_EARLIEST_RUN_SQL = f"""
-    SELECT MIN(j.created_at)
+#: The same cohort, read in ``(created_at, id)`` order after a keyset and
+#: optionally narrowed to some of the owner's conversations. A batched read
+#: walks a history too large for one selection with it, every batch under the
+#: same predicate as the single read, so the two cannot select different runs.
+_COHORT_BATCH_SQL = f"""
+    SELECT {_JOB_COLUMNS}
     {_SELECTED_RUNS_SQL}
+      AND ($8::text[] IS NULL OR j.thread_id = ANY($8::text[]))
+      AND ($9::timestamptz IS NULL OR (j.created_at, j.id) > ($9::timestamptz, $10::text))
+    ORDER BY j.created_at, j.id
+    LIMIT $7
 """
 
-#: When the newest selected run past the first ``$7`` was created, counting
-#: back from ``$2``: every run created after it fits a budget of ``$7`` runs.
-_OVERFLOW_RUN_SQL = f"""
-    SELECT j.created_at
-    {_SELECTED_RUNS_SQL}
-    ORDER BY j.created_at DESC
-    OFFSET $7
-    LIMIT 1
+#: The earliest run the cohort predicate selects for one owner.
+_FIRST_RUN_SQL = """
+    SELECT MIN(j.created_at)
+    FROM agent_jobs j
+    WHERE j.user_id = $1 AND j.fork_source_job_id IS NULL
 """
 
 #: How many attempts the selection holds, counted before any is read.
@@ -115,16 +118,17 @@ _ATTEMPT_ROLLUPS_SQL = """
 """
 
 
-#: The lower bound of a selection that has none: every stored run is after it.
-_BEGINNING = datetime.min.replace(tzinfo=UTC)
-
-
 class UsageQueryTooLarge(Exception):
     """The selection exceeds a published bound and is refused as a whole."""
 
 
 class UsageQueryUnavailable(Exception):
     """The selection could not be read within its bounds."""
+
+
+#: The smallest batch a batched read shrinks to before refusing: a hundred
+#: runs over the attempt budget is a pathological history, not a large one.
+MIN_BATCH_RUNS = 100
 
 
 class AdminUsageQueries:
@@ -203,33 +207,6 @@ class AdminUsageQueries:
             await self._keep_rollups(stale, rollups)
         return cohort, _attempt_rows(attempts, rollups)
 
-    async def owner_run_bounds(
-        self, user_id: str, *, until: datetime, max_runs: int
-    ) -> tuple[datetime | None, datetime | None]:
-        """Where an owner's all-time period can start, from the runs a selection counts.
-
-        Both statements read the same runs the cohort selects, through the same
-        predicate, inside one read-only repeatable-read transaction.
-
-        Returns:
-            When the owner's first run before ``until`` was created, and when
-            the newest run past the newest ``max_runs`` was created. Each is
-            None when there is no such run: no runs at all, or all of them fit.
-
-        Raises:
-            UsageQueryUnavailable: If a statement fails or exceeds its timeout.
-        """
-        filters = (user_id, None, None, None)
-        try:
-            async with self._read() as conn:
-                earliest = await conn.fetchval(_EARLIEST_RUN_SQL, _BEGINNING, until, *filters)
-                overflow = await conn.fetchval(
-                    _OVERFLOW_RUN_SQL, _BEGINNING, until, *filters, max_runs
-                )
-        except Exception as error:
-            raise UsageQueryUnavailable from error
-        return earliest, overflow
-
     async def _cohort(
         self,
         conn: asyncpg.Connection,
@@ -292,6 +269,95 @@ class AdminUsageQueries:
         if stale:
             rollups.extend(await refresh_attempt_rollups(conn, stale))
         return attempts, rollups, stale
+
+    async def first_run_at(self, user_id: str) -> datetime | None:
+        """When the owner's first run the cohort can select was created."""
+        try:
+            async with self._read() as conn:
+                return await conn.fetchval(_FIRST_RUN_SQL, user_id)
+        except Exception as error:
+            raise UsageQueryUnavailable from error
+
+    async def batched_selection(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        user_id: str,
+        thread_ids: list[str] | None,
+        max_runs: int,
+        max_attempts: int,
+        deadline: float,
+    ) -> AsyncIterator[tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+        """Yield one owner's selection as consecutive bounded batches.
+
+        Every batch is read in the same read-only repeatable-read transaction,
+        so the batches together describe one instant exactly as a single
+        selection would. A batch holds at most ``max_runs`` runs and
+        ``max_attempts`` attempts; one that would not is retried at half the
+        size, down to :data:`MIN_BATCH_RUNS`. Nothing is skipped: the batches
+        partition every run the predicate selects. Rollups reduced on the way
+        are stored once the read is over, as :meth:`selection` stores them.
+
+        Yields:
+            Each batch's cohort rows and their attempt rows, shaped as
+            :meth:`selection` returns them.
+
+        Raises:
+            UsageQueryTooLarge: If even the smallest batch exceeds a budget.
+            UsageQueryUnavailable: If a statement fails, times out, or the
+                whole read passes ``deadline`` (a ``time.monotonic`` instant).
+        """
+        stale: list[dict[str, Any]] = []
+        refreshed: list[AttemptStatsRollup] = []
+        try:
+            async with self._read() as conn:
+                after: tuple[datetime, str] | None = None
+                size = max_runs
+                while True:
+                    if time.monotonic() > deadline:
+                        raise UsageQueryUnavailable
+                    cohort = [
+                        dict(row)
+                        for row in await conn.fetch(
+                            _COHORT_BATCH_SQL,
+                            since,
+                            until,
+                            user_id,
+                            None,
+                            None,
+                            None,
+                            size,
+                            thread_ids,
+                            after[0] if after else None,
+                            after[1] if after else None,
+                        )
+                    ]
+                    if not cohort:
+                        break
+                    try:
+                        attempts, rollups, batch_stale = await self._attempt_usage(
+                            conn, cohort=cohort, max_attempts=max_attempts
+                        )
+                    except UsageQueryTooLarge:
+                        if size <= MIN_BATCH_RUNS:
+                            raise
+                        size = max(MIN_BATCH_RUNS, size // 2)
+                        continue
+                    if batch_stale:
+                        ids = {target["attempt_id"] for target in batch_stale}
+                        stale.extend(batch_stale)
+                        refreshed.extend(rollup for rollup in rollups if rollup.attempt_id in ids)
+                    yield cohort, _attempt_rows(attempts, rollups)
+                    if len(cohort) < size:
+                        break
+                    after = (cohort[-1]["created_at"], cohort[-1]["id"])
+        except (UsageQueryTooLarge, UsageQueryUnavailable):
+            raise
+        except Exception as error:
+            raise UsageQueryUnavailable from error
+        if stale:
+            await self._keep_rollups(stale, refreshed)
 
     async def _keep_rollups(
         self, stale: list[dict[str, Any]], rollups: list[AttemptStatsRollup]

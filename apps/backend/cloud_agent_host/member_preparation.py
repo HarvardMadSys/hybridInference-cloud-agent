@@ -35,7 +35,7 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 
 if TYPE_CHECKING:
     import subprocess
@@ -184,9 +184,14 @@ class MemberPreparation:
         """Each step's outcome, up to the one that stopped the exec."""
         if any(step.reaps for step in steps):
             self._manager.ensure_member_process_reaper(self._spec)
-        if len(steps) == 1:
-            # Alone, a step is the exec it always was.
-            (step,) = steps
+        # Kata's exec transport can close its output when interactive stdin
+        # closes, losing reports emitted after the first child exits, even
+        # though the runner finishes successfully. Execute the queue as
+        # individual commands there: commands without input get a real EOF
+        # without an interactive attachment, as before batching was added.
+        backend = getattr(self._manager, "backend", None)
+        if len(steps) == 1 or getattr(backend, "runtime", None) == KATA_RUNTIME:
+            step = steps[0]
             result = self._exec(list(step.argv), step.timeout_s, step.input_bytes)
             return [_Outcome(result.returncode, result.stderr)]
         result = self._exec(
@@ -197,8 +202,13 @@ class MemberPreparation:
         outcomes = _outcomes(result.stdout, len(steps))
         stopped = bool(outcomes) and outcomes[-1].status != 0 and not steps[len(outcomes) - 1].soft
         if len(outcomes) < len(steps) and not stopped:
-            # The runner ended inside the next step: that step failed as the exec did.
-            outcomes.append(_Outcome(result.returncode or 1, result.stderr))
+            if result.returncode == 0:
+                raise SandboxError(
+                    "member preparation returned an incomplete report "
+                    f"({len(outcomes)} of {len(steps)} steps); outcome is unknown"
+                )
+            # The runner failed inside the next step; attribute the failure there.
+            outcomes.append(_Outcome(result.returncode, result.stderr))
         return outcomes
 
     def _exec(

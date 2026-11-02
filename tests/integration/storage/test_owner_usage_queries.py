@@ -14,6 +14,7 @@ from tests.unit.test_sandbox_resource_protocol import sample
 
 from cloud_agent.admin_observability import decode_cursor
 from cloud_agent.owner_usage import CONTAINER_CURSOR_SCOPE, OwnerContainerCursor
+from cloud_agent.usage_range import buckets
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -289,6 +290,63 @@ async def test_running_time_per_utc_day_comes_from_recorded_transitions(db, stor
     assert [day.running_seconds for day in history.days] == pytest.approx([3660.0, 3600.0, 3600.0])
     assert history.totals.running_seconds == pytest.approx(10860.0)
     assert history.totals.measured_seconds == 0
+
+
+async def test_a_day_nothing_ran_counts_no_running_time(db, store):
+    """An idle day joins to no span; it is zero, not the whole day.
+
+    Postgres's LEAST and GREATEST skip NULLs, so an unfiltered sum over the
+    empty join counted every idle bucket as running from start to end.
+    """
+    job = await _create_job(store)
+    await container(db, job, "asbx_idle", created_at=DAY - timedelta(days=2))
+    await events(
+        db,
+        "asbx_idle",
+        (DAY + timedelta(hours=1), "running"),
+        (DAY + timedelta(hours=2), "stopped"),
+    )
+    history = await store.owner_usage.resource_history("user-1", buckets=days(DAY, 3))
+    assert [day.running_seconds for day in history.days] == pytest.approx([3600.0, 0.0, 0.0])
+    nobody = await store.owner_usage.resource_history(
+        "user-without-containers", buckets=days(DAY, 2)
+    )
+    assert [day.running_seconds for day in nobody.days] == [0.0, 0.0]
+
+
+async def test_a_long_range_sums_whole_weeks_and_months_on_the_server(db, store):
+    job = await _create_job(store)
+    await container(db, job, "asbx_weeks", created_at=DAY - timedelta(days=30))
+    await events(
+        db,
+        "asbx_weeks",
+        (DAY + timedelta(hours=1), "running"),
+        (DAY + timedelta(hours=3), "stopped"),
+        (DAY + timedelta(days=8, hours=1), "running"),
+        (DAY + timedelta(days=8, hours=2), "stopped"),
+    )
+    async with db.acquire() as conn:
+        await conn.executemany(
+            """INSERT INTO agent_sandbox_usage_days
+               (sandbox_id, user_id, day, measured_seconds, cpu_core_seconds, memory_byte_seconds)
+               VALUES ($1, 'user-1', $2, $3, $3, $3)""",
+            [
+                ("asbx_weeks", DAY.date(), 100.0),
+                ("asbx_weeks", (DAY + timedelta(days=1)).date(), 20.0),
+                ("asbx_weeks", (DAY + timedelta(days=8)).date(), 7.0),
+            ],
+        )
+    since, until = DAY - timedelta(days=3), DAY + timedelta(days=20)
+    weekly = buckets(since, until, "week")
+    history = await store.owner_usage.resource_history("user-1", buckets=weekly)
+    assert sum(day.running_seconds for day in history.days) == pytest.approx(3 * 3600.0)
+    assert sum(day.measured_seconds for day in history.days) == pytest.approx(127.0)
+    assert len([day for day in history.days if day.running_seconds > 0]) == 2
+    monthly = await store.owner_usage.resource_history(
+        "user-1", buckets=buckets(since, until, "month")
+    )
+    assert monthly.totals.measured_seconds == pytest.approx(127.0)
+    assert monthly.totals.running_seconds == pytest.approx(3 * 3600.0)
 
 
 async def test_a_container_still_running_counts_until_the_window_ends(db, store):

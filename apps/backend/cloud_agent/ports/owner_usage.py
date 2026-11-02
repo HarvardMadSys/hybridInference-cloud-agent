@@ -28,3 +28,7 @@ class OwnerUsageQueries(Protocol):
     ) -> OwnerResourceHistory:
         """Running time and measured CPU and memory for each UTC day bucket."""
         ...
+
+    async def first_record_at(self, user_id: str) -> datetime | None:
+        """When the owner's earliest retained run or container was created."""
+        ...

@@ -9,10 +9,11 @@ import {
   type RunTab,
   type StepTab,
 } from '../trajectoryInspectorTabs';
-import { buildTrajectorySteps, turnContextFromJobs } from '../trajectorySteps';
+import { buildTrajectorySteps, turnContextFromJobs, type TrajectoryStep } from '../trajectorySteps';
 import type { AgentEvent, AgentJob } from '../types';
 import { useResizablePane } from '../useResizablePane';
 import { useWorkspaceTabs, type SideChatTab, type WorkspaceTab } from '../useWorkspaceTabs';
+import { opensContext } from '../context/contextPresent';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
 import { KEYBOARD_INPUT_SELECTOR, matchesShortcut } from '@/lib/keyboardShortcuts';
 
@@ -30,6 +31,9 @@ const INSPECTOR_DEFAULT_WIDTH = 400;
 const INSPECTOR_MIN_WIDTH = 320;
 const INSPECTOR_MAX_WIDTH = 640;
 const TRAJECTORY_MIN_WIDTH = 420;
+
+/** The conversation's main views: its chat, its trajectory of steps, and its context. */
+export type ConversationView = 'chat' | 'trajectory' | 'context';
 
 /** A delegated agent, named by the turn that started it and its overview key. */
 export interface SubagentTarget {
@@ -53,7 +57,11 @@ export function useJobDetailPanels({
 }) {
   const [shortcuts] = useKeyboardShortcuts(userId);
   const workspaceScope = JSON.stringify([userId, job.threadId ?? job.id]);
-  const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
+  const [tab, setTab] = useState<ConversationView>('chat');
+  // Context insights link a conversation straight to its Context view.
+  useEffect(() => {
+    if (opensContext(window.location.search)) setTab('context');
+  }, []);
   // The subagent being read, if any. Chat shows its own conversation and the
   // trajectory its steps; without one, both show the whole conversation.
   const [subagent, setSubagent] = useState<SubagentTarget | null>(null);
@@ -326,6 +334,37 @@ export function useJobDetailPanels({
     [rememberInspectorTrigger, setWorkspaceOpen],
   );
 
+  // The Context view names a request by its stored event. Its step opens when
+  // this page has read that event; otherwise the turn it belongs to does.
+  const openContextPoint = useCallback(
+    ({ jobId, turnNo, eventId }: { jobId: string; turnNo: number; eventId: number | null }) => {
+      const holds = (candidate: TrajectoryStep) =>
+        candidate.jobId === jobId && candidate.sourceEvents.some((event) => event.id === eventId);
+      const step = eventId === null ? undefined : getTrajectorySteps().find(holds);
+      if (!step) {
+        openRun(jobId, turnNo);
+        return;
+      }
+      setTab('trajectory');
+      selectStep(step.key);
+    },
+    [getTrajectorySteps, openRun, selectStep],
+  );
+
+  // `/context` opens the main Context view, beside Chat and Trajectory. The
+  // workspace panel is left as it is: Context is not one of its tabs.
+  const openContextView = useCallback(() => setTab('context'), []);
+
+  // The trajectory's subagent filter, as its menu value: `[jobId, key]` or empty.
+  const setSubagentFilter = useCallback((value: string) => {
+    if (!value) {
+      setSubagent(null);
+      return;
+    }
+    const [jobId, key] = JSON.parse(value) as [string, string];
+    setSubagent({ jobId, key });
+  }, []);
+
   const selectInspectorTab = useCallback((next: StepTab | RunTab) => {
     setInspector((current) => {
       if (!current) return current;
@@ -379,12 +418,15 @@ export function useJobDetailPanels({
   }, [toggleWorkspace, shortcuts.workspace]);
 
   return {
+    /** The turn the panels were opened for. */
+    job,
     workspaceShortcut: shortcuts.workspace,
     workspaceScope,
     tab,
     setTab,
     subagent,
     setSubagent,
+    setSubagentFilter,
     workspaceOpen,
     setWorkspaceOpen,
     workspaceTabs,
@@ -420,6 +462,8 @@ export function useJobDetailPanels({
     toggleWorkspace,
     closeInspector,
     selectStep,
+    openContextPoint,
+    openContextView,
     inspectTranscriptEvent,
     openRun,
     selectInspectorTab,

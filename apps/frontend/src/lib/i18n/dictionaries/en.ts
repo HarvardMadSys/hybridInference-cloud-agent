@@ -1,4 +1,5 @@
 import { accountsEn } from './accounts';
+import { composerEn } from './composer';
 import { modelSelectionEn } from './modelSelection';
 import { usageEn } from './usage';
 
@@ -335,12 +336,6 @@ export const en = {
   'turnResults.backToWorkspace': 'Back to current workspace',
   'turnResults.recordedTurn': 'Recorded changes · Turn {number}',
   'turnResults.recordedHint': 'This view shows the changes recorded for this turn.',
-  'composer.send': 'Send',
-  'composer.sendHint': 'Send — Enter to send, Shift+Enter for a new line',
-  'composer.queue': 'Queue',
-  'composer.queueHint': 'Send after the current turn finishes',
-  'composer.steer': 'Steer now',
-  'composer.steerHint': 'Send into the current turn — {keys}',
   'deployment.version': 'Version',
   'deployment.date': 'Deployed',
   'deployment.unavailable': 'Not available',
@@ -669,6 +664,7 @@ export const en = {
   'settings.projectMemory.projectsError': 'Could not load repositories.',
   'settings.projectMemory.noProjects': 'Repositories you work in appear here.',
   'settings.projectMemory.confirmTitle': 'Clear the memory of {repo}?',
+  ...composerEn,
   ...modelSelectionEn,
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':

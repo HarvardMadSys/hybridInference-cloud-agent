@@ -450,6 +450,10 @@ describe('visible send modes', () => {
     });
     render(<JobDetail job={job()} userId="alice" />);
     await screen.findByRole('button', { name: 'Steer now' });
+    // The standing help sits in Prompt options; the box is still described by it.
+    expect(screen.getByLabelText('Add a follow-up')).toHaveAccessibleDescription(
+      /to add to this turn/,
+    );
     // The same model ID on another connection is another source, billed elsewhere.
     fireEvent.click(screen.getByLabelText('Model for this turn'));
     fireEvent.click(screen.getByRole('option', { name: 'qwen-test · Other' }));
@@ -457,6 +461,9 @@ describe('visible send modes', () => {
     expect(
       screen.getByText(/runs as the next turn instead of joining the running one/),
     ).toBeVisible();
+    expect(screen.getByLabelText('Add a follow-up')).toHaveAccessibleDescription(
+      /runs as the next turn instead of joining the running one/,
+    );
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'Use my key' } });
     fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });

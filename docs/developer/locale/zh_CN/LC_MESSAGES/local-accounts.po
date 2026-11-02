@@ -1228,12 +1228,12 @@ msgstr "数据模型"
 
 #: ../developer/local-accounts.md:446
 msgid ""
-"Migration `0107_local_accounts`, after `0106_user_model_connections`, "
-"adds the tables; `0108_local_account_parity` splits sign-in identities "
+"Migration `0108_local_accounts`, after `0107_attempt_context_profiles`, "
+"adds the tables; `0109_local_account_parity` splits sign-in identities "
 "from passwords (carrying every account over) and adds the rest."
 msgstr ""
-"迁移 `0107_local_accounts` 接在 `0106_user_model_connections` "
-"后面，新增这些表；`0108_local_account_parity` 把登录身份与密码拆开（保留所有账号），并新增其余内容。"
+"迁移 `0108_local_accounts` 接在 `0107_attempt_context_profiles` "
+"后面，新增这些表；`0109_local_account_parity` 把登录身份与密码拆开（保留所有账号），并新增其余内容。"
 
 #: ../developer/local-accounts.md
 msgid "Table"

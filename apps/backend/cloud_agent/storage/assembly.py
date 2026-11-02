@@ -29,11 +29,14 @@ from cloud_agent.storage.repositories import (
     PostgresAttemptCommands,
     PostgresAuditLogRepository,
     PostgresAuditRepository,
+    PostgresCommandExecutionQueries,
     PostgresComputeResourceRepository,
+    PostgresContextQueries,
     PostgresConversationCommands,
     PostgresConversationQueries,
     PostgresCredentialQueries,
     PostgresExecutionQueries,
+    PostgresFileActivityQueries,
     PostgresGoalRepository,
     PostgresGoalWakeupRepository,
     PostgresHostCapacityRepository,
@@ -78,11 +81,14 @@ if TYPE_CHECKING:
         AttemptCommands,
         AuditLogQueries,
         AuditRepository,
+        CommandExecutionQueries,
         ComputeResourceRepository,
+        ContextQueries,
         ConversationCommands,
         ConversationQueries,
         CredentialQueries,
         ExecutionQueries,
+        FileActivityQueries,
         GoalRepository,
         GoalWakeupRepository,
         HostCapacityRepository,
@@ -144,6 +150,7 @@ class Storage:
         self.conversation_queries: ConversationQueries = PostgresConversationQueries(pool)
         self.credential_queries: CredentialQueries = PostgresCredentialQueries(pool)
         self.execution_queries: ExecutionQueries = PostgresExecutionQueries(pool)
+        self.file_activity_queries: FileActivityQueries = PostgresFileActivityQueries(pool)
         self.goals: GoalRepository = PostgresGoalRepository(pool)
         self.goal_wakeups: GoalWakeupRepository = PostgresGoalWakeupRepository(pool)
         self.host_capacity: HostCapacityRepository = PostgresHostCapacityRepository(pool)
@@ -159,6 +166,8 @@ class Storage:
             PostgresNotificationMaintenanceRepository(pool)
         )
         self.owner_usage: OwnerUsageQueries = PostgresOwnerUsageRepository(pool)
+        self.context_queries: ContextQueries = PostgresContextQueries(pool)
+        self.command_executions: CommandExecutionQueries = PostgresCommandExecutionQueries(pool)
         self.pending_messages: PendingMessageRepository = PostgresPendingMessageRepository(pool)
         self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)
         self.residency: ResidencyRepository = PostgresResidencyRepository(pool)

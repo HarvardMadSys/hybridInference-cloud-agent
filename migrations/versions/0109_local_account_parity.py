@@ -14,7 +14,7 @@ What changes, all within the local-account tables:
   is off). Only ``link`` and ``operator`` prove a mailbox, which promotion by
   the administrator address list and the signup domain list require. A
   carried-over verified email was verified by a link, the only way
-  ``0107_local_accounts`` had.
+  ``0108_local_accounts`` had.
 - **One access rule.** The view ``agent_local_account_access`` answers whether
   an account's identity is verified, whether it may sign in and whether it may
   use Agent. Every SQL gate reads it, and it is built from ``LEFT JOIN`` and
@@ -37,8 +37,8 @@ silently dropping an account that signs in some other way.
 
 from alembic import op
 
-revision = "0108_local_account_parity"
-down_revision = "0107_local_accounts"
+revision = "0109_local_account_parity"
+down_revision = "0108_local_accounts"
 branch_labels = None
 depends_on = None
 

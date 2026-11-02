@@ -2395,7 +2395,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                     "workspace_shared": True,
                     "container_id": lease["container_id"],
                     "activation_generation": activation_generation,
-                    **retained.sandbox_metadata(),
+                    **{**retained.sandbox_metadata(), **job.started_context_fields()},
                 },
             )
         )

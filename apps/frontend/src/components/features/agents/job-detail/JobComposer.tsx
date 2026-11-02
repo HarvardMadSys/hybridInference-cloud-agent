@@ -5,7 +5,7 @@ import { useApplePlatform } from '@/components/features/settings/keyboardShortcu
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { chordLabel } from '@/lib/keyboardShortcuts';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
-import { Suspense, useState, type FormEvent, type RefObject } from 'react';
+import { Suspense, useId, useState, type FormEvent, type RefObject } from 'react';
 import { ComposerCommandMenu } from '../ComposerCommandMenu';
 import { ComposerDialogLoading } from '../ComposerDialogLoading';
 import { ComposerPlusMenu } from '../ComposerPlusMenu';
@@ -24,6 +24,7 @@ import { modelOverride } from '../modelSource';
 import { ModelConnectionNotice } from '../ModelConnectionNotice';
 import { GoalBar } from '../goal/GoalBar';
 import { hasLiveWork } from '../goal/liveWork';
+import { useOpenThreadContext } from '../context/threadContextData';
 import { useGoalCommand, type GoalCommandControls } from '../goal/useGoalCommand';
 import { McpSessionPanel } from '../mcp/McpSessionPanel';
 import type { useThreadComposerMcp } from '../mcp/useThreadComposerMcp';
@@ -31,6 +32,8 @@ import type { ComposerSsh } from '../ssh/useComposerSsh';
 import type { AgentJob } from '../types';
 import { useComposerDraftValue, type ComposerDraftStore } from '../useComposerDraft';
 import type { usePendingMessages } from '../usePendingMessages';
+import { ComposerOptionsButton, ComposerOptionsPanel, useComposerOptions } from './ComposerOptions';
+import { ComposerTodos, type ComposerTodosProps } from './ComposerTodos';
 import { SkillSelectionDialog } from './LazyPanels';
 import type { useJobComposerSettings } from './useJobComposerSettings';
 import type { useJobRunActions } from './useJobRunActions';
@@ -39,6 +42,8 @@ import type { useJobRunActions } from './useJobRunActions';
 /**
  * How a draft can join the running turn: steered in, or, when it chose another
  * model or source, queued as the next turn (never answered on the live one).
+ * The steer chord is standing help, kept with the prompt options; being queued
+ * instead is shown beside the box, since it changes what Send does.
  */
 function steerNote(
   canSendNow: boolean,
@@ -46,9 +51,12 @@ function steerNote(
   apple: boolean,
   t: ReturnType<typeof useT>,
 ): string {
-  if (!canSendNow) return '';
-  if (otherModel) return ` · ${t('modelSource.steerQueued')}`;
+  if (!canSendNow || otherModel) return '';
   return ` · ${t('queue.steerHint', { keys: chordLabel('↵', apple) })}`;
+}
+
+function queuedNote(canSendNow: boolean, otherModel: boolean, t: ReturnType<typeof useT>) {
+  return canSendNow && otherModel ? t('modelSource.steerQueued') : '';
 }
 
 function runtimeNote(job: AgentJob, contextLost: boolean): string {
@@ -90,6 +98,7 @@ export function JobComposer({
   steerNow,
   insertGoalCommand,
   onReload,
+  todo,
   hidden = false,
 }: {
   job: AgentJob;
@@ -123,6 +132,8 @@ export function JobComposer({
   steerNow: (command: GoalCommandControls['submit']) => void;
   insertGoalCommand: () => void;
   onReload?: () => void;
+  /** The To-dos strip: the shown turn's recorded task list, summarized above the composer. */
+  todo?: ComposerTodosProps;
   /** Kept mounted, with its draft, while another view replaces the Chat. */
   hidden?: boolean;
 }) {
@@ -151,6 +162,7 @@ export function JobComposer({
   const canSteer = queue.canSendNow && !otherModel;
   const followUp = useComposerDraftValue(draft);
   const { setValue: setFollowUp } = draft;
+  const openContext = useOpenThreadContext();
   const goalCommand = useGoalCommand({
     value: followUp,
     setValue: setFollowUp,
@@ -158,16 +170,23 @@ export function JobComposer({
     onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
     onApply: applyGoalObjective,
     onError: setActionError,
+    // `/context` opens the main Context tab; nothing is sent.
+    onContext: openContext,
   });
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
+  const options = useComposerOptions(false);
+  const noteId = useId();
+  const queued = queuedNote(queue.canSendNow, otherModel, t);
   return (
     <>
-      {/* Keep the sticky controls opaque while the transcript scrolls behind them. */}
+      {/* The transcript scrolls under these sticky controls, so they occlude
+          it with the page's own surface: the same color as the page, never a
+          tint, gradient or blur, so it reads as page rather than a band. */}
       <div
         ref={composerRef}
         hidden={hidden}
-        className="sticky bottom-0 z-10 -mx-1 mt-3 bg-gray-50 px-1 pb-1 pt-2 dark:bg-gray-950"
+        className="sticky bottom-0 z-10 -mx-1 mt-3 bg-surface px-1 pb-2 pt-2"
       >
         <LiveAgentStatus job={job} />
         {/* `/goal` on its own is not an objective. It is consumed
@@ -199,11 +218,12 @@ export function JobComposer({
           disabled={isArchived || contextLost}
           liveTurn={inherited}
         />
+        {todo ? <ComposerTodos {...todo} /> : null}
         <div
           className={
             isArchived
               ? undefined
-              : `ui-composer ${dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''}`
+              : `ui-composer rounded-2xl ${dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''}`
           }
         >
           {job.goal ? (
@@ -331,14 +351,25 @@ export function JobComposer({
                     : 'Message or run a task, / commands, @ files or sessions'
                 }
                 aria-label="Add a follow-up"
-                className="block max-h-[30vh] min-h-12 w-full resize-y rounded-t-xl border-0 bg-transparent px-3 py-2 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
+                aria-describedby={`${noteId}-note ${noteId}-queued`}
+                className="block max-h-[30vh] min-h-14 w-full resize-y rounded-t-2xl border-0 bg-transparent px-4 pb-1 pt-3 text-sm leading-6 text-foreground placeholder:text-muted focus:outline-none focus:ring-0"
               />
               <AttachmentStrip
                 entries={attachments.entries}
                 onRemove={attachments.remove}
                 disabled={contextLost || submitting}
               />
-              <div className="flex flex-wrap items-center gap-1 border-t border-border px-2 py-1">
+              <ComposerOptionsPanel options={options}>
+                {/* Standing help for the next message; the box is described by it. */}
+                <p id={`${noteId}-note`} className="px-3 pt-1 text-[11px] leading-4 text-muted">
+                  {runtimeNote(job, contextLost)}
+                  {modelPicker ? '' : ` · ${inheritedLabel}`}
+                  {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
+                  {steerNote(queue.canSendNow, otherModel, apple, t)}
+                </p>
+              </ComposerOptionsPanel>
+              {/* One surface with the box: no rule between them. */}
+              <div className="flex flex-wrap items-end gap-1 px-2.5 pb-2 pt-1 sm:items-center">
                 <ComposerPlusMenu
                   onFiles={attachments.add}
                   onOpenSkills={() => setSkillsOpen(true)}
@@ -354,58 +385,61 @@ export function JobComposer({
                   mcpBlockedReason={mcpBlockedReason}
                   disabled={contextLost || submitting}
                 />
-                <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />
-                {modelPicker ? (
-                  <>
-                    {/* The harness stays the thread's; the model is offered
+                <ComposerOptionsButton options={options} />
+                <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1">
+                  {modelPicker ? (
+                    <>
+                      {/* The harness stays the thread's; the model is offered
                           again. A model change restarts this member's CLI and
                           native-resumes it in the same retained workspace; it
                           does not replace or clone the sandbox. */}
-                    <Picker compact label="Model for this turn" {...modelPicker} />
-                    <Picker
-                      compact
-                      label="Reasoning for this turn"
-                      value={effort}
-                      options={efforts}
-                      onChange={setChosenEffort}
-                    />
-                  </>
-                ) : null}
-                <ComposerMessageActions
-                  label={t(isActive ? 'composer.queue' : 'composer.send')}
-                  title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
-                  steerLabel={t('composer.steer')}
-                  steerTitle={t('composer.steerHint', { keys: chordLabel('Enter', apple) })}
-                  onSteer={
-                    canSteer && attachments.entries.length === 0
-                      ? () => void steerNow(goalCommand.submit)
-                      : undefined
-                  }
-                  disabled={
-                    contextLost ||
-                    inheritedUnavailable ||
-                    !followUp.trim() ||
-                    submitting ||
-                    attachments.uploading ||
-                    readingFiles ||
-                    mcp.saving ||
-                    Boolean(ssh?.saving) ||
-                    goalCommand.busy
-                  }
-                  busy={submitting || goalCommand.busy}
-                />
+                      <Picker compact label="Model for this turn" {...modelPicker} />
+                      <Picker
+                        compact
+                        label="Reasoning for this turn"
+                        value={effort}
+                        options={efforts}
+                        onChange={setChosenEffort}
+                      />
+                    </>
+                  ) : null}
+                  <ComposerMessageActions
+                    label={t(isActive ? 'composer.queue' : 'composer.send')}
+                    title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
+                    steerLabel={t('composer.steer')}
+                    steerTitle={t('composer.steerHint', { keys: chordLabel('Enter', apple) })}
+                    onSteer={
+                      canSteer && attachments.entries.length === 0
+                        ? () => void steerNow(goalCommand.submit)
+                        : undefined
+                    }
+                    disabled={
+                      contextLost ||
+                      inheritedUnavailable ||
+                      !followUp.trim() ||
+                      submitting ||
+                      attachments.uploading ||
+                      readingFiles ||
+                      mcp.saving ||
+                      Boolean(ssh?.saving) ||
+                      goalCommand.busy
+                    }
+                    busy={submitting || goalCommand.busy}
+                  />
+                </div>
               </div>
-              <p className="px-3 pb-2 text-[11px] leading-4 text-muted">
-                {runtimeNote(job, contextLost)}
-                {modelPicker ? '' : ` · ${inheritedLabel}`}
-                {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
-                {steerNote(queue.canSendNow, otherModel, apple, t)}
+              <p
+                id={`${noteId}-queued`}
+                hidden={!queued}
+                className="px-4 pb-2.5 text-[11px] leading-4 text-muted"
+              >
+                {queued}
               </p>
               <ModelConnectionNotice config={config} />
               <p
                 role="status"
                 hidden={!inheritedUnavailable}
-                className="px-3 pb-2 text-[11px] leading-4 text-status-error"
+                className="px-4 pb-2.5 text-[11px] leading-4 text-status-error"
               >
                 {t('modelSource.inheritedUnavailable', { label: inheritedLabel })}
               </p>

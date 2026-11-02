@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0108_local_account_parity`. The supported deployment scripts run "
+"`0109_local_account_parity`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0108_local_account_parity`。官方支持的部署脚本会在替换 API "
+"`0109_local_account_parity`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)中。"
 
@@ -269,8 +269,8 @@ msgid "What it changes"
 msgstr "改了什么"
 
 #: ../developer/upgrade-notes.md
-msgid "`0107_local_accounts`"
-msgstr "`0107_local_accounts`"
+msgid "`0108_local_accounts`"
+msgstr "`0108_local_accounts`"
 
 #: ../developer/upgrade-notes.md
 msgid ""
@@ -282,8 +282,8 @@ msgid ""
 msgstr "创建账号所用的表：账号、密码登录、等候名单准入、服务器端会话、邮件令牌、滥用计数、访问终止以及账号身份标记。它不修改任何现有行，也不锁定任何现有表。降级会删除这些表，所有账号也随之删除。"
 
 #: ../developer/upgrade-notes.md
-msgid "`0108_local_account_parity`"
-msgstr "`0108_local_account_parity`"
+msgid "`0109_local_account_parity`"
+msgstr "`0109_local_account_parity`"
 
 #: ../developer/upgrade-notes.md
 msgid ""
@@ -291,7 +291,7 @@ msgid ""
 "identities (email, login name, phone) and optional password credentials, "
 "carrying every account over with its verification time and hash (a "
 "verified email is recorded as verified by its link, the only way "
-"`0107_local_accounts` had); adds the access view every SQL gate reads, "
+"`0108_local_accounts` had); adds the access view every SQL gate reads, "
 "the `deleted` account state with the account's name, note, language and "
 "sign-in and deletion times, phone codes, browser sessions, sign-in "
 "events, the signup domain list, first-run setup and administrator mail to"
@@ -302,8 +302,27 @@ msgid ""
 msgstr ""
 "仅涉及账号。把 `agent_local_password_logins` "
 "拆分为登录身份（邮箱、登录名、手机号）和可选的密码凭据，把每个账号连同其验证时间和哈希一并迁移过来（已验证的邮箱记录为通过链接验证，这是 "
-"`0107_local_accounts` 唯一的方式）；新增每个 SQL 闸门都读取的访问视图、`deleted` "
+"`0108_local_accounts` 唯一的方式）；新增每个 SQL 闸门都读取的访问视图、`deleted` "
 "账号状态及账号的名称、备注、语言、登录和删除时间，以及手机验证码、浏览器会话、登录事件、注册域名列表、首次设置和发给账号的管理员邮件。它只涉及账号表。降级会恢复邮箱加密码的表并删除新表，连同其中的登录事件和邮件历史；只要有账号通过其他方式登录或已被删除，降级就会拒绝，而不是删除该账号。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0107_attempt_context_profiles`"
+msgstr "`0107_attempt_context_profiles`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds the `agent_attempt_context_profiles` table, a rebuildable cache of "
+"each attempt's context profile (request sizes, compactions and content-"
+"size estimates derived from its stored events) behind the Context view "
+"and the Usage page's context insights. It scans and rewrites nothing; "
+"profiles are derived lazily when an owner reads them, and a stale or "
+"differently versioned row is rebuilt from the event ledger. A downgrade "
+"drops only the cache."
+msgstr ""
+"新增 `agent_attempt_context_profiles` 表。它是每次尝试的上下文画像缓存（请求大小、压缩事件，"
+"以及根据已存事件估算的内容大小），供会话的上下文视图和用量页的上下文洞察读取，随时可以重建。"
+"迁移不扫描、不改写任何数据；画像在所有者查看时才按需生成，过期或版本不同的行会从事件账本重新生成。"
+"回滚只删除这张缓存表。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0106_user_model_connections`"
@@ -961,3 +980,4 @@ msgstr ""
 "里给上表加一行，写清楚升级线上部署的运维人员需要知道什么：会改动哪些已有数据、可能锁表多久、降级会不会被拒绝。然后把 *启动本次发布之前* 一节和"
 " [ENVIRONMENT.md](../../ENVIRONMENT.md) 里写的 head 修订号也更新掉；有测试会检查这两处写的都是当前的"
 " head。"
+

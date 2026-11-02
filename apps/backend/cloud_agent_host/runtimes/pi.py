@@ -26,6 +26,7 @@ from .events import (
     NormalizedEvent,
     _payload_text,
     _truncate,
+    reported_compaction,
 )
 from .preview import ReplyPreview
 
@@ -264,6 +265,8 @@ class PiRuntime(AgentRuntime):
             )
         if kind in self._SILENT_KINDS:
             return None
+        if kind in {"compaction_start", "compaction_end"}:
+            return _compaction_event(event)
         return self._raw(line, f"unknown type {kind!r}")
 
     def _from_agent_end(self, event: dict[str, Any]) -> list[NormalizedEvent]:
@@ -446,6 +449,21 @@ class PiRuntime(AgentRuntime):
         # it changes: the deployment's instructions, not the conversation.
         if role in {"user", "system"}:
             return None
+        if role == "custom":
+            # An extension's message, put into the context the model reads:
+            # an injection the Context view lists, bounded like a summary.
+            text = _custom_text(message.get("content"))
+            return NormalizedEvent(
+                LIFECYCLE,
+                {
+                    "phase": "context_injection",
+                    "source": "pi_custom_message",
+                    "label": str(message.get("customType") or "custom")[:120],
+                    "text": text[:SUMMARY_TEXT_CHARS],
+                    "chars": len(text),
+                    **({"truncated": True} if len(text) > SUMMARY_TEXT_CHARS else {}),
+                },
+            )
         return self._raw(line, f"message_end with unknown role {role!r}")
 
     #: pi's own flag vocabulary, minus the two that do not survive the trip.
@@ -490,3 +508,54 @@ class PiRuntime(AgentRuntime):
             mcp=PI.mcp,
             reasoning_efforts=self.EFFORT_LEVELS,
         )
+
+
+def _compaction_event(event: dict[str, Any]) -> NormalizedEvent:
+    """Map pi's own report of a compaction starting or ending (pinned 0.73.1).
+
+    ``compaction_end`` carries the trigger (``manual``, ``threshold`` or
+    ``overflow``), the tokens before, and whether it was aborted or will be
+    retried. An end that was neither is a compaction that happened, and is
+    stored as the same ``compact_boundary`` milestone Claude Code reports; one
+    that did not happen is a diagnostic. The summary text stays out of the
+    stream.
+    """
+    result = event.get("result")
+    result = result if isinstance(result, dict) else {}
+    report = reported_compaction(trigger=event.get("reason"), pre_tokens=result.get("tokensBefore"))
+    if event.get("type") == "compaction_start":
+        return NormalizedEvent(LIFECYCLE, {"phase": "compaction_start", "compaction": report})
+    completed = bool(result) and event.get("aborted") is not True
+    payload: dict[str, Any] = {
+        "phase": "compact_boundary" if completed else "compaction_aborted",
+        "compaction": report,
+        "completed": completed,
+        "aborted": event.get("aborted") is True,
+        "will_retry": event.get("willRetry") is True,
+    }
+    summary = result.get("summary")
+    if completed and isinstance(summary, str) and summary:
+        # What the next request carries in place of the compacted history.
+        payload["summary_text"] = summary[:SUMMARY_TEXT_CHARS]
+        payload["summary_chars"] = len(summary)
+    error = event.get("errorMessage")
+    if isinstance(error, str) and error:
+        payload["text"] = _truncate(error, 500)
+    return NormalizedEvent(LIFECYCLE, payload)
+
+
+#: Characters of a compaction summary kept on its event.
+SUMMARY_TEXT_CHARS = 4000
+
+
+def _custom_text(content: Any) -> str:
+    """An extension message's text, whether pi sent a string or content blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""

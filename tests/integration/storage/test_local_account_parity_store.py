@@ -101,7 +101,7 @@ async def test_the_migration_carries_accounts_over_and_refuses_a_lossy_downgrade
     database = db_config()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM agent_local_accounts")
-    downgrade_to(database, "0107_local_accounts")
+    downgrade_to(database, "0108_local_accounts")
     try:
         async with pool.acquire() as conn:
             for account_id, email, verified in (
@@ -158,10 +158,10 @@ async def test_the_migration_carries_accounts_over_and_refuses_a_lossy_downgrade
                 _ULID_A,
             )
         with pytest.raises(Exception, match="refusing to downgrade"):
-            downgrade_to(database, "0107_local_accounts")
+            downgrade_to(database, "0108_local_accounts")
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM agent_local_login_identities WHERE kind = 'phone'")
-        downgrade_to(database, "0107_local_accounts")
+        downgrade_to(database, "0108_local_accounts")
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT account_id, email, password_hash, email_verified_at IS NOT NULL AS v "
