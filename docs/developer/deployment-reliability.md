@@ -126,7 +126,8 @@ itself, as every child did before the host handed its verification over, and
 accepts the turn only if that check passes. The sandbox manager still installs
 and reads back the rules before any group joins its bridge.
 
-Network-rule reads share a disposable helper; route reads use a separate helper
+Network-rule reads share one helper request, which the process's long-lived
+helper takes when it is free; route reads use a separate disposable helper
 without capabilities. Reconciliation caches inspections only within one
 command, rereads after mutations, and verifies the final bridge identity,
 membership and relay addresses. It skips unchanged guest hosts/resolver writes
