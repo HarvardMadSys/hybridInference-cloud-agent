@@ -44,18 +44,20 @@ function removeAnimationSupport() {
   delete (HTMLDivElement.prototype as unknown as { animate?: unknown }).animate;
 }
 
-/** Every element reports `CONTENT_HEIGHT` as its content and the frame its drawn height. */
+/** Every element reports `contentHeight` as its content and the frame its drawn height. */
 let drawnHeight = 0;
+let contentHeight = CONTENT_HEIGHT;
 function installMeasurements() {
   drawnHeight = 0;
+  contentHeight = CONTENT_HEIGHT;
   Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
     configurable: true,
-    get: () => CONTENT_HEIGHT,
+    get: () => contentHeight,
   });
   Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
     configurable: true,
     value(this: HTMLElement) {
-      const height = this.hasAttribute('data-frame') ? drawnHeight : CONTENT_HEIGHT;
+      const height = this.hasAttribute('data-frame') ? drawnHeight : contentHeight;
       return { height, width: 0, top: 0, left: 0, right: 0, bottom: height, x: 0, y: 0 };
     },
   });
@@ -155,14 +157,54 @@ describe('useCollapseHeight', () => {
     installAnimationSupport();
     const { rerender } = render(<Probe count={3} />);
     drawnHeight = CONTENT_HEIGHT;
+    act(() => animations.at(-1)?.onfinish?.());
     animations = [];
 
-    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
-      configurable: true,
-      get: () => CONTENT_HEIGHT * 2,
-    });
+    // As in a browser: by the time the effect runs, the new row is laid out
+    // and the unstyled frame already measures it. The motion must still start
+    // from the height that was on screen.
+    contentHeight = CONTENT_HEIGHT * 2;
+    drawnHeight = CONTENT_HEIGHT * 2;
     rerender(<Probe count={4} />);
     expect(animations.at(-1)!.keyframes).toEqual([{ height: '100px' }, { height: '200px' }]);
+  });
+
+  it('keeps the change continuous when a second row empties', () => {
+    installAnimationSupport();
+    contentHeight = CONTENT_HEIGHT * 2;
+    const { rerender } = render(<Probe count={4} />);
+    act(() => animations.at(-1)?.onfinish?.());
+    animations = [];
+
+    contentHeight = CONTENT_HEIGHT;
+    drawnHeight = CONTENT_HEIGHT;
+    rerender(<Probe count={3} />);
+    expect(animations.at(-1)!.keyframes).toEqual([{ height: '200px' }, { height: '100px' }]);
+  });
+
+  it('closes from the height on screen after the strip resized on its own', () => {
+    installAnimationSupport();
+    const observers: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const { rerender } = render(<Probe count={1} />);
+    act(() => animations.at(-1)?.onfinish?.());
+    animations = [];
+
+    // The picture could not be decoded and became a short chip: no count
+    // change, so only the resize is there to say so.
+    contentHeight = 40;
+    observers.forEach((callback) => callback([], {} as ResizeObserver));
+    rerender(<Probe count={0} />);
+    expect(animations.at(-1)!.keyframes).toEqual([{ height: '40px' }, { height: '0px' }]);
   });
 
   it('lands at once under prefers-reduced-motion instead of animating', () => {

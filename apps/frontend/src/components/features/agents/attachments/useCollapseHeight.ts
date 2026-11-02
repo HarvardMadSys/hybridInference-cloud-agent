@@ -64,11 +64,29 @@ export function useCollapseHeight(count: number): CollapseHeight {
   /** The visual height an interrupted motion was cut at, before it snapped. */
   const interruptedAt = useRef<number | null>(null);
   /**
-   * How tall the contents were the last time there were any. A removal unmounts
-   * them before this effect runs, so the frame has already collapsed to
-   * nothing by then and only this remembers what to close from.
+   * The height the frame rests at once its motion is over. It has to be
+   * remembered: this effect runs after the new contents are laid out, and an
+   * unstyled frame already measures *their* height by then, so measuring it
+   * here would make every change look like no change at all. Unknown (null)
+   * until the first measurement, so a strip that mounts with contents does not
+   * animate in from nothing.
    */
-  const lastContentHeight = useRef(0);
+  const resting = useRef<number | null>(null);
+
+  // The contents can change height without a change in count: a row rewraps
+  // when the window is resized, a picture that cannot be decoded becomes a
+  // chip, a refused upload turns into its reason. Keep `resting` true to what
+  // is on screen, so the next motion starts where the strip really is.
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!mounted || !content || typeof ResizeObserver !== 'function') return;
+    const observer = new ResizeObserver(() => {
+      // A running motion owns the height; it lands on its own target.
+      if (!running.current) resting.current = content.offsetHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [mounted]);
 
   useLayoutEffect(() => {
     // Appearing: the contents have to exist before they can be measured, so
@@ -84,15 +102,14 @@ export function useCollapseHeight(count: number): CollapseHeight {
     if (!frame || !content) return;
 
     const target = count > 0 ? content.offsetHeight : 0;
-    if (count > 0) lastContentHeight.current = target;
-    // Read where the box actually is, so a motion interrupted by another add
-    // or remove continues from its current height instead of restarting.
+    // Start where the box is drawn: at zero when appearing, at the height an
+    // interrupted motion had reached, or at the height it was resting at.
     const from = growFromZero.current
       ? 0
-      : (interruptedAt.current ??
-        (count > 0 ? frame.getBoundingClientRect().height : lastContentHeight.current));
+      : (interruptedAt.current ?? resting.current ?? frame.getBoundingClientRect().height);
     growFromZero.current = false;
     interruptedAt.current = null;
+    resting.current = target;
 
     const current = ++generation.current;
     running.current?.cancel();
