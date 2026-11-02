@@ -312,7 +312,7 @@ export function ReviewSection() {
         aria-hidden="true"
         className="order-last rounded-[18px] bg-[#0a0a0a] p-5 text-white sm:p-[30px] min-[1101px]:order-none dark:bg-surface-raised dark:ring-1 dark:ring-border"
       >
-        <p className="flex items-center gap-2 font-mono text-xs text-neutral-400">
+        <p className="flex items-center gap-2 font-mono text-xs text-neutral-400 dark:text-muted">
           <PullRequestIcon />
           {t('landing.demo.draftPr', { number: 128 })}
         </p>
@@ -347,7 +347,9 @@ export function ReviewSection() {
             </span>
           </span>
         </div>
-        <p className="mt-[18px] text-[13px] text-neutral-400">{t('landing.reviewAfter')}</p>
+        <p className="mt-[18px] text-[13px] text-neutral-400 dark:text-muted">
+          {t('landing.reviewAfter')}
+        </p>
       </div>
       <div>
         <Eyebrow number="03">{t('landing.reviewEyebrow')}</Eyebrow>
@@ -391,7 +393,7 @@ export function ClosingSection({
           >
             {t('landing.closingTitle')}
           </h2>
-          <p className="mt-2 font-mono text-[12.5px] text-neutral-400">
+          <p className="mt-2 font-mono text-[12.5px] text-neutral-400 dark:text-muted">
             {t(signupOpen ? 'landing.closingSteps' : 'landing.closingStepsSignIn')}
           </p>
         </div>

@@ -32,18 +32,20 @@ export function AccountFrame({
           className="ui-focus-ring inline-flex min-w-0 items-center gap-2.5 rounded-md text-sm font-semibold tracking-tight text-foreground"
         >
           <BrandMark />
-          <span className="truncate">{branding.appName}</span>
+          {/* The deployment's name is the page's h1, as the runtime site check
+              requires; the form's title is the section heading below it. */}
+          <h1 className="truncate">{branding.appName}</h1>
         </Link>
       </header>
       <main className="mx-auto flex w-full max-w-[420px] flex-1 flex-col justify-center px-[18px] pb-16 pt-6">
         <section aria-labelledby="account-heading" className="account-form">
           {steps}
-          <h1
+          <h2
             id="account-heading"
             className="text-[28px] font-semibold leading-tight tracking-[-0.03em] text-foreground"
           >
             {title}
-          </h1>
+          </h2>
           {description && <p className="mt-2 text-[14.5px] leading-6 text-muted">{description}</p>}
           <div className="mt-7 space-y-5">{children}</div>
         </section>

@@ -129,7 +129,7 @@ describe('the signed-out home page', () => {
   it('holds the finished task while the pointer rests on it', async () => {
     render(<LandingPage />);
     await advance(0);
-    const total = STAGES.reduce((sum, stage) => sum + stageDuration(EXAMPLES[0], stage), 0);
+    const total = STAGES.reduce<number>((sum, stage) => sum + stageDuration(EXAMPLES[0], stage), 0);
     await advance(1100 + total + 200);
     expect(row()).toHaveAttribute('data-state', 'opened');
 

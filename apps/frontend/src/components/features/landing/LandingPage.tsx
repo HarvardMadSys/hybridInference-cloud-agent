@@ -29,7 +29,7 @@ const SECONDARY =
 function AccountActions({ signupOpen, onDark = false }: { signupOpen: boolean; onDark?: boolean }) {
   const t = useT();
   const secondary = onDark
-    ? `${SECONDARY} border-white/25 text-white hover:bg-white/10`
+    ? `${SECONDARY} border-white/25 text-white hover:bg-white/10 dark:hover:bg-surface-hover`
     : `${SECONDARY} border-border-strong/60 bg-surface text-foreground hover:bg-surface-hover`;
   if (!signupOpen)
     return (
