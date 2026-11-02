@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import base64
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from cloud_agent import settings, task_titles
+from cloud_agent import settings
 from cloud_agent.api import uploads
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
@@ -186,45 +184,3 @@ async def test_goal_recovery_and_retries_follow_saved_settings(saved_settings):
     assert delay_parameters == [120.0, 1800.0]
     saved_settings(**{"goals.max_wakeup_attempts": 5})
     assert not is_exhausted(3)
-
-
-async def test_title_request_uses_saved_url_bounds_and_retry_count(saved_settings, monkeypatch):
-    saved_settings(
-        **{
-            "gateway_base_url": "https://saved.example",
-            "task_titles.max_chars": 12,
-            "task_titles.input_max_chars": 8,
-            "task_titles.max_tokens": 32,
-            "task_titles.max_attempts": 2,
-        }
-    )
-    monkeypatch.setenv("GATEWAY_BASE_URL", "https://old.example")
-    monkeypatch.setattr(task_titles, "_RETRY_DELAYS_S", (0.0,) * 5)
-    assert task_titles.fallback_title("a" * 30) == "a" * 11 + "…"
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(503)
-
-    store = SimpleNamespace(
-        get_thread_title_prompt=AsyncMock(return_value="x" * 100),
-        set_generated_thread_title=AsyncMock(),
-    )
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        await task_titles.generate_thread_title(
-            store,
-            job_id="job",
-            attempt_id=1,
-            lease_generation=1,
-            model="model",
-            sandbox_token="grant",
-            client=client,
-        )
-    assert len(requests) == 2
-    assert all(request.url.host == "saved.example" for request in requests)
-    body = json.loads(requests[0].content)
-    assert body["max_tokens"] == 32
-    assert body["messages"][1]["content"] == "x" * 8
-    assert "at most 12 Unicode characters" in body["messages"][0]["content"]
-    store.set_generated_thread_title.assert_not_awaited()

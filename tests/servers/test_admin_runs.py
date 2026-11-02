@@ -9,18 +9,19 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.servers.test_owner_revalidation import _AccessGateway
+from tests.servers.test_owner_revalidation import _Directory
+from tests.support.owners import SESSIONS, use_session_secret
 from tests.support.storage import OneFake
-from tests.unit.test_ledger_snapshots import END, START, ledger_row
+from tests.support.usage import END, START
 
-from cloud_agent import identity
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.admin_observability import (
     AdminRun,
     AdminRunList,
 )
 from cloud_agent.api import admin_runs, usage
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.schemas import ResourceMetricBrief, RunResourceSummary
 
@@ -60,8 +61,7 @@ def _admin_run_row() -> dict:
 @pytest.fixture
 def setup(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "admin-observations-test")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-observations-session-test-long-secret")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     run = _admin_run_row()
     events = [
         {
@@ -121,8 +121,6 @@ def setup(monkeypatch):
             return None
         return {
             "job": run,
-            "ledger_rows": [ledger_row()],
-            "conversation_rows": [],
             "inputs": {"job_ids": [run["id"]], "attempts": [], "events": []},
             "version": "00000000000000000001.000000",
         }
@@ -130,42 +128,40 @@ def setup(monkeypatch):
     store = OneFake(
         SimpleNamespace(
             get_job=AsyncMock(return_value=run),
-            ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
             record_admin_action=AsyncMock(return_value=1),
-            queue_job_ledger_refresh=AsyncMock(),
             job_usage_reads=AsyncMock(side_effect=job_usage_reads),
         )
     )
-    gateway = _AccessGateway(["agent.use", "agent.admin"])
+    store.local_accounts = SESSIONS
+    owners = _Directory(["agent.use", "agent.admin"])
     app = FastAPI()
     app.include_router(admin_runs.router)
     app.include_router(usage.router)
     app.dependency_overrides[admin_runs.get_admin_run_queries] = lambda: queries
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: owners
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "admin-person"}
-    return app, queries, store, gateway
+    return app, queries, store, owners
 
 
 @pytest.mark.parametrize("method,path", PATHS)
 @pytest.mark.parametrize("auth", ["missing", "invalid", "revoked"])
 async def test_every_read_requires_current_admin_permission(setup, method, path, auth):
-    app, queries, store, gateway = setup
-    gateway.permissions = ["agent.use"]
+    app, queries, store, owners = setup
+    owners.permissions = ["agent.use"]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         headers = {}
         if auth == "invalid":
             headers = {"Authorization": "Bearer not-an-admin-token"}
         elif auth == "revoked":
             client.cookies.set(
-                identity.SESSION_COOKIE,
-                identity.mint_session(user_id="admin-person"),
+                LOCAL_SESSION_COOKIE,
+                SESSIONS.sign_in("admin-person"),
             )
         response = await client.request(method, path, headers=headers)
     assert response.status_code == (403 if auth == "revoked" else 401)
     for function in vars(queries).values():
         function.assert_not_awaited()
-    store.ledger_rows_for_job.assert_not_awaited()
     store.record_admin_action.assert_not_awaited()
 
 
@@ -179,13 +175,11 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     assert owner.status_code == 404
     body = admin.json()
     assert body["run"]["user_id"] == "other-owner"
-    assert body["usage"]["ledger"]["totals"]["calls"] == 1
     assert body["usage"]["runtime"]["input_tokens"] == 200  # two attempts, not six blocks
     assert body["usage"]["runtime"]["normalized_input_tokens"] == 400
-    assert body["usage"]["conversation"] is None
-    assert body["capabilities"] == {"llm_requests": True}
-    assert body["usage"]["ledger"]["finalized"] is False
-    assert body["usage"]["ledger"]["unknown_rows"]["reasoning"] == 1
+    # The agent's report alone: no Gateway ledger, conversation total or cost.
+    assert set(body["usage"]) == {"runtime", "external_provider", "version"}
+    assert "capabilities" not in body
     assert "private" not in admin.text
     assert "grant_id" not in admin.text
     assert "binding_id" not in admin.text
@@ -193,16 +187,13 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     # admin read above it must never come through this owner-scoped path.
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_other", user_id="admin-person")
     store.record_admin_action.assert_not_awaited()
-    store.queue_job_ledger_refresh.assert_not_awaited()
 
 
 async def test_empty_terminal_turn_has_no_promised_future_usage(setup):
-    app, queries, store, _ = setup
-    store.ledger_rows_for_job.return_value = []
+    app, queries, _store, _ = setup
     queries.usage_inputs.return_value = {"job_ids": ["ajob_other"], "attempts": [], "events": []}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(PREFIX + "/ajob_other", headers=ADMIN)
-    assert response.json()["usage"]["ledger"]["status"] == "unavailable"
     assert response.json()["usage"]["runtime"]["input_tokens"] is None
     assert response.json()["session_statistics"] == {
         "model_seconds": None,
@@ -214,7 +205,7 @@ async def test_empty_terminal_turn_has_no_promised_future_usage(setup):
 
 
 async def test_session_statistics_reuses_safe_usage_inputs_without_additional_reads(setup):
-    app, queries, store, gateway = setup
+    app, queries, store, owners = setup
     queries.usage_inputs.return_value = {
         "job_ids": ["ajob_other"],
         "attempts": [{"job_id": "ajob_other", "attempt_id": 10, "started_at": START}],
@@ -254,7 +245,7 @@ async def test_session_statistics_reuses_safe_usage_inputs_without_additional_re
     store.get_job.assert_not_awaited()
     store.job_usage_reads.assert_not_awaited()
     store.record_admin_action.assert_not_awaited()
-    assert gateway.asked == []
+    assert owners.asked == []
 
 
 async def test_resource_read_keeps_message_timing_and_unavailable_whole_turn(setup):
@@ -456,7 +447,7 @@ def test_admin_observation_routes_are_registered_only_on_the_control_plane():
     control = create_app().openapi()["paths"]
     relay = create_mcp_app().openapi()["paths"]
     paths = {path for path in control if path.startswith(PREFIX)}
-    assert len(paths) == 6
+    assert len(paths) == 3
     assert not paths.intersection(relay)
 
 
@@ -473,3 +464,16 @@ async def test_resource_read_preserves_the_measured_cpu_quota_and_nested_window(
     assert summary["cpu"]["capacity_cores"] == 2.0
     assert summary["window"]["duration_ms"] == 130_000
     assert "duration_ms" not in summary
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_admin_usage_preserves_the_turns_provider_source(setup, external):
+    """Whether the owner's provider bills the turn survives; which connection does not."""
+    app, queries, _store, _ = setup
+    connection = "mconn_" + "a" * 32
+    queries.get_run.return_value["model_connection_id"] = connection if external else None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json()["usage"]["external_provider"] is external
+    assert connection not in response.json()["usage"].__repr__()

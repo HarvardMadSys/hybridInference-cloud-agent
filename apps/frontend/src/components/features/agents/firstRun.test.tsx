@@ -27,7 +27,6 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
   return {
     repos: [],
     runtimes: ['claude-code'],
-    models: ['model-a'],
     github_connected: false,
     github_install_url: '/agents/integrations',
     ...overrides,

@@ -14,8 +14,8 @@ export interface NewTaskDraft {
    */
   chosenModel: string;
   /**
-   * The owner connection `chosenModel` was picked from, or empty for the
-   * Gateway — which is what every draft written before sources existed held.
+   * The owner connection `chosenModel` was picked from, or empty: what every
+   * draft written before sources existed held, and a pick that cannot run.
    */
   chosenModelConnectionId: string;
   effort: string;

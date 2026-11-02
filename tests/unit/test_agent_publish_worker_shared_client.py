@@ -1,7 +1,7 @@
 """Publication borrows the control plane's shared HTTP pool.
 
-A publication's title calls and its pull-request exchange ride the pool the
-loop is lent, and each opened a client of its own before. A borrowed client is
+A publication's pull-request exchange rides the pool the loop is lent, and
+opened a client of its own before. A borrowed client is
 left open, and its own redirect setting never decides where a token goes.
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Any
 from unittest.mock import Mock
 
 import httpx
@@ -22,7 +21,6 @@ from tests.unit.test_agent_publish_worker import (  # noqa: F401 - the autouse f
     _patch_publish,
 )
 
-from cloud_agent import publish_worker
 from cloud_agent.publish_worker import GitHubCredential, ensure_draft_pull_request, publish_loop
 from cloud_agent.publisher import PublishResult, TransientPublishError
 
@@ -92,20 +90,13 @@ async def test_a_borrowed_client_never_carries_the_token_through_a_redirect(step
     assert {host for _method, host in asked} == {"api.github.com"}
 
 
-async def test_the_loop_lends_its_pool_to_each_title_and_pull_request(monkeypatch):
-    """A publication's model calls and GitHub calls each used to open a client of their own."""
+async def test_the_loop_lends_its_pool_to_each_pull_request(monkeypatch):
+    """A publication's GitHub calls used to open a client of their own."""
     store = FakeStore(dict(_JOB))
     _patch_publish(
         monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
     )
     opened = _patch_pr(monkeypatch)
-    titled: list[Any] = []
-
-    async def generated(job, changed_files, *, grants, client=None):
-        titled.append(client)
-        return None
-
-    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
     shared = object()
     task = asyncio.create_task(
         publish_loop(
@@ -124,5 +115,4 @@ async def test_the_loop_lends_its_pool_to_each_title_and_pull_request(monkeypatc
         await task
 
     assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
-    assert titled == [shared]
     assert opened["client"] is shared

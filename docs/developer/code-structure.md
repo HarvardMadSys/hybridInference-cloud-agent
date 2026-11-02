@@ -13,7 +13,7 @@ apps/
     cloud_agent_host/     Host execution and retained sandbox management
     cloud_agent_shared/   Contracts and algorithms shipped in both images
   frontend/              Next.js browser UI and backend-for-frontend routes
-gateway_contracts/       Gateway HTTP contracts and control-plane OpenAPI
+api_contracts/           The committed snapshot of this service's OpenAPI
 migrations/              Agent-owned database schema, managed by Alembic
 deploy/                  Image builds and deployment entry points
 scripts/                 Development, qualification, and release tooling
@@ -23,8 +23,8 @@ docs/                    Maintained guides and dated design evidence
 
 The control plane and host are independently deployed implementations. Neither
 imports the other. Shared code provides the facts and contracts they agree on;
-it imports neither implementation. Gateway integration uses HTTP contracts.
-The agent database and Gateway database remain separate.
+it imports neither implementation. Accounts, admission and usage live in the
+agent database; model calls go from the sandbox to the owner's provider.
 
 ## Follow a control-plane request
 

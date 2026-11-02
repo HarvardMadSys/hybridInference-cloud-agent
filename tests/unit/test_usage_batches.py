@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
 import pytest
-from tests.unit.test_ledger_snapshots import ledger_row, report_payload
 
 from cloud_agent.admin_usage import aggregate_jobs, breakdown, merge_aggregates
 from cloud_agent.storage.admin_usage_queries import UsageQueryUnavailable
@@ -24,33 +23,39 @@ TERMINAL = ("succeeded", "failed", "cancelled")
 START = datetime(2025, 1, 1, tzinfo=UTC)
 
 
+def _attempt(job_id: str, index: int) -> dict:
+    """One attempt's rollup, as the agent reported it."""
+    return {
+        "job_id": job_id,
+        "attempt_id": index,
+        "attempt_no": 1,
+        "saw_usage": True,
+        "input_tokens": 20 + index,
+        "output_tokens": 10 + index,
+        "cache_read_tokens": 80,
+        "cache_write_tokens": 0,
+        # An unreported counter stays unknown and is counted, never summed as 0.
+        "reasoning_tokens": None if index % 7 == 0 else index,
+    }
+
+
 def _jobs(count: int) -> list[dict]:
     jobs = []
     for index in range(count):
-        snapshot = report_payload()
-        if index % 7 == 0:
-            # An unknown cost stays unknown and is counted, never summed as 0.
-            snapshot["totals"] = {**snapshot["totals"], "spent_usd": None}
-            snapshot["unknown_rows"] = {**snapshot["unknown_rows"], "spent_usd": 1}
-        else:
-            snapshot["totals"] = {**snapshot["totals"], "spent_usd": f"0.{index:08d}"}
-        ledger = (
-            [] if index % 11 == 0 else [ledger_row(id=index, attempt_id=index, snapshot=snapshot)]
-        )
         job_id = f"ajob_{index:05d}"
-        for row in ledger:
-            row["job_id"] = job_id
+        # Every eleventh turn reported nothing: unavailable, never zero.
+        usage = [] if index % 11 == 0 else [_attempt(job_id, index)]
         jobs.append(
             {
                 "id": job_id,
                 "user_id": "owner",
                 "thread_id": f"athr_{index % 5}",
                 "model": f"model-{index % 3}",
-                "runtime": "codex",
+                "runtime": "claude-code",
                 "repo": "r",
                 "state": "succeeded",
                 "created_at": START + timedelta(hours=7 * index),
-                "ledger": ledger,
+                "usage": usage,
             }
         )
     return jobs
@@ -75,8 +80,8 @@ class _Queries:
                 raise UsageQueryUnavailable
             batch = selected[offset : offset + max_runs]
             self.batch_sizes.append(len(batch))
-            cohort = [{k: v for k, v in job.items() if k != "ledger"} for job in batch]
-            rows = [row for job in batch for row in job["ledger"]]
+            cohort = [{k: v for k, v in job.items() if k != "usage"} for job in batch]
+            rows = [row for job in batch for row in job["usage"]]
             yield cohort, rows
 
 
@@ -91,7 +96,7 @@ async def test_many_small_batches_sum_to_the_single_aggregate():
     single = aggregate_jobs(jobs, terminal_states=TERMINAL)
     assert usage.summary.model_dump() == single.model_dump()
     assert usage.summary.totals is not None
-    assert usage.summary.unknown_rows is not None and usage.summary.unknown_rows.spent_usd > 0
+    assert usage.summary.unknown_rows is not None and usage.summary.unknown_rows.reasoning > 0
     # Buckets partition the runs; empty buckets are present, not skipped.
     assert sum(bucket.usage.run_count for bucket in usage.buckets) == 230
     assert [b.date for b in usage.buckets] == [

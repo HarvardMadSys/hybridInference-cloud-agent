@@ -11,9 +11,8 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI  # noqa: TC002 — used in a runtime annotation.
 from httpx import ASGITransport, AsyncClient
-from tests.unit.test_ledger_snapshots import START, ledger_row, report_payload
+from tests.support.owners import use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES, MAX_USAGE_RUNS
 from cloud_agent.api import admin_usage
 from cloud_agent.api.deps import get_storage
@@ -26,6 +25,7 @@ from cloud_agent.storage.admin_usage_queries import (
 ADMIN = {"Authorization": "Bearer admin-usage-test"}
 PATH = "/admin/agent/usage"
 PERSONAL = "private prompt"
+START = datetime(2026, 9, 9, 10, tzinfo=UTC)
 
 
 def row(
@@ -35,7 +35,7 @@ def row(
     model: str = "model-a",
     state: str = "succeeded",
     created_at: datetime = START,
-    ledger: list[dict] | None = None,
+    usage: list[dict] | None = None,
 ) -> dict:
     """One projected job row, including fields the response must never echo."""
     return {
@@ -46,26 +46,32 @@ def row(
         "repo": "example/repository",
         "state": state,
         "created_at": created_at,
-        "ledger": [ledger_row()] if ledger is None else ledger,
         "task_prompt": PERSONAL,
         "metadata": {"token": "private credential"},
     }
 
 
-def ledger_row_for(job_id: str, *, amount: str = "0.00012345") -> dict:
-    return ledger_row(
-        job_id=job_id,
-        snapshot=report_payload(totals={**report_payload()["totals"], "spent_usd": amount}),
-    )
+def usage_for(job_id: str, *, output: int = 10) -> dict:
+    """One attempt's agent-reported usage, as the bounded read returns it."""
+    return {
+        "job_id": job_id,
+        "attempt_id": 101,
+        "attempt_no": 1,
+        "saw_usage": True,
+        "input_tokens": 20,
+        "output_tokens": output,
+        "cache_read_tokens": 80,
+        "cache_write_tokens": 0,
+    }
 
 
 @pytest.fixture
 def queries():
     """A stub query layer that records exactly what the route asked for."""
     stub = SimpleNamespace(
-        # One call, one read view: the cohort and its ledger rows come back
-        # together so the route cannot count a run and sum a different snapshot.
-        selection=AsyncMock(return_value=([row()], [ledger_row_for("ajob_one")])),
+        # One call, one read view: the cohort and its usage rows come back
+        # together so the route cannot count a run and sum another's usage.
+        selection=AsyncMock(return_value=([row()], [usage_for("ajob_one")])),
     )
     return stub
 
@@ -73,8 +79,7 @@ def queries():
 @pytest.fixture
 def setup(monkeypatch, queries):
     monkeypatch.setenv("ADMIN_TOKEN", "admin-usage-test")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-usage-session-test-long-secret")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     app = create_app()
     app.dependency_overrides[admin_usage.get_admin_usage_queries] = lambda: queries
     app.dependency_overrides[get_storage] = lambda: None
@@ -91,15 +96,18 @@ async def test_an_administrator_reads_totals_days_and_both_breakdowns(setup):
     response = await get(app, f"{PATH}?since=2026-09-09T00:00:00Z&until=2026-09-11T00:00:00Z")
     assert response.status_code == 200
     body = response.json()
-    assert body["schema_version"] == 1
-    assert body["source"] == "gateway_api_logs"
-    assert body["attribution"] == "grant_time_window"
+    assert body["schema_version"] == 2
+    assert body["source"] == "runtime_reported"
     assert body["finalized"] is False
     assert body["selection"]["time_basis"] == "job_created_at"
     assert body["selection"]["day_timezone"] == "UTC"
     assert body["selection"]["model_basis"] == "job_configured_model"
     assert body["summary"]["run_count"] == 1
-    assert body["summary"]["totals"]["spent_usd"] == "0.00012345"
+    assert body["summary"]["totals"]["tokens_in"] == 100
+    assert body["summary"]["totals"]["tokens_out"] == 10
+    # The owner's provider bills the turn; nothing here knows the cost.
+    assert body["summary"]["totals"]["spent_usd"] is None
+    assert body["summary"]["totals"]["calls"] is None
     assert body["summary"]["runs_with_snapshot"] == 1
     assert [day["date"] for day in body["days"]] == ["2026-09-09", "2026-09-10"]
     assert body["by_user"]["groups"][0]["key"] == "owner-one"
@@ -217,7 +225,7 @@ async def test_the_reduction_runs_without_holding_the_event_loop(setup, monkeypa
     await asyncio.wait_for(server, timeout=5)
     assert answered == [True]
     assert response.status_code == 200
-    assert response.json()["summary"]["totals"]["spent_usd"] == "0.00012345"
+    assert response.json()["summary"]["totals"]["tokens_out"] == 10
 
 
 async def test_an_unreadable_selection_returns_503_not_a_partial_total(setup):
@@ -277,8 +285,8 @@ def test_the_mcp_listener_does_not_mount_the_admin_usage_route():
     )
 
 
-async def test_jobs_are_paired_with_their_own_ledger_rows(setup):
-    """A job's snapshot must never be attributed to a neighbouring run."""
+async def test_jobs_are_paired_with_their_own_usage_rows(setup):
+    """A job's usage must never be attributed to a neighbouring run."""
     app, queries = setup
     queries.selection.return_value = (
         [
@@ -286,23 +294,23 @@ async def test_jobs_are_paired_with_their_own_ledger_rows(setup):
             row(job_id="ajob_two", user_id="owner-two", model="model-b"),
         ],
         [
-            ledger_row_for("ajob_two", amount="2.00"),
-            ledger_row_for("ajob_one", amount="1.00"),
+            usage_for("ajob_two", output=2),
+            usage_for("ajob_one", output=1),
         ],
     )
     response = await get(app, PATH)
     body = response.json()
     groups = {group["key"]: group for group in body["by_user"]["groups"]}
-    assert groups["owner-one"]["usage"]["totals"]["spent_usd"] == "1.00"
-    assert groups["owner-two"]["usage"]["totals"]["spent_usd"] == "2.00"
-    assert body["summary"]["totals"]["spent_usd"] == "3.00"
+    assert groups["owner-one"]["usage"]["totals"]["tokens_out"] == 1
+    assert groups["owner-two"]["usage"]["totals"]["tokens_out"] == 2
+    assert body["summary"]["totals"]["tokens_out"] == 3
 
 
 async def test_days_cover_the_selection_and_empty_days_stay_visible(setup):
     app, queries = setup
     queries.selection.return_value = (
         [row(created_at=datetime(2026, 9, 8, 12, tzinfo=UTC))],
-        [ledger_row_for("ajob_one")],
+        [usage_for("ajob_one")],
     )
     response = await get(app, f"{PATH}?since=2026-09-08T06:00:00Z&until=2026-09-10T06:00:00Z")
     body = response.json()
@@ -315,7 +323,7 @@ async def test_days_cover_the_selection_and_empty_days_stay_visible(setup):
 
 async def test_unstarted_terminal_runs_count_as_unavailable_not_as_zero(setup):
     app, queries = setup
-    queries.selection.return_value = ([row(state="cancelled", ledger=[])], [])
+    queries.selection.return_value = ([row(state="cancelled")], [])
     response = await get(app, PATH)
     body = response.json()
     assert body["summary"]["run_count"] == 1

@@ -102,7 +102,7 @@ class _StoppedDocker(FakeDocker):
 
 
 def _world(monkeypatch, spec):
-    """A stopped group whose bridge holds only its two relays, as after ``docker stop``."""
+    """A stopped group whose bridge holds only its relay, as after ``docker stop``."""
     config = _config()
     backend = ContainerBackend(image="img", sandbox_network=config, sandbox_namespace=_NAMESPACE)
     backend._network_guard = FakeGuard()  # type: ignore[assignment]
@@ -115,7 +115,7 @@ def _world(monkeypatch, spec):
     assert network is not None
     docker.connect(network["Id"], SANDBOX, [])
     docker(["docker", "stop", SANDBOX])
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp"}
+    assert docker.names_on(name) == {"relay-mcp"}
     assert docker.containers[SANDBOX]["networks"][name]["NetworkID"] == network["Id"]
     docker.calls.clear()
     return manager, docker, name, network["Id"]

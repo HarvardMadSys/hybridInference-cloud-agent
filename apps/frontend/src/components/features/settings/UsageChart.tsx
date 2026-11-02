@@ -36,7 +36,7 @@ const CHART_TITLE: Record<UsageBucket, TranslationKey> = {
  */
 export function UsageChart({ days, bucket }: { days: ChartDay[]; bucket: UsageBucket }) {
   const { t, locale } = useLocale();
-  const [metric, setMetric] = useState<ChartMetric>('cost');
+  const [metric, setMetric] = useState<ChartMetric>('tokens');
   const [pointed, setPointed] = useState<number | null>(null);
   if (days.length === 0) return null;
   const values = days.map((day) => dayValue(day, metric));

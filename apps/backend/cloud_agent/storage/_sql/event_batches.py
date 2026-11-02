@@ -14,10 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.events import insert_event
-from cloud_agent.storage._sql.ledger import (
-    REQUEST_ATTEMPT_LEDGER_REFRESH_SQL,
-    carries_model_usage,
-)
+from cloud_agent.storage._sql.ledger import NOTIFY_JOB_USAGE_SQL, carries_model_usage
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -62,8 +59,7 @@ async def append_attempt_events(
             )
         )
     if any(carries_model_usage(event_type, payload) for event_type, payload, _ in events):
-        # A model call just finished: read its usage now rather than when a
-        # page next asks, so every open tab is pushed the total. A second
-        # request in one transaction would schedule nothing earlier.
-        await conn.execute(REQUEST_ATTEMPT_LEDGER_REFRESH_SQL, attempt_id)
+        # A model call's usage just arrived: push it to the owner's open tabs
+        # when this commits, rather than leave them to their next read.
+        await conn.execute(NOTIFY_JOB_USAGE_SQL, job_id)
     return event_ids

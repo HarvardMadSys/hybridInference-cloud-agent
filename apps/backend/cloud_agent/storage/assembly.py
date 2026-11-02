@@ -39,10 +39,10 @@ from cloud_agent.storage.repositories import (
     PostgresFileActivityQueries,
     PostgresGoalRepository,
     PostgresGoalWakeupRepository,
-    PostgresGrantRepository,
     PostgresHostCapacityRepository,
     PostgresHostPoolRepository,
     PostgresLedgerRepository,
+    PostgresLocalAccountRepository,
     PostgresMcpCatalogRepository,
     PostgresMcpConnectionRepository,
     PostgresModelConnectionRepository,
@@ -50,6 +50,7 @@ from cloud_agent.storage.repositories import (
     PostgresNotificationMaintenanceRepository,
     PostgresOperationMeasurementRepository,
     PostgresOwnerUsageRepository,
+    PostgresOwnerWorkRepository,
     PostgresPendingMessageRepository,
     PostgresProfilingControlRepository,
     PostgresResidencyRepository,
@@ -90,10 +91,10 @@ if TYPE_CHECKING:
         FileActivityQueries,
         GoalRepository,
         GoalWakeupRepository,
-        GrantRepository,
         HostCapacityRepository,
         HostPoolRepository,
         LedgerRepository,
+        LocalAccountRepository,
         McpCatalogRepository,
         McpConnectionRepository,
         ModelConnectionRepository,
@@ -101,6 +102,7 @@ if TYPE_CHECKING:
         NotificationMaintenanceRepository,
         OperationMeasurements,
         OwnerUsageQueries,
+        OwnerWorkTermination,
         PendingMessageRepository,
         ProfilingControl,
         ResidencyRepository,
@@ -151,7 +153,6 @@ class Storage:
         self.file_activity_queries: FileActivityQueries = PostgresFileActivityQueries(pool)
         self.goals: GoalRepository = PostgresGoalRepository(pool)
         self.goal_wakeups: GoalWakeupRepository = PostgresGoalWakeupRepository(pool)
-        self.grants: GrantRepository = PostgresGrantRepository(pool)
         self.host_capacity: HostCapacityRepository = PostgresHostCapacityRepository(pool)
         self.host_pool: HostPoolRepository = PostgresHostPoolRepository(pool)
         self.ledger: LedgerRepository = PostgresLedgerRepository(pool)
@@ -185,3 +186,6 @@ class Storage:
         self.teams: TeamRepository = PostgresTeamRepository(pool)
         self.team_admin: TeamAdminQueries = PostgresTeamAdminQueries(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)
+        #: Accounts and the work ended with them.
+        self.local_accounts: LocalAccountRepository = PostgresLocalAccountRepository(pool)
+        self.owner_work: OwnerWorkTermination = PostgresOwnerWorkRepository(pool)

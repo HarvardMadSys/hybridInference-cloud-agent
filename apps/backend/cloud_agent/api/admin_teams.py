@@ -6,9 +6,9 @@ answer a support question or spot a team stuck without anyone able to run it.
 Changing a team from here is a separate, audited operation this module does
 not offer.
 
-Members are named by their own profile and their Gateway account email, read
-per request and never stored, the way the team's own pages name them. An email
-the Gateway cannot read is left out rather than failing the page.
+Members are named by their own profile and their account email, read per
+request and never stored, the way the team's own pages name them. An email
+that cannot be read is left out rather than failing the page.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any, Literal, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from cloud_agent.api.deps import (
-    get_gateway_client,
+    get_owner_directory,
     get_storage,
     require_store,
     verify_admin_access,
@@ -84,7 +84,7 @@ async def list_teams(
         description="The id of the last team the previous page showed.",
     ),
     teams: TeamAdminQueries = Depends(get_team_admin_queries),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AdminTeamListResponse:
     """Teams newest first.
 
@@ -97,7 +97,7 @@ async def list_teams(
         query=query, state=state, limit=limit, before=before
     )
     return AdminTeamListResponse(
-        teams=await admin_team_summaries(gateway, rows),
+        teams=await admin_team_summaries(owners, rows),
         next_before=rows[-1].id if more else None,
     )
 
@@ -106,14 +106,14 @@ async def list_teams(
 async def get_team(
     team_id: str,
     teams: TeamAdminQueries = Depends(get_team_admin_queries),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AdminTeamDetailResponse:
     """One team in any state: members past and present, open requests, links."""
     try:
         detail = await teams.get_team_for_admin(team_id)
     except TeamNotFound as exc:
         raise _not_found(exc) from exc
-    return await admin_team_detail(gateway, detail)
+    return await admin_team_detail(owners, detail)
 
 
 @router.get("/{team_id}/audit-events", response_model=AdminTeamAuditListResponse)
@@ -122,7 +122,7 @@ async def list_team_audit_events(
     before: int | None = Query(None, ge=1),
     limit: int = Query(50, ge=1, le=AUDIT_PAGE_LIMIT),
     teams: TeamAdminQueries = Depends(get_team_admin_queries),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AdminTeamAuditListResponse:
     """A team's audit events, newest first, a page at a time."""
     try:
@@ -131,6 +131,6 @@ async def list_team_audit_events(
         raise _not_found(exc) from exc
     page = events[:limit]
     return AdminTeamAuditListResponse(
-        events=await admin_audit_events(gateway, page),
+        events=await admin_audit_events(owners, page),
         next_before=page[-1].id if len(events) > limit else None,
     )

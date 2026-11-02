@@ -17,7 +17,7 @@ from tests.integration.storage.test_agent_job_store import pool, store  # noqa: 
 
 from cloud_agent.api import model_connections as api
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_grant_client, get_storage
+from cloud_agent.api.deps import get_storage
 from cloud_agent.application import model_connection_check as check
 from cloud_agent.application.model_connections import model_connection_cipher
 
@@ -77,7 +77,6 @@ def _client(store) -> AsyncClient:
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_grant_client] = lambda: None
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "user-1"}
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 

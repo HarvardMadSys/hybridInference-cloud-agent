@@ -92,9 +92,7 @@ async def _one_pass(store: _Store, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(attempts.asyncio, "sleep", _sleep)
     with pytest.raises(asyncio.CancelledError):
-        await attempts.reap_expired_attempts(
-            store, interval_seconds=0, max_attempts=1, grants=_Grants()
-        )
+        await attempts.reap_expired_attempts(store, interval_seconds=0, max_attempts=1)
     assert sleeps == 2
 
 
@@ -104,19 +102,19 @@ async def test_one_reaper_pass_purges_abandoned_staged_uploads(monkeypatch: pyte
 
     await _one_pass(store, monkeypatch)
 
-    assert store.events == ["reap_expired", ("purge", 24), "revoke_grants"]
+    assert store.events == ["reap_expired", ("purge", 24)]
 
 
 async def test_a_purge_failure_is_logged_and_does_not_abort_the_loop(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
-    """A purge exception stays in its own try, so the grant revocation after it still runs."""
+    """A purge exception stays in its own try."""
     store = _Store(purge_error=RuntimeError("attachment store unavailable"))
 
     with caplog.at_level(logging.WARNING, logger="cloud_agent.app"):
         await _one_pass(store, monkeypatch)
 
-    assert store.events == ["reap_expired", ("purge", 24), "revoke_grants"]
+    assert store.events == ["reap_expired", ("purge", 24)]
     failures = [
         record for record in caplog.records if record.message == "Staged upload purge failed"
     ]

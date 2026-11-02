@@ -24,7 +24,7 @@
 # whole script first, which would switch public services ahead of the host.
 #
 #   prepare           build or pull the images. Replaces nothing.
-#   prepare-database  start Postgres, migrate, check the identity namespace,
+#   prepare-database  start Postgres, check the account namespace, migrate,
 #                     and on a cold machine start the API and MCP relay the
 #                     host's readiness probe needs. Migrations stay
 #                     backwards-compatible with the API that is still running,
@@ -218,6 +218,21 @@ from_env() {
   printf '%s' "$value"
 }
 
+# Configuration for the removed Gateway sign-in, admission and inference is
+# refused before anything is pulled, migrated or replaced. Compose would drop
+# these from the containers' environment without a word, so the deployment
+# would start as if they were never set; the control plane refuses them too.
+for retired in AGENT_AUTH_MODE AGENT_GATEWAY_URL AGENT_SESSION_REDIRECT_URI \
+  AGENT_WEB_GATEWAY_URL AGENT_WEB_FEATURE_RAG AGENT_GATEWAY_SSH_HOST \
+  GATEWAY_AUTHORIZE_URL GATEWAY_BASE_URL \
+  GATEWAY_GRANT_BASE_PATH GATEWAY_GRANT_BINDING_ID GATEWAY_GRANT_DISPATCH_TOKEN \
+  GATEWAY_ISSUER GATEWAY_JWKS_URL IDENTITY_ALLOWED_REDIRECTS IDENTITY_ISSUER \
+  IDENTITY_JWT_PRIVATE_KEY IDENTITY_JWT_RETIRING_PUBLIC_KEYS \
+  AGENT_ONCALL_DISPATCH_TOKEN AGENT_ONCALL_USER_ID; do
+  [[ -z "$(from_env "$retired")" ]] \
+    || die "remove ${retired} from this deployment's .env: Cloud Agent no longer supports Gateway sign-in or Gateway inference (see docs/developer/upgrade-notes.md#independent-accounts-cutover)"
+done
+
 # The target API uses the same exact generation as the deployment waiter when
 # deciding whether a replica may materialize a new retained group. Export it
 # for every Compose invocation, including a bounded cold-start bootstrap.
@@ -396,15 +411,15 @@ if runs_phase prepare-database; then
   # plain detached `up` returns as soon as the container has started, which can
   # still let Alembic race Postgres initialization on a fresh volume.
   compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres
-  log "migrating deployment database"
-  compose run --rm --no-deps migrate
-
-  # Check the identity boundary before bootstrapping or replacing either listener.
-  # Historical data is never adopted by CD: an operator must first acknowledge
-  # its original issuer. A refusal here leaves the running API and relay intact.
-  log "checking the Agent database identity issuer"
+  # Check the account boundary before the database is migrated, read-only and
+  # on whatever schema it has: a Gateway-era database is refused before
+  # anything changes it, and is left as it was. A refusal here also leaves the
+  # running API and relay intact.
+  log "checking that the Agent database is empty or holds Cloud Agent accounts"
   compose run --rm --no-deps control-plane \
     python -m cloud_agent.identity_namespace --check
+  log "migrating deployment database"
+  compose run --rm --no-deps migrate
 
 fi
 
@@ -456,7 +471,7 @@ ensure_bootstrap_listeners() {
   fi
   if [ "${#missing[@]}" -gt 0 ]; then
     log "starting missing target services for parallel host readiness: ${missing[*]}"
-    # Host readiness probes both fixed sandbox relays. Starting only the API on
+    # Host readiness probes the MCP relay and the API. Starting only the API on
     # a clean machine, or assuming MCP is running merely because the API is,
     # deadlocks deployment: the host cannot publish its exact-SHA marker while
     # the full compose up that would start the missing service is fenced on that

@@ -145,7 +145,7 @@ describe('account menu', () => {
 
   it('holds the account pages, preferences, help and sign-out', async () => {
     pathname = '/settings/my-settings';
-    renderMenu({ gatewayUrl: 'https://gateway.example', docsUrl: 'https://docs.example/agents' });
+    renderMenu({ docsUrl: 'https://docs.example/agents' });
     const menu = await openMenu();
 
     expect(within(menu).getByText('ada@example.com')).toBeInTheDocument();
@@ -153,26 +153,31 @@ describe('account menu', () => {
       within(menu)
         .getAllByRole('menuitem')
         .map((item) => item.textContent),
-    ).toEqual([
-      'Dashboard',
-      'My Settings',
-      'Appearance',
-      'Language',
-      'Help',
-      'Switch account',
-      'Log out',
-    ]);
-    expect(within(menu).getByRole('menuitem', { name: 'Dashboard' })).toHaveAttribute(
-      'href',
-      'https://gateway.example/dashboard',
-    );
+    ).toEqual(['My Settings', 'Appearance', 'Language', 'Help', 'Switch account', 'Log out']);
     const settings = within(menu).getByRole('menuitem', { name: 'My Settings' });
     expect(settings).toHaveAttribute('href', '/settings/my-settings');
     expect(settings).toHaveAttribute('aria-current', 'page');
-    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Dashboard' }));
+    expect(document.activeElement).toBe(settings);
   });
 
-  it('switches account through the gateway’s chooser, back to this page', async () => {
+  it('keeps account settings, switching and logout in the app', async () => {
+    renderMenu();
+    const menu = await openMenu();
+    expect(within(menu).queryByRole('menuitem', { name: 'Dashboard' })).not.toBeInTheDocument();
+    expect(menu.querySelector('a[href^="http"]')).toBeNull();
+    expect(within(menu).getByRole('menuitem', { name: 'My Settings' })).toHaveAttribute(
+      'href',
+      '/settings/my-settings',
+    );
+    expect(within(menu).getByRole('menuitem', { name: 'Switch account' })).toHaveAttribute(
+      'href',
+      '/login?return_to=%2F',
+    );
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Log out' }));
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
+  });
+
+  it('switches account through the login page, back to this page', async () => {
     pathname = '/ajob_123';
     renderMenu();
     const menu = await openMenu();
@@ -180,12 +185,11 @@ describe('account menu', () => {
     const item = within(menu).getByRole('menuitem', { name: 'Switch account' });
     const url = new URL(item.getAttribute('href') ?? '', 'https://agents.example');
 
-    expect(url.pathname).toBe('/v1/session/login');
-    expect(url.searchParams.get('prompt')).toBe('select_account');
+    expect(url.pathname).toBe('/login');
     expect(url.searchParams.get('return_to')).toBe('/ajob_123');
   });
 
-  it('leaves out Dashboard without a gateway and Help without docs or contact', async () => {
+  it('leaves out Help without docs or contact', async () => {
     renderMenu();
     const menu = await openMenu();
     expect(

@@ -4,12 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  getAgentJobUsage,
-  refreshAgentJobUsage,
-  type AgentJobUsageApi,
-  type AgentLedgerTotalsApi,
-} from '@/lib/api/agents';
+import { getAgentJobUsage, type AgentJobUsageApi } from '@/lib/api/agents';
 
 import { LedgerUsage as UsageView, useLedgerUsage } from './LedgerUsage';
 import {
@@ -21,94 +16,43 @@ import {
 } from './agentPush';
 import type { AgentJob } from './types';
 
+vi.mock('@/lib/api/agents', () => ({ getAgentJobUsage: vi.fn() }));
+
+/** The footer as the job view mounts it, and the hook's own state beside it. */
 function LedgerUsage({ job: currentJob }: { job: AgentJob }) {
   const data = useLedgerUsage(currentJob);
-  return <UsageView job={currentJob} usage={data} />;
+  return (
+    <>
+      <UsageView usage={data} />
+      <output aria-label="Usage state">
+        {data === null
+          ? 'none'
+          : `${data.jobId}:${data.loading ? 'loading' : ''}${data.failed ? 'failed' : ''}`}
+      </output>
+    </>
+  );
 }
 
-vi.mock('@/lib/api/agents', () => ({
-  getAgentJobUsage: vi.fn(),
-  refreshAgentJobUsage: vi.fn(),
-}));
-
 const job = { id: 'ajob_1', state: 'done', runtime: 'claude-code' } as AgentJob;
-const totals: AgentLedgerTotalsApi = {
-  calls: 3,
-  tokens_in: 1200,
-  tokens_out: 80,
-  cache_read: 1000,
-  cache_write: 0,
-  reasoning: null,
-  spent_usd: '0.12345678',
-};
 
-function usage(): AgentJobUsageApi {
-  const unknown = {
-    tokens_in: 0,
-    tokens_out: 0,
-    cache_read: 0,
-    cache_write: 0,
-    reasoning: 3,
-    spent_usd: 0,
-  };
+/** What one turn's agent reported: Claude Code's disjoint counters, cache-inclusive input. */
+function usage(input = 1200, output = 80): AgentJobUsageApi {
   return {
-    ledger: {
-      status: 'partial',
-      source: 'gateway_api_logs',
-      attribution: 'grant_time_window',
-      finalized: false,
-      totals: { ...totals },
-      unknown_rows: { ...unknown },
-      estimated_calls: 0,
-      queried_at: '2026-09-09T10:10:00Z',
-      missing_attempts: 0,
-      refreshing: false,
-      attempts: [
-        {
-          attempt_id: 10,
-          attempt_no: 1,
-          status: 'partial',
-          reason: null,
-          totals: { ...totals },
-          unknown_rows: { ...unknown },
-          estimated_calls: 0,
-          queried_at: '2026-09-09T10:10:00Z',
-          windows: [
-            {
-              since: '2026-09-09T10:00:00Z',
-              until: '2026-09-09T10:05:00Z',
-              basis: 'request_started_at',
-            },
-          ],
-        },
-      ],
-    },
     runtime: {
       source: 'runtime',
       input_tokens: 200,
-      normalized_input_tokens: 1200,
-      output_tokens: 80,
+      normalized_input_tokens: input,
+      output_tokens: output,
       cache_read_tokens: 1000,
+      cache_write_tokens: 0,
+      reasoning_tokens: null,
     },
+    external_provider: true,
   };
 }
 
-function unavailable(reason = 'attribution_unavailable'): AgentJobUsageApi {
-  const data = usage();
-  data.ledger.status = 'unavailable';
-  data.ledger.totals = null;
-  data.ledger.unknown_rows = null;
-  data.ledger.queried_at = null;
-  data.ledger.missing_attempts = 1;
-  data.ledger.attempts[0] = {
-    ...data.ledger.attempts[0],
-    status: 'unavailable',
-    reason,
-    totals: null,
-    windows: [],
-    queried_at: null,
-  };
-  return data;
+function versioned(version: string, output: number): AgentJobUsageApi {
+  return { ...usage(1200, output), version };
 }
 
 async function mount(currentJob = job) {
@@ -123,335 +67,129 @@ async function advance(milliseconds: number) {
   await act(async () => vi.advanceTimersByTimeAsync(milliseconds));
 }
 
+const state = () => screen.getByLabelText('Usage state').textContent;
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-09-09T10:12:00Z'));
   vi.mocked(getAgentJobUsage).mockReset().mockResolvedValue(usage());
-  vi.mocked(refreshAgentJobUsage).mockReset().mockResolvedValue(usage());
 });
 
 afterEach(() => {
   cleanup();
+  resetAgentPush();
   vi.useRealTimers();
 });
 
 describe('LedgerUsage', () => {
-  it('uses one loading skeleton, then only the current run summary', async () => {
-    let finish!: (value: AgentJobUsageApi) => void;
-    vi.mocked(getAgentJobUsage).mockImplementation(
-      () => new Promise((resolve) => (finish = resolve)),
-    );
-    await mount();
-    expect(screen.getAllByRole('status')).toHaveLength(1);
-    expect(screen.getByRole('status', { name: 'Loading usage' })).toBeInTheDocument();
-    expect(screen.queryByText('Input tokens')).not.toBeInTheDocument();
-    expect(screen.queryByText('—')).not.toBeInTheDocument();
-    await act(async () => finish(usage()));
-
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent(
-      '3 model calls · 1.2k input tokens · 80 output tokens',
-    );
-    expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
-    expect(screen.queryByText('Estimated inference cost')).not.toBeInTheDocument();
-    expect(screen.getByTitle('1,200 input tokens')).toHaveTextContent('1.2k input tokens');
-    expect(screen.queryByText('Reasoning tokens')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Some usage is/)).not.toBeInTheDocument();
-    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /refresh/i })).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/gateway|runtime|attempt|retr(y|ies)|snapshot/i),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText(/Updated at/)).not.toBeInTheDocument();
-  });
-
-  it('keeps measured zeros and hides unknown detail values without inventing costs', async () => {
-    const data = usage();
-    Object.assign(data.ledger.totals!, {
-      calls: 0,
-      tokens_in: 0,
-      tokens_out: 0,
-      cache_read: null,
-      cache_write: null,
-      reasoning: 0,
-      spent_usd: null,
-    });
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    await mount();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent(
-      '0 model calls · 0 input tokens · 0 output tokens',
-    );
-    expect(screen.queryByText('Reasoning tokens')).not.toBeInTheDocument();
-    expect(screen.queryByText('Cache read tokens')).not.toBeInTheDocument();
-    expect(screen.queryByText('Cache write tokens')).not.toBeInTheDocument();
-    expect(screen.queryByText('Estimated inference cost')).not.toBeInTheDocument();
-    expect(screen.queryByText('—')).not.toBeInTheDocument();
-  });
-
-  it('identifies incomplete primary totals and estimates without exposing reconciliation fields', async () => {
-    const data = usage();
-    data.ledger.missing_attempts = 1;
-    data.ledger.estimated_calls = 1;
-    data.ledger.unknown_rows!.tokens_in = 2;
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    await mount();
-    expect(screen.getByText('Some usage is unavailable.')).toBeInTheDocument();
-    expect(screen.getByTitle('1,200 input tokens')).toBeInTheDocument();
-    expect(screen.getByText('Some token counts are estimated.')).toBeInTheDocument();
-    expect(screen.queryByText(/attempt|missing this value/i)).not.toBeInTheDocument();
-  });
-
-  it('falls back only when measured totals are absent and uses normalized inclusive input', async () => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(unavailable());
+  it('shows the agent-reported tokens and that the provider bills it, never a cost', async () => {
     await mount();
     expect(screen.getByLabelText('Run usage')).toHaveTextContent(
       '1.2k input tokens · 80 output tokens',
     );
+    expect(screen.getByTitle('1,200 input tokens')).toHaveTextContent('1.2k input tokens');
     expect(screen.getByText('Reported by agent.')).toBeInTheDocument();
-    expect(screen.getByTitle('1,200 input tokens')).toBeInTheDocument();
-    expect(screen.queryByText(/model call/)).not.toBeInTheDocument();
-    expect(screen.queryByText('Estimated inference cost')).not.toBeInTheDocument();
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+    expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Usage')).not.toHaveTextContent('$');
+    // Agents count no model calls: none is claimed.
+    expect(screen.getByLabelText('Usage')).not.toHaveTextContent(/model call/);
+    expect(screen.queryByRole('button', { name: /refresh/i })).not.toBeInTheDocument();
   });
 
-  it('does not guess a compatible input count for legacy runtime reports', async () => {
-    const data = unavailable();
-    delete data.runtime.normalized_input_tokens;
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
+  it('keeps measured zeros and hides unknown values without inventing any', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue({
+      runtime: {
+        source: 'runtime',
+        input_tokens: 0,
+        normalized_input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: null,
+        cache_write_tokens: null,
+        reasoning_tokens: null,
+      },
+    });
     await mount();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
-    expect(screen.getByLabelText('Run usage')).not.toHaveTextContent('input');
-    expect(screen.queryByText('Input tokens')).not.toBeInTheDocument();
-    expect(screen.queryByText('200')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent(
+      '0 input tokens · 0 output tokens',
+    );
+    expect(screen.queryByText('—')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Usage')).not.toHaveTextContent('$');
   });
 
-  it('does not mistake a cache-only legacy report for total input tokens', async () => {
-    const data = unavailable();
-    data.runtime.normalized_input_tokens = null;
-    data.runtime.output_tokens = null;
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
+  it('shows no counts until the agent reports one, and still says who bills it', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue({
+      runtime: {
+        source: 'runtime',
+        input_tokens: 200,
+        normalized_input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+      },
+    });
     await mount();
-    expect(screen.getByText('Usage temporarily unavailable.')).toBeInTheDocument();
+    // Uncached input alone is not a total; it is not shown as one.
     expect(screen.queryByLabelText('Run usage')).not.toBeInTheDocument();
-    expect(screen.queryByText('Input tokens')).not.toBeInTheDocument();
-    expect(screen.queryByText('Output tokens')).not.toBeInTheDocument();
+    expect(screen.queryByText(/200/)).not.toBeInTheDocument();
+    expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
   });
 
-  it('keeps measured totals primary even when the runtime reports a different count', async () => {
-    const data = usage();
-    data.runtime.normalized_input_tokens = 9000;
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
+  it('never substitutes a conversation total for the current run', async () => {
+    // An older server's response, still carrying a conversation's sum.
+    vi.mocked(getAgentJobUsage).mockResolvedValue({
+      ...usage(),
+      conversation: { totals: { tokens_in: 2800, tokens_out: 900 }, turn_count: 3 },
+    } as AgentJobUsageApi);
     await mount();
     expect(screen.getByLabelText('Run usage')).toHaveTextContent('1.2k input tokens');
-    expect(screen.queryByText('Reported by agent.')).not.toBeInTheDocument();
-    expect(screen.queryByText(/9k/)).not.toBeInTheDocument();
-  });
-
-  it('never substitutes conversation totals for the current run', async () => {
-    const data = unavailable();
-    data.conversation = {
-      turn_count: 3,
-      totals: { ...totals, calls: 6, tokens_in: 2800 },
-      unknown_rows: { ...usage().ledger.unknown_rows! },
-      estimated_calls: 0,
-      queried_at: '2026-09-09T10:09:00Z',
-      incomplete: true,
-      refreshing: false,
-    };
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    await mount();
-    expect(screen.queryByText('Conversation total')).not.toBeInTheDocument();
+    expect(screen.queryByText(/2\.8k|900/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Conversation usage')).not.toBeInTheDocument();
-    expect(screen.queryByText(/6 model calls|2.8k/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('1.2k input tokens');
   });
 
-  it('ignores unavailable conversation totals when this run has usage', async () => {
-    const data = unavailable();
-    data.conversation = {
-      turn_count: 3,
-      totals: null,
-      unknown_rows: null,
-      estimated_calls: 0,
-      queried_at: null,
-      incomplete: true,
-      refreshing: false,
-    };
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    await mount();
-    expect(screen.queryByLabelText('Conversation usage')).not.toBeInTheDocument();
-    expect(screen.queryByText('Usage temporarily unavailable.')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('1.2k input tokens');
-  });
-
-  it('treats an unsupported deployment as unavailable without displaying old placeholder counts', async () => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    await mount({ ...job, state: 'running', usage: { turns: 0 } } as AgentJob);
-    expect(screen.getByText('Usage temporarily unavailable.')).toBeInTheDocument();
-    expect(screen.queryByText(/0 model calls|Estimated inference cost/)).not.toBeInTheDocument();
-    await advance(600_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
-
-  it('requests fresh source usage throughout active runs, including after five minutes', async () => {
-    const view = await mount({ ...job, state: 'running' });
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
-    await advance(360_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(25);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(25);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
-    expect(refreshAgentJobUsage).toHaveBeenLastCalledWith('ajob_1', expect.any(AbortSignal));
-    view.unmount();
-    await advance(60_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(25);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(25);
-  });
-
-  it('reads in-flight and throttled work before requesting another source update', async () => {
-    const busy = usage();
-    busy.ledger.refreshing = true;
-    const delayed = usage();
-    delayed.ledger.next_refresh_at = new Date(Date.now() + 30_000).toISOString();
+  it('keeps the values it has when a later read fails, then recovers on its clock', async () => {
     vi.mocked(getAgentJobUsage)
-      .mockResolvedValueOnce(busy)
-      .mockResolvedValueOnce(delayed)
-      .mockResolvedValue(usage());
+      .mockResolvedValueOnce(usage(1200, 80))
+      .mockRejectedValueOnce(new Error('secret upstream details'))
+      .mockResolvedValue(usage(1300, 90));
     await mount({ ...job, state: 'running' });
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
     await advance(15_000);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-    await advance(15_000);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
-  });
-
-  it('follows terminal delayed checks without pulling them forward or declaring final totals', async () => {
-    const delayed = usage();
-    delayed.ledger.next_refresh_at = new Date(Date.now() + 30_000).toISOString();
-    const updated = usage();
-    updated.ledger.totals!.calls = 4;
-    updated.ledger.next_refresh_at = null;
-    vi.mocked(getAgentJobUsage)
-      .mockResolvedValueOnce(delayed)
-      .mockResolvedValueOnce(delayed)
-      .mockResolvedValue(updated);
-    await mount();
-    expect(screen.getByText(/Usage may change/)).toBeInTheDocument();
-    expect(screen.queryByText(/Updating/)).not.toBeInTheDocument();
-    await advance(30_000);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
-    expect(screen.queryByText(/Usage may change/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/final|completed|settled/i)).not.toBeInTheDocument();
-    await advance(600_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
-
-  it.each(['active', 'refreshing', 'scheduled'])(
-    'does not poll a settled run for a sibling that is %s',
-    async (state) => {
-      const data = usage();
-      data.conversation = {
-        turn_count: 2,
-        totals: { ...totals, calls: 5 },
-        unknown_rows: data.ledger.unknown_rows,
-        estimated_calls: 0,
-        queried_at: data.ledger.queried_at,
-        incomplete: false,
-        active: state === 'active',
-        refreshing: state === 'refreshing',
-        next_refresh_at: state === 'scheduled' ? new Date(Date.now() + 30_000).toISOString() : null,
-      };
-      vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-      await mount();
-      await advance(360_000);
-      expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-      expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-      expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-      expect(screen.queryByLabelText('Conversation usage')).not.toBeInTheDocument();
-    },
-  );
-
-  it('keeps cached values when a request fails, then recovers automatically', async () => {
-    vi.mocked(refreshAgentJobUsage).mockRejectedValueOnce(new Error('secret upstream details'));
-    const updated = usage();
-    updated.ledger.totals!.calls = 4;
-    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(usage()).mockResolvedValue(updated);
-    await mount({ ...job, state: 'running' });
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-    expect(screen.getByText(/Update temporarily unavailable/)).toBeInTheDocument();
+    expect(state()).toBe('ajob_1:failed');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(screen.queryByText('secret upstream details')).not.toBeInTheDocument();
-    vi.mocked(refreshAgentJobUsage).mockResolvedValue(updated);
     await advance(15_000);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
-    expect(screen.queryByText(/Update temporarily unavailable/)).not.toBeInTheDocument();
-  });
-
-  it('retains measured values when a later response loses the source instead of switching to runtime', async () => {
-    vi.mocked(refreshAgentJobUsage).mockResolvedValue(unavailable('usage_unavailable'));
-    await mount({ ...job, state: 'running' });
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-    expect(screen.getByText(/Update temporarily unavailable/)).toBeInTheDocument();
-    expect(screen.queryByText('Reported by agent.')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('1.2k input tokens');
-  });
-
-  it('backs off transient terminal source failures and recovers without manual refresh', async () => {
-    const stale = usage();
-    stale.ledger.status = 'stale';
-    stale.ledger.attempts[0].reason = 'usage_unavailable';
-    vi.mocked(getAgentJobUsage).mockResolvedValue(stale);
-    vi.mocked(refreshAgentJobUsage).mockResolvedValue(stale);
-    await mount();
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
-    await advance(15_000);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(2);
-    await advance(15_000);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(2);
-    await advance(15_000);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(3);
-    await advance(30_000);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(3);
-    const recovered = usage();
-    recovered.ledger.totals!.calls = 4;
-    vi.mocked(getAgentJobUsage).mockResolvedValue(recovered);
-    await advance(30_000);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
-    expect(screen.queryByText(/Update temporarily unavailable/)).not.toBeInTheDocument();
-    const reads = vi.mocked(getAgentJobUsage).mock.calls.length;
-    await advance(120_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(reads);
+    expect(state()).toBe('ajob_1:');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('90 output tokens');
   });
 
   it('backs off failed initial reads and can recover a completed run', async () => {
     vi.mocked(getAgentJobUsage).mockRejectedValue(new Error('network unavailable'));
     await mount();
-    expect(screen.getByText('Usage temporarily unavailable.')).toBeInTheDocument();
+    expect(state()).toBe('ajob_1:failed');
     await advance(15_000);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    await advance(30_000);
+    await advance(29_999);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    await advance(1);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
+    // Capped at a minute, however long it keeps failing.
+    await advance(60_000);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(4);
+    await advance(60_000);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(5);
     vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
     await advance(60_000);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('1.2k input tokens');
+    // A finished turn's settled read is the last one.
+    const reads = vi.mocked(getAgentJobUsage).mock.calls.length;
+    await advance(300_000);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(reads);
   });
 
-  it.each([
-    'attribution_unavailable',
-    'usage_unconfigured',
-    'internal_api_not_configured',
-    'binding_changed',
-    'unknown_grant',
-    'usage_unsupported_schema',
-  ])('does not repeatedly request unusable attribution/configuration: %s', async (reason) => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(unavailable(reason));
+  it('reads a running turn again every fifteen seconds without a push stream', async () => {
     await mount({ ...job, state: 'running' });
-    await advance(360_000);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-    expect(screen.queryByText(reason)).not.toBeInTheDocument();
+    await advance(14_999);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
   });
 
   it('aborts old requests and rejects their late responses after switching jobs', async () => {
@@ -464,256 +202,48 @@ describe('LedgerUsage', () => {
     await act(async () => view.rerender(<LedgerUsage job={{ ...job, id: 'ajob_2' }} />));
     expect(oldSignal.aborted).toBe(true);
     await act(async () => finishOld(usage()));
-    expect(screen.getByText('Usage temporarily unavailable.')).toBeInTheDocument();
+    expect(state()).toBe('ajob_2:');
     expect(screen.queryByLabelText('Run usage')).not.toBeInTheDocument();
-    expect(screen.queryByText('$0.12345678')).not.toBeInTheDocument();
   });
 
   it('clears already loaded totals immediately when switching jobs', async () => {
     const view = await mount();
+    expect(screen.getByLabelText('Run usage')).toBeInTheDocument();
     vi.mocked(getAgentJobUsage).mockImplementation(() => new Promise(() => {}));
     view.rerender(<LedgerUsage job={{ ...job, id: 'ajob_2' }} />);
-    expect(screen.getByRole('status', { name: 'Loading usage' })).toBeInTheDocument();
+    // The first frame for the new job shows none of the old one's numbers.
     expect(screen.queryByLabelText('Run usage')).not.toBeInTheDocument();
-    expect(screen.queryByText('$0.12345678')).not.toBeInTheDocument();
+    expect(state()).not.toContain('ajob_1');
+    await act(async () => {});
+    expect(state()).toBe('ajob_2:loading');
     view.unmount();
     expect(vi.mocked(getAgentJobUsage).mock.calls.at(-1)![1]!.aborted).toBe(true);
   });
 });
 
 describe('LedgerUsage with the owner change stream', () => {
-  afterEach(() => resetAgentPush());
-
-  function nothingCalled(): AgentJobUsageApi {
-    const data = unavailable('no_model_calls');
-    data.ledger.status = 'available';
-    data.ledger.missing_attempts = 0;
-    data.ledger.attempts[0] = { ...data.ledger.attempts[0], status: 'available' };
-    data.runtime = {
-      source: 'runtime',
-      input_tokens: null,
-      output_tokens: null,
-      cache_read_tokens: null,
-      normalized_input_tokens: null,
-    };
-    return data;
-  }
-
-  it('shows nothing for a turn that ended before its agent called a model', async () => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(nothingCalled());
-    await mount({ ...job, state: 'failed' } as AgentJob);
-    expect(screen.queryByLabelText('Usage')).not.toBeInTheDocument();
-    expect(screen.queryByText(/temporarily unavailable|Counting usage/)).not.toBeInTheDocument();
-  });
-
-  it('shows nothing for a turn that never ran', async () => {
-    const data = nothingCalled();
-    data.ledger.status = 'unavailable';
-    data.ledger.attempts = [];
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    await mount({ ...job, state: 'cancelled' } as AgentJob);
-    expect(screen.queryByLabelText('Usage')).not.toBeInTheDocument();
-  });
-
-  it('reads a pushed usage change at once and never asks for a refresh itself', async () => {
+  it('reads a pushed usage change at once, and only for its own job', async () => {
     act(() => setAgentPushLive(true));
-    await mount({ ...job, state: 'running' } as AgentJob);
+    await mount({ ...job, state: 'running' });
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
 
-    // The fifteen-second clock is gone while pushes flow.
+    // The fifteen-second clock is only a backstop while pushes flow.
     await advance(15_000);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
 
     act(() => receiveHint('usage', 'ajob_1'));
     await advance(PUSH_BATCH_MS);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
 
     act(() => receiveHint('usage', 'another_job'));
     await advance(PUSH_BATCH_MS);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['pending', 'refreshing'])(
-    'reads a finished turn again after fifteen seconds while its usage is %s',
-    async (state) => {
-      act(() => setAgentPushLive(true));
-      const unsettled = usage();
-      if (state === 'pending') unsettled.ledger.status = 'pending';
-      else unsettled.ledger.refreshing = true;
-      const updated = usage();
-      updated.ledger.totals!.calls = 4;
-      vi.mocked(getAgentJobUsage)
-        .mockResolvedValueOnce(usage())
-        .mockResolvedValueOnce(unsettled)
-        .mockResolvedValue(updated);
-      const view = await mount({ ...job, state: 'running' });
-      await act(async () => view.rerender(<LedgerUsage job={job} />));
-      expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-      expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
-      expect(screen.queryByRole('status')).not.toBeInTheDocument();
-      expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-
-      await advance(14_999);
-      expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-      await advance(1);
-      expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
-      expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
-      expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
-      await advance(60_000);
-      expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
-      expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-    },
-  );
-
-  it('hides pending usage without totals until the next read provides them', async () => {
-    act(() => setAgentPushLive(true));
-    const pending = usage();
-    pending.ledger.status = 'pending';
-    pending.ledger.totals = null;
-    pending.runtime = {
-      source: 'runtime',
-      input_tokens: null,
-      normalized_input_tokens: null,
-      output_tokens: null,
-      cache_read_tokens: null,
-    };
-    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(pending).mockResolvedValue(usage());
-    await mount();
-    expect(screen.queryByLabelText('Usage')).not.toBeInTheDocument();
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    await advance(14_999);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    await advance(1);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
-
-  it('keeps reading pending usage pushed for a finished turn until it becomes available', async () => {
-    act(() => setAgentPushLive(true));
-    const updated = usage();
-    updated.ledger.totals!.calls = 5;
-    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(usage()).mockResolvedValue(updated);
-    await mount();
-    const pending = usage();
-    pending.ledger.status = 'pending';
-    pending.ledger.totals!.calls = 4;
-    act(() => receiveHint('usage', job.id, pending));
-    await advance(PUSH_BATCH_MS);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
-    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
-    await advance(15_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('5 model calls');
-    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
-
-  it("reads at a finished turn's scheduled refresh instead of waiting a minute", async () => {
-    act(() => setAgentPushLive(true));
-    const scheduled = usage();
-    scheduled.ledger.next_refresh_at = new Date(Date.now() + 5_000).toISOString();
-    const updated = usage();
-    updated.ledger.totals!.calls = 4;
-    vi.mocked(getAgentJobUsage).mockResolvedValueOnce(scheduled).mockResolvedValue(updated);
-    await mount();
-    await advance(4_999);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    await advance(1);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-    await advance(60_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-  });
-
-  it('uses the normal backstop while a terminal refresh stays overdue', async () => {
-    act(() => setAgentPushLive(true));
-    const overdue = usage();
-    overdue.ledger.next_refresh_at = new Date(Date.now() - 5_000).toISOString();
-    vi.mocked(getAgentJobUsage).mockResolvedValue(overdue);
-    await mount();
-    await advance(14_999);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    await advance(1);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    await advance(15_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
-
-  it('keeps the minute backstop for an active turn while pushes flow', async () => {
-    act(() => setAgentPushLive(true));
-    await mount({ ...job, state: 'running' });
-    await advance(59_999);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    await advance(1);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
-
-  function versioned(version: string, calls: number): AgentJobUsageApi {
-    const data = usage();
-    data.version = version;
-    data.ledger.totals = { ...data.ledger.totals!, calls };
-    return data;
-  }
-
-  it("keeps a newer terminal pending snapshot's timer after an older settled push", async () => {
-    act(() => setAgentPushLive(true));
-    vi.mocked(getAgentJobUsage)
-      .mockResolvedValueOnce(versioned('0001', 3))
-      .mockResolvedValue(versioned('0003', 4));
-    await mount();
-    const pending = versioned('0002', 3);
-    pending.ledger.status = 'pending';
-    act(() => receiveHint('usage', job.id, pending));
-    await advance(PUSH_BATCH_MS);
-    act(() => receiveHint('usage', job.id, versioned('0001', 3)));
-    await advance(PUSH_BATCH_MS);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
-    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
-
-    await advance(15_000 - PUSH_BATCH_MS);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    expect(screen.queryByText('Counting usage…')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
-  });
-
-  it.each(['pending', 'scheduled'])(
-    'keeps terminal polling stopped when an older %s read follows a settled push',
-    async (state) => {
-      act(() => setAgentPushLive(true));
-      let finishOlder!: (value: AgentJobUsageApi) => void;
-      vi.mocked(getAgentJobUsage)
-        .mockResolvedValueOnce(versioned('0001', 3))
-        .mockImplementationOnce(() => new Promise((resolve) => (finishOlder = resolve)));
-      await mount();
-      act(() => receiveHint('usage', job.id));
-      await advance(PUSH_BATCH_MS);
-      act(() => receiveHint('usage', job.id, versioned('0003', 4)));
-      await advance(PUSH_BATCH_MS);
-      const older = versioned('0002', 3);
-      if (state === 'pending') older.ledger.status = 'pending';
-      else older.ledger.next_refresh_at = new Date(Date.now() + 5_000).toISOString();
-      await act(async () => finishOlder(older));
-
-      await advance(60_000);
-      expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-      expect(screen.getByLabelText('Run usage')).toHaveTextContent('4 model calls');
-      expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-    },
-  );
-
   it('shows usage the stream sent without reading it, over a read that left before it', async () => {
     act(() => setAgentPushLive(true));
-    await mount({ ...job, state: 'running' } as AgentJob);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    await mount({ ...job, state: 'running' });
 
-    // A read is on its way when the stream sends newer usage.
     let finishOlder!: (value: AgentJobUsageApi) => void;
     vi.mocked(getAgentJobUsage).mockImplementationOnce(
       () => new Promise((resolve) => (finishOlder = resolve)),
@@ -725,29 +255,28 @@ describe('LedgerUsage with the owner change stream', () => {
     act(() => receiveHint('usage', 'ajob_1', versioned('0002', 7)));
     await advance(PUSH_BATCH_MS);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 output tokens');
 
     await act(async () => finishOlder(versioned('0001', 3)));
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 output tokens');
   });
 
   it('keeps a read over an older usage pushed after it', async () => {
     act(() => setAgentPushLive(true));
     vi.mocked(getAgentJobUsage).mockResolvedValue(versioned('0005', 9));
-    await mount({ ...job, state: 'running' } as AgentJob);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('9 model calls');
+    await mount({ ...job, state: 'running' });
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('9 output tokens');
 
     // Computed before the read, delivered after it.
     act(() => receiveHint('usage', 'ajob_1', versioned('0004', 8)));
     await advance(PUSH_BATCH_MS);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('9 model calls');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('9 output tokens');
   });
 
   it('shows a read still on its way when it is newer than a usage pushed meanwhile', async () => {
     act(() => setAgentPushLive(true));
     vi.mocked(getAgentJobUsage).mockResolvedValue(versioned('0001', 1));
-    await mount({ ...job, state: 'running' } as AgentJob);
+    await mount({ ...job, state: 'running' });
 
     let finishNewer!: (value: AgentJobUsageApi) => void;
     vi.mocked(getAgentJobUsage).mockImplementationOnce(
@@ -757,30 +286,28 @@ describe('LedgerUsage with the owner change stream', () => {
     await advance(PUSH_BATCH_MS);
     act(() => receiveHint('usage', 'ajob_1', versioned('0002', 2)));
     await advance(PUSH_BATCH_MS);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('2 output tokens');
 
     await act(async () => finishNewer(versioned('0003', 3)));
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 output tokens');
   });
 
   it('keeps the newer usage across a change of the turn it shows', async () => {
     act(() => setAgentPushLive(true));
     vi.mocked(getAgentJobUsage).mockResolvedValue(versioned('0007', 7));
-    const view = await mount({ ...job, state: 'running' } as AgentJob);
-    // The turn ends: the line reads again and is shown the newer usage...
+    const view = await mount({ ...job, state: 'running' });
     await act(async () => {
       view.rerender(<LedgerUsage job={{ ...job, state: 'done' } as AgentJob} />);
     });
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
-    // ...and an older one pushed before the turn ended does not replace it.
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 output tokens');
     act(() => receiveHint('usage', 'ajob_1', versioned('0006', 6)));
     await advance(PUSH_BATCH_MS);
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 output tokens');
   });
 
   it('reads a turn that changed in the same batch rather than trust the usage sent', async () => {
     act(() => setAgentPushLive(true));
-    await mount({ ...job, state: 'running' } as AgentJob);
+    await mount({ ...job, state: 'running' });
     act(() => {
       receiveJobChange({ id: 'ajob_1', revision: 9, state: 'succeeded' });
       receiveHint('usage', 'ajob_1', usage());
@@ -790,50 +317,8 @@ describe('LedgerUsage with the owner change stream', () => {
   });
 });
 
-describe('LedgerUsage on an owner connection', () => {
-  /** A turn its owner's provider billed: no Gateway snapshot will ever arrive. */
-  function external(): AgentJobUsageApi {
-    const data = unavailable();
-    data.ledger.status = 'pending';
-    data.ledger.attempts[0] = { ...data.ledger.attempts[0], status: 'pending', reason: 'pending' };
-    data.external_provider = true;
-    return data;
-  }
-
-  it('shows the agent-reported tokens and that the provider bills it, never a cost', async () => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(external());
-    await mount();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent(
-      '1.2k input tokens · 80 output tokens',
-    );
-    expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Usage')).not.toHaveTextContent('$');
-    expect(screen.queryByText('Usage temporarily unavailable.')).not.toBeInTheDocument();
-    // A finished turn has nothing more to wait for from the Gateway.
-    await advance(120_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
-
-  it('says who bills it even before the agent reports any tokens', async () => {
-    const data = external();
-    data.runtime = {
-      source: 'runtime',
-      input_tokens: null,
-      output_tokens: null,
-      cache_read_tokens: null,
-    };
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    await mount();
-    expect(screen.queryByLabelText('Run usage')).not.toBeInTheDocument();
-    expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
-  });
-
-  it('reads the runtime counters while running without asking the Gateway to refresh', async () => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(external());
-    await mount({ ...job, state: 'running' });
-    await advance(60_000);
-    expect(vi.mocked(getAgentJobUsage).mock.calls.length).toBeGreaterThan(1);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
+it('names provider-owned billing before any usage response arrives', () => {
+  render(<UsageView usage={null} />);
+  expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
+  expect(screen.getByLabelText('Usage')).not.toHaveTextContent('$');
 });

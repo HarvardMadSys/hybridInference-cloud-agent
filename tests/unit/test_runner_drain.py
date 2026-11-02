@@ -90,7 +90,6 @@ def test_sigterm_during_preflight_does_not_kill_the_turn_child() -> None:
         code = runner._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,

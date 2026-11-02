@@ -10,9 +10,7 @@ const saved = {
     statusUrl: '',
     docsUrl: 'https://docs.example.com/agents/',
     contactUrl: 'https://example.com/support',
-    gatewayUrl: 'https://gateway.example.com/dashboard',
   },
-  features: { rag: true },
 };
 
 describe('saved public site settings', () => {
@@ -61,32 +59,28 @@ describe('saved public site settings', () => {
         agent_access: { allowed: true },
         secret: 'must-never-be-published',
       }),
-    ).toEqual({
-      branding: { ...saved.branding, gatewayUrl: 'https://gateway.example.com' },
-      features: saved.features,
-    });
+    ).toEqual({ branding: saved.branding });
     expect(parseSavedPublicAppearance({})).toBeNull();
+    // An older control plane's retired fields are not carried into the page.
     expect(
       parseSavedPublicAppearance({
         ...saved,
-        branding: { ...saved.branding, gatewayUrl: 'javascript:alert(1)' },
+        branding: { ...saved.branding, gatewayUrl: 'https://gateway.example.com' },
+        features: { rag: true },
       }),
-    ).toBeNull();
+    ).toEqual({ branding: saved.branding });
   });
 
-  it('uses saved branding and switches while retaining only deployment metadata from the server', () => {
+  it('uses saved branding while retaining only deployment metadata from the server', () => {
     const site = parseSavedSiteConfig(
       { ...saved, secret: 'must-never-be-published' },
       {
         AGENT_WEB_APP_NAME: 'Old environment name',
-        AGENT_WEB_FEATURE_RAG: 'false',
         AGENT_DEPLOYMENT_SHA: 'image-version',
         AGENT_WEB_DEPLOYED_AT: '2026-10-10T12:00:00Z',
       },
     );
     expect(site.branding.appName).toBe('Admin configured app');
-    expect(site.branding.gatewayUrl).toBe('https://gateway.example.com');
-    expect(site.features.rag).toBe(true);
     expect(site.deployment).toEqual({
       version: 'image-version',
       deployedAt: '2026-10-10T12:00:00.000Z',
@@ -106,18 +100,16 @@ describe('saved public site settings', () => {
   it.each([
     null,
     {},
-    { ...saved, features: { rag: 'true' } },
     { ...saved, branding: {} },
     { ...saved, branding: { ...saved.branding, orgUrl: 'https://exa mple.com' } },
     { ...saved, branding: { ...saved.branding, statusUrl: 'https://%' } },
-    { ...saved, branding: { ...saved.branding, gatewayUrl: 'javascript:alert(1)' } },
+    { ...saved, branding: { ...saved.branding, appName: 42 } },
   ])(
     'returns safe display defaults for malformed saved settings without restoring legacy branding',
     (value) => {
       const site = parseSavedSiteConfig(value, {
         AGENT_WEB_APP_NAME: 'Old environment branding',
         AGENT_WEB_ORG_URL: 'https://old.example.com',
-        AGENT_WEB_FEATURE_RAG: 'true',
         AGENT_DEPLOYMENT_SHA: 'image-version',
       });
       expect(site).toEqual({

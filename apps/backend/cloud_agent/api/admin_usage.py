@@ -1,9 +1,10 @@
 """Cross-task usage aggregation for administrators.
 
 One read answers "who used how much" for runs created in a window, using only
-the Gateway snapshots the Agent already stores. It never reads content, never
-queries the Gateway and never refreshes a snapshot; a missing snapshot stays
-missing and is visible as coverage rather than as zero usage.
+what each turn's agent reported about its own tokens (see
+:mod:`cloud_agent.runtime_usage`). It never reads content and never asks a
+model provider; a turn that reported nothing stays missing and is visible as
+coverage rather than as zero usage. Cost belongs to each owner's provider.
 """
 
 from __future__ import annotations
@@ -16,10 +17,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import AwareDatetime  # noqa: TC002 — FastAPI resolves this at runtime.
 
 from cloud_agent.admin_usage import (
-    MAX_USAGE_LEDGER_ROWS,
+    MAX_USAGE_ATTEMPTS,
     MAX_USAGE_RESPONSE_BYTES,
     MAX_USAGE_RUNS,
-    MAX_USAGE_SNAPSHOT_BYTES,
     AdminUsageResponse,
     AdminUsageSelection,
     aggregate_prepared,
@@ -59,7 +59,7 @@ _SUPPORTED_QUERY_KEYS = frozenset({"since", "until", "user_id", "model", "runtim
 
 
 def _no_store(response: Response) -> None:
-    """A cached aggregate would outlive the snapshots it was read from."""
+    """A cached aggregate would outlive the usage it was read from."""
     response.headers["Cache-Control"] = "no-store"
 
 
@@ -119,7 +119,7 @@ async def get_admin_usage(
         raise HTTPException(status_code=422, detail=str(exc)) from None
     since, until = window
     # One clock reading for the window and for the response, so a client can
-    # tell when the cached numbers were read rather than when the ledger was.
+    # tell when the numbers were read.
     generated_at = datetime.now(UTC)
 
     try:
@@ -131,8 +131,7 @@ async def get_admin_usage(
             runtime=runtime,
             repo=repo,
             max_runs=MAX_USAGE_RUNS,
-            max_rows=MAX_USAGE_LEDGER_ROWS,
-            max_snapshot_bytes=MAX_USAGE_SNAPSHOT_BYTES,
+            max_attempts=MAX_USAGE_ATTEMPTS,
         )
     except UsageQueryTooLarge:
         raise _error(
@@ -159,7 +158,7 @@ async def get_admin_usage(
         until=until,
     )
     # The byte bound is on what actually leaves: a selection inside its row and
-    # snapshot budgets can still serialize past it when a report carries very
+    # attempt budgets can still serialize past it when a report carries very
     # wide counters. Refuse the whole response rather than trimming days or
     # groups, which would answer a different question than the one asked.
     if size > MAX_USAGE_RESPONSE_BYTES:
@@ -180,10 +179,10 @@ def _summarize(
 
     CPU-bound and synchronous: the route runs it on a worker thread.
     """
-    ledger_by_job: dict[str, list[dict[str, Any]]] = {row["id"]: [] for row in cohort}
+    usage_by_job: dict[str, list[dict[str, Any]]] = {row["id"]: [] for row in cohort}
     for row in rows:
-        ledger_by_job[row["job_id"]].append(row)
-    jobs = [{**row, "ledger": ledger_by_job[row["id"]]} for row in cohort]
+        usage_by_job[row["job_id"]].append(row)
+    jobs = [{**row, "usage": usage_by_job[row["id"]]} for row in cohort]
     # Resolving a stored report is the expensive part, so every reduction below
     # reuses the summaries resolved here rather than resolving them again. The
     # summary, the days and both breakdowns stay one read of one selection.

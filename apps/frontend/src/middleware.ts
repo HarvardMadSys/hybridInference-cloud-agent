@@ -33,7 +33,7 @@ export const config = {
   // policy of their own and would only pay for a nonce. Next prefixes
   // `basePath` to each entry, and the second one then requires a segment after
   // the prefix: without the first, `/agents` itself — the app's home page in
-  // the gateway-hosted variant — would be served with no policy at all.
+  // the parent-site variant — would be served with no policy at all.
   // `scripts/check-runtime-site-config.mjs` checks both mount points.
   matcher: ['/', '/((?!_next/static|_next/image|favicon.ico).*)'],
 };

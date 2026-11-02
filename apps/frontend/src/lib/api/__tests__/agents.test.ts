@@ -35,7 +35,6 @@ import {
   renameAgentJob,
   resizeAgentTerminal,
   resumeAgentGoal,
-  refreshAgentJobUsage,
   restoreAgentJob,
   setAgentGoal,
   streamAgentTerminal,
@@ -193,31 +192,21 @@ describe('agents api', () => {
     );
   });
 
-  it('reads and refreshes owner-scoped usage without rounding decimal costs', async () => {
-    const body = { ledger: { totals: { spent_usd: '0.12345678' } } };
+  it('reads owner-scoped usage as sent', async () => {
+    const body = { runtime: { source: 'runtime', output_tokens: 42 } };
     fetchWithAuth.mockResolvedValue(jsonResponse(body));
     const { signal } = new AbortController();
-    expect((await getAgentJobUsage('job/one', signal))?.ledger.totals?.spent_usd).toBe(
-      '0.12345678',
-    );
+    expect((await getAgentJobUsage('job/one', signal))?.runtime.output_tokens).toBe(42);
     expect(fetchWithAuth).toHaveBeenLastCalledWith(
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/usage',
       { signal },
     );
-    fetchWithAuth.mockResolvedValue(jsonResponse(body));
-    expect(await refreshAgentJobUsage('job/one', signal)).toEqual(body);
-    expect(fetchWithAuth).toHaveBeenLastCalledWith(
-      expect.any(String),
-      '/v1/agent/jobs/job%2Fone/usage/refresh',
-      { method: 'POST', signal },
-    );
   });
 
-  it('treats a pre-ledger 404 as unavailable while preserving real API failures', async () => {
+  it('treats a 404 as unavailable while preserving real API failures', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ detail: 'Not Found' }, 404));
     expect(await getAgentJobUsage('ajob_1')).toBeNull();
-    expect(await refreshAgentJobUsage('ajob_1')).toBeNull();
     fetchWithAuth.mockResolvedValue(jsonResponse({ detail: 'Unavailable' }, 503));
     await expect(getAgentJobUsage('ajob_1')).rejects.toMatchObject({ statusCode: 503 });
   });

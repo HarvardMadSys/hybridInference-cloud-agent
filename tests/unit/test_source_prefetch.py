@@ -304,7 +304,6 @@ def test_a_new_group_offered_a_snapshot_starts_while_its_archive_is_built(monkey
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings={"source_import_max_mib": 64},

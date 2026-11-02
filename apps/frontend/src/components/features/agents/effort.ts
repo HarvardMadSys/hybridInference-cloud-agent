@@ -9,39 +9,21 @@ import type { AgentConfigApi } from '@/lib/api/agents';
 // guess wearing a citation. Four levels, the same everywhere, is a claim we
 // can keep.
 //
-// Two guards survive, because both are facts rather than preferences:
-//
-// - **the runtime must be able to say it.** Verified against each pinned CLI
-//   (see `effort_wire_shapes.md`), and load-bearing: claude-code turns a level
-//   it does not know into `high` without complaint, so offering one it lacks
-//   would run a depth nobody chose.
-// - **the model must take the parameter at all.** The gateway forwards
-//   `reasoning_effort` only for models whose registry entry lists it, so
-//   offering it elsewhere would be a control that changes nothing.
+// A turn on an owner's connection runs at the provider's default: nothing says
+// which of a provider's models take the parameter, so no control is offered.
 
 /** What this platform offers, wherever it can be delivered. */
 export const PLATFORM_EFFORTS = ['low', 'medium', 'high', 'max'];
 
-/**
- * The levels to show for a pair, weakest first, or `[]` for no control.
- *
- * The model's entry in `model_reasoning_efforts` is read as a yes/no — does
- * this model take the parameter — and not for its contents. That list is the
- * Gateway's, so a model on a personal connection never matches it by name.
- */
+/** The levels to show for a pair, weakest first, or `[]` for no control. */
 export function offeredEfforts(
-  config: AgentConfigApi | null,
-  runtime: string,
-  model: string,
+  _config: AgentConfigApi | null,
+  _runtime: string,
+  _model: string,
   connectionId: string | null = null,
 ): string[] {
-  // An owner's own connection runs at Auto: the Gateway's registry says which
-  // of its models take the parameter, and nothing says that of a provider's.
-  if (connectionId) return [];
-  const runtimeLevels = config?.runtime_reasoning_efforts?.[runtime] ?? [];
-  const modelTakesIt = (config?.model_reasoning_efforts?.[model] ?? []).length > 0;
-  if (!modelTakesIt) return [];
-  return PLATFORM_EFFORTS.filter((level) => runtimeLevels.includes(level));
+  void connectionId;
+  return [];
 }
 
 /** The deepest level on offer, or `''` when the pair offers no control. */

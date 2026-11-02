@@ -1,5 +1,6 @@
 export const SETTINGS_PATHS = {
   profile: '/settings/my-settings',
+  account: '/settings/account',
   memory: '/settings/memory',
   shortcuts: '/settings/keyboard-shortcuts',
   usage: '/settings/usage',

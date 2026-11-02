@@ -1,13 +1,18 @@
 import { expect, test } from '@playwright/test';
 
+// One model id on two of the owner's connections: the picker must keep the
+// two sources apart, and a turn names the connection it was given.
 const connectionId = `mconn_${'a'.repeat(32)}`;
+const otherId = `mconn_${'b'.repeat(32)}`;
 const personalLabel = 'fixture-model · Personal inference';
+const otherLabel = 'fixture-model · Second provider';
 const personal = {
   id: connectionId,
   name: 'Personal inference',
   models: ['fixture-model'],
   model_runtimes: { 'fixture-model': ['codex'] },
 };
+const other = { ...personal, id: otherId, name: 'Second provider' };
 
 test.beforeEach(async ({ request, page }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
@@ -19,7 +24,7 @@ test.afterEach(async ({ request }) => {
 });
 
 for (const unavailable of [false, true]) {
-  test(`personal source survives reload ${unavailable ? 'and becomes unavailable' : 'and can switch to its Gateway namesake'}`, async ({
+  test(`personal source survives reload ${unavailable ? 'and becomes unavailable' : 'and can switch to the same model on another connection'}`, async ({
     page,
   }, testInfo) => {
     let enabled = true;
@@ -29,13 +34,12 @@ for (const unavailable of [false, true]) {
         json: {
           repos: ['fixture/repository'],
           runtimes: ['codex'],
-          models: ['fixture-model'],
           default_model: 'fixture-model',
-          default_model_connection_id: null,
+          default_model_connection_id: otherId,
           github_connected: true,
           github_install_url: null,
           model_connections_enabled: true,
-          model_connections: enabled ? [personal] : [],
+          model_connections: enabled ? [personal, other] : [other],
         },
       }),
     );
@@ -52,7 +56,7 @@ for (const unavailable of [false, true]) {
     await page.goto('/?repo=fixture%2Frepository');
     const picker = page.getByRole('button', { name: 'Model', exact: true });
     await picker.click();
-    await expect(page.getByRole('option', { name: 'fixture-model', exact: true })).toBeVisible();
+    await expect(page.getByRole('option', { name: otherLabel, exact: true })).toBeVisible();
     await expect(page.getByRole('option', { name: personalLabel, exact: true })).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath('distinct-model-sources.png'),
@@ -69,6 +73,7 @@ for (const unavailable of [false, true]) {
       await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeDisabled();
       await page.locator('#new-task-prompt').press('Enter');
       expect(submitted).toEqual([]);
+      // Never swapped for the other connection's same model, now its only label.
       await expect(picker).not.toHaveText('fixture-model');
       return;
     }
@@ -82,10 +87,9 @@ for (const unavailable of [false, true]) {
     });
     await expect(page.locator('#new-task-prompt')).toBeEnabled();
     await picker.click();
-    await page.getByRole('option', { name: 'fixture-model', exact: true }).click();
+    await page.getByRole('option', { name: otherLabel, exact: true }).click();
     await page.locator('#new-task-prompt').press('Enter');
     await expect.poll(() => submitted.length).toBe(2);
-    expect(submitted[1]).toMatchObject({ model: 'fixture-model' });
-    expect(submitted[1].model_connection_id ?? null).toBeNull();
+    expect(submitted[1]).toMatchObject({ model: 'fixture-model', model_connection_id: otherId });
   });
 }

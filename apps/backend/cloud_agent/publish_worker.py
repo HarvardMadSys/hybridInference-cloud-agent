@@ -55,7 +55,7 @@ from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, requi
 from cloud_agent.environments import EnvironmentEncryptionError
 from cloud_agent.github_app import rate_limit_wait
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.pr_titles import generate_pr_title, is_generic_pr_summary
+from cloud_agent.pr_titles import is_generic_pr_summary
 from cloud_agent.publisher import (
     PatchRejected,
     PublishError,
@@ -74,7 +74,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from typing import BinaryIO
 
-    from cloud_agent.grants import GrantClient
     from cloud_agent.ports import (
         HostPoolRepository,
         ModelConnectionRepository,
@@ -118,7 +117,7 @@ GITHUB_API = "https://api.github.com"
 #: publisher to the 900-second reaper.
 _PUBLISH_HEARTBEAT_INTERVAL_S = 60.0
 #: Git and source-control calls are network-bound, but an unbounded fan-out
-#: would mint too many credentials and grants at once. Per-sandbox epoch order
+#: would mint too many credentials at once. Per-sandbox epoch order
 #: remains a storage invariant; these slots let independent sandboxes proceed.
 _PUBLISH_CONCURRENCY = 4
 
@@ -774,7 +773,6 @@ async def publish_one(
     *,
     credential: GitHubCredential | None = None,
     app_credentials: Any | None = None,
-    grants: GrantClient | None = None,
     base_branch: str | None = None,
     allow_workflow_changes: bool = False,
 ) -> str | None:
@@ -794,7 +792,6 @@ async def publish_one(
         job,
         credential=credential,
         app_credentials=app_credentials,
-        grants=grants,
         base_branch=base_branch
         if base_branch is not None
         else setting_env("AGENT_PUBLISH_BASE_BRANCH") or "dev",
@@ -918,7 +915,6 @@ async def _publish_due(
     *,
     credential: GitHubCredential | None,
     app_credentials: Any | None,
-    grants: GrantClient | None = None,
     base_branch: str,
     http: httpx.AsyncClient | None = None,
 ) -> None:
@@ -953,7 +949,6 @@ async def _publish_due(
                         job,
                         credential=credential,
                         app_credentials=app_credentials,
-                        grants=grants,
                         base_branch=base_branch,
                         admission_started=admission_started,
                         http=http,
@@ -1041,7 +1036,6 @@ async def _publish_claimed(
     *,
     credential: GitHubCredential | None,
     app_credentials: Any | None,
-    grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
     admission_started: asyncio.Event | None = None,
@@ -1077,7 +1071,6 @@ async def _publish_claimed(
             job,
             credential=credential,
             app_credentials=app_credentials,
-            grants=grants,
             base_branch=base_branch,
             allow_workflow_changes=allow_workflow_changes,
             admission_started=admission_started,
@@ -1115,7 +1108,6 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
     *,
     credential: GitHubCredential | None,
     app_credentials: Any | None,
-    grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
     admission_started: asyncio.Event | None = None,
@@ -1123,8 +1115,8 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
 ) -> str | None:
     """Publish one claimed snapshot. Returns the PR URL, or ``None``.
 
-    ``http`` is the control plane's shared pool, for the title's model calls
-    and GitHub's pull-request API; without it each opens its own client.
+    ``http`` is the control plane's shared pool, for GitHub's pull-request
+    API; without it each call opens its own client.
     """
     job_id = job["job_id"]
     base_sha = job["base_sha"]
@@ -1254,81 +1246,15 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                 **({"known_secrets": known} if known else {}),
             )
             try:
-                fallback_title = _pr_title(job, result.changed_files)
-
-                async def generated_title() -> str | None:
-                    try:
-                        return await generate_pr_title(
-                            job, result.changed_files, grants=grants, client=http
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        logger.warning(
-                            "agent_pr_title_generation_failed",
-                            extra={
-                                "event": "agent_pr_title_generation_failed",
-                                "snapshot_id": job["snapshot_id"],
-                                "reason": "unexpected_failure",
-                                "error_type": type(exc).__name__,
-                            },
-                        )
-                        return None
-
-                title_task = asyncio.create_task(
-                    generated_title(),
-                    name=f"snapshot-title-{job['snapshot_id']}",
+                pr_url = await ensure_draft_pull_request(
+                    repo=job["repo"],
+                    head_branch=result.branch,
+                    base_branch=pr_base,
+                    title=_pr_title(job, result.changed_files),
+                    body=_pr_body(job, result.changed_files),
+                    credential=credential,
+                    client=http,
                 )
-                try:
-                    # Preserve the one-call path for an immediately available
-                    # title (including tests and deployments with a local fast
-                    # provider). A network-bound title never holds up the draft.
-                    await asyncio.sleep(0)
-                    title = await title_task if title_task.done() else None
-                    opened_title = title or fallback_title
-                    pr_url = await ensure_draft_pull_request(
-                        repo=job["repo"],
-                        head_branch=result.branch,
-                        base_branch=pr_base,
-                        title=opened_title,
-                        body=_pr_body(job, result.changed_files),
-                        credential=credential,
-                        client=http,
-                    )
-                    if not title_task.done():
-                        title = await title_task
-                    if title is not None and title != opened_title:
-                        try:
-                            enriched_url = await ensure_draft_pull_request(
-                                repo=job["repo"],
-                                head_branch=result.branch,
-                                base_branch=pr_base,
-                                title=title,
-                                body=_pr_body(job, result.changed_files),
-                                credential=credential,
-                                client=http,
-                                create_if_missing=False,
-                            )
-                            if enriched_url is not None:
-                                pr_url = enriched_url
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            # The draft already exists with a meaningful title.
-                            # Optional enrichment must not turn that durable
-                            # publication into a retry or duplicate PR attempt.
-                            logger.warning(
-                                "agent_pr_title_enrichment_failed",
-                                extra={
-                                    "event": "agent_pr_title_enrichment_failed",
-                                    "snapshot_id": job["snapshot_id"],
-                                    "error_type": type(exc).__name__,
-                                },
-                            )
-                finally:
-                    if not title_task.done():
-                        title_task.cancel()
-                    await asyncio.gather(title_task, return_exceptions=True)
                 return result, pr_url
             except BaseException:
                 if result.base_bundle is not None:
@@ -1405,7 +1331,6 @@ async def publish_loop(
     *,
     credential_provider: Any = None,
     github_app: GitHubAppSource | None = None,
-    grants: GrantClient | None = None,
     base_branch: str | None = None,
     interval_seconds: float | None = None,
     wake: BackgroundWake | None = None,
@@ -1429,7 +1354,7 @@ async def publish_loop(
     the rest of the process after one failed load (issue #47).
 
     ``http`` is the control plane's shared pool, lent to each publication's
-    title and pull-request calls; the lifespan closes it after this loop stops.
+    pull-request calls; the lifespan closes it after this loop stops.
     """
     without_source = False
     while True:
@@ -1473,7 +1398,6 @@ async def publish_loop(
                 store,
                 credential=credential,
                 app_credentials=app_credentials,
-                grants=grants,
                 base_branch=base_branch
                 if base_branch is not None
                 else setting_env("AGENT_PUBLISH_BASE_BRANCH") or "dev",

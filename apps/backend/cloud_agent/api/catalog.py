@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from cloud_agent.api._job_views import _iso, _job_response
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._project_filter import TemporaryFilter, require_single_project_filter
-from cloud_agent.api.deps import get_grant_client, get_storage, require_store
+from cloud_agent.api.deps import get_storage, require_store
 from cloud_agent.application.residency import close_released_residencies
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.entitlement import REPO_PATTERN
@@ -160,22 +160,18 @@ async def delete_agent_sessions(
     body: AgentSessionSelection,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _CatalogStorage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
 ) -> AgentSessionDeleteResponse:
     """Permanently hide sessions from their owner, retaining audit data.
 
     Archived or not, idle or working: the delete cancels each chat's turns and
-    releases its residency, then revokes the released grants and closes the
-    member processes on their hosts.
+    releases its residency, then closes the member processes on their hosts.
     """
     job_store = _require_store(store)
     result = await job_store.conversation_commands.delete_sessions(
         thread_ids=body.thread_ids, user_id=user["user_id"]
     )
     _raise_session_mutation_error(result)
-    await close_released_residencies(
-        job_store.host_pool, grants, result.get("released_residencies") or []
-    )
+    await close_released_residencies(job_store.host_pool, result.get("released_residencies") or [])
     return AgentSessionDeleteResponse(thread_ids=result["thread_ids"])
 
 

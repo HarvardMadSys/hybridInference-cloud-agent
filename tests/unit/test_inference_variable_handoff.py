@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from tests.support.owners import launch_connection
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host.chat_sandbox import (
@@ -160,10 +161,10 @@ def _launch_context(environment: BoundEnvironment | None):
         native_session_id=None,
         model="model",
         reasoning_effort=None,
-        gateway_base_url="http://gateway",
         credential="grant",
         slot_id=2,
         environment=environment,
+        **launch_connection("claude-code"),
     )
     context = ResidentTransportFactory(manager)._launch_context(spec, launch, credential="grant")
     return context, events
@@ -275,10 +276,10 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
             native_session_id=None,
             model="model",
             reasoning_effort=None,
-            gateway_base_url="http://gateway",
             credential="grant",
             slot_id=1,
             environment=environment,
+            **launch_connection("codex"),
         )
         context = ResidentTransportFactory(manager)._launch_context(
             spec, resident, credential="grant"

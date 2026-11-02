@@ -9,8 +9,8 @@ Every execution (attempt) contributes its own span only -- first to last
 event as the platform received them -- so the wait before a retry belongs to
 no one. Inside a span, each instant gets one label, in this order:
 
-1. **TTFT** -- inside a model request, before its first token, as the Gateway
-   measured it (``request_started_at`` + ``ttft_ms``);
+1. **TTFT** -- inside a model request, before its first token, as a request
+   log measured it (``request_started_at`` + ``ttft_ms``);
 2. **Generation** -- inside a model request after its first token (to
    ``request_started_at`` + ``latency_ms``). Claude Code's streamed block
    durations (``block_ms``, this release on) split it into thinking, answers
@@ -20,16 +20,17 @@ no one. Inside a span, each instant gets one label, in this order:
 4. **Not attributed** -- the rest of the span: the harness, waits, and the
    lag of event receipt. Not called overhead: nothing measured it.
 
-An execution the Gateway rows do not cover (older than the bounded read, an
-unreachable Gateway, a runtime connection the platform does not route) has
-no model intervals: its span minus tool runs is **model + harness (not
-split)**. Overlaps count once, so no category can exceed the span.
+An execution no request log covers has no model intervals: its span minus
+tool runs is **model + harness (not split)**. Overlaps count once, so no
+category can exceed the span. Owners' own model connections are not proxied,
+so no request log is recorded today and every execution is not split; the
+request pages stay the input a recorded log would provide.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,7 +38,7 @@ from cloud_agent.context_profile import profile_is_current
 from cloud_agent.context_running import merge_intervals
 
 if TYPE_CHECKING:
-    from cloud_agent.grant_usage import GrantUsageRequestPage
+    from datetime import datetime
 
 TimingKind = Literal["ttft", "reasoning", "text", "toolarg", "gen", "tools", "unsplit", "other"]
 TIMING_KINDS: tuple[TimingKind, ...] = (
@@ -52,6 +53,24 @@ TIMING_KINDS: tuple[TimingKind, ...] = (
 )
 #: Strip segments one response carries; adjacent same-kind segments merge first.
 MAX_STRIP_SEGMENTS = 1_200
+
+
+class TimedRequest(Protocol):
+    """One model request a request log measured."""
+
+    request_id: str
+    response_id: str | None
+    request_started_at: datetime
+    ttft_ms: int | None
+    latency_ms: int | None
+    status_code: int | None
+    tokens_out: int | None
+
+
+class RequestPage(Protocol):
+    """One execution's page of measured model requests."""
+
+    requests: Sequence[TimedRequest]
 
 
 class TimingSegment(BaseModel):
@@ -149,7 +168,7 @@ class _Execution:
         self.split = False
 
 
-def _requests_of(page: GrantUsageRequestPage) -> list[tuple[str, str | None, int, int, int, int]]:
+def _requests_of(page: RequestPage) -> list[tuple[str, str | None, int, int, int, int]]:
     """(request id, response id, start, ttft, end, output) of each timed request."""
     rows = []
     for request in page.requests:
@@ -186,12 +205,12 @@ def _executions(attempts: Sequence[Mapping[str, Any]]) -> dict[int, _Execution]:
 
 
 class _Requests:
-    """The Gateway's timed requests, each attributed to the execution that sent it."""
+    """Logged timed requests, each attributed to the execution that sent it."""
 
     def __init__(
         self,
         executions: Mapping[int, _Execution],
-        pages: Sequence[tuple[Mapping[str, Any], GrantUsageRequestPage]],
+        pages: Sequence[tuple[Mapping[str, Any], RequestPage]],
     ) -> None:
         seen: set[str] = set()
         self.joined: list[RequestTiming] = []
@@ -262,12 +281,12 @@ def totals_of(segments: Sequence[tuple[TimingKind, int, int]], kind: TimingKind)
 
 def assemble_timing(
     attempts: Sequence[Mapping[str, Any]],
-    pages: Sequence[tuple[Mapping[str, Any], GrantUsageRequestPage]],
+    pages: Sequence[tuple[Mapping[str, Any], RequestPage]],
     *,
     gateway_gap: str | None,
     gateway_started: int,
 ) -> ThreadTiming:
-    """Fold the attempts' recorded timing and the Gateway's request rows."""
+    """Fold the attempts' recorded timing and any logged request rows."""
     executions = _executions(attempts)
     requests = _Requests(executions, pages)
     totals: dict[TimingKind, int] = dict.fromkeys(TIMING_KINDS, 0)

@@ -52,8 +52,7 @@ RECIPE_FORMAT_VERSION = 1
 #:
 #: No Dockerfiles: images are pulled by digest. No `deploy/local/`: that is the
 #: developer stack, and it builds from source by design. No `deploy/preflight/`:
-#: it needs httpx and a gateway, and it is a pre-cutover check rather than part
-#: of installing a release.
+#: it is a pre-cutover check rather than part of installing a release.
 RECIPE_FILES: tuple[str, ...] = (
     "deploy/DEPLOY_PROTOCOL",
     "deploy/watch_peer.py",
@@ -70,11 +69,11 @@ RECIPE_FILES: tuple[str, ...] = (
     "deploy/host/sandbox_host.sh",
     "deploy/host/storage_attestation.py",
     "deploy/host/docker-compose.sandbox.yml",
-    "deploy/host/agent-gateway-tunnel.sh",
+    "deploy/host/agent-ssh-tunnel.sh",
     "deploy/host/setup_kata_runtime.sh",
     "deploy/host/kata_runtime_epoch.py",
     "deploy/host/.env.example",
-    "deploy/reverse-proxy/agents-under-gateway.conf",
+    "deploy/reverse-proxy/agents-under-parent-site.conf",
     "deploy/release/artifact_compose.py",
     "deploy/release/artifact_env.sh",
     "deploy/release/release_env.py",

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
@@ -9,12 +9,12 @@ import type { AgentConfigApi } from '@/lib/api/agents';
 import { listEnvironments } from '@/lib/api/environments';
 import { getInsights } from '@/lib/api/insights';
 import { listMcpConnections } from '@/lib/api/mcp';
-import { rewritePrompt } from '@/lib/api/promptRewrite';
 import { listSkills } from '@/lib/api/skills';
 import { listSshServers } from '@/lib/api/sshServers';
 import { getUserProfile } from '@/lib/api/userProfile';
 
 import { TaskComposer } from './TaskComposer';
+import { announceModelConnectionsChanged } from './modelConnectionEvents';
 import { composerDraftStorageKey } from './useComposerDraft';
 
 // A model is chosen together with the source it runs on. These cover the new
@@ -39,7 +39,6 @@ vi.mock('@/lib/api/environments', () => ({
 }));
 vi.mock('@/lib/api/insights', () => ({ getInsights: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn() }));
-vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/mcp', () => ({
   listMcpConnections: vi.fn(),
@@ -49,16 +48,16 @@ vi.mock('@/lib/api/sshServers', () => ({ listSshServers: vi.fn() }));
 vi.mock('./githubAccess', () => ({ githubAccessUrl: vi.fn(), leaveFor: vi.fn() }));
 
 const CONNECTION = 'mconn_0123456789abcdef0123456789abcdef';
+const OTHER = 'mconn_fedcba9876543210fedcba9876543210';
 
-/** Gateway and a personal connection both offer `shared`; only the connection speaks to Codex. */
+/** Two connections both list `shared`; only the first speaks to Codex. */
 function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
   return {
     repos: ['owner/repository'],
     runtimes: ['claude-code', 'codex'],
-    models: ['shared', 'gateway-only'],
-    model_reasoning_efforts: { shared: ['high'], 'gateway-only': ['high'] },
     runtime_reasoning_efforts: { 'claude-code': ['high'], codex: ['high'] },
     default_model: 'shared',
+    default_model_connection_id: OTHER,
     model_connections_enabled: true,
     model_connections: [
       {
@@ -66,6 +65,12 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
         name: 'My provider',
         models: ['shared', 'mine'],
         model_runtimes: { shared: ['codex'], mine: ['codex'] },
+      },
+      {
+        id: OTHER,
+        name: 'Other provider',
+        models: ['shared', 'other-only'],
+        model_runtimes: { shared: ['claude-code'], 'other-only': ['claude-code'] },
       },
     ],
     github_connected: true,
@@ -137,7 +142,6 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ id: 'ajob_1' } as never);
   vi.mocked(getAgentConfig).mockReset().mockResolvedValue(config());
-  vi.mocked(rewritePrompt).mockReset();
 });
 afterEach(cleanup);
 
@@ -146,18 +150,19 @@ describe('TaskComposer model sources', () => {
     render(<TaskComposer />);
     await chooseRepository();
     fireEvent.click(screen.getByLabelText('Model'));
+    // `shared` is listed by both connections, so it names the one it is on.
     expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
-      'shared',
-      'gateway-only',
+      'shared · Other provider',
+      'other-only',
     ]);
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     choose('Agent', 'codex');
     fireEvent.click(screen.getByLabelText('Model'));
+    // The remembered pick stays in view, marked, rather than becoming its namesake.
     expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
-      'shared',
-      'gateway-only',
+      'shared · Other provider (unavailable)',
       'shared · My provider',
-      'mine · My provider',
+      'mine',
     ]);
   });
 
@@ -180,20 +185,6 @@ describe('TaskComposer model sources', () => {
     expect(body).not.toHaveProperty('reasoning_effort');
   });
 
-  it('switches back to the Gateway model of the same name without a connection', async () => {
-    render(<TaskComposer />);
-    await chooseRepository();
-    choose('Agent', 'codex');
-    choose('Model', 'shared · My provider');
-    choose('Model', 'shared');
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Run on the Gateway' } });
-    await runWhenReady();
-    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
-    const body = vi.mocked(createAgentJob).mock.calls[0][0];
-    expect(body).toMatchObject({ model: 'shared', reasoning_effort: 'high' });
-    expect(body).not.toHaveProperty('model_connection_id');
-  });
-
   it('keeps a personal pick and its source in the draft across a visit', async () => {
     const first = render(<TaskComposer />);
     await chooseRepository();
@@ -212,14 +203,7 @@ describe('TaskComposer model sources', () => {
     );
   });
 
-  it('reads a draft written before sources as a Gateway pick', async () => {
-    storeDraft({ runtime: 'codex', chosenModel: 'shared' });
-    render(<TaskComposer />);
-    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('shared'));
-    expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('shared');
-  });
-
-  it('holds Run on a personal pick that cannot run, instead of the Gateway namesake', async () => {
+  it('holds Run on a pick whose connection is gone, instead of a namesake', async () => {
     // The draft's connection has since been deleted.
     storeDraft({
       repo: 'owner/repository',
@@ -235,7 +219,7 @@ describe('TaskComposer model sources', () => {
       'shared · personal connection (unavailable)',
     );
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
-    choose('Model', 'shared');
+    choose('Model', 'shared · My provider');
     expect(screen.queryByText(/cannot run with/)).toBeNull();
     expect(screen.getByLabelText('Model')).toHaveValue('shared');
   });
@@ -248,12 +232,10 @@ describe('TaskComposer model sources', () => {
     await chooseRepository();
     // Claude Code is the first agent, and no connection serves it.
     expect(screen.getByLabelText('Agent')).toHaveValue('claude-code');
-    expect(screen.getByLabelText('Model')).toHaveAccessibleDescription(
-      'mine · My provider (unavailable)',
-    );
+    expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('mine (unavailable)');
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
     choose('Agent', 'codex');
-    expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('mine · My provider');
+    expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('mine');
   });
 
   it('restores a personal pick from the GitHub return receipt', async () => {
@@ -271,22 +253,7 @@ describe('TaskComposer model sources', () => {
       }),
     );
     render(<TaskComposer />);
-    await waitFor(() =>
-      expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('mine · My provider'),
-    );
-  });
-
-  it('turns off the Gateway rewriter while a personal model is selected', async () => {
-    render(<TaskComposer />);
-    await chooseRepository();
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Tidy this prompt' } });
-    expect(screen.getByRole('button', { name: 'Rewrite prompt' })).toBeEnabled();
-    choose('Agent', 'codex');
-    choose('Model', 'mine · My provider');
-    const rewrite = screen.getByRole('button', { name: 'Rewrite prompt' });
-    expect(rewrite).toBeDisabled();
-    expect(rewrite).toHaveAttribute('title', expect.stringContaining('platform inference'));
-    expect(rewritePrompt).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('mine'));
   });
 
   it('offers a Messages connection to Claude Code only, and runs Claude Code on it', async () => {
@@ -314,8 +281,6 @@ describe('TaskComposer model sources', () => {
     expect(screen.getByLabelText('Agent')).toHaveValue('claude-code');
     fireEvent.click(screen.getByLabelText('Model'));
     expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
-      'shared',
-      'gateway-only',
       'shared · Claude gateway',
     ]);
     fireEvent.click(screen.getByRole('option', { name: 'shared · Claude gateway' }));
@@ -347,11 +312,9 @@ describe('TaskComposer model sources', () => {
     );
     render(<TaskComposer />);
     await chooseRepository();
-    choose('Model', 'shared · Claude gateway');
+    choose('Model', 'shared');
     choose('Agent', 'codex');
-    expect(screen.getByLabelText('Model')).toHaveAccessibleDescription(
-      'shared · Claude gateway (unavailable)',
-    );
+    expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('shared (unavailable)');
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
   });
 
@@ -375,10 +338,10 @@ describe('TaskComposer model sources', () => {
     fireEvent.click(screen.getByLabelText('Model'));
     const options = screen.getAllByRole('option').map((option) => option.textContent);
     // The unverified model is not offered; no label names an API.
-    expect(options).toContain('chat-model · Chat provider');
+    expect(options).toContain('chat-model');
     expect(options.some((option) => option?.includes('new-model'))).toBe(false);
     expect(options.some((option) => option?.includes('Chat Completions'))).toBe(false);
-    fireEvent.click(screen.getByRole('option', { name: 'chat-model · Chat provider' }));
+    fireEvent.click(screen.getByRole('option', { name: 'chat-model' }));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Run Codex on Chat' } });
     await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
@@ -412,12 +375,82 @@ describe('TaskComposer model sources', () => {
     await chooseRepository();
     choose('Agent', 'codex');
     fireEvent.click(screen.getByLabelText('Model'));
-    expect(screen.getByRole('option', { name: 'chat-model · Mixed' })).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'messages-only · Mixed' })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'chat-model' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'messages-only' })).not.toBeInTheDocument();
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     choose('Agent', 'claude-code');
     fireEvent.click(screen.getByLabelText('Model'));
-    expect(screen.getByRole('option', { name: 'messages-only · Mixed' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'chat-model · Mixed' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'messages-only' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'chat-model' })).toBeInTheDocument();
+  });
+});
+
+describe('local account model onboarding', () => {
+  it('offers an actionable setup link and nothing to run', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        model_connection_required: true,
+        default_model: null,
+        model_connections: [],
+      }),
+    );
+    render(<TaskComposer />);
+    expect(await screen.findByRole('link', { name: 'Set up a model connection' })).toHaveAttribute(
+      'href',
+      '/settings/my-settings#settings-connections',
+    );
+    expect(screen.getByText(/Your provider manages billing and usage limits/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
+  });
+
+  it('honors an explicit disabled gate even if a stale response still contains personal models', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        model_connection_required: true,
+        model_connections_enabled: false,
+        default_model: 'shared',
+        default_model_connection_id: CONNECTION,
+      }),
+    );
+    render(<TaskComposer />);
+    await screen.findByText('Model connections are unavailable');
+    expect(
+      screen.queryByRole('link', { name: 'Set up a model connection' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
+  });
+
+  it('refreshes setup after a verified save, then holds a disabled same-name source without fallback', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        model_connection_required: true,
+        default_model: null,
+        model_connections: [],
+      }),
+    );
+    render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my unsent task' } });
+    choose('Agent', 'codex');
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ default_model: null }));
+    act(() => announceModelConnectionsChanged());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('link', { name: 'Set up a model connection' }),
+      ).not.toBeInTheDocument(),
+    );
+    choose('Model', 'shared · My provider');
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Run/ })).toBeEnabled());
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ model_connections: [] }));
+    act(() => announceModelConnectionsChanged());
+    await waitFor(() =>
+      expect(screen.getByLabelText('Model')).toHaveAccessibleDescription(
+        'shared · personal connection (unavailable)',
+      ),
+    );
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my unsent task');
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+    expect(createAgentJob).not.toHaveBeenCalled();
   });
 });

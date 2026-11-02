@@ -11,6 +11,7 @@ import {
 import { ModelConnectionCard } from './ModelConnectionCard';
 import { ModelConnectionForm } from './ModelConnectionForm';
 import { ConnectionOps, type Operate, type Settlement } from './connectionOps';
+import { announceModelConnectionsChanged } from '../agents/modelConnectionEvents';
 
 export function ModelConnectionsSettings() {
   const t = useT();
@@ -33,6 +34,8 @@ export function ModelConnectionsSettings() {
       throw cause;
     } finally {
       if (outcome === 'refresh') setReload((value) => value + 1);
+      // A failed response may still have committed; ask the server again.
+      announceModelConnectionsChanged();
     }
   }, []);
 

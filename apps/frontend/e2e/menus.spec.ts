@@ -246,7 +246,6 @@ test('a long repository list scrolls inside its bounded panel above the footer',
       json: {
         repos,
         runtimes: ['codex'],
-        models: ['fixture-model'],
         default_model: 'fixture-model',
         github_connected: true,
         github_install_url: null,
@@ -335,8 +334,22 @@ test('scrolling keeps a fixed picker beside its trigger without overshoot', asyn
       json: {
         repos: ['fixture/repository'],
         runtimes: ['codex'],
-        models: ['model-a', 'model-b', 'model-c', 'model-d', 'model-e'],
         default_model: 'model-a',
+        default_model_connection_id: `mconn_${'c'.repeat(32)}`,
+        model_connections_enabled: true,
+        model_connections: [
+          {
+            id: `mconn_${'c'.repeat(32)}`,
+            name: 'Fixture provider',
+            models: ['model-a', 'model-b', 'model-c', 'model-d', 'model-e'],
+            model_runtimes: Object.fromEntries(
+              ['model-a', 'model-b', 'model-c', 'model-d', 'model-e'].map((model) => [
+                model,
+                ['codex'],
+              ]),
+            ),
+          },
+        ],
         github_connected: true,
         github_install_url: null,
       },
@@ -397,8 +410,19 @@ test('hovering one model and arrowing to another highlights only the active row'
       json: {
         repos: ['fixture/repository'],
         runtimes: ['codex'],
-        models: ['model-a', 'model-b', 'model-c', 'model-d'],
         default_model: 'model-a',
+        default_model_connection_id: `mconn_${'c'.repeat(32)}`,
+        model_connections_enabled: true,
+        model_connections: [
+          {
+            id: `mconn_${'c'.repeat(32)}`,
+            name: 'Fixture provider',
+            models: ['model-a', 'model-b', 'model-c', 'model-d'],
+            model_runtimes: Object.fromEntries(
+              ['model-a', 'model-b', 'model-c', 'model-d'].map((model) => [model, ['codex']]),
+            ),
+          },
+        ],
         github_connected: true,
         github_install_url: null,
       },

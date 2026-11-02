@@ -33,8 +33,8 @@ async def test_cancellation_mid_page_keeps_cursor_at_last_completed_queue(
     entered_second = asyncio.Event()
     visited: list[str] = []
 
-    async def settle(_store: Any, *, thread_id: str, gateway: Any, app_credentials: Any) -> None:
-        del gateway, app_credentials
+    async def settle(_store: Any, *, thread_id: str, owners: Any, app_credentials: Any) -> None:
+        del owners, app_credentials
         visited.append(thread_id)
         if thread_id == "thread-b" and not entered_second.is_set():
             entered_second.set()
@@ -43,7 +43,7 @@ async def test_cancellation_mid_page_keeps_cursor_at_last_completed_queue(
     monkeypatch.setattr(pending_messages, "_settle_with", settle)
     sweep = QueueSweep()
     task = asyncio.create_task(
-        settle_waiting_queues(store, gateway=None, github_app=None, limit=3, sweep=sweep)
+        settle_waiting_queues(store, owners=None, github_app=None, limit=3, sweep=sweep)
     )
     await asyncio.wait_for(entered_second.wait(), timeout=1)
     task.cancel()
@@ -52,7 +52,7 @@ async def test_cancellation_mid_page_keeps_cursor_at_last_completed_queue(
 
     assert sweep.after == "thread-a"
     assert (
-        await settle_waiting_queues(store, gateway=None, github_app=None, limit=3, sweep=sweep) == 2
+        await settle_waiting_queues(store, owners=None, github_app=None, limit=3, sweep=sweep) == 2
     )
     assert visited == ["thread-a", "thread-b", "thread-b", "thread-c"]
     assert repository.after_values == [None, "thread-a"]

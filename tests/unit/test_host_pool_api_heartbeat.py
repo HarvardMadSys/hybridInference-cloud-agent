@@ -31,10 +31,10 @@ async def test_a_residency_two_groups_report_is_renewed_once_and_lost_once(resid
     """A member that two retained groups both report is still one residency.
 
     The beat is the host's to shape, so the answer is per residency, not per
-    report: the grant of an extended residency is renewed once, and a residency
-    that was not extended comes back in ``residencies_lost`` once.
+    report: a residency that was not extended comes back in ``residencies_lost``
+    once.
     """
-    client, store, grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     store.beat_answers = {("th-1", 1): "agr-1"}  # th-gone absent → not extended → lost
     group = _live_group(("th-1", 1), ("th-gone", 4))
@@ -47,5 +47,4 @@ async def test_a_residency_two_groups_report_is_renewed_once_and_lost_once(resid
     )
 
     assert response.status_code == 200, response.text
-    assert grants.renewed == ["agr-1"]
     assert response.json()["residencies_lost"] == [{"thread_id": "th-gone", "generation": 4}]

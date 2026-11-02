@@ -5,7 +5,7 @@ import { chordAriaLabel } from '@/lib/keyboardShortcuts';
 import { isComposerSubmit } from './composerKeys';
 import { modelOverride, type ModelChoice } from './modelSource';
 
-/** The model, source and effort a follow-up inherits; a null or absent source is the Gateway. */
+/** The model, source and effort a follow-up inherits; a null or absent source cannot run. */
 export interface InheritedModel {
   model: string;
   modelConnectionId?: string | null;

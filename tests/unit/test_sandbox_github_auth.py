@@ -7,6 +7,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from tests.support.owners import launch_connection
 
 from cloud_agent_host.chat_sandbox import MEMBER_UID_BASE, ChatSandboxSpec
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
@@ -37,10 +38,10 @@ def _context(runtime_id="claude-code", **changes):
             native_session_id=None,
             model="model",
             reasoning_effort=None,
-            gateway_base_url="http://gateway",
             credential="inference-grant",
             github_token="sandbox-write-token",
             github_repo="owner/repo",
+            **launch_connection(runtime_id),
         ),
         **changes,
     )

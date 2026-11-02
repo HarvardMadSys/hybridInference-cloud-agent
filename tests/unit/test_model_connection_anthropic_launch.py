@@ -52,7 +52,7 @@ def _prepare(base: str, **extra: object) -> tuple[list[str], dict[str, str]]:
     return ClaudeCodeRuntime().prepare_live(
         workdir="/workspace",
         model="claude-sonnet-4-5",
-        gateway_base_url=MessagesBaseUrl(base),
+        model_base_url=MessagesBaseUrl(base),
         credential=_KEY,
         **extra,  # type: ignore[arg-type]
     )
@@ -90,11 +90,11 @@ def test_effort_stays_auto_on_a_connection():
     assert "--effort" not in argv
 
 
-def test_the_gateway_relay_is_unchanged_for_claude_code():
+def test_a_plain_address_is_normalized_for_claude_code():
     _argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/workspace",
         model="glm-5.1",
-        gateway_base_url="http://relay.local:8080/v1",
+        model_base_url="http://relay.local:8080/v1",
         credential="grant",
     )
     assert env["ANTHROPIC_BASE_URL"] == "http://relay.local:8080"
@@ -107,7 +107,7 @@ def test_an_openai_runtime_refuses_a_messages_connection(runtime):
         runtime.prepare_live(
             workdir="/workspace",
             model="claude-sonnet-4-5",
-            gateway_base_url=MessagesBaseUrl("https://api.example.com/v1"),
+            model_base_url=MessagesBaseUrl("https://api.example.com/v1"),
             credential=_KEY,
         )
 
@@ -122,7 +122,6 @@ def test_the_launch_context_types_the_url_by_its_protocol():
 
 
 def test_a_messages_connection_launch_crosses_the_sandbox_manager_intact(monkeypatch):
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://10.0.0.1:8080")
     access = ModelConnectionAccess(
         connection_id=_CONNECTION,
         revision=2,
@@ -151,7 +150,6 @@ def _launch(**changes: object) -> ResidentLaunch:
         "native_session_id": "native-1",
         "model": "claude-sonnet-4-5",
         "reasoning_effort": None,
-        "gateway_base_url": "http://relay.local:8080",
         "credential": _KEY,
         "inference_base_url": "https://api.example.com/v1",
         "inference_protocol": "anthropic_messages",
@@ -167,5 +165,3 @@ def test_rotation_or_a_protocol_change_restarts_the_claude_member():
     assert transport.compatible_with(replace(launch, credential=None))
     assert not transport.compatible_with(replace(launch, inference_source=f"{_CONNECTION}@3"))
     assert not transport.compatible_with(replace(launch, inference_protocol="chat_completions"))
-    gateway = replace(launch, inference_base_url="", inference_protocol="", inference_source="")
-    assert not transport.compatible_with(gateway)

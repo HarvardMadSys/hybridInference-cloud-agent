@@ -17,11 +17,11 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 from tests.support.ssh_keys import host_key, parses_as_ed25519
 
-from cloud_agent import identity
 from cloud_agent.api import ssh_servers as api
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.application.ssh_servers import CheckFailed, ssh_key_cipher
 from cloud_agent.domain.ssh_servers import (
     CHECK_EVENTS,
@@ -191,8 +191,7 @@ def pushes(monkeypatch) -> list[dict[str, Any]]:
 
 @pytest.fixture()
 def app(monkeypatch, repository, pushes):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "ssh-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "ssh-test-encryption-key")
     api._check_locks.clear()
     application = FastAPI()
@@ -202,15 +201,15 @@ def app(monkeypatch, repository, pushes):
         async def agent_access(self, owner):
             return {"user_id": owner, "allowed": True, "permissions": ["agent.use"]}
 
-    application.dependency_overrides[get_gateway_client] = Gateway
+    application.dependency_overrides[get_owner_directory] = Gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        ssh_servers=repository, host_pool=object()
+        local_accounts=SESSIONS, ssh_servers=repository, host_pool=object()
     )
     return application
 
 
 def headers(user_id: str = "owner-1") -> dict[str, str]:
-    return {"Authorization": f"Bearer {identity.mint_session(user_id=user_id)}"}
+    return {"Authorization": f"Bearer {SESSIONS.sign_in(user_id)}"}
 
 
 def client(app) -> httpx.AsyncClient:

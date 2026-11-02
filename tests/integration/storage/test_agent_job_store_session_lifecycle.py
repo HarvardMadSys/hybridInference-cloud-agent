@@ -215,319 +215,15 @@ async def test_sandbox_of_deleted_sessions_is_stopped_then_deleted(
     assert retained is not None and retained["task_prompt"] == source["task_prompt"]
 
 
-async def test_generated_title_is_canonical_and_stable_across_turns(pool, store: Storage):
-    """The prompt remains intact while each turn reads the same short summary."""
-    prompt = "Please implement the CSV export for SPRUCE_8462 with detailed validation."
-    job, claim, sandbox = await _reserve_shared_chat(store, task_prompt=prompt)
-    assert len(job["title"]) <= 36
-    assert job["title_source"] == "fallback"
-    assert claim is not None and claim["title_generation_pending"]
-    fence = {
-        "job_id": job["id"],
-        "attempt_id": claim["attempt_id"],
-        "lease_generation": claim["lease_generation"],
-    }
-    assert await store.conversation_commands.set_generated_thread_title(
-        **fence, title="SPRUCE_8462 CSV export"
-    )
-    assert not await store.conversation_commands.set_generated_thread_title(
-        **fence, title="Second summary"
-    )
-    saved = await store.conversation_queries.get_job(job["id"])
-    assert saved is not None
-    assert saved["title"] == "SPRUCE_8462 CSV export"
-    assert saved["title_source"] == "generated"
-    assert saved["task_prompt"] == prompt
-    sandbox_fence = {
-        "thread_id": job["thread_id"],
-        "attempt_id": claim["attempt_id"],
-        "lease_generation": claim["lease_generation"],
-        "sandbox_generation": sandbox["generation"],
-        "activation_generation": sandbox["activation_generation"],
-    }
-    assert await store.sandbox.mark_thread_sandbox_running(
-        **sandbox_fence, container_id="title-container", context_status="new"
-    )
-    assert await store.sandbox.admit_thread_sandbox_turn(
-        **sandbox_fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
-    )
-    assert await store.sandbox.settle_thread_sandbox(
-        **sandbox_fence,
-        residency_generation=sandbox["residency_generation"],
-        job_id=job["id"],
-        context_status="live",
-        native_session_id="title-session",
-        idle_timeout_seconds=1800,
-        base_sha=job["base_sha"],
-    )
-    assert await store.attempt_commands.transition(
-        **fence, from_states=("running",), to_state="succeeded"
-    )
-    child = await append_follow_up(
-        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
-    )
-    assert child is not None and child.get("error") is None
-    assert child["title"] == saved["title"]
-    assert child["title_source"] == "generated"
-    followup_claim = await _claim(
-        store,
-        worker_id="title-worker",
-        lease_ttl_seconds=60,
-        host="shared-runner",
-        host_credential_hash="test-credential-hash",
-    )
-    assert followup_claim is not None and not followup_claim["title_generation_pending"]
-    assert not await store.conversation_commands.set_generated_thread_title(
-        job_id=child["id"],
-        attempt_id=followup_claim["attempt_id"],
-        lease_generation=followup_claim["lease_generation"],
-        title="JSON export",
-    )
-
-
-async def test_manual_same_title_wins_in_flight_generation(pool, store: Storage):
-    """A manual save claims ownership even if the user keeps the fallback text."""
-    job = await _create_job(store)
-    claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
-    assert claim is not None and claim["title_generation_pending"]
-    # Hold the user edit uncommitted so generation really races the row lock.
-    async with pool.acquire() as conn, conn.transaction():
-        await conn.execute(
-            "UPDATE agent_threads SET title_source = 'manual' WHERE id = $1",
-            job["thread_id"],
-        )
-        generation = asyncio.create_task(
-            store.conversation_commands.set_generated_thread_title(
-                job_id=job["id"],
-                attempt_id=claim["attempt_id"],
-                lease_generation=claim["lease_generation"],
-                title="Unwanted automatic title",
-            )
-        )
-        await asyncio.sleep(0.03)
-        assert not generation.done()
-    assert not await asyncio.wait_for(generation, timeout=3)
-    saved = await store.conversation_queries.get_job(job["id"])
-    assert saved is not None and saved["title"] == job["title"]
-    assert saved["title_source"] == "manual"
-
-
 async def test_manual_same_title_sets_provenance(store: Storage):
-    """Saving the visible fallback without edits still blocks later generation."""
+    """Saving the visible fallback without edits still records the owner's choice."""
     job = await _create_job(store)
     assert await store.conversation_commands.set_thread_title(
         job_id=job["id"], user_id=job["user_id"], title=job["title"]
     )
-    claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
-    assert claim is not None and not claim["title_generation_pending"]
     saved = await store.conversation_queries.get_job(job["id"])
     assert saved is not None and saved["title_source"] == "manual"
-    assert not await store.conversation_commands.set_generated_thread_title(
-        job_id=job["id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        title="Unwanted title",
-    )
-
-
-@pytest.mark.parametrize(
-    "fence_break",
-    ["generation", "job", "expired", "failed", "cancelled", "cancel_requested", "deleted"],
-)
-async def test_generated_title_rejects_stale_or_deleted_work(
-    pool, store: Storage, fence_break: str
-):
-    """Expired/superseded work cannot mutate the canonical conversation title."""
-    job = await _create_job(store)
-    claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
-    assert claim is not None
-    generation = claim["lease_generation"]
-    job_id = job["id"]
-    if fence_break == "generation":
-        generation += 1
-    elif fence_break == "job":
-        job_id = (await _create_job(store, user_id="other-owner"))["id"]
-    elif fence_break in {"failed", "cancelled"}:
-        assert await store.attempt_commands.transition(
-            job_id=job_id,
-            attempt_id=claim["attempt_id"],
-            lease_generation=generation,
-            from_states=("running",),
-            to_state=fence_break,
-        )
-    else:
-        async with pool.acquire() as conn:
-            if fence_break == "expired":
-                await conn.execute(
-                    "UPDATE agent_attempts SET lease_expires_at = NOW() - INTERVAL '1 second' "
-                    "WHERE id = $1",
-                    claim["attempt_id"],
-                )
-            elif fence_break == "cancel_requested":
-                await conn.execute(
-                    "UPDATE agent_jobs SET cancel_requested = TRUE WHERE id = $1", job_id
-                )
-            else:
-                await conn.execute(
-                    "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1",
-                    job["thread_id"],
-                )
-    assert (
-        await store.conversation_commands.get_thread_title_prompt(
-            job_id=job_id, attempt_id=claim["attempt_id"], lease_generation=generation
-        )
-        is None
-    )
-    assert not await store.conversation_commands.set_generated_thread_title(
-        job_id=job_id,
-        attempt_id=claim["attempt_id"],
-        lease_generation=generation,
-        title="Stale result",
-    )
-    saved = await store.conversation_queries.get_job(job["id"])
-    assert saved is not None and saved["title"] == job["title"]
-
-
-async def test_title_generation_recovers_on_retry_but_rejects_the_old_attempt(store: Storage):
-    """A fresh lease can recover naming; the superseded attempt still cannot write."""
-    job = await _create_job(store)
-    first = await _claim(store, worker_id="first-worker", lease_ttl_seconds=60)
-    assert first is not None and first["title_generation_pending"]
-    assert await store.attempt_commands.release_claim(
-        job_id=job["id"],
-        attempt_id=first["attempt_id"],
-        lease_generation=first["lease_generation"],
-    )
-    second = await _claim(store, worker_id="second-worker", lease_ttl_seconds=60)
-    assert second is not None and second["title_generation_pending"]
-    assert (
-        await store.conversation_commands.get_thread_title_prompt(
-            job_id=job["id"],
-            attempt_id=first["attempt_id"],
-            lease_generation=first["lease_generation"],
-        )
-        is None
-    )
-    assert not await store.conversation_commands.set_generated_thread_title(
-        job_id=job["id"],
-        attempt_id=first["attempt_id"],
-        lease_generation=first["lease_generation"],
-        title="Stale summary",
-    )
-    assert (
-        await store.conversation_commands.get_thread_title_prompt(
-            job_id=job["id"],
-            attempt_id=second["attempt_id"],
-            lease_generation=second["lease_generation"],
-        )
-        == job["task_prompt"]
-    )
-    assert await store.conversation_commands.set_generated_thread_title(
-        job_id=job["id"],
-        attempt_id=second["attempt_id"],
-        lease_generation=second["lease_generation"],
-        title="Recovered summary",
-    )
-
-
-@pytest.mark.parametrize("source", ["fallback", "generated", "inherited", "manual"])
-async def test_followup_recovers_original_topic_and_legacy_warmup_title(pool, store, source):
-    """A later turn repairs automatic warmup titles without taking manual ownership."""
-    prompt = "Implement CSV export for SPRUCE_8462"
-    job, claim, sandbox = await _reserve_shared_chat(store, task_prompt=prompt)
-    fence = {
-        "job_id": job["id"],
-        "attempt_id": claim["attempt_id"],
-        "lease_generation": claim["lease_generation"],
-    }
-    assert not await store.conversation_commands.set_generated_thread_title(
-        **fence, title="⏳ The model is starting up — this t…"
-    )
-    if source != "fallback":
-        # Model the already-persisted bug, its fork, or a deliberate user title.
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE agent_threads SET title = $2, title_source = $3 WHERE id = $1",
-                job["thread_id"],
-                "⏳ The model is starting up — this t…",
-                source,
-            )
-    sandbox_fence = {
-        "thread_id": job["thread_id"],
-        "attempt_id": claim["attempt_id"],
-        "lease_generation": claim["lease_generation"],
-        "sandbox_generation": sandbox["generation"],
-        "activation_generation": sandbox["activation_generation"],
-    }
-    assert await store.sandbox.mark_thread_sandbox_running(
-        **sandbox_fence, container_id="title-recovery", context_status="new"
-    )
-    assert await store.sandbox.admit_thread_sandbox_turn(
-        **sandbox_fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
-    )
-    assert await store.sandbox.settle_thread_sandbox(
-        **sandbox_fence,
-        residency_generation=sandbox["residency_generation"],
-        job_id=job["id"],
-        context_status="live",
-        native_session_id="title-recovery-session",
-        idle_timeout_seconds=1800,
-        base_sha=job["base_sha"],
-    )
-    assert await store.attempt_commands.transition(
-        **fence, from_states=("running",), to_state="succeeded"
-    )
-    child = await append_follow_up(
-        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
-    )
-    assert child is not None and child.get("error") is None
-    next_claim = await _claim(
-        store,
-        worker_id="title-recovery-worker",
-        lease_ttl_seconds=60,
-        host="shared-runner",
-        host_credential_hash="test-credential-hash",
-    )
-    assert next_claim is not None
-    assert next_claim["title_generation_pending"] is (source != "manual")
-    next_fence = {
-        "job_id": child["id"],
-        "attempt_id": next_claim["attempt_id"],
-        "lease_generation": next_claim["lease_generation"],
-    }
-    assert await store.conversation_commands.get_thread_title_prompt(**next_fence) == (
-        prompt if source != "manual" else None
-    )
-    assert await store.conversation_commands.set_generated_thread_title(
-        **next_fence, title="SPRUCE_8462 CSV export"
-    ) is (source != "manual")
-    saved = await store.conversation_queries.get_job(child["id"])
-    assert saved["title"] == (
-        "SPRUCE_8462 CSV export" if source != "manual" else "⏳ The model is starting up — this t…"
-    )
-
-
-async def test_successful_short_task_accepts_delayed_title(pool, store: Storage):
-    """A fast task can finish before its independent title request returns."""
-    job = await _create_job(store)
-    claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
-    assert claim is not None
-    fence = {
-        "job_id": job["id"],
-        "attempt_id": claim["attempt_id"],
-        "lease_generation": claim["lease_generation"],
-    }
-    await _settled(pool, store, fence["job_id"])
-    assert await store.attempt_commands.transition(
-        **fence, from_states=("running",), to_state="succeeded"
-    )
-    assert await store.conversation_commands.get_thread_title_prompt(**fence) == job["task_prompt"]
-    assert await store.conversation_commands.set_generated_thread_title(
-        **fence, title="Fix flaky test"
-    )
-    saved = await store.conversation_queries.get_job(job["id"])
-    assert saved is not None and saved["title"] == "Fix flaky test"
-    assert saved["title_source"] == "generated"
+    assert saved["title"] == job["title"]
 
 
 async def test_a_cancelled_parent_released_by_the_platform_unblocks_its_queued_child(
@@ -790,10 +486,11 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
 
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
+    from tests.support.model_connections import use_test_cipher, verified_connection
 
     from cloud_agent.api import routes
     from cloud_agent.api._owner_auth import require_agent_owner
-    from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client, get_storage
+    from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory, get_storage
     from cloud_agent.application import follow_ups
 
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -846,23 +543,32 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
         return outcome
 
     monkeypatch.setattr(store.pending_messages, "settle_queue", capture_command_row)
+    # Every turn runs on one of its owner's connections; the message names it.
+    use_test_cipher(monkeypatch)
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
+    connection = await verified_connection(store, job["user_id"], models=(job["model"],))
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": job["user_id"]}
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    app.dependency_overrides[get_gateway_client] = lambda: None
+    app.dependency_overrides[get_owner_directory] = lambda: None
     monkeypatch.setattr(follow_ups, "require_entitled_repo", AsyncMock())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         path = f"/v1/agent/threads/{job['thread_id']}/messages"
         headers = {"Idempotency-Key": "side-receipt-contract"}
-        response = await client.post(path, json={"prompt": "side question"}, headers=headers)
+        body = {
+            "prompt": "side question",
+            "model": job["model"],
+            "model_connection_id": connection["id"],
+        }
+        response = await client.post(path, json=body, headers=headers)
         assert response.status_code == 201, response.text
         assert response.json()["pending"] is None
         receipt = response.json()["job"]
         assert len(command_rows) == 1
         assert command_rows[0]["thread_sandbox"] is None
-        replay = await client.post(path, json={"prompt": "side question"}, headers=headers)
+        replay = await client.post(path, json=body, headers=headers)
         assert replay.status_code == 201, replay.text
         assert replay.json()["job"]["id"] == receipt["id"]
         for body in (receipt, replay.json()["job"]):

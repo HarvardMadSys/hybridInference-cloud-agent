@@ -13,9 +13,9 @@ Users give tasks from a web interface. Enrolled hosts run Claude Code, Codex,
 pi, OpenCode, or Kilo against the repository, each in its own native session
 inside a sandbox that survives between turns. The control plane schedules the
 work, streams it to the browser, and publishes the result as a pull request.
-Model access, quotas, and account identity come from a
-[HybridInference gateway](https://github.com/HarvardMadSys/hybridInference),
-reached over HTTP only.
+Accounts are Cloud Agent's own, admitted through a waiting list, and every task
+runs on a model connection its owner adds with their own provider key (for
+example a FreeInference key).
 
 <!-- TODO: add a screenshot of a chat with its workspace pane. -->
 
@@ -65,15 +65,17 @@ Run the complete stack on one machine with Docker 28+, Docker Compose,
 ./deploy/local/dev.sh smoke
 ```
 
-Open <http://127.0.0.1:13002>. The stack includes the web app, OAuth flow,
-control plane, database, an enrolled host, and all five pinned agent CLIs.
+Open <http://127.0.0.1:13002>. The stack includes the web app, the account
+system, control plane, database, an enrolled host, and all five pinned agent
+CLIs. Create the first administrator at `/setup/administrator` with the code the
+control plane logs (`./deploy/local/dev.sh smoke` does it for you).
 `./deploy/local/dev.sh stop` stops it and keeps its database and sandboxes for
 the next start.
 
-The local stack uses a gateway fixture that returns deterministic responses, so
-it needs no gateway or provider key. It verifies integration and the session
-lifecycle, not model quality or production isolation. To run agents against
-real models, deploy Cloud Agent against a HybridInference gateway: follow
+The local stack ships no model provider: a task runs once its owner adds a
+model connection to a provider the sandbox can reach over public HTTPS. It
+verifies integration and the account and session lifecycle, not model quality
+or production isolation. To deploy for real, follow
 [Running self-hosted](docs/developer/operations.md#running-self-hosted) and
 [Before a job can run for real](docs/developer/operations.md#before-a-job-can-run-for-real).
 The [local guide](deploy/local/README.md) covers configuration, logs, and
@@ -97,10 +99,9 @@ flowchart TD
     Browser[Browser] --> Web[Next.js web app and BFF]
     Web --> Control[Control plane: API, scheduling, publication]
     Control --> Database[(Agent-owned PostgreSQL)]
-    Control <-->|HTTP contracts| Gateway[HybridInference gateway]
     Host[Enrolled host: runner and sandbox manager] <-->|Claims, heartbeats, workspace| Control
     Host -->|Container lifecycle| Sandbox[Retained sandbox group: shared workspace, native CLI sessions]
-    Sandbox -->|Scoped inference credential via relay| Gateway
+    Sandbox -->|The owner's provider key, over public HTTPS| Provider[The owner's model provider]
     Sandbox -->|Scoped tool credential via relay| MCP[Control plane MCP-only listener]
     Sandbox -->|TCP 80 and 443 under host rules| Public[Public IPv4 destinations]
 ```
@@ -117,14 +118,12 @@ member to the same group. See
 [native conversation recall](docs/developer/context-recall.md) for the context
 states and their limits.
 
-The gateway owns accounts, model permissions, and inference quotas; there is no
-per-task dollar budget. Cloud Agent shares no database, code, or signing secret
-with it and uses only the
-[documented contracts](gateway_contracts/README.md). Sandboxes never hold a
-long-lived credential: they receive short-lived inference grants, a scoped MCP
-token, and, when the GitHub App is configured, an hour-long token for the job's
-repository. A grant can still be replayed until it expires or is revoked, within
-the owner's model permissions and quota. Read [SECURITY.md](SECURITY.md) and the
+Cloud Agent keeps its own accounts and admission; the owner's provider keeps
+the API key's quota and bill, and there is no per-task dollar budget. The Usage
+pages show the tokens agents reported, not a provider bill. A member sandbox
+holds the owner's provider key for the turn it runs, a scoped MCP token, and,
+when the GitHub App is configured, an hour-long token for the job's repository;
+it never holds a platform credential. Read [SECURITY.md](SECURITY.md) and the
 [sandbox network runbook](docs/developer/operations.md#the-sandbox-network)
 before deploying for untrusted users.
 
@@ -152,7 +151,7 @@ apps/backend/cloud_agent/         FastAPI control plane and PostgreSQL storage
 apps/backend/cloud_agent_host/    Host runner, sandboxes, sandbox manager, CLI adapters
 apps/backend/cloud_agent_shared/  Shared protocols, pins, errors, Git and archive helpers
 apps/frontend/                    Next.js user interface and admin dashboard
-gateway_contracts/                Gateway contract mirrors and control-plane API snapshot
+api_contracts/                    The committed snapshot of this service's OpenAPI
 migrations/                       Alembic revisions for the Agent database
 deploy/                           Control-plane, host, sandbox, local, and release recipes
 tests/                            Unit, API, integration, and external verification

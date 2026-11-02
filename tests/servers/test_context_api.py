@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.api import context
-from cloud_agent.api.deps import get_gateway_client, get_grant_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.context_insights import ContextInsightsCursor, context_cursor_scope
 
 NOW = datetime(2026, 10, 15, 12, tzinfo=UTC)
@@ -66,8 +66,7 @@ def _row(thread_id: str) -> dict:
 
 @pytest.fixture()
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "context-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(context.router)
     queries = AsyncMock()
@@ -81,34 +80,30 @@ def app(monkeypatch):
     owner_usage = AsyncMock()
     owner_usage.first_record_at.return_value = None
     usage = _NoUsage()
-    gateway = AsyncMock()
-    gateway.agent_access.side_effect = lambda owner: {
+    owners = AsyncMock()
+    owners.agent_access.side_effect = lambda owner: {
         "user_id": owner,
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
-    ledger = AsyncMock()
-    ledger.thread_request_sources.return_value = ([], False)
-    application.dependency_overrides[get_grant_client] = lambda: SimpleNamespace(binding_id="b1")
+    application.dependency_overrides[get_owner_directory] = lambda: owners
     commands = AsyncMock()
     commands.command_executions.return_value = None
     application.state.commands = commands
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
         context_queries=queries,
         command_executions=commands,
-        ledger=ledger,
+        local_accounts=SESSIONS,
         owner_usage=owner_usage,
         admin_usage=usage,
     )
     application.state.queries = queries
-    application.state.ledger = ledger
     application.state.usage = usage
     return application
 
 
 async def _get(app, path, *, owner="owner-1", **params):
-    headers = {"Authorization": f"Bearer {identity.mint_session(user_id=owner)}"} if owner else {}
+    headers = {"Authorization": f"Bearer {SESSIONS.sign_in(owner)}"} if owner else {}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
     ) as http:
@@ -351,7 +346,7 @@ async def test_a_bad_filter_is_refused_before_the_list_is_read(app, params):
     app.state.queries.insights_page.assert_not_awaited()
 
 
-async def test_timing_is_the_owners_and_reads_a_bounded_number_of_executions(app):
+async def test_timing_is_the_owners_and_says_no_request_log_was_recorded(app):
     assert (
         await _get(app, "/v1/agent/jobs/j1/thread/context/timing", owner=None)
     ).status_code == 401
@@ -364,9 +359,9 @@ async def test_timing_is_the_owners_and_reads_a_bounded_number_of_executions(app
     body = response.json()
     assert body["active_ms"] == 0
     assert body["segments"] == []
-    app.state.ledger.thread_request_sources.assert_awaited_with(
-        job_id="j1", user_id="owner-1", limit=context.THREAD_TIMING_SOURCES
-    )
+    # Owners' own connections are not proxied: no request is ever timed.
+    assert body["gateway"] == "not_recorded"
+    assert body["requests"] == []
 
 
 @pytest.mark.parametrize(

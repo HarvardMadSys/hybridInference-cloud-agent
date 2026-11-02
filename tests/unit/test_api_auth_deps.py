@@ -16,8 +16,8 @@ The credential boundaries that would be quietest if they broke:
 
 from __future__ import annotations
 
-import asyncio
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import jwt
@@ -25,58 +25,54 @@ import pytest
 import pytest_asyncio
 from fastapi import Depends, FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
-from cloud_agent.agent_access import AgentAccessDecision
+from cloud_agent.accounts.config import ENV_LOCAL_SESSION_SECRET, LOCAL_SESSION_COOKIE
 from cloud_agent.api import deps
 from cloud_agent.api.deps import (
     AGENT_TOKEN_PREFIX,
     get_client_ip,
     get_current_user,
+    get_storage,
     log_admin_action,
     looks_like_agent_token,
+    require_agent_access,
     verify_admin_access,
 )
-from cloud_agent.gateway import GatewayError
 
 pytestmark = pytest.mark.asyncio
 
-_SESSION_SECRET = "session-signing-secret-long-enough-for-hs256"
 _USER = "user_1"
 
 
 @pytest.fixture(autouse=True)
 def _session_env(monkeypatch):
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, _SESSION_SECRET)
+    use_session_secret(monkeypatch)
     monkeypatch.delenv(deps.ENV_ADMIN_TOKEN, raising=False)
     monkeypatch.delenv(deps.ENV_TRUST_PROXY_HEADERS, raising=False)
     yield
 
 
-def _session(*, role: str = "internal", expired: bool = False, email: str | None = None) -> str:
-    """Mint what ``/v1/session/login`` would have set."""
-    token = identity.mint_session(user_id=_USER)
-    if not expired:
-        return token
-    claims = jwt.decode(token, options={"verify_signature": False})
-    claims["exp"] = int(time.time()) - 1
-    return jwt.encode(claims, _SESSION_SECRET, algorithm="HS256")
+def _session() -> str:
+    """A live account session for ``_USER``, as sign-in issues one."""
+    return SESSIONS.sign_in(_USER)
 
 
 @pytest_asyncio.fixture()
 async def client():
     """An app exposing the two request-scoped dependencies directly."""
     app = FastAPI()
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(local_accounts=SESSIONS)
 
-    class Gateway:
+    class Owners:
+        def __init__(self) -> None:
+            self.permissions: dict[str, list[str]] = {}
+
         async def agent_access(self, user_id):
-            return {
-                "user_id": user_id,
-                "allowed": True,
-                "permissions": ["agent.use", "agent.admin"],
-            }
+            held = self.permissions.get(user_id, ["agent.use", "agent.admin"])
+            return {"user_id": user_id, "allowed": bool(held), "permissions": held}
 
-    app.state.gateway = Gateway()
+    app.state.owners = Owners()
 
     @app.get("/who")
     async def who(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
@@ -126,7 +122,7 @@ async def test_the_agent_token_prefix_still_matches_what_tokens_mints(monkeypatc
 
 
 async def test_the_session_cookie_authenticates(client: AsyncClient) -> None:
-    client.cookies.set(identity.SESSION_COOKIE, _session(email="owner@example.com"))
+    client.cookies.set(LOCAL_SESSION_COOKIE, _session())
 
     response = await client.get("/who")
 
@@ -152,24 +148,33 @@ async def test_no_credential_is_a_401(client: AsyncClient) -> None:
     assert response.json()["detail"].startswith("Missing authentication token")
 
 
-async def test_an_expired_session_says_so(client: AsyncClient) -> None:
-    """The message is load-bearing: it is how a client knows to sign in again
-    rather than to retry the same credential."""
-    client.cookies.set(identity.SESSION_COOKIE, _session(expired=True))
+async def test_an_ended_session_is_refused(client: AsyncClient) -> None:
+    """A session ended on the server (sign-out, password change) is no credential."""
+    client.cookies.set(LOCAL_SESSION_COOKIE, _session())
+    SESSIONS.revoke_all()
 
     response = await client.get("/who")
 
     assert response.status_code == 401
-    assert response.json()["detail"].startswith("Token has expired")
+    assert response.json()["detail"] == "Invalid authentication token."
 
 
-async def test_a_session_signed_with_another_secret_is_refused(client: AsyncClient) -> None:
+async def test_a_suspended_accounts_session_is_refused(client: AsyncClient) -> None:
+    client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in("suspended", status="suspended"))
+
+    response = await client.get("/who")
+
+    assert response.status_code == 401
+
+
+async def test_a_retired_gateway_session_jwt_is_refused(client: AsyncClient) -> None:
+    """A JWT a Gateway-era deployment set is not a session here, whatever it claims."""
     forged = jwt.encode(
         {"sub": _USER, "role": "admin", "exp": int(time.time()) + 600},
         "a-completely-different-secret-of-sufficient-length",
         algorithm="HS256",
     )
-    client.cookies.set(identity.SESSION_COOKIE, forged)
+    client.cookies.set(LOCAL_SESSION_COOKIE, forged)
 
     response = await client.get("/who")
 
@@ -181,8 +186,8 @@ async def test_a_deployment_with_no_session_secret_says_503(
     client: AsyncClient, monkeypatch
 ) -> None:
     """Not 401. The caller did nothing wrong and cannot fix it by retrying."""
-    client.cookies.set(identity.SESSION_COOKIE, _session())
-    monkeypatch.delenv(identity.ENV_SESSION_SECRET, raising=False)
+    client.cookies.set(LOCAL_SESSION_COOKIE, _session())
+    monkeypatch.delenv(ENV_LOCAL_SESSION_SECRET, raising=False)
 
     response = await client.get("/who")
 
@@ -194,8 +199,8 @@ async def test_the_identity_context_contains_no_profile(
 ) -> None:
     """Downstream owner handlers receive only the verified user identifier."""
     client.cookies.set(
-        identity.SESSION_COOKIE,
-        identity.mint_session(user_id=_USER),
+        LOCAL_SESSION_COOKIE,
+        SESSIONS.sign_in(_USER),
     )
 
     response = await client.get("/who")
@@ -256,8 +261,8 @@ async def test_a_non_ascii_admin_token_is_refused_not_a_server_error(
 
 
 async def test_an_admin_session_opens_the_admin_door(client: AsyncClient) -> None:
-    """The dashboard uses a session and the Gateway's current agent.admin grant."""
-    client.cookies.set(identity.SESSION_COOKIE, _session(role="admin"))
+    """The dashboard uses a session and the account's current agent.admin."""
+    client.cookies.set(LOCAL_SESSION_COOKIE, _session())
 
     response = await client.get("/admin")
 
@@ -265,15 +270,16 @@ async def test_an_admin_session_opens_the_admin_door(client: AsyncClient) -> Non
     assert response.json()["admin_id"] == f"admin:{_USER}"
 
 
-@pytest.mark.parametrize("role", ["free", "pro", "internal"])
-async def test_an_agent_admin_permission_works_for_every_profile_role(
-    client: AsyncClient, role: str
+async def test_a_session_without_agent_admin_is_refused_at_the_admin_door(
+    client: AsyncClient,
 ) -> None:
-    client.cookies.set(identity.SESSION_COOKIE, _session(role=role))
+    owners = client._transport.app.state.owners  # type: ignore[attr-defined]
+    owners.permissions = {"member": ["agent.use"]}
+    client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in("member"))
 
     response = await client.get("/admin")
 
-    assert response.status_code == 200
+    assert response.status_code == 403
 
 
 async def test_the_admin_door_diagnoses_a_missing_secret_the_same_way(
@@ -282,12 +288,11 @@ async def test_the_admin_door_diagnoses_a_missing_secret_the_same_way(
     """One misconfiguration, one diagnosis.
 
     This used to answer 401 while ``get_current_user`` answered 503 for the
-    identical cause — an unset ``AGENT_SESSION_SECRET`` — because the broader
-    ``IdentityError`` was caught here. The 401 sent an operator hunting for a
-    credential problem that did not exist.
+    identical cause — an unset session secret. The 401 sent an operator
+    hunting for a credential problem that did not exist.
     """
-    client.cookies.set(identity.SESSION_COOKIE, _session(role="admin"))
-    monkeypatch.delenv(identity.ENV_SESSION_SECRET, raising=False)
+    client.cookies.set(LOCAL_SESSION_COOKIE, _session())
+    monkeypatch.delenv(ENV_LOCAL_SESSION_SECRET, raising=False)
 
     response = await client.get("/admin")
 
@@ -304,7 +309,7 @@ async def test_the_admin_token_still_opens_without_a_session_secret(
     not.
     """
     monkeypatch.setenv(deps.ENV_ADMIN_TOKEN, "the-admin-token")
-    monkeypatch.delenv(identity.ENV_SESSION_SECRET, raising=False)
+    monkeypatch.delenv(ENV_LOCAL_SESSION_SECRET, raising=False)
 
     response = await client.get("/admin", headers={"Authorization": "Bearer the-admin-token"})
 
@@ -455,139 +460,22 @@ def _configured_identity_issuer(monkeypatch):
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
 
 
-def _record(admission: deps.AgentAccessAdmission, decision: AgentAccessDecision) -> None:
-    """Record ``decision`` as a lookup that started and answered just now."""
-    with admission.asking() as asked:
-        admission.record(decision, asked)
+async def test_admission_is_read_fresh_on_every_request():
+    """No decision is kept: a withdrawal governs the very next request."""
 
+    class Owners:
+        def __init__(self) -> None:
+            self.held = ["agent.use"]
+            self.asked = 0
 
-async def _until(condition: Any) -> None:
-    """Yield to the loop until ``condition()`` holds, failing rather than hanging."""
-    for _ in range(1000):
-        if condition():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError("the awaited state was never reached")
+        async def agent_access(self, user_id):
+            self.asked += 1
+            return {"user_id": user_id, "allowed": bool(self.held), "permissions": self.held}
 
-
-class _SlowAccessGateway:
-    """Answers ``agent.use`` once released, counting how often it was asked."""
-
-    def __init__(self) -> None:
-        self.asked = 0
-        self.release = asyncio.Event()
-
-    async def agent_access(self, user_id: str) -> dict[str, Any]:
-        self.asked += 1
-        await self.release.wait()
-        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
-
-
-async def test_concurrent_owner_admissions_share_one_gateway_lookup():
-    gateway = _SlowAccessGateway()
-    admission = deps.AgentAccessAdmission()
-    waiting = [asyncio.create_task(admission.decision(gateway, "u1")) for _ in range(5)]
-    await asyncio.sleep(0)
-    gateway.release.set()
-    decisions = await asyncio.gather(*waiting)
-    assert gateway.asked == 1
-    assert all(decision.permits("agent.use") for decision in decisions)
-
-
-async def test_a_caller_that_gives_up_does_not_cancel_the_shared_lookup():
-    gateway = _SlowAccessGateway()
-    admission = deps.AgentAccessAdmission()
-    first = asyncio.create_task(admission.decision(gateway, "u1"))
-    second = asyncio.create_task(admission.decision(gateway, "u1"))
-    await asyncio.sleep(0)
-    first.cancel()
-    gateway.release.set()
-    assert (await second).permits("agent.use")
-    assert gateway.asked == 1
-
-
-async def test_a_recorded_denial_ends_the_kept_grant():
-    gateway = _SlowAccessGateway()
-    gateway.release.set()
-    admission = deps.AgentAccessAdmission()
-    await admission.decision(gateway, "u1")
-    _record(admission, AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
-    await admission.decision(gateway, "u1")
-    assert gateway.asked == 2
-
-
-async def test_a_lookup_that_overlaps_a_recorded_denial_does_not_keep_its_grant():
-    gateway = _SlowAccessGateway()
-    admission = deps.AgentAccessAdmission()
-    stale = asyncio.create_task(admission.decision(gateway, "u1"))
-    await _until(lambda: gateway.asked == 1)
-    # /v1/session/me is told the access was withdrawn while that lookup waits.
-    _record(admission, AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
-    gateway.release.set()
-    assert (await stale).permits("agent.use")
-    await admission.decision(gateway, "u1")
-    assert gateway.asked == 2
-
-
-class _ScriptedAccessGateway:
-    """Answers each lookup, once released, with the next scripted outcome."""
-
-    def __init__(self, *outcomes: bool | Exception) -> None:
-        self.outcomes = list(outcomes)
-        self.asked = 0
-        self.release = asyncio.Event()
-
-    async def agent_access(self, user_id: str) -> dict[str, Any]:
-        outcome = self.outcomes[self.asked]
-        self.asked += 1
-        await self.release.wait()
-        if isinstance(outcome, Exception):
-            raise outcome
-        permissions = ["agent.use"] if outcome else []
-        return {"user_id": user_id, "allowed": outcome, "permissions": permissions}
-
-
-async def test_requests_after_a_recorded_denial_do_not_join_the_lookup_before_it():
-    gateway = _ScriptedAccessGateway(True, False)
-    admission = deps.AgentAccessAdmission()
-    stale = asyncio.create_task(admission.decision(gateway, "u1"))
-    await _until(lambda: gateway.asked == 1)
-    _record(admission, AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
-    after = asyncio.create_task(admission.decision(gateway, "u1"))
-    await _until(lambda: gateway.asked == 2)
-    gateway.release.set()
-    # The request that was already waiting is answered by its lookup; the one
-    # that arrived after the denial is answered by a lookup of its own.
-    assert (await stale).permits("agent.use")
-    assert not (await after).permits("agent.use")
-    assert gateway.asked == 2
-
-
-async def test_a_failed_lookup_leaves_a_grant_recorded_while_it_waited():
-    gateway = _ScriptedAccessGateway(GatewayError("unavailable", status_code=503))
-    admission = deps.AgentAccessAdmission()
-    stale = asyncio.create_task(admission.decision(gateway, "u1"))
-    await _until(lambda: gateway.asked == 1)
-    _record(admission, AgentAccessDecision(user_id="u1", allowed=True, permissions=["agent.use"]))
-    gateway.release.set()
-    with pytest.raises(HTTPException):
-        await stale
-    assert (await admission.decision(gateway, "u1")).permits("agent.use")
-    assert gateway.asked == 1
-
-
-async def test_a_grant_asked_for_before_a_recorded_denial_is_not_kept():
-    admission = deps.AgentAccessAdmission()
-    granted = AgentAccessDecision(user_id="u1", allowed=True, permissions=["agent.use"])
-    with admission.asking() as earlier:
-        # A later /v1/session/me is told of the withdrawal and records it first.
-        _record(admission, AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
-        admission.record(granted, earlier)
-    gateway = _SlowAccessGateway()
-    gateway.release.set()
-    await admission.decision(gateway, "u1")
-    assert gateway.asked == 1
-    # A grant asked for after the denial is kept.
-    _record(admission, granted)
-    await admission.decision(gateway, "u1")
-    assert gateway.asked == 1
+    owners = Owners()
+    assert (await require_agent_access(owners, "u1")).permits("agent.use")
+    owners.held = []
+    with pytest.raises(HTTPException) as refused:
+        await require_agent_access(owners, "u1")
+    assert refused.value.status_code == 403
+    assert owners.asked == 2

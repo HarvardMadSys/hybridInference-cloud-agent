@@ -91,7 +91,7 @@ async def test_a_page_of_stuck_queues_does_not_hide_the_ones_after_it(store, poo
 
     async def run() -> list[str]:
         storage.pending_messages.visited.clear()
-        await settle_waiting_queues(storage, gateway=None, github_app=None, limit=2, sweep=sweep)
+        await settle_waiting_queues(storage, owners=None, github_app=None, limit=2, sweep=sweep)
         return list(dict.fromkeys(storage.pending_messages.visited))
 
     # Without the sweep, every pass would stop at the same two stuck threads.
@@ -108,5 +108,5 @@ async def test_a_page_of_stuck_queues_does_not_hide_the_ones_after_it(store, poo
 async def test_a_sweep_rejects_a_zero_page_limit(store):
     with pytest.raises(ValueError, match="limit must be at least 1"):
         await settle_waiting_queues(
-            store, gateway=None, github_app=None, limit=0, sweep=QueueSweep()
+            store, owners=None, github_app=None, limit=0, sweep=QueueSweep()
         )

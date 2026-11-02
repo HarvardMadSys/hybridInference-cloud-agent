@@ -3,7 +3,7 @@
 // The build-time half of the configuration stays in `env.ts`: `basePath` and
 // the browser's API prefix are properties of the *image variant*, and Next
 // resolves them while the bundle is compiled. Everything here is the opposite
-// — a name, an organisation, a status page, the gateway's origin — and those
+// — a name, an organisation, a status page — and those
 // are properties of a *deployment*, not of a build. A deployment that changes
 // its product name must not have to rebuild the same image.
 //
@@ -27,12 +27,6 @@ export interface SiteBranding {
   docsUrl: string;
   /** A support page, or `mailto:` and one address. Empty hides the link. */
   contactUrl: string;
-  /**
-   * The gateway's *origin*, for the links this app does not host itself.
-   * Never the browser's API address — that is `basePath` plus `/api`, and it
-   * belongs to the build variant.
-   */
-  gatewayUrl: string;
 }
 
 export interface RuntimeSiteConfig {
@@ -40,10 +34,6 @@ export interface RuntimeSiteConfig {
   deployment?: {
     version: string;
     deployedAt: string;
-  };
-  features: {
-    /** The gateway's docs assistant. Off unless a deployment says otherwise. */
-    rag: boolean;
   };
 }
 
@@ -63,10 +53,6 @@ export const NEUTRAL_SITE_CONFIG: RuntimeSiteConfig = {
     statusUrl: '',
     docsUrl: '',
     contactUrl: '',
-    gatewayUrl: '',
-  },
-  features: {
-    rag: false,
   },
 };
 
@@ -85,8 +71,6 @@ export const SITE_CONFIG_ENV = {
   statusUrl: 'AGENT_WEB_STATUS_URL',
   docsUrl: 'AGENT_WEB_DOCS_URL',
   contactUrl: 'AGENT_WEB_CONTACT_URL',
-  gatewayUrl: 'AGENT_WEB_GATEWAY_URL',
-  featureRag: 'AGENT_WEB_FEATURE_RAG',
   version: 'AGENT_DEPLOYMENT_SHA',
   deployedAt: 'AGENT_WEB_DEPLOYED_AT',
 } as const;
@@ -98,9 +82,8 @@ type EnvSource = Record<string, string | undefined>;
  *
  * Thrown rather than swallowed. The previous code turned an unparseable URL
  * into the empty string, which reads as "not configured" — so a typo in a
- * status URL silently removed the Status link, and a typo in the gateway URL
- * silently removed every gateway link, with nothing anywhere saying why. A
- * deployment that meant to configure something and got it wrong should say so.
+ * status URL silently removed the Status link, with nothing anywhere saying
+ * why. A deployment that meant to configure something and got it wrong should say so.
  */
 export class SiteConfigError extends Error {
   constructor(message: string) {
@@ -144,12 +127,6 @@ function optionalContact(env: EnvSource, name: string): string {
 }
 
 /** An optional absolute http(s) URL, reduced to its origin. */
-function optionalOrigin(env: EnvSource, name: string): string {
-  const raw = trimmed(env[name]);
-  if (!raw) return '';
-  return parseUrl(name, raw).origin;
-}
-
 function parseUrl(name: string, raw: string): URL {
   let parsed: URL;
   try {
@@ -170,15 +147,6 @@ function parseUrl(name: string, raw: string): URL {
  * old reader was `=== 'true'`, which silently read `1`, `yes` and `TRUE` as
  * off — a switch an operator sets and cannot see that it did nothing.
  */
-function optionalBoolean(env: EnvSource, name: string, fallback: boolean): boolean {
-  const raw = trimmed(env[name]);
-  if (!raw) return fallback;
-  const lowered = raw.toLowerCase();
-  if (lowered === 'true') return true;
-  if (lowered === 'false') return false;
-  throw new SiteConfigError(`${name} must be "true" or "false", got: ${raw}`);
-}
-
 /**
  * Resolve the site identity from an explicit environment.
  *
@@ -195,10 +163,6 @@ export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
       statusUrl: optionalUrl(env, SITE_CONFIG_ENV.statusUrl),
       docsUrl: optionalUrl(env, SITE_CONFIG_ENV.docsUrl),
       contactUrl: optionalContact(env, SITE_CONFIG_ENV.contactUrl),
-      gatewayUrl: optionalOrigin(env, SITE_CONFIG_ENV.gatewayUrl),
-    },
-    features: {
-      rag: optionalBoolean(env, SITE_CONFIG_ENV.featureRag, NEUTRAL_SITE_CONFIG.features.rag),
     },
   };
   const version = optionalName(env, SITE_CONFIG_ENV.version);
@@ -225,16 +189,12 @@ function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSit
     throw new SiteConfigError('Invalid application settings.');
   const saved = value as Record<string, unknown>;
   const branding = saved.branding as Record<string, unknown> | undefined;
-  const features = saved.features as Record<string, unknown> | undefined;
-  if (!branding || !features || typeof features.rag !== 'boolean') {
-    throw new SiteConfigError('Invalid application settings.');
-  }
+  if (!branding) throw new SiteConfigError('Invalid application settings.');
   const env: EnvSource = {
     [SITE_CONFIG_ENV.version]: metadata[SITE_CONFIG_ENV.version],
     [SITE_CONFIG_ENV.deployedAt]: metadata[SITE_CONFIG_ENV.deployedAt],
-    [SITE_CONFIG_ENV.featureRag]: String(features.rag),
   };
-  for (const key of ['appName', 'orgName', 'orgUrl', 'statusUrl', 'gatewayUrl'] as const) {
+  for (const key of ['appName', 'orgName', 'orgUrl', 'statusUrl'] as const) {
     if (typeof branding[key] !== 'string')
       throw new SiteConfigError('Invalid application settings.');
     env[SITE_CONFIG_ENV[key]] = branding[key];
@@ -254,10 +214,10 @@ function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSit
 /** Only validated public appearance can become the server's outage fallback. */
 export function parseSavedPublicAppearance(
   value: unknown,
-): Pick<RuntimeSiteConfig, 'branding' | 'features'> | null {
+): Pick<RuntimeSiteConfig, 'branding'> | null {
   try {
-    const { branding, features } = checkedSavedSiteConfig(value, {});
-    return { branding, features };
+    const { branding } = checkedSavedSiteConfig(value, {});
+    return { branding };
   } catch {
     return null;
   }

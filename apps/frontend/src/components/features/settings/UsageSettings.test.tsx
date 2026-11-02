@@ -141,7 +141,7 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
     oldest_queried_at: null,
     runs_with_snapshot: 3,
     missing_attempts: 0,
-    status_counts: { available: 3, partial: 0, stale: 0, pending: 0, unavailable: 0 },
+    status_counts: { available: 3, partial: 0, pending: 0, unavailable: 0 },
     active_runs: 0,
     refreshing_runs: 0,
     ...overrides,
@@ -212,12 +212,7 @@ async function tile(label: string): Promise<string> {
 
 function section() {
   return render(
-    <SiteConfigProvider
-      config={{
-        ...NEUTRAL_SITE_CONFIG,
-        branding: { ...NEUTRAL_SITE_CONFIG.branding, gatewayUrl: 'https://gateway.example' },
-      }}
-    >
+    <SiteConfigProvider config={NEUTRAL_SITE_CONFIG}>
       <LocaleProvider>
         <UsageSettings />
       </LocaleProvider>
@@ -319,13 +314,13 @@ describe('UsageSettings', () => {
     expect(getOwnerContainers).toHaveBeenLastCalledWith({ limit: 50 });
   });
 
-  it('shows the period’s cost, tokens and container time, and how much was measured', async () => {
+  it('shows the period’s tokens and container time, and leaves cost to the provider', async () => {
     section();
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
-    expect(screen.getByText('Estimate, not a bill')).toBeInTheDocument();
-    expect(
-      screen.getByText(/^Days start at 00:00 UTC.*when the daily limit resets/),
-    ).toBeInTheDocument();
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
+    expect(screen.getByText(/bills and limits its use/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$/)).toBeNull();
+    expect(screen.getByText(/^Days start at 00:00 UTC/)).toBeInTheDocument();
+    expect(screen.queryByText(/daily limit/)).toBeNull();
     expect(await tile('Tokens')).toBe('150K');
     expect(screen.getByText('120K in · 30K out')).toBeInTheDocument();
     expect(screen.getByText('10 h')).toBeInTheDocument();
@@ -339,10 +334,7 @@ describe('UsageSettings', () => {
     const table = screen.getByRole('table', { name: 'By model' });
     expect(within(table).getByText('glm-5.1')).toBeInTheDocument();
     expect(within(table).getByText('Unknown model')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Daily limit and account usage' })).toHaveAttribute(
-      'href',
-      'https://gateway.example/dashboard',
-    );
+    expect(screen.queryByRole('link', { name: /Daily limit/ })).toBeNull();
   });
 
   it('shows the cache hit rate, and reasoning tokens as a part of output', async () => {
@@ -369,7 +361,7 @@ describe('UsageSettings', () => {
     };
     vi.mocked(getOwnerTokens).mockResolvedValue(usage);
     section();
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
     expect(await tile('Cache hit rate')).toBe('—');
     expect(await tile('Reasoning tokens')).toBe('—');
   });
@@ -454,7 +446,7 @@ describe('UsageSettings', () => {
     expect(await screen.findByText('10 h')).toBeInTheDocument();
     vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
   });
 
   it('answers in Chinese', async () => {
@@ -464,13 +456,13 @@ describe('UsageSettings', () => {
     expect(screen.getByRole('heading', { name: '历史用量' })).toBeInTheDocument();
     expect(await screen.findByText('1 个运行中 · 1 个已停止')).toBeInTheDocument();
     expect(screen.getByText('最后使用：3小时前')).toBeInTheDocument();
-    expect(await screen.findByText('估算，不是账单')).toBeInTheDocument();
+    expect(await screen.findByText('由服务商计费')).toBeInTheDocument();
     expect(await tile('缓存命中率')).toBe('0%');
     expect(await tile('推理 Token')).toBe('—');
-    expect(screen.getByText('已计入输出 Token')).toBeInTheDocument();
-    expect(
-      await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
-    ).toBeInTheDocument();
+    expect(screen.getByText('仅 Codex 上报此项')).toBeInTheDocument();
+    expect(await screen.findByText(/^每天从 UTC 零点开始算/)).toBeInTheDocument();
+    // Attributable reports only, and the provider may bill more.
+    expect(screen.getByText(/部分调用不计入.*Codex 子智能体/)).toBeInTheDocument();
   });
 });
 
@@ -701,7 +693,7 @@ describe('UsageSettings: one range for History and Context insights', () => {
     vi.mocked(getOwnerTokens).mockResolvedValue(usage);
     section();
     const history = await screen.findByRole('region', { name: 'History' });
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
     // The global consumption metrics are the History's.
     expect(await tile('Tokens')).toBe('150K');
     expect(await tile('Cache hit rate')).toBe('30%');
@@ -742,11 +734,10 @@ describe('UsageSettings: one range for History and Context insights', () => {
     ]) {
       expect(within(insightsCard).queryByText(text)).not.toBeInTheDocument();
     }
-    // Each conversation keeps its own cost and cache hit, and opens its Context view.
+    // Each conversation keeps its own cache hit, and opens its Context view.
     const link = within(insightsCard).getByRole('link', { name: 'Long refactor' });
     expect(link).toHaveAttribute('href', '/job-ctx?view=context');
     const item = link.closest('li')!;
-    expect(within(item).getByText('$2.50')).toBeInTheDocument();
     expect(within(item).getByText('75%')).toBeInTheDocument();
     expect(within(item).getByText('90K · 30K')).toBeInTheDocument();
   });

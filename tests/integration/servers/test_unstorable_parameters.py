@@ -3,7 +3,7 @@
 A NUL in a path or query parameter, or an integer too wide for a ``bigint``,
 used to travel to the first query that read it and fail there with a 500.
 These go through the application ``create_app`` builds, over the real store,
-and only the gateway and the caller's identity stand in.
+and only the account directory and the caller's identity stand in.
 """
 
 from __future__ import annotations
@@ -16,14 +16,15 @@ from httpx import ASGITransport, AsyncClient
 from tests.integration.servers.test_pending_message_queue import (
     _OWNER,
     _REPO,
-    _Gateway,
     pool as pool,
 )
+from tests.support.model_connections import verified_connection
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, FakeOwners, on_connection
 
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
+    get_owner_directory,
     get_storage,
     verify_admin_access,
 )
@@ -41,10 +42,13 @@ async def http(pool, monkeypatch):
     """The real application with one owner, one team, environment and chat."""
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "unstorable-parameters-key")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", _REPO)
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
     store = Storage(pool)
+    # The owner's verified connection, the one `on_connection` names.
+    await verified_connection(store, _OWNER, connection_id=CONNECTION_ID, models=CONNECTION_MODELS)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = _Gateway
+    app.dependency_overrides[get_owner_directory] = lambda: FakeOwners()
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
@@ -61,7 +65,9 @@ async def http(pool, monkeypatch):
         assert environment.status_code == 201, environment.text
         job = await client.post(
             "/v1/agent/jobs",
-            json={"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40},
+            json=on_connection(
+                {"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40}
+            ),
         )
         assert job.status_code == 201, job.text
         yield client, {"team": team.id, "env": environment.json()["id"], "job": job.json()["id"]}

@@ -48,7 +48,7 @@ export interface AgentJobApi {
   task_prompt: string;
   runtime: string;
   model: string;
-  /** The owner's connection this turn runs on; null or absent is the Gateway. */
+  /** The owner's connection this turn runs on. */
   model_connection_id?: string | null;
   /** How hard the model was asked to think. Null is Auto — nobody chose. */
   reasoning_effort?: string | null;
@@ -74,12 +74,6 @@ export interface AgentJobApi {
   updated_at: string | null;
   pinned_at?: string | null;
   archived_at?: string | null;
-  // Read server-side from the billing ledger, never from the agent's own
-  // report. Null means "no ledger configured", which is not the same as zero.
-  spent_usd: number | null;
-  tokens_in: number | null;
-  tokens_out: number | null;
-  model_calls: number | null;
   /** Attempt whose continuity and resource telemetry is attached below. */
   telemetry_attempt_id?: number | null;
   /** Which continuity rung this turn ran on. Null on turns that predate it. */
@@ -170,7 +164,7 @@ export interface CreateAgentJobRequest {
   repo: string | null;
   task_prompt: string;
   model: string;
-  /** The owner's connection `model` is listed on; omitted is the Gateway. */
+  /** The owner's connection `model` is listed on. */
   model_connection_id?: string;
   runtime?: string;
   /** Omitted is Auto: the runtime and model decide for themselves. */

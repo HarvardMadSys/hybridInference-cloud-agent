@@ -8,6 +8,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from tests.support.owners import connection_access
 
 from cloud_agent.schemas import WorkerReleaseRequest
 from cloud_agent_host import runner, storage_admission
@@ -46,6 +47,7 @@ def test_unknown_capacity_does_not_invent_a_storage_pressure_verdict(monkeypatch
 
 def test_existing_sandbox_resume_does_not_depend_on_available_disk_space(monkeypatch):
     job = ClaimedJob(
+        model_connection=connection_access("claude-code"),
         job_id="ajob_test",
         thread_id="athr_test",
         attempt_id=1,
@@ -56,7 +58,6 @@ def test_existing_sandbox_resume_does_not_depend_on_available_disk_space(monkeyp
         runtime="codex",
         model="model",
         worker_token="worker",
-        sandbox_token="sandbox",
         thread_sandbox={"sandbox_id": "asbx_existing"},
     )
     called = []
@@ -85,7 +86,6 @@ def test_low_storage_declines_handover_before_the_turn_starts(monkeypatch):
         "runtime": "codex",
         "model": "model",
         "worker_token": "worker",
-        "sandbox_token": "sandbox",
         "_host_settings": {"storage_min_available_mib": 2048},
     }
     monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
@@ -103,7 +103,6 @@ def test_low_storage_declines_handover_before_the_turn_starts(monkeypatch):
             runner._serve_turn(
                 handover_fd=write_fd,
                 base_url="http://control",
-                gateway_url="http://gateway",
                 worker_id="runner",
                 lease_ttl=120,
                 agent_timeout_s=3600,
@@ -133,7 +132,6 @@ def test_direct_runner_storage_release_posts_a_valid_audit_reason(monkeypatch):
             "runtime": "codex",
             "model": "model",
             "worker_token": "worker",
-            "sandbox_token": "sandbox",
         }
     )
     monkeypatch.setattr(

@@ -32,7 +32,7 @@ class HttpBridgeRuntime(AgentRuntime):
         *,
         workdir: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -44,8 +44,8 @@ class HttpBridgeRuntime(AgentRuntime):
         """Launch the reviewed stdlib bridge around the pinned CLI's ``serve``."""
         del provides_isolation
         effort = self._check_effort(reasoning_effort)
-        env = self._wrapper_env(gateway_base_url, credential)
-        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
+        env = self._wrapper_env(model_base_url, credential)
+        self._accept_mcp(mcp_config, model_base_url=model_base_url, env=env)
         prefix = self.name.upper()
         env[f"{prefix}_GATEWAY_MODEL"] = model
         env[f"{prefix}_FREEINFERENCE_CONFIG_DIR"] = (
@@ -78,7 +78,7 @@ class HttpBridgeRuntime(AgentRuntime):
         return ["http-agent-live-bridge", self.name], env
 
     def _accept_mcp(
-        self, config: RuntimeMCPConfig, *, gateway_base_url: str, env: dict[str, str]
+        self, config: RuntimeMCPConfig, *, model_base_url: str, env: dict[str, str]
     ) -> None:
         """Hand the relay endpoints to the reviewed wrapper.
 
@@ -89,7 +89,7 @@ class HttpBridgeRuntime(AgentRuntime):
         the second, the first would be one MCP source among several and a
         committed file could add its own servers.
         """
-        self._wrapper_mcp_env(config, gateway_base_url=gateway_base_url, env=env)
+        self._wrapper_mcp_env(config, model_base_url=model_base_url, env=env)
 
     def capabilities(self) -> RuntimeCapabilities:
         """Take the platform's MCP relay and a verified effort level."""

@@ -26,6 +26,7 @@ import pytest
 import uvicorn
 from tests.external.test_agent_mcp_end_to_end import (
     _ENCRYPTION_KEY,
+    _LOCAL_SESSION_SECRET,
     _MCP_TOKEN_SECRET,
     _RESOURCE_TEXT,
     _TOOL_TEXT,
@@ -437,7 +438,7 @@ for directory in (".kilo", ".kilocode"):
 
     context = LaunchContext(
         workdir="/workspace",
-        gateway_base_url=f"http://{host}:{model_port}",
+        model_base_url=f"http://{host}:{model_port}",
         credential="test-model-key",
         provides_isolation=True,
         state_dir="/agent-state/mcp-test",
@@ -501,7 +502,7 @@ for directory in (".kilo", ".kilocode"):
             live_argv, env = get_runtime(runtime).prepare_live(
                 workdir=context.workdir,
                 model="test-model",
-                gateway_base_url=context.gateway_base_url,
+                model_base_url=context.model_base_url,
                 credential=context.credential,
                 provides_isolation=True,
                 mcp_config=replace(context.mcp_config, credential=rotate()),
@@ -566,6 +567,7 @@ async def test_resident_mcp_call_followup_resume_and_fork(
     for name, value in {
         "AGENT_DATABASE_URL": f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}",
         "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+        "AGENT_LOCAL_SESSION_SECRET": _LOCAL_SESSION_SECRET,
         "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
         "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
@@ -600,6 +602,12 @@ async def test_resident_mcp_call_followup_resume_and_fork(
     approver = None
     decisions = []
     try:
+        # The relay's own startup binds the empty database to accounts, as a
+        # deployment's does before anyone signs up; it refuses a database that
+        # already holds owner rows without that binding. So seed once it is up.
+        while not server.started:
+            assert not serving.done(), "the relay exited before it started"
+            await asyncio.sleep(0.02)
         token = await _seed(
             pool,
             upstream_url=f"http://127.0.0.1:{upstream_port}/mcp",

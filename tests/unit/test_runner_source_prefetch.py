@@ -161,7 +161,6 @@ def _run_turn(
         heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings={"source_import_max_mib": 64},

@@ -1,14 +1,13 @@
-"""The credentials a claim asks other services for, asked for at once.
+"""The GitHub credentials a claim asks for, asked for at once.
 
-A claimed turn needs the gateway's inference grant and, for a repository, two
-GitHub App installation tokens: a read-only one the runner clones with and a
-write one for the sandbox. None of the three depends on another, yet the claim
-waited for each in turn, so a turn started a gateway round trip and up to two
-GitHub round trips later than it had to.
+A claimed turn on a repository needs two GitHub App installation tokens: a
+read-only one the runner clones with and a write one for the sandbox. Neither
+depends on the other, yet the claim waited for each in turn, so a turn started
+a GitHub round trip later than it had to.
 
 They are asked for together now and answered as if one at a time: the first of
-them to fail, in the order they used to run, decides what is released, ended,
-revoked or logged, and what the claim answers.
+them to fail, in the order they used to run, decides what is released or
+logged, and what the claim answers.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable
 
     from cloud_agent.ports import AttemptCommands
 
@@ -46,15 +45,9 @@ async def mint_claim_credentials(
     attempt_commands: AttemptCommands,
     claim: dict[str, Any],
     *,
-    grant: Callable[[], Awaitable[str]] | None,
     app_credentials: Any | None,
-) -> tuple[str, str | None, str | None]:
-    """Return the turn's inference grant, clone token and sandbox GitHub token.
-
-    ``grant`` mints the grant, links it to the attempt and, when either fails,
-    settles the claim itself, as ``worker._mint_sandbox_grant`` does. ``None``
-    is a turn on its owner's own model connection, which runs on that key and
-    is given no grant.
+) -> tuple[str | None, str | None]:
+    """Return the turn's clone token and sandbox GitHub token.
 
     The clone token is the runner's alone: read-only, this repository only, one
     hour. The runner needs it to check the repository out — a runner that
@@ -63,58 +56,42 @@ async def mint_claim_credentials(
     Absent (null) is a working configuration: a public repository clones
     without any credential at all.
 
-    **Each runs to its end, whatever the others do.** A GitHub failure must not
-    cut a grant mint short: the gateway may already have issued the grant, and
-    only its link to the attempt can ever renew or revoke it.
+    **Both run to their end, whatever the other does. Then the first to fail in
+    the old order decides,** clone token, then GitHub token, exactly as when the
+    one after it was never asked:
 
-    **Then the first to fail in the old order decides,** grant, then clone
-    token, then GitHub token, exactly as when the ones after it were never
-    asked:
-
-    - the grant's refusal is raised as it was, once it has released or ended
-      the claim and revoked a grant it could not link; what GitHub minted
-      meanwhile is dropped, and stays in the App's token cache, as a token
-      minted before a later failure always did;
     - an App that does not cover the repository is a settled answer: the turn
-      goes ahead with the tokens minted before it and none after;
-    - any other GitHub failure hands the claim back with 503, which aborts the
-      attempt, and the revocation pass revokes the grant linked to it.
+      goes ahead with the token minted before it and none after;
+    - any other GitHub failure hands the claim back with 503, so no attempt is
+      spent.
 
-    A cancelled request cancels the mints still running and is raised only once
-    each has finished, so none goes on for a request nobody holds. A grant
-    linked by then is the attempt's, revoked by the revocation pass when its
-    lease lapses, as it always was; one cut short in its mint or link is left
-    as it was when a cancellation landed there before.
+    A cancelled request cancels the mint still running and is raised only once
+    both have finished, so none goes on for a request nobody holds.
 
     Raises:
-        HTTPException: The grant's refusal, or 503 after releasing the claim
-            when GitHub could not mint a token for a reason other than the
-            App not covering the repository.
+        HTTPException: 503 after releasing the claim when GitHub could not mint
+            a token for a reason other than the App not covering the repository.
     """
     repo = claim["repo"]
-    mints: list[Awaitable[Any]] = [grant() if grant is not None else _no_grant()]
     # A temporary workspace has no repository, so there is nothing to clone and
     # nothing a repository-scoped token could be scoped to: it gets neither.
-    if app_credentials is not None and repo is not None:
-        mints.append(
-            app_credentials.token_for(repo, permissions=_CLONE_SCOPE, repository_scoped=True)
-        )
+    if app_credentials is None or repo is None:
+        return None, None
+    mints: list[Awaitable[Any]] = [
+        app_credentials.token_for(repo, permissions=_CLONE_SCOPE, repository_scoped=True),
         # Cached per conversation rather than minted per claim: the CLI
         # fixes GH_TOKEN when it starts, so a new token on every follow-up
         # would replace the live process each turn.
-        mints.append(
-            app_credentials.token_for(
-                repo,
-                permissions=_SANDBOX_GITHUB_SCOPE,
-                repository_scoped=True,
-                holder=str(claim["thread_id"]),
-            )
-        )
-    sandbox_token, *repository = await asyncio.gather(*mints, return_exceptions=True)
-    if isinstance(sandbox_token, BaseException):
-        raise sandbox_token
+        app_credentials.token_for(
+            repo,
+            permissions=_SANDBOX_GITHUB_SCOPE,
+            repository_scoped=True,
+            holder=str(claim["thread_id"]),
+        ),
+    ]
+    outcomes = await asyncio.gather(*mints, return_exceptions=True)
     tokens: list[str | None] = [None, None]
-    for index, outcome in enumerate(repository):
+    for index, outcome in enumerate(outcomes):
         if isinstance(outcome, AppNotInstalled):
             # A settled answer: the App does not cover this repository. Hand
             # the job over without credentials — a public repository clones
@@ -131,12 +108,7 @@ async def mint_claim_credentials(
             # A cancellation is no failure to mint, and goes on as it did.
             raise outcome
         tokens[index] = outcome
-    return sandbox_token, tokens[0], tokens[1]
-
-
-async def _no_grant() -> str:
-    """Answer a turn on its owner's model connection, which runs on no grant."""
-    return ""
+    return tokens[0], tokens[1]
 
 
 async def _hand_back(

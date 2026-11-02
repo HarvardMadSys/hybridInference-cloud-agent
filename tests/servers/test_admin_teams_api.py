@@ -10,8 +10,9 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.api import admin_teams
-from cloud_agent.api.deps import get_gateway_client
+from cloud_agent.api.deps import get_owner_directory
 from cloud_agent.domain.teams import (
     AdminAuditRecord,
     AdminMemberRecord,
@@ -20,7 +21,6 @@ from cloud_agent.domain.teams import (
     ApplicantRecord,
     TeamNotFound,
 )
-from cloud_agent.gateway import GatewayError
 from cloud_agent.user_avatar import generate_user_avatar
 
 ADMIN = {"Authorization": "Bearer test-teams-admin"}
@@ -93,7 +93,7 @@ class FakeTeams:
         return self.events[: kwargs["limit"]]
 
 
-class FakeGateway:
+class FakeOwners:
     def __init__(self) -> None:
         self.unreadable: set[str] = set()
         self.asked: list[str] = []
@@ -101,7 +101,7 @@ class FakeGateway:
     async def user_email(self, user_id: str) -> str:
         self.asked.append(user_id)
         if user_id in self.unreadable:
-            raise GatewayError("unavailable")
+            raise OwnerDirectoryError("unavailable")
         return f"{user_id}@example.com"
 
 
@@ -109,10 +109,10 @@ class FakeGateway:
 async def api(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "test-teams-admin")
     teams = FakeTeams()
-    gateway = FakeGateway()
+    gateway = FakeOwners()
     app = FastAPI()
     app.state.storage = SimpleNamespace(team_admin=teams)
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: gateway
     app.include_router(admin_teams.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client, teams, gateway

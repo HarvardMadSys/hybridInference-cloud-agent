@@ -67,14 +67,12 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/thread-1',
     runtime: 'claude-code',
     model: 'model',
-    spentUsd: 0,
     timeoutLabel: '',
     sandbox: '',
     attempts: [],
     events: [],
     diffFiles: [],
     gates: [],
-    usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: 0 },
     ...overrides,
   };
 }

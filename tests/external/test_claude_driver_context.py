@@ -56,7 +56,7 @@ def native_driver(tmp_path, monkeypatch):
 
     context = drivers.LaunchContext(
         workdir=str(workdir),
-        gateway_base_url=f"http://127.0.0.1:{gateway.port}",
+        model_base_url=f"http://127.0.0.1:{gateway.port}",
         credential="local-context-test",
         provides_isolation=False,
         state_dir=str(tmp_path),

@@ -44,21 +44,18 @@ def test_archive_cancellation_stops_before_the_next_entry_or_chunk(tmp_path, mon
 
         monkeypatch.setattr(source_archive, "_entries", entries)
     elif stage == "metadata":
-        # The builder stats each walked path with os.lstat. Whichever of the
-        # two top-level entries the directory lists first is cancelled after;
-        # a stat of the other one is the violation, in either listing order.
         lstat = source_archive.os.lstat
-        first: list[pathlib.Path] = []
+        entries = {root / ".git", root / "payload"}
 
+        # Cancelled at whichever entry is statted first: directory order is
+        # filesystem-dependent. The string-path builder now uses os.lstat;
+        # any further metadata read after cancellation is still a violation.
         def metadata(path, *args, **kwargs):
             result = lstat(path, *args, **kwargs)
-            entry = pathlib.Path(os.fsdecode(path))
-            if entry.parent == root and entry.name in {".git", "payload"}:
-                if not first:
-                    first.append(entry)
-                    stop.set()
-                elif entry != first[0]:
+            if pathlib.Path(os.fsdecode(path)) in entries:
+                if stop.is_set():
                     consumed.append("statted after cancellation")
+                stop.set()
             return result
 
         monkeypatch.setattr(source_archive.os, "lstat", metadata)

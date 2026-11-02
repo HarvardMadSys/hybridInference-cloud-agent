@@ -1,6 +1,6 @@
 // Tell this browser's other Agents tabs whose session the cookie now holds.
 //
-// The session cookie is the browser's, so signing in as another gateway account
+// The session cookie is the browser's, so signing in as another account
 // in one tab ("Switch account") changes every tab's. The tab that signed in
 // lands on a fresh page and knows; the others would keep showing the previous
 // account's tasks, and every request from them would now be answered for the

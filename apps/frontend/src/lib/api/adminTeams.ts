@@ -6,7 +6,7 @@ import { fetchWithAuth, jsonOrThrow } from './client';
 export interface AdminTeamPerson {
   user_id: string;
   display_name: string;
-  /** Read from the Gateway per request; null when it could not be read. */
+  /** Read per request; null when it could not be read. */
   email: string | null;
   avatar_data_url: string;
 }

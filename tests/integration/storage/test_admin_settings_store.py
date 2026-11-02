@@ -138,39 +138,6 @@ async def test_new_fields_are_imported_atomically_without_replacing_a_concurrent
     )
 
 
-async def test_saved_issuer_update_pins_identity_and_a_conflict_rolls_back_the_entire_patch(
-    store, db
-):
-    from cloud_agent.identity_namespace import IdentityNamespaceError
-
-    await store.settings.seed_settings({"gateway_issuer": "", "publish_base_branch": "original"})
-    await store.settings.update_settings({"gateway_issuer": "https://identity.example"})
-    async with db.acquire() as conn:
-        assert (
-            await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace")
-            == "https://identity.example"
-        )
-    with pytest.raises(IdentityNamespaceError):
-        await store.settings.update_settings(
-            {"gateway_issuer": "https://foreign.example", "publish_base_branch": "wrong"}
-        )
-    revision, values = await store.settings.read_settings()
-    assert revision == 2
-    assert values["publish_base_branch"] == "original"
-    assert values["gateway_issuer"] == "https://identity.example"
-
-
-async def test_upgrade_preserves_the_recorded_issuer_when_legacy_env_is_absent(store, db):
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO agent_identity_namespace (singleton, gateway_issuer) VALUES (TRUE, $1)",
-            "https://identity.example",
-        )
-    revision, values = await store.settings.seed_settings({"gateway_issuer": ""})
-    assert revision == 1
-    assert values["gateway_issuer"] == "https://identity.example"
-
-
 async def test_empty_deployment_starts_and_saves_missing_keys_through_recovery_setup(
     db, monkeypatch
 ):
@@ -187,6 +154,10 @@ async def test_empty_deployment_starts_and_saves_missing_keys_through_recovery_s
         "AGENT_SETTINGS_ENCRYPTION_KEY", "test-settings-root-key-over-thirty-two-bytes"
     )
     monkeypatch.setenv("ADMIN_TOKEN", "test-recovery-admin")
+    # What the account system needs to start at all; everything else can wait
+    # for recovery setup.
+    monkeypatch.setenv("AGENT_LOCAL_SESSION_SECRET", "test-local-session-secret-over-32-bytes")
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "test-credential-key-over-32-bytes")
     user = quote(os.environ.get("TEST_DB_USER", "postgres"), safe="")
     password = quote(os.environ.get("TEST_DB_PASSWORD", "postgres"), safe="")
     # Startup must use the database the fixture reset, including xdist's
@@ -207,7 +178,7 @@ async def test_empty_deployment_starts_and_saves_missing_keys_through_recovery_s
 
     monkeypatch.setattr(httpx, "AsyncClient", isolated_client)
     recovery = {"Authorization": "Bearer test-recovery-admin"}
-    signing_key = "test-session-signing-key-over-thirty-two-bytes"
+    signing_key = "test-control-signing-key-over-thirty-two-bytes"
     app = create_app()
     try:
         async with (
@@ -218,19 +189,19 @@ async def test_empty_deployment_starts_and_saves_missing_keys_through_recovery_s
             initial = await client.get("/admin/agent/settings", headers=recovery)
             assert initial.status_code == 200
             assert initial.json()["setup"]["required"] is True
-            assert initial.json()["secret_configured"]["session_signing_secret"] is False
+            assert initial.json()["secret_configured"]["control_signing_secret"] is False
             saved = await client.put(
                 "/admin/agent/settings",
                 headers=recovery,
-                json={"settings": {"session_signing_secret": signing_key}},
+                json={"settings": {"control_signing_secret": signing_key}},
             )
-            assert saved.status_code == 200
-            assert saved.json()["secret_configured"]["session_signing_secret"] is True
+            assert saved.status_code == 200, saved.text
+            assert saved.json()["secret_configured"]["control_signing_secret"] is True
             assert signing_key not in saved.text
-            assert settings.setting_env("AGENT_SESSION_SECRET") == signing_key
+            assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == signing_key
         # A second listener loads the saved key with no runtime secret in env.
         relay = create_mcp_app()
         async with relay.router.lifespan_context(relay):
-            assert settings.setting_env("AGENT_SESSION_SECRET") == signing_key
+            assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == signing_key
     finally:
         settings.reset_settings()

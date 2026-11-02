@@ -101,7 +101,7 @@ def test_ci_images_build_on_their_deployment_architecture() -> None:
         "web-agents": ("deploy/control-plane/Dockerfile.web", arm64),
         "runner": ("deploy/host/Dockerfile.agent-runner", x64),
         "sandbox": ("deploy/sandbox/Dockerfile.agent-sandbox", x64),
-        "tunnel": ("deploy/host/Dockerfile.agent-gateway-tunnel", x64),
+        "tunnel": ("deploy/host/Dockerfile.agent-ssh-tunnel", x64),
     }
     assert {cell["name"] for cell in cells} == set(expected)
     for cell in cells:
@@ -163,7 +163,6 @@ def _tunnels(compose: dict) -> dict[str, dict]:
     [
         ("AGENT_CONTROL_PLANE_URL", "8000", "claim, register and heartbeat"),
         ("AGENT_SANDBOX_MCP_URL", "8001", "the MCP relay, and nothing else"),
-        ("AGENT_GATEWAY_URL", "8080", "model calls"),
     ],
 )
 def test_each_address_reaches_the_listener_it_names(
@@ -207,7 +206,7 @@ def test_nothing_on_the_relay_network_reaches_the_control_plane(compose: dict) -
         for name, svc in compose["services"].items()
         if "agent-relays" in (svc.get("networks") or {})
     }
-    assert on_relays == {"gateway-tunnel": "8080", "mcp-tunnel": "8001"}, on_relays
+    assert on_relays == {"mcp-tunnel": "8001"}, on_relays
 
 
 # ---------------------------------------------------------------------------

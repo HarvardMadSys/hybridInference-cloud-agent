@@ -44,12 +44,10 @@ from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 # publisher targets the PR at it, so a caller must not be able to forge one.
 BASE_REF_METADATA_KEY = "_agent_base_ref"
 
-#: Reserved metadata mark for jobs the on-call service door created. Stamped by
-#: the platform after caller metadata so a body cannot un-mark itself, and read
-#: by anything that wants to tell an on-call analysis from an owner's thread
-#: (the web UI, spend reports). Reserved in the same sense as the base ref: the
-#: creation path drops a caller-supplied copy, so an owner's job cannot claim
-#: to be one the platform dispatched.
+#: Reserved metadata mark for jobs the retired on-call service door created,
+#: which archived jobs still carry. Reserved in the same sense as the base ref:
+#: the creation path drops a caller-supplied copy, so an owner's job cannot
+#: claim to be one the platform dispatched.
 ONCALL_METADATA_KEY = "oncall"
 
 #: What a follow-up sends to clear an inherited effort. A plain null cannot
@@ -114,18 +112,15 @@ class AgentJobCreate(BaseModel):
     model: str = Field(
         ...,
         max_length=255,
-        description=(
-            "Model id the runtime should use: a Gateway model, or one listed on "
-            "`model_connection_id` when that is set."
-        ),
+        description="Model id the runtime should use, one listed on `model_connection_id`.",
     )
     model_connection_id: str | None = Field(
         None,
         pattern=MODEL_CONNECTION_ID_PATTERN,
         description=(
-            "The owner's own model connection the model runs on. Null is the Gateway. "
-            "Together with `model` this names the source unambiguously: the same id "
-            "may exist on the Gateway and on several connections."
+            "The owner's own model connection the model runs on. A task without one "
+            "is refused with `model_connection_required`. Together with `model` this "
+            "names the source unambiguously: the same id may exist on several connections."
         ),
     )
     reasoning_effort: str | None = Field(
@@ -314,7 +309,8 @@ class AgentJobResponse(BaseModel):
     title_source: str | None = None
     runtime: str
     model: str
-    #: Null is the Gateway; otherwise the owner's model connection this turn runs on.
+    #: The owner's model connection this turn runs on; null only on a turn from
+    #: before connections were the only source, which runs on nothing.
     model_connection_id: str | None = None
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1
     #: Null means Auto, which is also what every turn created before this
@@ -372,13 +368,6 @@ class AgentJobResponse(BaseModel):
     updated_at: str | None = None
     pinned_at: str | None = None
     archived_at: str | None = None
-    # Read from the billing ledger, never from anything the agent reports
-    # about itself. Attribution only: there is no per-task cap to compare it
-    # against, and the account's daily quota is what actually governs spend.
-    spent_usd: float | None = None
-    tokens_in: int | None = None
-    tokens_out: int | None = None
-    model_calls: int | None = None
     # Attempt continuity telemetry. Current retained follow-ups report hot or
     # warm-native; a first NEW turn has no continuity rung, while cold/replay
     # remain readable for historical rows.

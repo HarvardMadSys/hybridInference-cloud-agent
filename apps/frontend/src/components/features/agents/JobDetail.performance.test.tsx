@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -192,8 +193,7 @@ function conversation(streamed: AgentEvent[] = []): AgentJob {
     branch: 'agent/task',
     runtime: 'claude-code',
     model: 'qwen-test',
-    spentUsd: 0,
-    hasLedger: false,
+    modelConnectionId: TEST_CONNECTION,
     timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
@@ -205,7 +205,6 @@ function conversation(streamed: AgentEvent[] = []): AgentJob {
     diffFileDetails: DIFF_DETAILS,
     diffStat: { add: 4002, del: 0 },
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
   };
 }
 
@@ -233,7 +232,7 @@ beforeEach(() => {
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
-    models: ['qwen-test'],
+    ...offering(['qwen-test']),
     github_connected: true,
     github_install_url: null,
   } as Awaited<ReturnType<typeof getAgentConfig>>);

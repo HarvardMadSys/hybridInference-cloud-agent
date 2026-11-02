@@ -13,7 +13,7 @@ from tests.integration.storage.test_agent_job_store import (
 )
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db, store as store
 from tests.support.follow_ups import append_follow_up
-from tests.unit.test_ledger_snapshots import END, START
+from tests.support.usage import END, START
 from tests.unit.test_sandbox_resource_protocol import sample
 
 from cloud_agent.admin_observability import decode_cursor

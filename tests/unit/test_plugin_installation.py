@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
 from cloud_agent_host.bounded_output import text_chunks
@@ -58,11 +59,11 @@ def _launch(**updates) -> ResidentLaunch:
             native_session_id=None,
             model="model",
             reasoning_effort=None,
-            gateway_base_url="http://gateway",
             credential="scoped-inference-secret",
             mcp_credential="scoped-mcp-secret",
             slot_id=1,
             plugins=_PLUGINS,
+            **launch_connection("claude-code"),
         ),
         **updates,
     )
@@ -354,7 +355,6 @@ def test_claim_validates_runtime_plugin_specs_and_preserves_legacy_claims():
         "runtime": "claude-code",
         "model": "model",
         "worker_token": "worker-secret",
-        "sandbox_token": "scoped-inference-secret",
     }
     assert ClaimedJob.from_response(body).plugins == []
     assert ClaimedJob.from_response({**body, "plugins": list(_PLUGINS)}).plugins == list(_PLUGINS)

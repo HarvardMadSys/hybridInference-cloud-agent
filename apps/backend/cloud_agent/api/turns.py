@@ -33,9 +33,8 @@ from cloud_agent.api._job_views import (
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
-    get_grant_client,
     get_job_event_signal,
+    get_owner_directory,
     get_source_control,
     get_storage,
     require_store,
@@ -82,7 +81,6 @@ if TYPE_CHECKING:
         AttachmentRepository,
         ConversationCommands,
         ConversationQueries,
-        GrantRepository,
         HostPoolRepository,
         ModelConnectionRepository,
         PendingMessageRepository,
@@ -112,7 +110,6 @@ class _TurnsStorage(Protocol):
     attachments: AttachmentRepository
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
-    grants: GrantRepository
     host_pool: HostPoolRepository
     model_connections: ModelConnectionRepository
     pending_messages: PendingMessageRepository
@@ -380,14 +377,14 @@ async def _settle(
     job_store: _TurnsStorage,
     *,
     thread_id: str,
-    gateway: Any,
+    owners: Any,
     app_credentials: Any | None,
     prepared: PreparedHead | None = None,
 ) -> SettleOutcome:
     """Settle after an owner's queue change; a failure leaves it for the sweep.
 
-    The change itself has committed. A settlement that cannot finish — the
-    gateway not answering a model check, say — must not turn it into a 500 the
+    The change itself has committed. A settlement that cannot finish — GitHub
+    not answering a repository check, say — must not turn it into a 500 the
     owner would retry; the next settlement, at the latest the periodic sweep,
     does the rest.
     """
@@ -395,7 +392,7 @@ async def _settle(
         return await settle_queue(
             job_store,
             thread_id=thread_id,
-            gateway=gateway,
+            owners=owners,
             app_credentials=app_credentials,
             prepared=prepared,
         )
@@ -412,7 +409,7 @@ async def _settle_without_app(
     job_store: _TurnsStorage,
     *,
     thread_id: str,
-    gateway: Any,
+    owners: Any,
     source_control: SourceControlRuntime | None,
 ) -> SettleOutcome:
     """Settle after a queue change that must not wait for the GitHub App.
@@ -427,7 +424,7 @@ async def _settle_without_app(
         return await settle_queue_when_possible(
             job_store,
             thread_id=thread_id,
-            gateway=gateway,
+            owners=owners,
             github_app=None if source_control is None else source_control.github,
         )
     except Exception:
@@ -449,7 +446,7 @@ async def submit_thread_message(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentThreadMessageResult:
     """Send a message: the next turn now if nothing is running, otherwise queued.
 
@@ -517,7 +514,6 @@ async def submit_thread_message(
         reasoning_effort=body.reasoning_effort,
         store=job_store,
         app_credentials=app_credentials,
-        gateway=gateway,
     )
     submitted = await job_store.pending_messages.submit_message(
         thread_id=thread_id,
@@ -562,10 +558,10 @@ async def submit_thread_message(
     outcome = await _settle(
         job_store,
         thread_id=thread_id,
-        gateway=gateway,
+        owners=owners,
         app_credentials=app_credentials,
         # The check this request already made, so an idle conversation does
-        # not ask the gateway twice for the same message.
+        # not check the same message twice.
         prepared=prepared_head(message, parent_job_id=str(latest["id"]), resolved=prepared),
     )
     return await _queue_result(
@@ -616,7 +612,7 @@ async def edit_thread_message(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
     source_control: SourceControlRuntime | None = Depends(get_source_control),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentThreadMessageResult:
     """Change a waiting message, at the revision the caller read.
 
@@ -652,7 +648,6 @@ async def edit_thread_message(
             # Strict: without the App the repository check would see only the
             # allowlist (issue #47), so this answers 503 while it is unavailable.
             app_credentials=get_agent_app_credentials(source_control),
-            gateway=gateway,
         )
         if changes.get("model"):
             changes["model"] = prepared.model
@@ -666,7 +661,7 @@ async def edit_thread_message(
     if result.get("error") is not None:
         raise _message_refused(result)
     outcome = await _settle_without_app(
-        job_store, thread_id=thread_id, gateway=gateway, source_control=source_control
+        job_store, thread_id=thread_id, owners=owners, source_control=source_control
     )
     return await _queue_result(
         job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
@@ -683,7 +678,7 @@ async def delete_thread_message(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
     source_control: SourceControlRuntime | None = Depends(get_source_control),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentThreadMessageResult:
     """Withdraw a waiting message, at the revision the caller read.
 
@@ -701,7 +696,7 @@ async def delete_thread_message(
     # The message may have been what stopped the line; what was behind it can
     # go now, or once the App is back if it cannot be loaded at the moment.
     outcome = await _settle_without_app(
-        job_store, thread_id=thread_id, gateway=gateway, source_control=source_control
+        job_store, thread_id=thread_id, owners=owners, source_control=source_control
     )
     return await _queue_result(job_store, thread_id=thread_id, user=user, outcome=outcome)
 
@@ -779,7 +774,7 @@ async def _hand_over_once_claimed(
     thread_id: str,
     job_id: str,
     message: dict[str, Any],
-    gateway: Any,
+    owners: Any,
     app_credentials: Any | None,
     signal: JobEventSignal | None = None,
 ) -> None:
@@ -795,7 +790,7 @@ async def _hand_over_once_claimed(
             await _settle(
                 job_store,
                 thread_id=thread_id,
-                gateway=gateway,
+                owners=owners,
                 app_credentials=app_credentials,
             )
     except Exception:
@@ -816,7 +811,7 @@ async def send_pending_message_now(
     body: AgentPendingMessageSendNow,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     signal: JobEventSignal | None = Depends(get_job_event_signal),
 ) -> AgentThreadMessageResult:
@@ -844,7 +839,7 @@ async def send_pending_message_now(
     )
     if began.get("idle"):
         outcome = await _settle(
-            job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+            job_store, thread_id=thread_id, owners=owners, app_credentials=app_credentials
         )
         return await _queue_result(
             job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
@@ -859,7 +854,7 @@ async def send_pending_message_now(
                 thread_id=thread_id,
                 job_id=str(began["job_id"]),
                 message=message,
-                gateway=gateway,
+                owners=owners,
                 app_credentials=app_credentials,
                 signal=signal,
             )
@@ -900,7 +895,7 @@ async def send_pending_message_now(
         await _settle(
             job_store,
             thread_id=thread_id,
-            gateway=gateway,
+            owners=owners,
             app_credentials=app_credentials,
         )
         if handoff.requeued
@@ -919,7 +914,7 @@ async def resume_thread_queue(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentThreadMessageResult:
     """Continue a paused queue from its first message.
 
@@ -942,7 +937,7 @@ async def resume_thread_queue(
         extra={"event": "agent_pending_queue_resumed", "thread_id": thread_id},
     )
     outcome = await _settle(
-        job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+        job_store, thread_id=thread_id, owners=owners, app_credentials=app_credentials
     )
     return await _queue_result(job_store, thread_id=thread_id, user=user, outcome=outcome)
 
@@ -953,7 +948,6 @@ async def fork_agent_job(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
 ) -> AgentJobResponse:
     """Fork one settled native session into the same shared Docker workspace."""
     job_store = _require_store(store)
@@ -1104,7 +1098,6 @@ async def fork_agent_job(
             operation,
             job_id=job_id,
             job_store=job_store,
-            grants=grants,
         )
 
     forked = await job_store.session_fork.finalize_session_fork(operation_id=operation_id)

@@ -14,7 +14,6 @@ import { LiveAgentStatus } from '../LiveAgentStatus';
 import { NativeQuestionPrompt } from '../NativeQuestionPrompt';
 import { PendingMessageQueue } from '../PendingMessageQueue';
 import { Picker } from '../Picker';
-import { PromptRewrite } from '../PromptRewrite';
 import { ThreadStatsBar } from '../ThreadStatsBar';
 import { ownerFailureMessage } from '../adapt';
 import { AttachmentStrip } from '../attachments/AttachmentStrip';
@@ -22,6 +21,7 @@ import type { useAttachments } from '../attachments/useAttachments';
 import { isSteerChord } from '../composerKeys';
 import { hasLostContext } from '../conversationJob';
 import { modelOverride } from '../modelSource';
+import { ModelConnectionNotice } from '../ModelConnectionNotice';
 import { GoalBar } from '../goal/GoalBar';
 import { hasLiveWork } from '../goal/liveWork';
 import { useOpenThreadContext } from '../context/threadContextData';
@@ -90,10 +90,8 @@ export function JobComposer({
   setChosenSkills,
   mcpBlockedReason,
   submitting,
-  rewriting,
   readingFiles,
   setReadingFiles,
-  setRewriting,
   actionError,
   setActionError,
   submitFollowUp,
@@ -122,10 +120,8 @@ export function JobComposer({
   setChosenSkills: (skills: SelectedSkillApi[]) => void;
   mcpBlockedReason?: string;
   submitting: boolean;
-  rewriting: boolean;
   readingFiles: boolean;
   setReadingFiles: (reading: boolean) => void;
-  setRewriting: (rewriting: boolean) => void;
   actionError: string | null;
   setActionError: (error: string | null) => void;
   /** Each runs the `/goal` command it is given first: a draft that is one is not sent. */
@@ -153,7 +149,6 @@ export function JobComposer({
     choice,
     inheritedLabel,
     inheritedUnavailable,
-    rewrite,
     effort,
     setChosenEffort,
     modelPicker,
@@ -180,7 +175,7 @@ export function JobComposer({
   });
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
-  const options = useComposerOptions(rewriting);
+  const options = useComposerOptions(false);
   const noteId = useId();
   const queued = queuedNote(queue.canSendNow, otherModel, t);
   return (
@@ -365,21 +360,6 @@ export function JobComposer({
                 disabled={contextLost || submitting}
               />
               <ComposerOptionsPanel options={options}>
-                <PromptRewrite
-                  key={threadId}
-                  compact
-                  value={followUp}
-                  // Gateway-only: off, with the reason, for a personal source.
-                  {...rewrite}
-                  disabled={
-                    contextLost || submitting || goalCommand.busy || /^\s*\//.test(followUp)
-                  }
-                  onActiveChange={setRewriting}
-                  onApply={(prompt) => {
-                    setFollowUp(prompt);
-                    followUpBox.current?.focus();
-                  }}
-                />
                 {/* Standing help for the next message; the box is described by it. */}
                 <p id={`${noteId}-note`} className="px-3 pt-1 text-[11px] leading-4 text-muted">
                   {runtimeNote(job, contextLost)}
@@ -438,7 +418,6 @@ export function JobComposer({
                       inheritedUnavailable ||
                       !followUp.trim() ||
                       submitting ||
-                      rewriting ||
                       attachments.uploading ||
                       readingFiles ||
                       mcp.saving ||
@@ -456,6 +435,7 @@ export function JobComposer({
               >
                 {queued}
               </p>
+              <ModelConnectionNotice config={config} />
               <p
                 role="status"
                 hidden={!inheritedUnavailable}

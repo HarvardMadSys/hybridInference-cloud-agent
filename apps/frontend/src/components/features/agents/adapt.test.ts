@@ -160,10 +160,6 @@ const JOB: AgentJobApi = {
   metadata: null,
   created_at: null,
   updated_at: null,
-  spent_usd: null,
-  tokens_in: null,
-  tokens_out: null,
-  model_calls: null,
 };
 
 function event(
@@ -983,7 +979,6 @@ describe('toDisplayJob', () => {
     // than a blank one.
     const job = toDisplayJob(JOB);
     expect(job.gates).toEqual([]);
-    expect(job.spentUsd).toBe(0);
   });
 
   it('folds a tool result into its matching activity and preserves its attempt', () => {
@@ -1611,30 +1606,12 @@ describe('patch parsing', () => {
   });
 });
 
-describe('ledger-sourced fields', () => {
-  it('reports spend and usage from the API rather than inventing them', () => {
-    const job = toDisplayJob({
-      ...JOB,
-      spent_usd: 0.0075,
-      tokens_in: 74523,
-      tokens_out: 512,
-      model_calls: 3,
-    });
-
-    expect(job.spentUsd).toBe(0.0075);
-    expect(job.hasLedger).toBe(true);
-    expect(job.usage.tokensIn).toBe('74.5k');
-    expect(job.usage.turns).toBe(3);
-  });
-
-  it('distinguishes "no ledger" from "spent nothing"', () => {
-    // A deployment with no billing ledger must not be shown as a free job.
-    const job = toDisplayJob(JOB);
-
-    expect(job.spentUsd).toBe(0);
-    expect(job.hasLedger).toBe(false);
-    expect(job.usage.tokensIn).toBe('');
-    expect(job.usage.turns).toBeNull();
+describe('job usage fields', () => {
+  it("carries no cost or billed count: the job usage read is the agent's report", () => {
+    const job = toDisplayJob(JOB) as unknown as Record<string, unknown>;
+    expect(job).not.toHaveProperty('spentUsd');
+    expect(job).not.toHaveProperty('hasLedger');
+    expect(job).not.toHaveProperty('usage');
   });
 });
 
@@ -1663,10 +1640,6 @@ describe('lifecycle noise', () => {
     metadata: null,
     created_at: null,
     updated_at: null,
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
   };
 
   it('does not render an unknown phase as a completed milestone', () => {

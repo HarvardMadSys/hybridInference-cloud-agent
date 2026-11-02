@@ -77,7 +77,7 @@
       "api_url": null,
       "platform": "linux/amd64",
       "architecture": "amd64",
-      "dockerfile": "deploy/host/Dockerfile.agent-gateway-tunnel",
+      "dockerfile": "deploy/host/Dockerfile.agent-ssh-tunnel",
       "runner_labels": ["self-hosted", "Linux", "X64", "image-verify-x64"],
       "smoke_key": "tunnel",
       "ci_scopes": []

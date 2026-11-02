@@ -1,8 +1,9 @@
 """The Usage settings page: an owner's containers, their past use, and model usage.
 
 Every read is the signed-in owner's own and never cached. Model usage is the
-admin Usage aggregation selected for this owner's runs: the same stored
-Gateway snapshots summed the same way, so the two pages cannot disagree.
+admin Usage aggregation selected for this owner's runs: the same
+agent-reported tokens summed the same way, so the two pages cannot disagree.
+The owner's provider keeps their bill; no cost is known here.
 """
 
 from __future__ import annotations
@@ -180,7 +181,7 @@ async def read_owner_tokens(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _OwnerUsageStorage | None = Depends(get_storage),
 ) -> OwnerTokenUsage:
-    """Model usage and cost of the owner's runs created in the range.
+    """Agent-reported model usage of the owner's runs created in the range.
 
     A range larger than one bounded selection is summed in bounded batches
     (:mod:`cloud_agent.usage_batches`), never narrowed.

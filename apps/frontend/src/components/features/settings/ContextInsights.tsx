@@ -7,9 +7,10 @@
 // are the first page's, and cover every matching conversation.
 //
 // The numbers are the server's. Sizes are single requests' input tokens as the
-// agent CLIs reported them; cost and cache hit are the Gateway's records summed
-// on the server. Nothing here adds amounts together, and a measure that was not
-// recorded is a dash. While the server is still reading runs it has not read
+// agent CLIs reported them; cache hit is their reported tokens summed on the
+// server, and cost stays with each owner's provider, so it is not shown.
+// Nothing here adds amounts together, and a measure that was not recorded is a
+// dash. While the server is still reading runs it has not read
 // before, the page says so and asks again until the ranking is complete.
 
 import Link from 'next/link';
@@ -32,7 +33,7 @@ import { Bar, ContextCompositionChart } from './ContextCompositionChart';
 import { ContextInsightsFilterBar, ContextProjectGroups } from './ContextInsightsFilters';
 import { NO_FILTERS, hasFilters, recordedSlices } from './contextInsightsPresent';
 import { Card, LoadError, RangeNote, Tile, errorText } from './UsageParts';
-import { cachedShare, compactCount, formatCost, formatShare, relativeTime } from './usagePresent';
+import { cachedShare, compactCount, formatShare, relativeTime } from './usagePresent';
 
 /** How soon to ask again while runs are still being read. */
 export const PROFILING_RETRY_MS = 2_500;
@@ -376,7 +377,6 @@ function ConversationRow({
         label={t('contextInsights.col.requests')}
         value={observed ? row.main_requests.toLocaleString(locale) : '—'}
       />
-      <Stat label={t('contextInsights.col.cost')} value={formatCost(usage?.totals?.spent_usd)} />
       <Stat
         label={t('contextInsights.col.cache')}
         value={formatShare(usage ? cachedShare(usage) : null)}
@@ -404,7 +404,7 @@ function RowComposition({ row }: { row: ConversationContext }) {
 }
 
 const ROW_GRID =
-  'sm:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_repeat(4,minmax(0,1fr))] sm:items-center sm:gap-3';
+  'sm:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_repeat(3,minmax(0,1fr))] sm:items-center sm:gap-3';
 
 /** The list's column names, on screens wide enough to lay it out as columns. */
 function ColumnHeads() {
@@ -414,7 +414,6 @@ function ColumnHeads() {
     'contextInsights.col.context',
     'contextInsights.col.compactions',
     'contextInsights.col.requests',
-    'contextInsights.col.cost',
     'contextInsights.col.cache',
   ];
   return (

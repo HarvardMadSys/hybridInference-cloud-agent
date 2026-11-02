@@ -2,19 +2,8 @@ import { expect, test } from '@playwright/test';
 
 import { chatOnly, connectionView } from './modelConnectionFixtures';
 
-test.beforeEach(async ({ page, request }) => {
+test.beforeEach(async ({ request }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
-  await page.route('**/api/v1/agent/model-preference', (route) =>
-    route.fulfill({
-      json: {
-        default_model: null,
-        last_model: 'fixture-model',
-        effective_model: 'fixture-model',
-        deployment_default: null,
-        models: ['fixture-model'],
-      },
-    }),
-  );
 });
 
 test.afterEach(async ({ request }) => {

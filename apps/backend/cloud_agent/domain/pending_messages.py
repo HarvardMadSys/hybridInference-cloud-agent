@@ -67,7 +67,7 @@ class PreparedHead:
     skills: list[dict[str, Any]] | None = None
     attachments: list[dict[str, Any]] | None = None
     error: str | None = None
-    #: The source of ``model`` when it is set; ``None`` is the Gateway.
+    #: The source of ``model`` when it is set.
     model_connection_id: str | None = None
 
 

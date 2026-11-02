@@ -183,7 +183,7 @@ def test_the_pinned_install_starts_the_binary_the_shim_would_have(tmp_path):
     argv, _ = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="gpt-5.1-codex",
-        gateway_base_url="http://gateway:8080",
+        model_base_url="https://provider.example/v1",
         credential="member-credential",
     )
     arguments = argv[len(NATIVE_LAUNCHER) + 1 :]
@@ -452,11 +452,11 @@ def test_the_binary_starts_with_a_direct_launchs_signals_behind_the_helper_too(t
     }
     started = {}
     for plan, url in (
-        ("direct", "http://gateway:8080"),
+        ("direct", "https://provider.example/v1"),
         ("translated", ResponsesViaChatUrl("https://provider.example/v1")),
     ):
         argv, launch_env = CodexRuntime().prepare_live(
-            workdir="/workspace", model="chat-model", gateway_base_url=url, credential="credential"
+            workdir="/workspace", model="chat-model", model_base_url=url, credential="credential"
         )
         run = subprocess.run(
             [local.get(arg, arg) for arg in argv],
@@ -479,13 +479,13 @@ def test_every_codex_launch_starts_with_the_native_launch():
     direct, _ = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="gpt-5.1-codex",
-        gateway_base_url="http://gateway:8080",
+        model_base_url="https://provider.example/v1",
         credential="member-credential",
     )
     translated, _ = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="chat-model",
-        gateway_base_url=ResponsesViaChatUrl("https://api.example.com/v1"),
+        model_base_url=ResponsesViaChatUrl("https://api.example.com/v1"),
         credential="provider-key",
     )
 

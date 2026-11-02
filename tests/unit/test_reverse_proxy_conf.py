@@ -1,6 +1,6 @@
 """The reverse-proxy snippet keeps the two properties that are easy to lose.
 
-`deploy/reverse-proxy/agents-under-gateway.conf` is applied by hand — the
+`deploy/reverse-proxy/agents-under-parent-site.conf` is applied by hand — the
 proxy in front of these hosts is not version-controlled anywhere — so this
 file is the reviewed text an operator pastes. Two details in it fail quietly:
 
@@ -27,7 +27,10 @@ from pathlib import Path
 import pytest
 
 CONF = (
-    Path(__file__).resolve().parents[2] / "deploy" / "reverse-proxy" / "agents-under-gateway.conf"
+    Path(__file__).resolve().parents[2]
+    / "deploy"
+    / "reverse-proxy"
+    / "agents-under-parent-site.conf"
 )
 
 

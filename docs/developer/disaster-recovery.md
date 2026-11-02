@@ -123,9 +123,10 @@ native-session restore.
 2. Verify the selected set's hashes and decryption material. Restore into an
    isolated database first, using compatible Postgres and the selected release.
    Restore the matching configuration/root keys before starting a listener.
-   Follow [identity binding](minimal-identity.md) and the existing
-   [database recovery procedures](operations.md#preserving-an-old-chain-database)
-   for historical schema chains. Do not improvise an Alembic downgrade.
+   A restored database must be bound to the account system; a Gateway-era one
+   is refused and stays an archive
+   ([old databases](operations.md#preserving-an-old-chain-database)). Do not
+   improvise an Alembic downgrade.
 3. Restore the complete stopped host state with a compatible Docker/storage
    driver and the correct mounts. Check mount availability before starting
    Docker. Retain the matching enrollment credential, namespace, and container

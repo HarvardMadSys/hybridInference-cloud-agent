@@ -169,7 +169,7 @@ async def test_a_sandbox_manager_that_never_answers_does_not_hold_up_the_reaper(
 
     A host that drops packets costs each of its markers a full request timeout,
     and its markers stay set, so inside the pass that wait came back on every
-    pass -- before any lease was reaped or any grant renewed.
+    pass -- before any lease was reaped.
     """
     replay_started = asyncio.Event()
     replay_cancelled = asyncio.Event()
@@ -185,16 +185,13 @@ async def test_a_sandbox_manager_that_never_answers_does_not_hold_up_the_reaper(
         "cloud_agent.sandbox_manager_routing.hydrate_shared_sandbox_manager", silent_sandbox_manager
     )
     store.reap_expired = AsyncMock(return_value=[])
-    store.take_revocable_grants = AsyncMock(return_value=[])
-    store.list_renewable_grants = AsyncMock(return_value=[])
-    grants = SimpleNamespace(renew=AsyncMock(), revoke=AsyncMock(return_value=True))
     task = asyncio.create_task(
-        reap_expired_attempts(store, interval_seconds=0.001, grants=grants)  # type: ignore[arg-type]
+        reap_expired_attempts(store, interval_seconds=0.001)  # type: ignore[arg-type]
     )
     try:
         async with asyncio.timeout(10):
             await replay_started.wait()
-            while store.list_renewable_grants.await_count < 2:
+            while store.reap_expired.await_count < 2:
                 await asyncio.sleep(0.005)
     finally:
         task.cancel()

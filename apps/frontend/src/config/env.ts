@@ -5,8 +5,8 @@
 // on. Next resolves both while the bundle is compiled, which is why changing
 // either is a rebuild.
 //
-// The deployment's identity — product name, organisation, status page, the
-// gateway's origin — deliberately does **not** live here. It is read per
+// The deployment's identity — product name, organisation, status page —
+// deliberately does **not** live here. It is read per
 // request on the server in `site.server.ts`, so one built image can serve
 // several deployments without being rebuilt. A `NEXT_PUBLIC_` variable is
 // substituted textually at build time, so anything left in this file is
@@ -26,14 +26,13 @@ export const agentApiBase = (process.env.NEXT_PUBLIC_AGENT_API_URL || '').replac
  * The prefix this app is served under (`NEXT_PUBLIC_BASE_PATH`).
  *
  * Empty for a deployment that owns its own hostname. Set to `/agents` to
- * mount the app inside the gateway's existing origin, which is what makes the
- * session cookie same-origin and removes CORS from the problem entirely.
+ * mount the app inside a parent site's origin, which is what makes the session
+ * cookie same-origin and removes CORS from the problem entirely.
  *
  * **Next.js prefixes what it generates, not what we write.** `<Link>`, router
  * navigations and asset URLs pick `basePath` up automatically; a path built by
  * string concatenation does not. So anything that hands a URL to another
- * service — above all the OAuth redirect, which the gateway matches as an
- * exact string — has to apply this itself.
+ * service has to apply this itself.
  *
  * Normalized rather than trusted: a trailing slash makes every derived path
  * contain `//`, and a missing leading slash makes them relative.

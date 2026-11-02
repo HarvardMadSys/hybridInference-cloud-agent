@@ -90,7 +90,7 @@ def _live(
 
     context = LaunchContext(
         workdir="/w",
-        gateway_base_url="http://gw",
+        model_base_url="http://gw",
         credential="agr",
         provides_isolation=True,
         mcp_config=EMPTY_RUNTIME_MCP_CONFIG,

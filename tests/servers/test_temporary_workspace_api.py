@@ -23,12 +23,13 @@ from tests.servers.test_agent_jobs_api import (
     client as client,
     store as store,
 )
+from tests.support.owners import connection_claim, on_connection
 
 from cloud_agent import sandbox_manager_routing
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 
-_TEMPORARY = {"repo": None, "task_prompt": "write a script", "model": "glm-5.1"}
+_TEMPORARY = on_connection({"repo": None, "task_prompt": "write a script", "model": "glm-5.1"})
 
 
 def _no_repository_check(monkeypatch: pytest.MonkeyPatch, *modules: str) -> None:
@@ -176,7 +177,9 @@ async def test_the_claim_carries_no_repository_credential(
     app.dependency_overrides[get_agent_app_credentials] = lambda: FakeApp()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await _create_temporary(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
 
     assert claim.status_code == 200, claim.text
     body = claim.json()
@@ -205,7 +208,9 @@ async def test_a_temporary_claim_receives_only_its_owners_durable_memories(
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job = await _create_temporary(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
 
     assert claim.status_code == 200, claim.text
     owner = store.jobs[job["id"]]["user_id"]

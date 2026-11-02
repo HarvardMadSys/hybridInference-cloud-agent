@@ -23,10 +23,6 @@ const JOB: AgentJobApi = {
   metadata: null,
   created_at: null,
   updated_at: null,
-  spent_usd: null,
-  tokens_in: null,
-  tokens_out: null,
-  model_calls: null,
 };
 
 function event(

@@ -1,7 +1,7 @@
 """Admission checks a submitted job or follow-up passes before it is written.
 
-Model resolution, runtime registration, reasoning-effort availability, skill
-selection, MCP binding resolution and the idempotency fence: the rules that
+The model connection a turn runs on, runtime registration, skill selection,
+MCP binding resolution and the idempotency fence: the rules that
 decide whether a submission is accepted at all. The create-job and follow-up
 entry points share them, which is why they have one home rather than one copy
 per router module.
@@ -40,22 +40,13 @@ from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     ONCALL_METADATA_KEY,
-    PLATFORM_REASONING_EFFORTS,
-    RESET_REASONING_EFFORT,
 )
 from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
-from cloud_agent.visible_models import (
-    ModelCatalogUnavailable,
-    agent_model_catalog_bundle,
-    agent_model_reasoning_efforts,
-    resolve_model_in_catalog,
-)
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.runtime_catalog import (
     registered_runtimes,
-    runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
 
@@ -90,19 +81,20 @@ class _JobCreationStorage(Protocol):
     source_control: SourceControlPort
 
 
-def model_catalog_unavailable() -> HTTPException:
-    """503 while the gateway cannot say which models this owner may call.
+def model_connection_required() -> HTTPException:
+    """409 for a turn that names no model connection: there is no other source.
 
-    Not a 400: an outage is no verdict on the model or the effort, and a
-    waiting message's check reads anything below 500 as one and holds the
-    message until its owner releases it.
+    A verdict, not an outage, so a waiting message is held with this sentence
+    rather than retried.
     """
     return HTTPException(
-        status_code=503,
+        status_code=409,
         detail={
             "error": {
-                "type": "model_catalog_unavailable",
-                "message": "The model catalog is temporarily unavailable. Please try again shortly.",
+                "type": "model_connection_required",
+                "message": (
+                    "Choose a model from one of your own model connections, or add one in Settings."
+                ),
             }
         },
     )
@@ -138,10 +130,8 @@ async def require_connection_source(
 ) -> None:
     """Refuse a turn on an owner connection it cannot run on.
 
-    Asks the connection only: neither the Gateway catalog nor its grant is a
-    prerequisite for a turn the owner's own provider serves, and the model id
-    is the provider's exact spelling, never resolved through Gateway aliases.
-    Refused outright while the deployment has not turned connections on.
+    The model id is the provider's exact spelling, never resolved through
+    aliases. Refused outright while an operator has switched connections off.
     """
     try:
         if not model_connections_enabled():
@@ -162,89 +152,24 @@ async def _admit_model(
     body: AgentJobCreate,
     user: dict[str, Any],
     *,
-    gateway: Any,
     connections: ModelConnectionRepository,
 ) -> tuple[str, str | None]:
-    """The model and effort a new job runs with, checked against the source it names."""
-    if body.model_connection_id is not None:
-        await require_connection_source(
-            connections,
-            user_id=user["user_id"],
-            connection_id=body.model_connection_id,
-            runtime=body.runtime,
-            model=body.model,
-            reasoning_effort=body.reasoning_effort,
-        )
-        return body.model, None
-    # Canonical from here on. The grant the gateway mints names canonical
-    # ids, so a job that stored the alias would carry a scope matching
-    # nothing — created successfully, dead at its first inference call.
-    # One catalog read serves both admission checks (issue #781).
-    try:
-        catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
-    except ModelCatalogUnavailable:
-        raise model_catalog_unavailable() from None
-    model = await require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
-    # Checked against the *resolved* model, not the requested spelling: the
-    # domain belongs to the model the turn will actually call.
-    reasoning_effort = await require_offered_effort(
-        body.reasoning_effort,
-        runtime=body.runtime,
-        model=model,
-        gateway=gateway,
-        user=user,
-        efforts=catalog[2],
-    )
-    return model, reasoning_effort
+    """The model a new job runs with, checked against the connection it names.
 
-
-async def require_resolvable_model(
-    model: str,
-    *,
-    gateway: Any,
-    user: dict[str, Any],
-    catalog: tuple[list[str], dict[str, str], dict[str, list[str]]] | None = None,
-) -> str:
-    """Resolve the requested model to its canonical id, or refuse the job.
-
-    Fail-fast on a model the job's first call would 404 on: rejecting here
-    costs a 400, while accepting costs a claim, a clone and an attempt before
-    the sandbox's first model call dies with an error that reads like a broken
-    model.
-
-    **Returns the canonical id, and the caller stores that.** Validating an
-    alias and then recording the alias was the bug this signature exists to
-    prevent: the gateway mints a grant against canonical ids, so a job carrying
-    `claude-3-opus-latest` produced a grant whose `allowed_models` matched
-    nothing. The job was created, and died at its first inference call with a
-    404 from a model that plainly exists.
-
-    ``catalog`` carries an already-read ``(models, aliases, efforts)`` bundle
-    (issue #781): the send path reads the catalog once and both admission
-    checks consume the same response. When omitted the catalog is read here,
-    which keeps direct callers working.
+    The connection's checks settle the effort too; a connection turn stores
+    none.
     """
-    if catalog is None:
-        try:
-            catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
-        except ModelCatalogUnavailable:
-            raise model_catalog_unavailable() from None
-    models, aliases, _efforts = catalog
-    canonical = resolve_model_in_catalog(model, models, aliases)
-    if canonical is not None:
-        return canonical
-    raise HTTPException(
-        status_code=400,
-        detail={
-            "error": {
-                "type": "model_not_available",
-                "message": (
-                    f"Model {model!r} is not available to agent jobs on this deployment. "
-                    f"Available: {', '.join(models[:20]) or 'none'}."
-                ),
-            }
-        },
+    if body.model_connection_id is None:
+        raise model_connection_required()
+    await require_connection_source(
+        connections,
+        user_id=user["user_id"],
+        connection_id=body.model_connection_id,
+        runtime=body.runtime,
+        model=body.model,
+        reasoning_effort=body.reasoning_effort,
     )
+    return body.model, None
 
 
 async def _resolve_mcp_bindings(
@@ -437,79 +362,6 @@ def require_registered_runtime(runtime: str) -> None:
         )
 
 
-async def require_offered_effort(
-    effort: str | None,
-    *,
-    runtime: str,
-    model: str,
-    gateway: Any,
-    user: dict[str, Any],
-    efforts: dict[str, list[str]] | None = None,
-) -> str | None:
-    """400 unless ``effort`` is one this runtime *and* this model both accept.
-
-    The offered set is the intersection, and it is checked rather than clamped.
-    Clamping looks kinder and is worse: glm-5.3 has no ``medium``, so a
-    ``medium`` quietly served as ``high`` would bill and behave as a depth
-    nobody chose while reporting the one they did — the same lie as a flag that
-    resolves to nothing, which is what this whole control exists to end.
-
-    Args:
-        effort: The requested level, or ``None`` for Auto.
-        runtime: The harness this turn will run on.
-        model: The canonical model id, already resolved.
-        gateway: Client for the gateway's internal contracts.
-        user: The authenticated owner.
-        efforts: An already-read ``{model_id: [values]}`` domain table
-            (issue #781): the send path reads the catalog once and both
-            admission checks consume the same response. When omitted the
-            catalog is read here, which keeps direct callers working.
-
-    Returns:
-        The value to store: ``None`` for Auto, else the validated level.
-
-    Raises:
-        HTTPException: 400 when the pair does not offer this value, 503 when the
-            model catalog cannot be read.
-    """
-    if effort is None or effort == RESET_REASONING_EFFORT:
-        # The sentinel means unset wherever it appears. On a follow-up it also
-        # has to be told apart from "inherit" (that caller checks it before
-        # getting here); on a create there is nothing to inherit, so the two
-        # spellings are the same answer and neither is a 400.
-        return None
-    runtime_levels = runtime_reasoning_efforts().get(runtime, [])
-    if efforts is None:
-        try:
-            efforts = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
-        except ModelCatalogUnavailable:
-            raise model_catalog_unavailable() from None
-    # The model's entry is read as a yes/no — does it take the parameter at
-    # all — and not for its contents. Per-model domains were tried and
-    # withdrawn: the providers' documented lists disagreed with what their
-    # APIs accept, so the levels are this platform's and the same everywhere.
-    takes_effort = bool(efforts.get(model))
-    offered = (
-        [level for level in PLATFORM_REASONING_EFFORTS if level in runtime_levels]
-        if takes_effort
-        else []
-    )
-    if effort in offered:
-        return effort
-    raise HTTPException(
-        status_code=400,
-        detail={
-            "error": {
-                "type": "reasoning_effort_not_available",
-                "message": (
-                    f"Reasoning effort {effort!r} is not available for {runtime!r} "
-                    f"with {model!r}. Available: {', '.join(offered) or 'none'}."
-                ),
-            }
-        },
-    )
-
-
 async def resolve_skill_selection(
     store: SkillRepository, *, user_id: str, skill_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
@@ -636,24 +488,18 @@ async def _admit_repository(
     return base_sha
 
 
-async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
+async def create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
     *,
     job_store: _JobCreationStorage,
     app_credentials: Any | None,
-    gateway: Any,
-    reserved_metadata: dict[str, Any] | None = None,
     client_request_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create one job for ``user``, shared by the owner and service doors.
+    """Create one job for ``user``: the model connection, repository entitlement, ref pinning.
 
-    Extracted so the on-call service surface (``api/service_jobs.py``) creates
-    jobs through exactly the checks the owner route runs — model resolution,
-    repo entitlement, ref pinning — rather than through a parallel path that
-    drifts. ``reserved_metadata`` is stamped *after* caller metadata for the
-    same reason ``BASE_REF_METADATA_KEY`` is popped first: a display fact the
-    platform asserts must not be spoofable by the request body.
+    A display fact the platform asserts (``BASE_REF_METADATA_KEY``) is popped
+    from caller metadata first, so the request body cannot spoof it.
     """
     # A resend is answered before the checks below, every one of which can
     # change between two sends of one submission: a model can be retired, an
@@ -689,9 +535,6 @@ async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
     # the way into a queued row and burn a claim before anything noticed —
     # the composer only offers registered ids, so an arbitrary string can only
     # arrive from a direct API caller, and it deserves a 400, not a dead job.
-    # The check lives in the helper rather than in the owner route because the
-    # service door creates jobs through here too: a check only one door runs
-    # is precisely the drift this extraction exists to prevent.
     require_registered_runtime(body.runtime)
     try:
         plugins = validate_sandbox_plugins(body.runtime, body.plugins or [])
@@ -706,7 +549,7 @@ async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
             },
         ) from exc
     model, reasoning_effort = await _admit_model(
-        body, user, gateway=gateway, connections=job_store.model_connections
+        body, user, connections=job_store.model_connections
     )
     if body.repo is None:
         # A temporary workspace: there is no repository to be entitled to and no
@@ -727,9 +570,8 @@ async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
     # Reserved display fact: caller metadata must not be able to claim the
     # job was pinned from a different branch than the one the API resolved.
     metadata.pop(BASE_REF_METADATA_KEY, None)
-    # Reserved provenance mark: only the on-call door stamps it, below through
-    # ``reserved_metadata``. An owner's copy would let their job pass for one
-    # the platform dispatched to whatever reads the mark.
+    # The retired on-call door's provenance mark, which archived jobs carry. An
+    # owner's copy would let their job pass for one the platform dispatched.
     metadata.pop(ONCALL_METADATA_KEY, None)
     # Execution policy and its evidence are server-owned facts. Opaque
     # metadata must not be able to manufacture a contradictory audit trail.
@@ -737,8 +579,6 @@ async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
         metadata.pop(key, None)
     if body.base_ref:
         metadata[BASE_REF_METADATA_KEY] = body.base_ref
-    for key, value in (reserved_metadata or {}).items():
-        metadata[key] = value
     # Shared-live is enforced globally at claim time, not represented as an
     # optional per-job requirement. Job metadata therefore remains caller data
     # plus server-owned execution facts, without a hidden rollout switch.

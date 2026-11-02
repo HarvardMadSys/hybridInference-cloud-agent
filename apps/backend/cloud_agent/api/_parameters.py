@@ -11,8 +11,8 @@ An integer is held to ``bigint``, the widest integer column there is. Which
 parameters are integers is the route's own declaration: a search for twenty
 digits is not one.
 
-A JSON body is checked too when a person wrote it: on a route an owner, an
-administrator or the on-call relay calls, any string in it, a key included,
+A JSON body is checked too when a person wrote it: on a route an owner or an
+administrator calls, any string in it, a key included,
 holding NUL or half a surrogate pair is refused. Neither means anything in what
 a person writes, and asyncpg cannot send a surrogate at all. What hosts and
 sandboxes report is not refused here, since refusing a report loses it: their
@@ -74,13 +74,12 @@ def _people() -> frozenset[Callable[..., Any]]:
     """The dependencies that authenticate whoever writes a body by hand."""
     from cloud_agent.api._owner_auth import authenticate_agent_owner
     from cloud_agent.api.deps import verify_admin_access
-    from cloud_agent.api.service_jobs import verify_oncall_dispatch
 
-    return frozenset({authenticate_agent_owner, verify_admin_access, verify_oncall_dispatch})
+    return frozenset({authenticate_agent_owner, verify_admin_access})
 
 
 def _written_by_a_person(route: object) -> bool:
-    """Whether ``route`` authenticates an owner, an administrator or the on-call relay."""
+    """Whether ``route`` authenticates an owner or an administrator."""
     pending = [route.dependant] if isinstance(route, APIRoute) else []
     while pending:
         dependant = pending.pop()

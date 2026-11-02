@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.support.owners import CONNECTION_ID, connection_row
 
 from cloud_agent.application import session_fork
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, identity_from_row
@@ -138,7 +139,13 @@ _FORK_OPERATION = {
     **_THREAD_SANDBOX,
     **_FORK_ROW,
     "thread_sandbox": _THREAD_SANDBOX,
-    "source_job": {"user_id": "owner", "model": "model-1"},
+    "source_job": {
+        "user_id": "owner",
+        "model": "model-1",
+        "runtime": "claude-code",
+        "thread_id": "athr_origin",
+        "model_connection_id": CONNECTION_ID,
+    },
     "source_native_turn_no": 1,
 }
 
@@ -146,6 +153,7 @@ _FORK_OPERATION = {
 @pytest.fixture
 def fork_bodies(monkeypatch) -> list[dict[str, Any]]:
     """Every body a Fork sends the Sandbox Manager, through the real client."""
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "fork-wire-encryption-key")
     bodies: list[dict[str, Any]] = []
     sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
 
@@ -174,20 +182,19 @@ async def _materialize(operation: dict[str, Any]) -> None:
     }
     store = SimpleNamespace(
         host_pool=object(),
-        grants=SimpleNamespace(link_residency_grant=AsyncMock(return_value=True)),
+        model_connections=SimpleNamespace(
+            get_model_connection=AsyncMock(
+                return_value=connection_row("owner", models=("model-1",))
+            ),
+            bind_residency=AsyncMock(return_value=True),
+        ),
         session_fork=SimpleNamespace(
             claim_session_fork_materialization=AsyncMock(return_value=True),
             establish_session_fork_residencies=AsyncMock(return_value=residencies),
             record_session_fork_materialized=AsyncMock(return_value={"state": "materialized"}),
         ),
     )
-    grants = SimpleNamespace(
-        mint=AsyncMock(return_value={"grant_id": "grant-1", "token": "token-1"}),
-        revoke=AsyncMock(),
-    )
-    await session_fork.materialize_session_fork(
-        operation, job_id="ajob_source", job_store=store, grants=grants
-    )
+    await session_fork.materialize_session_fork(operation, job_id="ajob_source", job_store=store)
 
 
 async def test_the_fork_sends_the_group_generation_and_container_it_recorded(fork_bodies):

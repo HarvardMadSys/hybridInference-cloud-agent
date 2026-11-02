@@ -200,7 +200,7 @@ def test_explicit_configuration_stays_fixed_while_runtime_reads_current_saved_va
         {
             "compute.poll_seconds": 35,
             "compute.observation_seconds": 90,
-            "session_redirect_uri": "https://agents.example/api/v1/session/callback",
+            "public_api_url": "https://agents.example/api",
         },
     )
     assert current_poll_seconds(fixed) == 17

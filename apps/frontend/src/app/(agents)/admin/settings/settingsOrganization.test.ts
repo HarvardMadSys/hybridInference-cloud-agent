@@ -34,7 +34,6 @@ describe('application settings organization', () => {
     ['Database tools', 'Operations'],
     ['Compute', 'Compute'],
     ['Execution', 'Compute'],
-    ['Gateway', 'Gateway'],
     ['MCP', 'MCP'],
     ['Appearance', 'Appearance'],
     ['Sandbox archives', 'Sandbox archives'],
@@ -65,13 +64,13 @@ describe('application settings organization', () => {
   });
 
   it.each([
-    ['gateway_base_url', 'Gateway connection'],
-    ['gateway_request_timeout_s', 'Gateway connection'],
+    ['web_base_url', 'Public addresses'],
+    ['public_api_url', 'Public addresses'],
     ['attachments.max_file_bytes', 'Attachments'],
-    ['task_titles.timeout_seconds', 'Task titles'],
+    ['task_titles.max_chars', 'Task titles'],
     ['default_execution_profile', 'Sandbox execution'],
     ['sandbox_manager_token', 'Sandbox execution'],
-    ['site.feature_rag', 'Branding'],
+    ['site.org_name', 'Branding'],
     ['log_level', 'Logging'],
     ['mcp_allow_private_targets', 'MCP connections'],
   ])('organizes %s into its related group', (key, group) => {

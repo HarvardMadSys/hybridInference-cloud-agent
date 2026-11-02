@@ -6,6 +6,8 @@ module contains only the intact MCP-facing behavior cases.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fixtures
@@ -20,9 +22,8 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     FakeStorage,
     _api_key_secret,
     _build_app,
-    _configured_identity_issuer,
     _create_job,
-    _FakeGateway,
+    _FakeOwners,
     _next_turn,
     _send,
     client,
@@ -30,9 +31,9 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     json,
     pytest,
     store,
-    timedelta,
     worker,
 )
+from tests.support.owners import connection_claim, on_connection
 
 pytestmark = pytest.mark.asyncio
 
@@ -68,7 +69,7 @@ def _job_body(**overrides: Any) -> dict[str, Any]:
     """A valid submission, with the fields under test overridable."""
     body: dict[str, Any] = {"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}
     body.update(overrides)
-    return body
+    return on_connection(body)
 
 
 @pytest.mark.parametrize(
@@ -545,7 +546,8 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as runner:
         claimed = await runner.post(
-            "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
+            "/v1/agent/worker/claim",
+            json=connection_claim({"worker_id": "w-1", "lease_ttl_seconds": 60}),
         )
     assert claimed.status_code == 200
     body = claimed.json()
@@ -573,16 +575,17 @@ async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient):
     """
     await _create_job(client)
 
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    body = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
 
     assert body["mcp_token"], "the sandbox was handed no MCP credential"
 
     from cloud_agent.tokens import SCOPE_MCP, parse_worker_token
 
-    # Scoped, and not the same credential as either of the other two.
+    # Scoped, and not the same credential as the runner's.
     assert parse_worker_token(body["mcp_token"])["scope"] == SCOPE_MCP
     assert body["mcp_token"] != body["worker_token"]
-    assert body["mcp_token"] != body["sandbox_token"]
 
 
 @pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
@@ -618,7 +621,9 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
     created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
     assert created.status_code == 201, created.text
 
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    body = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
 
     assert body["mcp_bindings"] == [
         worker.web_search.RUNTIME_SERVER_ID,
@@ -642,27 +647,9 @@ async def test_the_claim_names_no_mcp_relay_address(client: AsyncClient, monkeyp
     monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
     await _create_job(client)
 
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    body = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
 
     assert "mcp_base_url" not in body
     assert "agent-mcp" not in json.dumps(body)
-
-
-async def test_a_job_created_with_an_alias_stores_the_canonical_id(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    """**Validated as an alias, stored as an alias — the shape of the bug.**
-
-    The gateway mints a grant against canonical ids. A job that recorded
-    `legacy-name` produced a grant whose `allowed_models` matched nothing, so
-    the job was created successfully and died at its first inference call with
-    a 404 for a model that plainly exists.
-
-    Resolution translates once; everything after it works in canonical ids.
-    """
-    monkeypatch.setitem(_FakeGateway.aliases, "legacy-name", _TEST_MODELS[0])
-
-    await _create_job(client, model="legacy-name")
-
-    (job,) = list(store.jobs.values())
-    assert job["model"] == _TEST_MODELS[0], "the alias was stored instead of the canonical id"

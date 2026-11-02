@@ -8,98 +8,33 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import capacity_history, entitlement, ledger, operational_health
-from cloud_agent.api import mcp_connections, service_jobs, session
-from cloud_agent.application import residency
+from cloud_agent import capacity_history, entitlement, operational_health, settings
+from cloud_agent.api import mcp_connections
 from cloud_agent.storage.repositories import host_pool
 from cloud_agent.workers import snapshots
 
 
 def test_oauth_callbacks_and_repository_access_use_current_settings(monkeypatch):
     values = {
-        "AGENT_SESSION_REDIRECT_URI": "https://agents.example/api/v1/session/callback",
+        "AGENT_PUBLIC_API_URL": "https://agents.example/agents/api",
         "AGENT_WEB_BASE_URL": "https://agents.example/agents",
         "AGENT_REPO_ALLOWLIST": "team/first",
     }
-    for module in (mcp_connections, entitlement, session):
+    for module in (mcp_connections, entitlement, settings):
         monkeypatch.setattr(module, "setting_env", lambda name: values.get(name))
 
-    assert mcp_connections._public_base_url() == "https://agents.example/api"
+    assert mcp_connections._public_base_url() == "https://agents.example/agents/api"
     assert entitlement.repo_is_allowed("team/first")
     values["AGENT_REPO_ALLOWLIST"] = "team/second"
     values["AGENT_WEB_BASE_URL"] = "https://new.example/work"
     assert not entitlement.repo_is_allowed("team/first")
     assert entitlement.repo_is_allowed("team/second")
     assert entitlement.repo_is_allowed("other/repo", {"AGENT_REPO_ALLOWLIST": "other/repo"})
-    assert session._env(session.ENV_WEB_BASE_URL) == "https://new.example/work"
     redirect = mcp_connections._callback_redirect("github", ok=True, message="")
     assert redirect.headers["location"].startswith("https://new.example/work/integrations?")
 
 
-async def test_oncall_dispatch_rotation_applies_to_next_request(monkeypatch):
-    values = {
-        service_jobs.ENV_ONCALL_DISPATCH_TOKEN: "old-token",
-        service_jobs.ENV_ONCALL_USER_ID: "service-user",
-    }
-    monkeypatch.setattr(service_jobs, "setting_env", lambda name: values.get(name))
-    admin = AsyncMock(side_effect=RuntimeError("not an admin credential"))
-    monkeypatch.setattr(service_jobs, "verify_admin_access", admin)
-    assert await service_jobs.verify_oncall_dispatch(None, "Bearer old-token", None) == (
-        "oncall-dispatch"
-    )
-    values[service_jobs.ENV_ONCALL_DISPATCH_TOKEN] = "new-token"
-    with pytest.raises(RuntimeError, match="not an admin credential"):
-        await service_jobs.verify_oncall_dispatch(None, "Bearer old-token", None)
-    assert await service_jobs.verify_oncall_dispatch(None, "Bearer new-token", None) == (
-        "oncall-dispatch"
-    )
-    assert service_jobs._oncall_owner()["user_id"] == "service-user"
-
-
-async def test_residency_grants_use_updated_lease_duration(monkeypatch):
-    duration = 2400.0
-    monkeypatch.setattr(residency, "number_setting", lambda key: duration)
-    grants = SimpleNamespace(
-        mint=AsyncMock(return_value={"grant_id": "grant-1", "token": "credential"}),
-        revoke=AsyncMock(),
-    )
-    store = SimpleNamespace(link_residency_grant=AsyncMock(return_value=True))
-    row = {
-        "user_id": "owner",
-        "thread_id": "thread-1",
-        "establishing_attempt_id": 12,
-        "model": "model-1",
-        "generation": 2,
-    }
-    await residency._mint_residency_grant(store, grants, row=row)
-    assert grants.mint.call_args.kwargs["ttl_seconds"] == 2400
-    duration = 1200.0
-    await residency._mint_residency_grant(store, grants, row=row)
-    assert grants.mint.call_args.kwargs["ttl_seconds"] == 1200
-
-
-async def test_usage_timeout_and_capacity_retention_use_current_limits(monkeypatch):
-    monkeypatch.setattr(ledger, "number_setting", lambda key: 0.01)
-
-    async def stalled_usage(*args, **kwargs):
-        await asyncio.Event().wait()
-
-    grants = SimpleNamespace(binding_id="binding", usage=stalled_usage)
-    store = SimpleNamespace(complete_ledger_refresh=AsyncMock())
-    await ledger.refresh_ledger_entry(
-        store,
-        grants,
-        {
-            "id": 1,
-            "refresh_generation": 2,
-            "terminal": True,
-            "binding_id": "binding",
-            "grant_id": "grant",
-            "window_since": 1,
-            "window_until": 2,
-        },
-    )
-    assert store.complete_ledger_refresh.call_args.kwargs["error_code"] == "usage_unavailable"
+async def test_capacity_retention_uses_the_current_limit(monkeypatch):
     monkeypatch.setattr(capacity_history, "number_setting", lambda key: 7200.0)
     capacity = SimpleNamespace(prune_capacity_history=AsyncMock(return_value=0))
     await capacity_history._prune(capacity, limit=23, timeout_seconds=1)

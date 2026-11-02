@@ -24,7 +24,6 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
-from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry, AttemptResources, TurnResourceSummary
@@ -32,7 +31,6 @@ from cloud_agent.thread_stats import summarize_session_statistics
 from cloud_agent_shared.turn_resources import summarize_turn_resources
 
 if TYPE_CHECKING:
-    from cloud_agent.ports import LedgerRepository
     from cloud_agent.storage.admin_queries import AdminRunQueries
 
 logger = get_logger(__name__)
@@ -42,7 +40,6 @@ class _AdminRunsStorage(Protocol):
     """The capabilities this module's handlers reach the storage layer for."""
 
     admin_runs: AdminRunQueries
-    ledger: LedgerRepository
 
 
 def _require_store(store: _AdminRunsStorage | None) -> _AdminRunsStorage:
@@ -144,18 +141,15 @@ async def get_admin_run(
     job_id: str = Path(max_length=256),
     _admin: str = Depends(verify_admin_access),
     queries: AdminRunQueries = Depends(get_admin_run_queries),
-    store: _AdminRunsStorage | None = Depends(get_storage),
 ) -> AdminRunDetail:
-    """Read a turn's metadata and existing accounting without owner impersonation."""
+    """Read a turn's metadata and its agent's usage report without owner impersonation."""
     run = await _run(queries, job_id)
     runtime_inputs = await queries.usage_inputs(job_id)
     usage = summarize_job_usage(
-        ledger_rows=await _require_store(store).ledger.ledger_rows_for_job(job_id=job_id),
         runtime_inputs=runtime_inputs,
         runtime=run["runtime"],
-        terminal=run["state"] in TERMINAL_STATES,
         # Which connection stays the owner's; the reader learns only that the
-        # turn's provider, not the Gateway, bills it.
+        # turn's provider bills it.
         external_provider=bool(run.get("model_connection_id")),
     )
     return AdminRunDetail(

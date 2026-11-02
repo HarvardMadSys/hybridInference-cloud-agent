@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import launch_connection
 
 from cloud_agent_host.chat_sandbox import (
     MEMBER_UID_BASE,
@@ -417,10 +418,10 @@ def _launch(thread_id: str, *, native_session_id: str | None, slot: int) -> Resi
         native_session_id=native_session_id,
         model="glm-5.1",
         reasoning_effort=None,
-        gateway_base_url="http://gateway",
-        credential="grant",
+        credential="provider-key",
         slot_id=slot,
         residency_generation=slot + 1,
+        **launch_connection("claude-code"),
     )
 
 
@@ -2410,10 +2411,9 @@ def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing
 def test_the_sweep_names_its_running_groups_to_the_host_rule_check():
     """A table the check reinstalls comes back without any group's relay or SSH exceptions.
 
-    A firewall reload flushes the host's ruleset; the check puts the table
-    back, but a group still running behind it stays cut off from its gateway
-    and MCP relays, and from its SSH servers, until something syncs its bridge
-    again. Only the sweep knows which groups are running, so it names them.
+    A firewall reload flushes the host's ruleset; a group still running behind
+    the reinstalled table stays cut off from its MCP relay and SSH servers until
+    its bridge is synced. Only the sweep knows which groups run, so it names them.
     """
     manager, supervisor = _running_group()
 

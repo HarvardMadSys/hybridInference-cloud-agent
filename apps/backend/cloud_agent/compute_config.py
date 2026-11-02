@@ -13,13 +13,13 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
 from cloud_agent.compute_secrets import ComputeSecretError, StoredDeploymentResolver
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.settings import integer_setting, setting_env, text_setting
+from cloud_agent.settings import integer_setting, public_api_url, setting_env, text_setting
 
 if TYPE_CHECKING:
     from cloud_agent.compute_secrets import ComputeSecretStore
@@ -33,31 +33,17 @@ REGISTRATION_PATH = "/v1/compute/node-registrations"
 def registration_url() -> str:
     """Where a new node posts its host keys: explicit, or the public API origin.
 
-    Reuses the operator-configured sign-in callback (as MCP OAuth does), never
-    request headers. Only HTTPS qualifies: the node authenticates the control
-    plane by its certificate before sending the token.
+    Falls back to ``AGENT_PUBLIC_API_URL`` (as MCP OAuth does), never request
+    headers. Only HTTPS qualifies: the node authenticates the control plane by
+    its certificate before sending the token.
     """
     explicit = (setting_env(ENV_REGISTRATION_URL) or "").strip()
     if explicit:
         return explicit if urlsplit(explicit).scheme == "https" else ""
-    callback = (setting_env("AGENT_SESSION_REDIRECT_URI") or "").strip()
-    suffix = "/v1/session/callback"
-    try:
-        parsed = urlsplit(callback)
-    except ValueError:
+    base = public_api_url()
+    if urlsplit(base).scheme != "https":
         return ""
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or not parsed.path.endswith(suffix)
-    ):
-        return ""
-    base = parsed.path[: -len(suffix)]
-    return urlunsplit((parsed.scheme, parsed.netloc, base + REGISTRATION_PATH, "", ""))
+    return base + REGISTRATION_PATH
 
 
 @dataclass(frozen=True)

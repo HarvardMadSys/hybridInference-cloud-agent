@@ -30,17 +30,13 @@ compose() {
 }
 
 configure_browser_urls() {
-  # These three URLs and the URL printed by this script must use one canonical
-  # hostname. A host-only login-flow cookie set on 127.0.0.1 is not sent to a
-  # callback on localhost (or vice versa), even though both reach the same
-  # socket. Derive from the effective port on every invocation; explicit shell
-  # values still win, while stale values in an older .env.local cannot split
-  # the OAuth round trip or point a second stack back at the first one's port.
+  # Derive from the effective port on every invocation: explicit shell values
+  # still win, while stale values in an older .env.local cannot point a second
+  # stack back at the first one's port.
   edge_port=$(local_edge_port)
-  GATEWAY_AUTHORIZE_URL=${GATEWAY_AUTHORIZE_URL:-http://127.0.0.1:${edge_port}/authorize}
-  AGENT_SESSION_REDIRECT_URI=${AGENT_SESSION_REDIRECT_URI:-http://127.0.0.1:${edge_port}/api/v1/session/callback}
   AGENT_WEB_BASE_URL=${AGENT_WEB_BASE_URL:-http://127.0.0.1:${edge_port}}
-  export GATEWAY_AUTHORIZE_URL AGENT_SESSION_REDIRECT_URI AGENT_WEB_BASE_URL
+  AGENT_PUBLIC_API_URL=${AGENT_PUBLIC_API_URL:-http://127.0.0.1:${edge_port}/api}
+  export AGENT_WEB_BASE_URL AGENT_PUBLIC_API_URL
 }
 
 local_project_name() {
@@ -200,10 +196,10 @@ refuse_lost_database_credentials() {
 }
 
 upgrade_existing_env() {
-  # Keep every existing credential and operator-selected port.  Local env
-  # files predate both retained-only deployment and the server-side OAuth
-  # round trip; simply returning when one exists makes an otherwise valid
-  # checkout fail Compose interpolation after an update.
+  # Keep every existing credential and operator-selected port. Local env files
+  # predate the account system and retained-only deployment; simply returning
+  # when one exists makes an otherwise valid checkout fail Compose
+  # interpolation after an update.
   edge_port=$(sed -n 's/^LOCAL_EDGE_PORT=//p' "$ENV_FILE" | tail -n 1)
   edge_port=${edge_port:-13002}
   manager_token=$(sandbox_manager_token)
@@ -218,27 +214,41 @@ upgrade_existing_env() {
   append_env_if_missing LOCAL_RELAY_NETWORK freeinference-local-agent-relays
   append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
   append_dns_server_if_missing
-  append_env_if_missing GATEWAY_ISSUER "freeinference-local"
-  append_env_if_missing GATEWAY_AUTHORIZE_URL "http://127.0.0.1:${edge_port}/authorize"
-  append_env_if_missing AGENT_SESSION_REDIRECT_URI \
-    "http://127.0.0.1:${edge_port}/api/v1/session/callback"
+  append_env_if_missing AGENT_LOCAL_SESSION_SECRET "$(random_hex)"
+  append_env_if_missing AGENT_SETTINGS_ENCRYPTION_KEY "$(random_hex)"
   append_env_if_missing AGENT_WEB_BASE_URL "http://127.0.0.1:${edge_port}"
-  append_env_if_missing AGENT_WEB_GATEWAY_URL ""
+  append_env_if_missing AGENT_PUBLIC_API_URL "http://127.0.0.1:${edge_port}/api"
+}
+
+refuse_retired_env() {
+  # A stack from before the account system keeps its database bound to the
+  # local Gateway fixture, which is gone. Starting it would only fail later,
+  # at the database check, with less to go on.
+  retired=$(grep -Eo '^(GATEWAY_[A-Z_]+|AGENT_(AUTH_MODE|SESSION_REDIRECT_URI))=' "$ENV_FILE" \
+    | tr -d '=' | tr '\n' ' ') || true
+  if [ -n "$retired" ]; then
+    echo "$ENV_FILE configures the removed Gateway: $retired" >&2
+    echo "Cloud Agent has one account system now, and this stack's database belongs to the old one." >&2
+    echo "Nothing was deleted. Start a new stack with a new LOCAL_PROJECT_NAME and a new env file, or remove" >&2
+    echo "this stack and its volumes yourself if you do not need its data." >&2
+    return 1
+  fi
 }
 
 ensure_env() {
   if [ -f "$ENV_FILE" ]; then
     umask 077
+    refuse_retired_env
     upgrade_existing_env
     return
   fi
   refuse_lost_database_credentials
   umask 077
   postgres_password=$(random_hex)
-  dispatch_token=$(random_hex)
   enroll_token=$(random_hex)
   enroll_hash=$(printf '%s' "$enroll_token" | openssl dgst -sha256 -r | awk '{print $1}')
   session_secret=$(random_hex)
+  settings_key=$(random_hex)
   control_secret=$(random_hex)
   source_secret=$(random_hex)
   sandbox_manager_token=$(random_hex)
@@ -250,11 +260,8 @@ ensure_env() {
       'AGENT_POSTGRES_DB=cloudagent' \
       "AGENT_POSTGRES_PASSWORD=$postgres_password" \
       "AGENT_DATABASE_URL=postgresql://cloudagent:$postgres_password@postgres:5432/cloudagent" \
-      'GATEWAY_BASE_URL=http://local-gateway:8080' \
-      'GATEWAY_ISSUER=freeinference-local' \
-      'GATEWAY_JWKS_URL=http://local-gateway:8080/v1/identity/jwks' \
-      "GATEWAY_GRANT_DISPATCH_TOKEN=$dispatch_token" \
-      "AGENT_SESSION_SECRET=$session_secret" \
+      "AGENT_LOCAL_SESSION_SECRET=$session_secret" \
+      "AGENT_SETTINGS_ENCRYPTION_KEY=$settings_key" \
       "AGENT_CONTROL_TOKEN_SECRET=$control_secret" \
       "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY=$source_secret" \
       "AGENT_SANDBOX_MANAGER_TOKEN=$sandbox_manager_token" \
@@ -277,12 +284,10 @@ ensure_env() {
       'AGENT_DEPLOYMENT_SHA=unknown' \
       'LOCAL_RELAY_NETWORK=freeinference-local-agent-relays' \
       'LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16' \
-      'GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize' \
-      'AGENT_SESSION_REDIRECT_URI=http://127.0.0.1:13002/api/v1/session/callback' \
       'AGENT_WEB_BASE_URL=http://127.0.0.1:13002' \
+      'AGENT_PUBLIC_API_URL=http://127.0.0.1:13002/api' \
       'AGENT_WEB_BASE_PATH=' \
       'AGENT_WEB_API_URL=/api' \
-      'AGENT_WEB_GATEWAY_URL=' \
       'AGENT_WEB_APP_NAME=FreeInference Cloud Agent (local)' \
       'LOCAL_CHAT_IDLE_TIMEOUT_S=15' \
       'LOCAL_AGENT_TIMEOUT_S=600' \
@@ -358,6 +363,9 @@ asyncio.run(probe())'; then
     return 1
   fi
 
+  echo "Checking that this database belongs to the account system."
+  compose run --rm --no-deps migrate python -m cloud_agent.identity_namespace --check
+
   echo "Applying the agent-owned database migrations before full startup."
   compose run --rm --no-deps migrate
 }
@@ -386,19 +394,15 @@ local_base_url() {
 
 wait_ready() {
   base_url=$(local_base_url)
-  expected_stack=$(local_project_name)
+  expected_project=$(local_project_name)
   attempts=0
-  until health=$(curl --fail --silent --show-error "$base_url/health") \
-    && actual_stack=$(printf '%s' "$health" | python3 -c \
-      'import json, sys; print(json.load(sys.stdin).get("stack_id", ""))') \
-    && [ "$actual_stack" = "$expected_stack" ] \
+  # The edge's published port names this project, so another stack answering
+  # on the same port is not mistaken for this one.
+  until [ "$(compose port local-edge 8088 2>/dev/null)" = "127.0.0.1:$(local_edge_port)" ] \
     && curl --fail --silent --show-error "$base_url/api/healthz" >/dev/null; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 90 ]; then
-      echo "Local stack '$expected_stack' did not become ready at $base_url." >&2
-      if [ "${actual_stack:-}" ]; then
-        echo "That port answered as a different stack: '$actual_stack'." >&2
-      fi
+      echo "Local stack '$expected_project' did not become ready at $base_url." >&2
       echo "Recent logs:" >&2
       compose logs --tail=120 >&2
       return 1
@@ -447,7 +451,8 @@ case "$command" in
     compose up --detach "$build_flag"
     wait_ready
     echo "Local Cloud Agent is ready: $(local_base_url)"
-    echo "Run '$0 smoke' for an automated login/config/agent lifecycle check."
+    echo "Create the first administrator at $(local_base_url)/setup/administrator with the code in '$0 logs control-plane'."
+    echo "Run '$0 smoke' for an automated setup and sign-in check."
     ;;
   start)
     ensure_env
@@ -475,7 +480,9 @@ case "$command" in
     ensure_env
     validate_local_network_ownership
     wait_ready
-    exec python3 "$SCRIPT_DIR/smoke.py" "${2:-$(local_base_url)}"
+    setup_code=$(compose logs --no-log-prefix control-plane 2>/dev/null \
+      | sed -n 's/.*one-time setup code: \([A-Z2-9-]*\).*/\1/p' | tail -n 1)
+    LOCAL_SETUP_CODE=$setup_code exec python3 "$SCRIPT_DIR/smoke.py" "${2:-$(local_base_url)}"
     ;;
   config)
     ensure_env

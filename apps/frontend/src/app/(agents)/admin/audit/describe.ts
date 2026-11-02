@@ -209,8 +209,7 @@ export function describeAuditEntry(
 /**
  * Who acted: "You", the operator token, or a short form of another admin's id.
  *
- * Only an id is known: identity tokens deliberately carry no display name, and
- * the Gateway offers no contract to look one up.
+ * Only an id is known here: the audit trail keeps no display name.
  */
 export function describeActor(
   actorId: string | null,

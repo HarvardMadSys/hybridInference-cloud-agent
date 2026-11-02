@@ -7,6 +7,7 @@ branch semantics form an independently schedulable test module.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
@@ -20,17 +21,15 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     FastAPI,
     _api_key_secret,
     _build_app,
-    _configured_identity_issuer,
     _create_job,
     _create_job_raw,
-    _FakeGrants,
     asyncio,
     client,
     datetime,
     pytest,
     store,
-    timedelta,
 )
+from tests.support.owners import connection_claim, on_connection
 
 pytestmark = pytest.mark.asyncio
 
@@ -296,11 +295,13 @@ async def test_a_connected_user_may_run_only_their_own_repos(store: FakeStorage,
         )
         mine = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+            json=on_connection({"repo": "acme/service", "task_prompt": "fix it", "model": "m"}),
         )
         theirs = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "someone-else/private", "task_prompt": "exfiltrate", "model": "m"},
+            json=on_connection(
+                {"repo": "someone-else/private", "task_prompt": "exfiltrate", "model": "m"}
+            ),
         )
 
     assert mine.status_code == 201
@@ -364,7 +365,7 @@ async def test_disconnecting_removes_the_entitlement(store: FakeStorage, monkeyp
         await client.delete("/v1/agent/github/connect/77")
         after = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+            json=on_connection({"repo": "acme/service", "task_prompt": "fix it", "model": "m"}),
         )
 
     assert after.status_code == 403
@@ -500,11 +501,11 @@ async def test_a_user_is_offered_only_the_repositories_they_can_push_to(
         config = await client.get("/v1/agent/config")
         mine = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+            json=on_connection({"repo": "acme/service", "task_prompt": "fix it", "model": "m"}),
         )
         secret = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "acme/secret", "task_prompt": "read it", "model": "m"},
+            json=on_connection({"repo": "acme/secret", "task_prompt": "read it", "model": "m"}),
         )
         branches = await client.get("/v1/agent/branches", params={"repo": "acme/secret"})
 
@@ -537,7 +538,7 @@ async def test_a_token_github_refuses_is_forgotten_and_the_user_connects_again(
         app_creds.refused_tokens.add("user-token-for-abc123")
         refused = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+            json=on_connection({"repo": "acme/service", "task_prompt": "fix it", "model": "m"}),
         )
         config = await client.get("/v1/agent/config")
 
@@ -570,7 +571,7 @@ async def test_disconnecting_github_forgets_the_token_and_withdraws_the_authoriz
         config = await client.get("/v1/agent/config")
         after = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+            json=on_connection({"repo": "acme/service", "task_prompt": "fix it", "model": "m"}),
         )
 
     assert removed.status_code == 200
@@ -771,7 +772,7 @@ async def test_reconnecting_keeps_only_the_installations_github_still_reports(
         after = await client.get("/v1/agent/config")
         lost = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+            json=on_connection({"repo": "acme/service", "task_prompt": "fix it", "model": "m"}),
         )
 
     assert before.json()["repos"] == ["acme/service", "octocat/dotfiles"]
@@ -837,7 +838,7 @@ async def test_a_connection_with_no_token_is_made_again_before_anything_runs(
         integrations = await client.get("/v1/agent/integrations")
         refused = await client.post(
             "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+            json=on_connection({"repo": "acme/service", "task_prompt": "fix it", "model": "m"}),
         )
 
     assert config.json()["github_connected"] is False
@@ -999,24 +1000,22 @@ async def test_a_claim_while_the_app_is_unloaded_leaves_the_job_queued(
     clock = _StepClock()
     minter = _FakeGitHubApp(installations=[], repos_by_installation={})
     app = _app_with_unloaded_github(store, key, clock, minter)
-    grants = _FakeGrants()
-    from cloud_agent.api.deps import get_grant_client
-
-    app.dependency_overrides[get_grant_client] = lambda: grants
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        refused = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        refused = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
         while_down = dict(store.jobs[job_id])
-        minted_while_down = list(grants.minted)
 
         key.write_text(app_private_pem)
         clock.now += 30
-        claimed = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claimed = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
 
     assert refused.status_code == 503
     assert refused.json()["detail"]["error"]["type"] == "source_control_unavailable"
     assert (while_down["state"], while_down["current_attempt_id"]) == ("queued", None)
-    assert minted_while_down == []
     assert claimed.status_code == 200
     assert claimed.json()["job_id"] == job_id
     assert claimed.json()["clone_token"] == "ghs_x"
@@ -1036,7 +1035,9 @@ async def test_a_turn_finishes_while_the_app_is_unloaded_and_its_wakeup_waits(
         transport=ASGITransport(app=_build_app(store)), base_url="http://test"
     ) as client:
         job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     claimed_wakeups: list[int] = []
     original_claim = store.goal_wakeups.claim_wakeups
@@ -1072,7 +1073,7 @@ async def test_a_finish_drains_only_its_own_conversations_goal_wakeups(
     runner's request decided other owners' goals before it was acknowledged.
     """
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     claims: list[tuple[int, str | None]] = []
     original_claim = store.goal_wakeups.claim_wakeups
@@ -1115,13 +1116,15 @@ async def test_a_branch_is_pinned_to_a_commit_at_creation(store: FakeStorage, mo
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "model": "m",
-                "base_ref": "dev",
-                "metadata": {"_agent_base_ref": "spoofed", "ticket": "ABC-1"},
-            },
+            json=on_connection(
+                {
+                    "repo": "owner/name",
+                    "task_prompt": "fix it",
+                    "model": "m",
+                    "base_ref": "dev",
+                    "metadata": {"_agent_base_ref": "spoofed", "ticket": "ABC-1"},
+                }
+            ),
         )
 
     assert created.status_code == 201
@@ -1135,12 +1138,14 @@ async def test_reserved_base_ref_metadata_cannot_invent_a_branch(client: AsyncCl
     """Without base_ref, caller metadata must not forge the Git panel's base branch."""
     created = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "m",
-            "metadata": {"_agent_base_ref": "forged"},
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "m",
+                "metadata": {"_agent_base_ref": "forged"},
+            }
+        ),
     )
 
     assert created.status_code == 201
@@ -1154,12 +1159,14 @@ async def test_reserved_oncall_mark_cannot_be_claimed_by_an_owner(
     """Only the on-call door stamps the mark; an owner's copy is dropped."""
     created = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "m",
-            "metadata": {"oncall": True, "ticket": "ABC-1"},
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "m",
+                "metadata": {"oncall": True, "ticket": "ABC-1"},
+            }
+        ),
     )
 
     assert created.status_code == 201
@@ -1184,12 +1191,14 @@ async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage,
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "model": "m",
-                "base_ref": "nope",
-            },
+            json=on_connection(
+                {
+                    "repo": "owner/name",
+                    "task_prompt": "fix it",
+                    "model": "m",
+                    "base_ref": "nope",
+                }
+            ),
         )
 
     assert created.status_code == 400
@@ -1221,12 +1230,14 @@ async def test_a_base_ref_git_would_refuse_never_reaches_github(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "model": "m",
-                "base_ref": base_ref,
-            },
+            json=on_connection(
+                {
+                    "repo": "owner/name",
+                    "task_prompt": "fix it",
+                    "model": "m",
+                    "base_ref": base_ref,
+                }
+            ),
         )
 
     assert created.status_code == 422
@@ -1268,7 +1279,9 @@ async def _create_with_history_app(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         return await client.post(
             "/v1/agent/jobs",
-            json={"repo": "owner/name", "task_prompt": "fix it", "model": "m", **fields},
+            json=on_connection(
+                {"repo": "owner/name", "task_prompt": "fix it", "model": "m", **fields}
+            ),
         )
 
 

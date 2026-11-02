@@ -2,14 +2,14 @@
 
 from fastapi import APIRouter, Response
 
-from cloud_agent.settings import boolean_setting, text_setting
+from cloud_agent.settings import text_setting
 
 router = APIRouter(prefix="/v1/agent")
 
 
 @router.get("/site-config")
 async def site_config(response: Response) -> dict[str, object]:
-    """Return only the allowlisted site identity and display feature switch."""
+    """Return only the allowlisted site identity."""
     response.headers["Cache-Control"] = "no-store"
     return {
         "branding": {
@@ -19,7 +19,5 @@ async def site_config(response: Response) -> dict[str, object]:
             "statusUrl": text_setting("site.status_url"),
             "docsUrl": text_setting("site.docs_url"),
             "contactUrl": text_setting("site.contact_url"),
-            "gatewayUrl": text_setting("site.gateway_url"),
         },
-        "features": {"rag": boolean_setting("site.feature_rag")},
     }

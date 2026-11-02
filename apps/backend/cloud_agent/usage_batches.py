@@ -1,6 +1,6 @@
 """Sum one owner's model usage over any range, in bounded batches.
 
-The admin Usage aggregation refuses a selection over its run, row and snapshot
+The admin Usage aggregation refuses a selection over its run and attempt
 budgets, which protected the database by making long ranges impossible. An
 owner's ``all`` range must cover everything they have, so it is read in
 batches instead (:meth:`AdminUsageQueries.batched_selection`): each batch is
@@ -23,9 +23,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.admin_usage import (
-    MAX_USAGE_LEDGER_ROWS,
+    MAX_USAGE_ATTEMPTS,
     MAX_USAGE_RUNS,
-    MAX_USAGE_SNAPSHOT_BYTES,
     UNKNOWN_MODEL_GROUP,
     AdminUsageAggregate,
     AdminUsageBreakdown,
@@ -84,10 +83,10 @@ def _reduce(
     by_thread: bool,
 ) -> tuple[dict[Any, AdminUsageAggregate], ...]:
     """One batch's summary, bucket, model and thread aggregates (CPU-bound)."""
-    ledger_by_job: dict[str, list[dict[str, Any]]] = {row["id"]: [] for row in cohort}
+    usage_by_job: dict[str, list[dict[str, Any]]] = {row["id"]: [] for row in cohort}
     for row in rows:
-        ledger_by_job[row["job_id"]].append(row)
-    jobs = [{**row, "ledger": ledger_by_job[row["id"]]} for row in cohort]
+        usage_by_job[row["job_id"]].append(row)
+    jobs = [{**row, "usage": usage_by_job[row["id"]]} for row in cohort]
     prepared = prepare_jobs(jobs, terminal_states=TERMINAL_STATES)
     summary = grouped_aggregates(prepared, lambda _row: None)
     per_bucket = grouped_aggregates(prepared, lambda row: bucket_key(row["created_at"], size))
@@ -144,8 +143,7 @@ async def owner_usage(
             user_id=user_id,
             thread_ids=thread_ids,
             max_runs=max_runs,
-            max_rows=MAX_USAGE_LEDGER_ROWS,
-            max_snapshot_bytes=MAX_USAGE_SNAPSHOT_BYTES,
+            max_attempts=MAX_USAGE_ATTEMPTS,
             deadline=deadline,
         ):
             if batches == 1:

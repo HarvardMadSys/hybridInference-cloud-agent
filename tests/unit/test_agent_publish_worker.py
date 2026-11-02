@@ -692,71 +692,6 @@ async def test_pr_title_uses_readable_closing_summaries(monkeypatch, summaries, 
     assert "Please fix" not in captured["title"]
 
 
-async def test_title_generation_failure_publishes_a_meaningful_fallback(monkeypatch):
-    closing = (
-        "I've implemented the feature. Here's a summary of what I did.\n\n"
-        "- Add a button to restart failed runs in a new session"
-    )
-    store = FakeStore({**_JOB, "session_summaries": [closing]})
-    _patch_publish(
-        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
-    )
-    captured = _patch_pr(monkeypatch)
-    generated = AsyncMock(return_value=None)
-    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
-
-    url = await publish_one(store, credential=GitHubCredential("t"))
-
-    assert captured["title"] == "[agent] Add a button to restart failed runs in a new session"
-    assert store.snapshot_recorded == (9, url, "s")
-    generated.assert_awaited_once()
-
-
-async def test_draft_opens_before_slow_generated_title_then_is_enriched(monkeypatch):
-    """Title inference is optional enrichment, not the draft-creation gate."""
-    store = FakeStore(dict(_JOB))
-    _patch_publish(
-        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
-    )
-    title_started = asyncio.Event()
-    title_release = asyncio.Event()
-    draft_opened = asyncio.Event()
-    calls: list[tuple[str, bool]] = []
-
-    async def generated(*args, **kwargs):
-        title_started.set()
-        await title_release.wait()
-        return "[agent] Fix retries with bounded publication latency"
-
-    async def pull_request(**kwargs):
-        calls.append((kwargs["title"], kwargs.get("create_if_missing", True)))
-        draft_opened.set()
-        return "https://github.com/o/n/pull/7"
-
-    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
-    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", pull_request)
-
-    publishing = asyncio.create_task(publish_one(store, credential=GitHubCredential("t")))
-    try:
-        await asyncio.wait_for(title_started.wait(), timeout=0.5)
-        await asyncio.wait_for(draft_opened.wait(), timeout=0.5)
-        assert calls == [("[agent] Stabilize test retries", True)]
-        assert not publishing.done()
-        title_release.set()
-        assert await asyncio.wait_for(publishing, timeout=0.5) == "https://github.com/o/n/pull/7"
-    finally:
-        if not publishing.done():
-            publishing.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await publishing
-
-    assert calls == [
-        ("[agent] Stabilize test retries", True),
-        ("[agent] Fix retries with bounded publication latency", False),
-    ]
-    assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
-
-
 async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
     from cloud_agent import sandbox_manager_routing
 
@@ -1020,9 +955,7 @@ async def test_publication_resolves_the_current_branch_pr(monkeypatch, prior_sta
             )
         if request.method == "PATCH":
             assert request.url.path == "/repos/o/n/pulls/7"
-            assert (
-                json.loads(request.content)["title"] == "[agent] Fix retries and document backoff"
-            )
+            assert json.loads(request.content)["title"].startswith("[agent] ")
             return httpx.Response(200, json={"state": "open", "html_url": old_url})
         assert request.method == "POST"
         assert json.loads(request.content)["draft"] is True
@@ -1038,10 +971,6 @@ async def test_publication_resolves_the_current_branch_pr(monkeypatch, prior_sta
         monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="next", changed_files=["x"])
     )
 
-    async def generated(*args, **kwargs):
-        return "[agent] Fix retries and document backoff"
-
-    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
     prior_url = (
         "https://example.test/somewhere"
         if prior_state == "invalid_link"

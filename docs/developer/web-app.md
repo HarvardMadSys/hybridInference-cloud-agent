@@ -351,8 +351,6 @@ download limit is refused rather than saved in part. See
   eight per chat. The sandbox installs them before the first prompt, and a
   failed installation stops startup as a task error. Selections persist with
   the chat and are inherited by Fork.
-- **Prompt rewriting.** See
-  [Draft prompt rewriting](operations.md#draft-prompt-rewriting).
 - **Review.** Starts an independent code-review subagent in a workspace tab,
   covering every change since the conversation's original base, current
   workspace changes included, and instructed not to edit files. It needs an

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 04:47-0400\n"
+"POT-Creation-Date: 2026-10-30 22:23-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,17 +13,17 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.10.3\n"
+"Generated-By: Babel 2.18.0\n"
 
-#: ../developer/index.md:42
+#: ../developer/index.md:43
 msgid "Getting started"
 msgstr "快速上手"
 
-#: ../developer/index.md:53
+#: ../developer/index.md:54
 msgid "Concepts"
 msgstr "概念"
 
-#: ../developer/index.md:65
+#: ../developer/index.md:66
 msgid "Operations"
 msgstr "运维"
 
@@ -37,16 +37,12 @@ msgid ""
 "retained sandbox containers. Users work from a web interface, while "
 "enrolled hosts run Claude Code, Codex, pi, OpenCode, or Kilo. The control"
 " plane coordinates jobs, sessions, and publication to source control. "
-"Model access and account identity come from a [HybridInference "
-"gateway](https://github.com/HarvardMadSys/hybridInference), over HTTP "
-"only."
-msgstr ""
-"Cloud Agent 让编码 agent 在保留的沙箱容器里处理用户的仓库。用户在网页上操作，真正执行任务的是已注册的主机，上面跑着 "
-"Claude Code、Codex、pi、OpenCode 或 "
-"Kilo。控制平面负责调度任务、管理会话，并把改动发布到代码托管平台。模型调用和账号身份都来自 [HybridInference "
-"网关](https://github.com/HarvardMadSys/hybridInference)，双方只通过 HTTP 通信。"
+"Accounts are its own: people sign up, apply through a waiting list and "
+"are approved by an administrator. Every task runs on a model connection "
+"its owner adds with their own provider key, such as a FreeInference key."
+msgstr "Cloud Agent 在保留的沙箱容器中，针对用户的仓库运行编码 agent。用户通过 Web 界面工作，已注册的主机运行 Claude Code、Codex、pi、OpenCode 或 Kilo。控制平面协调任务、会话以及向源代码平台的发布。账号是它自己的：用户注册、通过等候名单申请，再由管理员批准。每个任务都运行在其所有者用自己的服务商密钥（例如 FreeInference 密钥）添加的模型连接上。"
 
-#: ../developer/index.md:10
+#: ../developer/index.md:11
 msgid ""
 "This is the documentation for the software itself: running it locally, "
 "operating a deployment, understanding how it works, and contributing to "
@@ -62,7 +58,7 @@ msgstr ""
 "MIT 许可证。发现 bug 或有疑问，请到 [issue tracker](https://github.com/HarvardMadSys"
 "/hybridInference-cloud-agent/issues) 提出。"
 
-#: ../developer/index.md:17
+#: ../developer/index.md:18
 msgid "Where to start"
 msgstr "从哪里开始"
 
@@ -75,8 +71,8 @@ msgid "Start here"
 msgstr "先看这里"
 
 #: ../developer/index.md
-msgid "Run the browser, API, gateway fixture, hosts, and sandboxes on one machine"
-msgstr "在一台机器上跑起浏览器、API、网关模拟服务、主机和沙箱"
+msgid "Run the browser, API, hosts, and sandboxes on one machine"
+msgstr "在一台机器上运行浏览器、API、主机和沙箱"
 
 #: ../developer/index.md
 msgid "[Local Docker stack](local-stack.md)"
@@ -163,18 +159,18 @@ msgid "[Security](security.md)"
 msgstr "[安全](security.md)"
 
 #: ../developer/index.md
-msgid "See which gateway APIs Cloud Agent consumes"
-msgstr "看看 Cloud Agent 用到了网关的哪些 API"
+msgid "See the API this service serves, as its committed contract"
+msgstr "查看本服务所提供的 API，即已提交的契约"
 
 #: ../developer/index.md
-msgid "[Gateway contracts](gateway-contracts.md)"
-msgstr "[网关契约](gateway-contracts.md)"
+msgid "[API contract](api-contracts.md)"
+msgstr "[API 契约](api-contracts.md)"
 
-#: ../developer/index.md:34
+#: ../developer/index.md:35
 msgid "Scope of this site"
 msgstr "本站涵盖的内容"
 
-#: ../developer/index.md:36
+#: ../developer/index.md:37
 msgid ""
 "These pages document the software, not any one installation of it. How "
 "end users work with a particular deployment, which agents and models it "
@@ -185,4 +181,3 @@ msgid ""
 msgstr ""
 "这些页面讲的是软件本身，而不是某一套具体的部署。某个部署的终端用户怎么使用它、提供哪些 agent "
 "和模型、怎么申请账号，由各自的运维方发布。带日期的设计、计划和验收记录作为工程历史留在仓库里；它们能说明某个决定的来龙去脉时，这里会附上链接。"
-

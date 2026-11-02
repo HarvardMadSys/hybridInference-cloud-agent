@@ -54,9 +54,9 @@ if (rawApiPrefix.startsWith('/') && rawApiPrefix !== derivedApiPrefix) {
     `NEXT_PUBLIC_AGENT_API_URL is ${JSON.stringify(rawApiPrefix)}, but this image is built ` +
       `with basePath ${JSON.stringify(basePath)}, whose browser API prefix is ` +
       `${JSON.stringify(derivedApiPrefix)}. A relative API prefix has to belong to the ` +
-      `variant it is built into: set AGENT_WEB_API_URL to ` +
+      'variant it is built into: set AGENT_WEB_API_URL to ' +
       `${JSON.stringify(derivedApiPrefix)}, or to an absolute URL for a cross-origin ` +
-      `deployment.`,
+      'deployment.',
   );
 }
 

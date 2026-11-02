@@ -23,14 +23,12 @@ const JOB: AgentJob = {
   branch: 'agent/ajob_workspace',
   runtime: 'claude-code',
   model: 'model',
-  spentUsd: 0,
   timeoutLabel: '',
   sandbox: '',
   attempts: [],
   events: [],
   diffFiles: [],
   gates: [],
-  usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: 0 },
 };
 
 const binaryFile = (overrides: Partial<AgentJobFileApi> = {}): AgentJobFileApi => ({

@@ -50,7 +50,7 @@ def test_every_host_docker_build_input_is_available_at_the_source_root() -> None
     content = members(hb.build(REPO_ROOT))
     for dockerfile in (
         "deploy/host/Dockerfile.agent-runner",
-        "deploy/host/Dockerfile.agent-gateway-tunnel",
+        "deploy/host/Dockerfile.agent-ssh-tunnel",
         "deploy/sandbox/Dockerfile.agent-sandbox",
     ):
         lines = content[dockerfile].decode().replace("\\\n", " ").splitlines()

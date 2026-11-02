@@ -19,19 +19,13 @@ minutes.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
-from typing import TYPE_CHECKING, Annotated, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
-from cloud_agent.api.deps import get_grant_client, get_renewal_schedule, get_storage
-from cloud_agent.application.grant_revocation import revoke_detached_grants
-from cloud_agent.grants import (
-    RenewalSchedule,  # noqa: TC001 — FastAPI resolves annotations at runtime.
-)
+from cloud_agent.api.deps import get_storage
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
@@ -62,7 +56,6 @@ from cloud_agent_shared.sandbox_archive_settings import (
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
-        GrantRepository,
         HostPoolRepository,
         ResidencyRepository,
         SandboxRepository,
@@ -78,7 +71,6 @@ class _HostsStorage(Protocol):
     this list rather than a call that happens to type-check.
     """
 
-    grants: GrantRepository
     host_pool: HostPoolRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
@@ -284,13 +276,8 @@ async def register_host(
 @router.post("/heartbeat", response_model=HostHeartbeatResponse)
 async def heartbeat_host(
     body: HostHeartbeatRequest,
-    background_tasks: BackgroundTasks,
     host: dict[str, Any] = Depends(authenticate_host),
     store: _HostsStorage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
-    # Annotated rather than a `Depends` default, so the handler called
-    # directly, outside a request, is given no schedule and renews every grant.
-    schedule: Annotated[RenewalSchedule | None, Depends(get_renewal_schedule)] = None,
 ) -> HostHeartbeatResponse:
     """Report liveness, and whatever about this machine has changed.
 
@@ -341,9 +328,6 @@ async def heartbeat_host(
     # it comes back in residencies_lost, with its generation echoed so a stale
     # answer cannot kill a successor, and the host tears that member down.
     lost: list[ResidencyBeat] = []
-    # The grants of every residency this beat extends, once each, renewed after
-    # the reply: see ``_renew_residency_grants``.
-    renewals: dict[str, None] = {}
     # Docker is the lifecycle authority for retained chat containers; the
     # database is the scheduling/fencing authority.  Heartbeats join those
     # views without treating absence as deletion. In particular, a sandbox manager's
@@ -358,9 +342,7 @@ async def heartbeat_host(
         observations=[_sandbox_observation(retained) for retained in retained_rows],
     )
     await _record_checkpoints(job_store, updated["host"], retained_rows)
-    revocations = await _release_stopped_residencies(
-        job_store, updated["host"], retained_rows, grants
-    )
+    await _release_stopped_residencies(job_store, updated["host"], retained_rows)
     # Starting/restarting is a bounded launch window. Renew only a process that
     # has proved itself LIVE.
     live = [
@@ -371,15 +353,11 @@ async def heartbeat_host(
         if member.residency_generation > 0 and member.resident_state == "live"
     ]
     for beat in await _extend_residencies(
-        job_store, updated["host"], live, ttl_seconds=residency_ttl_s(), renewals=renewals
+        job_store, updated["host"], live, ttl_seconds=residency_ttl_s()
     ):
         if beat not in lost:
             lost.append(beat)
     retained_stops = await _due_retained_stops(job_store, updated["host"], retained_rows)
-    if revocations:
-        background_tasks.add_task(revoke_detached_grants, grants, revocations)
-    if renewals and grants is not None:
-        background_tasks.add_task(_renew_residency_grants, grants, list(renewals), schedule)
     # The answer is made of the policy the beat's own write read, under the
     # same lock, rather than of four more reads of it. A part of it that did
     # not decode is None and is read again here, now that the beat's own work
@@ -452,14 +430,11 @@ async def _extend_residencies(
     residencies: list[tuple[str, int]],
     *,
     ttl_seconds: float,
-    renewals: dict[str, None],
 ) -> list[ResidencyBeat]:
     """Extend these ``(thread_id, generation)`` residencies together; return those lost.
 
     One transaction for all of them, which raises rather than answer a
-    database failure as "not extended". The grant of each one extended joins
-    ``renewals``: the credential lives exactly as long as the residency, so the
-    beat that extends the lease extends the grant. A lost one echoes its
+    database failure as "not extended". A lost one echoes its
     generation back (review finding 5): a beat carrying gen N can be answered
     after the host re-established gen N+1, and a thread-id-only loss would let
     the stale answer kill the successor. The host drops only on an exact
@@ -472,25 +447,21 @@ async def _extend_residencies(
     )
     lost: list[ResidencyBeat] = []
     for thread_id, generation in residencies:
-        grant = extended.get((thread_id, generation))
-        if grant:
-            renewals[grant] = None
-        elif grant is None:
+        if extended.get((thread_id, generation)) is None:
             lost.append(ResidencyBeat(thread_id=thread_id, generation=generation))
     return lost
 
 
 async def _release_stopped_residencies(
-    store: _HostsStorage, host: str, retained_rows: list[RetainedSandboxBeat], grants: Any
-) -> list[str]:
-    """Release the residencies of members with no process to use them; return their grants.
+    store: _HostsStorage, host: str, retained_rows: list[RetainedSandboxBeat]
+) -> None:
+    """Release the residencies of members with no process to use them.
 
     A stopped group has no process that can legitimately use a residency
     credential, nor a stopped or lost member of a running one. Release it
     instead of renewing it forever; the database fences this against
     concurrent starts. Most were released on an earlier beat, so one read
-    finds the generations still open, and only those are offered. The caller
-    revokes the returned grants after the reply (``revoke_detached_grants``).
+    finds the generations still open, and only those are offered.
     """
     quiescent = [
         (retained, member)
@@ -500,27 +471,23 @@ async def _release_stopped_residencies(
         and (not retained.running or member.resident_state in {"stopped", "lost"})
     ]
     if not quiescent:
-        return []
+        return
     still_open = await store.residency.open_shared_residencies(
         residencies=[
             (retained.sandbox_id, member.thread_id, member.residency_generation)
             for retained, member in quiescent
         ]
     )
-    revocations: list[str] = []
     for retained, member in quiescent:
         if (retained.sandbox_id, member.thread_id, member.residency_generation) not in still_open:
             continue
-        released = await store.residency.release_shared_residency_if_quiescent(
+        await store.residency.release_shared_residency_if_quiescent(
             thread_id=member.thread_id,
             generation=member.residency_generation,
             process_generation=member.process_generation,
             host=host,
             sandbox_id=retained.sandbox_id,
         )
-        if released and grants is not None:
-            revocations.append(released)
-    return revocations
 
 
 async def _due_retained_stops(
@@ -644,36 +611,6 @@ async def _record_checkpoints(
                 },
                 exc_info=True,
             )
-
-
-async def _renew_residency_grants(
-    grants: Any, grant_ids: list[str], schedule: RenewalSchedule | None = None
-) -> None:
-    """Renew the grants a heartbeat extended, together, after its reply was sent.
-
-    Each renewal may take the gateway's whole request timeout, and the host
-    stops waiting for its heartbeat's answer at 15 s. Awaited one by one before
-    the reply, two slow renewals were enough for the host never to receive the
-    stops and lost residencies that answer carries. Best-effort, as before: a
-    missed renewal starves hot turns into warm, never into an outage.
-
-    Only the grants that are running low, though. Every beat extends every
-    residency it names, and renewing each one's grant every thirty seconds
-    asked the gateway ten times for every step it granted. The beat has just
-    extended these residencies, which is all the store says about their grants,
-    so the schedule decides only *when*: a grant whose last renewal has plenty
-    left waits for a later beat. Without a schedule, every one is renewed.
-    """
-
-    async def renew(grant_id: str) -> None:
-        if schedule is not None and not schedule.due(grant_id):
-            return
-        with contextlib.suppress(Exception):
-            renewal = await grants.renew(grant_id)
-            if schedule is not None:
-                schedule.record(grant_id, renewal)
-
-    await asyncio.gather(*(renew(grant_id) for grant_id in grant_ids))
 
 
 def _host_archive_settings(

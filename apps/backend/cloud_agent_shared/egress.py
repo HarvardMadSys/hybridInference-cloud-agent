@@ -5,7 +5,7 @@ deployment's address pool, and the host enforces one fixed rule set on it:
 
 - public IPv4 unicast on TCP 80 and 443;
 - the one named DNS resolver, TCP/UDP 53;
-- the group's own two relays (inference and MCP), by exact address and port;
+- the group's own MCP relay, by exact address and port;
 - the exact public ``IPv4:port`` of each SSH server its owner registered,
   verified and enabled for one of the group's chats (``ssh_targets``);
 - nothing else: not the host, not private, link-local (cloud metadata), CGNAT,
@@ -42,8 +42,8 @@ only new connections, so deleting an element cuts a live SSH session too.
 **Ports, not protocols.** TCP 80/443 is a port rule. Nothing inspects what
 travels inside, so this is not a promise that only HTTP leaves, and it does not
 stop a sandbox sending the repository or its own short-lived tokens to a public
-host. Those tokens are refused at the public entrances of the gateway and the
-control plane; that, not this module, is what stops their direct replay.
+host. Those tokens are refused at the control plane's public entrance; that,
+not this module, is what stops their direct replay.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ PROTECTED_IPV4: tuple[str, ...] = (
     "240.0.0.0/4",
 )
 
-#: A group bridge is a /29: its gateway, the sandbox and the two relays.
+#: A group bridge is a /29: its gateway, the sandbox and its relay, with room to spare.
 GROUP_PREFIX_LENGTH = 29
 
 #: Where a deployment's group bridges may be carved from. Not ``is_private``,
@@ -234,7 +234,7 @@ def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
     relay_network = (source.get("AGENT_RELAY_NETWORK") or "").strip()
     if not relay_network:
         raise SandboxNetworkError(
-            "AGENT_RELAY_NETWORK must name the network the two relays are discovered on"
+            "AGENT_RELAY_NETWORK must name the network the MCP relay is discovered on"
         )
 
     extra = tuple(
@@ -244,9 +244,8 @@ def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
     )
 
     relays: list[RelayEndpoint] = []
-    for var in ("AGENT_GATEWAY_URL", "AGENT_SANDBOX_MCP_URL"):
-        if relay := _relay(source.get(var) or "", var=var):
-            relays.append(relay)
+    if relay := _relay(source.get("AGENT_SANDBOX_MCP_URL") or "", var="AGENT_SANDBOX_MCP_URL"):
+        relays.append(relay)
     return SandboxNetwork(
         namespace=namespace,
         pool=pool,

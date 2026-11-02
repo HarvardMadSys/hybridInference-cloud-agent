@@ -24,7 +24,6 @@ from cloud_agent.workers.terminal_replay import TerminalReplayStore
 #: live beside the loops that declare them now, not in `app.py`.
 TASK_PROTOCOLS = [
     TerminalReplayStore,
-    attempt_worker._GrantRenewal,
     attempt_worker._Reaping,
     snapshot_worker._SnapshotCapture,
     PublishStorage,

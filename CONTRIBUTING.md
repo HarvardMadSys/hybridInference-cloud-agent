@@ -98,14 +98,7 @@ Release publication has its own
 
 ## Contracts
 
-`gateway_contracts/*.openapi.yaml` records the Gateway HTTP APIs that this
-service consumes. Check changes against the corresponding Gateway source. If
-you change a client's endpoints or fields, update the relevant contract in the
-same PR. Identify the Gateway change that it tracks. Tests pin this service's
-side of the contract, but they cannot verify the current implementation in
-another repository.
-
-`gateway_contracts/agent-control-plane.openapi.json` records this service's own
+`api_contracts/agent-control-plane.openapi.json` records this service's own
 API. For an intentional change, regenerate it with
 [the developer-guide command](docs/developer/development.md#changing-an-api). Review the
 diff, and explain the compatibility implications in the PR.

@@ -496,32 +496,6 @@ def test_the_candidate_preflight_touches_no_network(monkeypatch):
     assert ensured == []
 
 
-def test_every_probe_runs_under_the_runtime_jobs_will_use(monkeypatch):
-    """A probe under the daemon's default validates a deployment nobody runs.
-
-    The bind check learned this when it passed on a host with no Kata shim and
-    every job then died at spawn. The gateway probe is the same shape — DNS
-    and networking are exactly what differs between a shared-kernel container
-    and a VM-isolated one — so it carries the flag too, and gets the guest's
-    relay addresses the way a chat does.
-    """
-    backend = build_backend_from_env(
-        {"AGENT_SANDBOX_BACKEND": "kata", "AGENT_SANDBOX_IMAGE": "img:1", **_NET_ENV}
-    )
-    monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox_network.ChatSandboxNetwork.relay_addresses",
-        lambda self, network: {"agent-gateway": "10.2.0.2"},
-    )
-    calls = _probe_returns(monkeypatch, "ok")
-
-    backend.check_gateway_reachable("http://agent-gateway:8080")
-
-    runs = [argv for argv in calls if argv[1] == "run"]
-    assert len(runs) == 1
-    assert runs[0][runs[0].index("--runtime") + 1] == KATA_RUNTIME
-    assert "agent-gateway=10.2.0.2" in runs[0]
-
-
 def _probe_returns(monkeypatch, verdict: str) -> list[list[str]]:
     """Stub the probe container, capturing the argv it would have run."""
     calls: list[list[str]] = []
@@ -532,72 +506,6 @@ def _probe_returns(monkeypatch, verdict: str) -> list[list[str]]:
 
     monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
     return calls
-
-
-def test_a_reachable_gateway_passes(monkeypatch):
-    calls = _probe_returns(monkeypatch, "ok")
-    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
-
-    backend.check_gateway_reachable("http://agent-gateway:8080")
-
-    argv = calls[0]
-    assert argv[:2] == ["docker", "run"]
-    assert argv[argv.index("--network") + 1] == "agent-relays"
-    # The probe URL is passed as an argument, never interpolated into the
-    # script: it comes from configuration and ends up inside a shell.
-    assert "http://agent-gateway:8080/health" in argv
-
-
-def test_a_name_that_does_not_resolve_names_the_remote_gateway_case(monkeypatch):
-    _probe_returns(monkeypatch, "unresolved")
-    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
-
-    with pytest.raises(SandboxError) as excinfo:
-        backend.check_gateway_reachable("http://backend:8080")
-
-    message = str(excinfo.value)
-    assert "cannot resolve" in message
-    assert "relay" in message
-
-
-def test_a_relay_that_resolves_but_cannot_forward_is_caught(monkeypatch):
-    """The regression this check was rewritten for.
-
-    DNS alone passes for anything with a record — including a tunnel container
-    that answers to the gateway's name and cannot reach the gateway behind it.
-    That is exactly the shape of a cross-machine deployment, so the one
-    topology that needed the check hardest was the one it could not see.
-    """
-    _probe_returns(monkeypatch, "unreachable")
-    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
-
-    with pytest.raises(SandboxError) as excinfo:
-        backend.check_gateway_reachable("http://agent-gateway:8080")
-
-    message = str(excinfo.value)
-    assert "no HTTP response" in message
-    assert "cannot reach the gateway behind it" in message
-
-
-def test_an_image_without_curl_or_python_degrades_loudly(monkeypatch, caplog):
-    """A deployment-owned image may have neither. Resolving is all that can be
-    asked of it — but the log must not imply the stronger check ran."""
-    _probe_returns(monkeypatch, "dns-only")
-    backend = ContainerBackend(image="custom:1", sandbox_network=_NETWORK)
-
-    with caplog.at_level(logging.WARNING):
-        backend.check_gateway_reachable("http://agent-gateway:8080")
-
-    assert "agent_sandbox_gateway_probe_degraded" in caplog.text
-
-
-def test_a_base_url_with_no_host_is_not_probed(monkeypatch):
-    calls = _probe_returns(monkeypatch, "ok")
-    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
-
-    backend.check_gateway_reachable("not-a-url")
-
-    assert calls == []
 
 
 def _inspect_json(**overrides):

@@ -71,7 +71,7 @@ def test_translated_codex_runs_behind_the_helper_with_only_a_token():
     argv, env = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="chat-model",
-        gateway_base_url=ResponsesViaChatUrl(_URL),
+        model_base_url=ResponsesViaChatUrl(_URL),
         credential=_KEY,
         session_state_dir="/state/codex",
     )
@@ -98,7 +98,7 @@ def test_direct_codex_is_unchanged_by_translation():
     argv, env = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="gpt-5.1-codex",
-        gateway_base_url=ExactBaseUrl("https://api.example.com/v1"),
+        model_base_url=ExactBaseUrl("https://api.example.com/v1"),
         credential=_KEY,
     )
     assert argv[: len(NATIVE_LAUNCHER) + 1] == [*NATIVE_LAUNCHER, "codex"]
@@ -111,7 +111,7 @@ def test_translated_claude_code_keeps_its_model_slot_behind_the_launcher():
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/workspace",
         model="",
-        gateway_base_url=MessagesViaChatUrl(_URL),
+        model_base_url=MessagesViaChatUrl(_URL),
         credential=_KEY,
         config_dir="/state/claude",
     )
@@ -134,7 +134,7 @@ def test_direct_claude_code_on_messages_is_unchanged():
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/workspace",
         model="",
-        gateway_base_url=MessagesBaseUrl("https://api.anthropic.example/v1"),
+        model_base_url=MessagesBaseUrl("https://api.anthropic.example/v1"),
         credential=_KEY,
     )
     assert argv[0] == "claude" and "--disallowedTools" not in argv
@@ -145,17 +145,17 @@ def test_direct_claude_code_on_messages_is_unchanged():
 @pytest.mark.parametrize("url", [ResponsesViaChatUrl(_URL), MessagesViaChatUrl(_URL)])
 def test_no_chat_runtime_accepts_a_translated_url(runtime, url):
     with pytest.raises(RuntimeConnectionUnsupportedError):
-        runtime.prepare_live(workdir="/w", model="m", gateway_base_url=url, credential=_KEY)
+        runtime.prepare_live(workdir="/w", model="m", model_base_url=url, credential=_KEY)
 
 
 def test_codex_and_claude_refuse_each_others_translation():
     with pytest.raises(RuntimeConnectionUnsupportedError):
         CodexRuntime().prepare_live(
-            workdir="/w", model="m", gateway_base_url=MessagesViaChatUrl(_URL), credential=_KEY
+            workdir="/w", model="m", model_base_url=MessagesViaChatUrl(_URL), credential=_KEY
         )
     with pytest.raises(RuntimeConnectionUnsupportedError):
         ClaudeCodeRuntime().prepare_live(
-            workdir="/w", model="", gateway_base_url=ResponsesViaChatUrl(_URL), credential=_KEY
+            workdir="/w", model="", model_base_url=ResponsesViaChatUrl(_URL), credential=_KEY
         )
 
 
@@ -184,7 +184,6 @@ def test_the_claim_masks_this_members_token_with_the_key():
             "runtime": "codex",
             "model": "chat-model",
             "worker_token": "w",
-            "sandbox_token": "",
             "model_connection": access.model_dump(),
         }
     )
@@ -228,7 +227,6 @@ def test_the_launch_fields_carry_the_client_protocol_and_token_only_when_transla
 
 
 def test_the_sandbox_manager_carries_the_plan_into_the_member_identity(monkeypatch):
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://10.0.0.1:8080")
     body = SharedResidentLaunchConfig(
         runtime_id="codex",
         model="chat-model",
@@ -253,7 +251,7 @@ def test_the_sandbox_manager_carries_the_plan_into_the_member_identity(monkeypat
     # A token the process does not hold (a rotated platform key, say) restarts
     # it, so a live process never emits a token this turn does not mask.
     assert not transport.compatible_with(replace(launch, inference_local_token="d" * 64))
-    with pytest.raises(ValueError, match="translated launch"):
+    with pytest.raises(ValueError, match="owner's model connection"):
         replace(launch, inference_source="", inference_base_url="", inference_protocol="")
     with pytest.raises(ValueError, match="token"):
         replace(launch, inference_local_token="")

@@ -1,4 +1,4 @@
-"""Owner-only display profile editing and read-only Gateway email."""
+"""Owner-only display profile editing and the account's read-only email."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from cloud_agent.accounts.directory import LocalOwnerDirectory, OwnerDirectoryError
 from cloud_agent.api._body_limits import payload_too_large, read_bounded_body
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._sensitive_routes import SensitiveRoute
-from cloud_agent.api.deps import get_gateway_client, get_storage, require_store
-from cloud_agent.gateway import GatewayClient, GatewayError
+from cloud_agent.api.deps import get_owner_directory, get_storage, require_store
 from cloud_agent.user_avatar import generate_user_avatar
 from cloud_agent.user_profile import (
     MAX_PROFILE_REQUEST_BYTES,
@@ -71,10 +71,10 @@ def _response(saved: ProfileView, *, user_id: str, email: str) -> ProfileRespons
     )
 
 
-async def _email(gateway: GatewayClient, user_id: str) -> str:
+async def _email(owners: LocalOwnerDirectory, user_id: str) -> str:
     try:
-        return await gateway.user_email(user_id)
-    except GatewayError:
+        return await owners.user_email(user_id)
+    except OwnerDirectoryError:
         raise HTTPException(
             503, "Account email is temporarily unavailable. Please try again."
         ) from None
@@ -84,11 +84,11 @@ async def _email(gateway: GatewayClient, user_id: str) -> str:
 async def read_profile(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ProfileStorage | None = Depends(get_storage),
-    gateway: GatewayClient = Depends(get_gateway_client),
+    owners: LocalOwnerDirectory = Depends(get_owner_directory),
 ) -> ProfileResponse:
     """Read the signed-in owner's display profile and current account email."""
     saved = await require_store(store).user_profile.get_user_profile(user_id=user["user_id"])
-    email = await _email(gateway, user["user_id"])
+    email = await _email(owners, user["user_id"])
     return _response(saved, user_id=user["user_id"], email=email)
 
 
@@ -97,7 +97,7 @@ async def save_profile(
     body: UpdateProfile,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ProfileStorage | None = Depends(get_storage),
-    gateway: GatewayClient = Depends(get_gateway_client),
+    owners: LocalOwnerDirectory = Depends(get_owner_directory),
 ) -> ProfileResponse:
     """Persist names and a sanitized picture at the profile revision the owner read."""
     image = body.image_data_url
@@ -108,7 +108,7 @@ async def save_profile(
             raise HTTPException(422, str(exc)) from None
     # Resolve the read-only field before writing, so an upstream failure cannot
     # report a failed save after having committed the owner's draft.
-    email = await _email(gateway, user["user_id"])
+    email = await _email(owners, user["user_id"])
     try:
         saved = await require_store(store).user_profile.save_user_profile(
             user_id=user["user_id"],

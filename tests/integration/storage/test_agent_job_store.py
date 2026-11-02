@@ -1733,19 +1733,9 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         ttl_seconds=120,
     )
     assert residencies is not None
-    assert await store.grants.link_residency_grant(
-        thread_id=residencies["source"]["thread_id"],
-        generation=residencies["source"]["generation"],
-        grant_id="grant-source-first",
-    )
-    assert await store.grants.link_residency_grant(
-        thread_id=residencies["target"]["thread_id"],
-        generation=residencies["target"]["generation"],
-        grant_id="grant-target-first",
-    )
     # A heartbeat can have sampled STOPPED immediately before this fork
     # rotated the source residency. Its release must share the durable
-    # operation fence or it can revoke the brand-new source process grant.
+    # operation fence or it can end the brand-new source process's residency.
     assert (
         await store.residency.release_shared_residency_if_quiescent(
             thread_id=residencies["source"]["thread_id"],
@@ -1763,7 +1753,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
             host="shared-runner",
             ttl_seconds=120,
         )
-        == "grant-source-first"
+        == ""
     )
     retried_residencies = await store.session_fork.establish_session_fork_residencies(
         operation_id=operation["id"],
@@ -1773,8 +1763,6 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert retried_residencies is not None
     assert retried_residencies["source"]["generation"] == residencies["source"]["generation"] + 1
     assert retried_residencies["target"]["generation"] == residencies["target"]["generation"] + 1
-    assert retried_residencies["source"]["previous_grant_id"] == "grant-source-first"
-    assert retried_residencies["target"]["previous_grant_id"] == "grant-target-first"
     residencies = retried_residencies
     receipt = {
         "operation_id": operation["id"],
@@ -4907,11 +4895,6 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
         sandbox_id=sandbox["sandbox_id"],
         residency_generation=residency["generation"],
     )
-    assert await store.grants.link_residency_grant(
-        thread_id=job["thread_id"],
-        generation=residency["generation"],
-        grant_id="grant-shared-expired",
-    )
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence,
         residency_generation=residency["generation"],
@@ -4951,7 +4934,8 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
                 "thread_id": job["thread_id"],
                 "generation": residency["generation"],
                 "host": "shared-runner",
-                "grant_id": "grant-shared-expired",
+                # No platform grant: turns run on the owner's connection key.
+                "grant_id": None,
             },
         }
     ]

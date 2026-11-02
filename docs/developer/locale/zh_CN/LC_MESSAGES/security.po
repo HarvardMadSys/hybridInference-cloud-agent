@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"POT-Creation-Date: 2026-10-30 22:23-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -49,38 +49,40 @@ msgid ""
 msgstr "本仓库中的控制平面、Web 应用、runner 主机和沙箱镜像。"
 
 #: ../../SECURITY.md:16
-msgid ""
-"The HTTP contracts under `gateway_contracts/`, as consumed by this "
-"service."
-msgstr "`gateway_contracts/` 下的 HTTP 契约，仅限本服务使用它们的方式。"
+msgid "The account system, its sessions and its waiting list."
+msgstr "账号系统、它的会话和等候名单。"
 
-#: ../../SECURITY.md:18
-msgid ""
-"The gateway that this service authenticates against is a separate "
-"project: HybridInference. Report gateway issues there."
-msgstr "本服务依赖网关做身份验证，但网关属于另一个项目 HybridInference。网关的问题请到那边报告。"
+#: ../../SECURITY.md:17
+msgid "The committed API contract under `api_contracts/`."
+msgstr "`api_contracts/` 下已提交的 API 契约。"
 
-#: ../../SECURITY.md:21
+#: ../../SECURITY.md:19
+msgid ""
+"A model provider that owners connect is not part of this service; report "
+"a provider's issues to that provider."
+msgstr "所有者接入的模型服务商不属于本服务；服务商的问题请向该服务商报告。"
+
+#: ../../SECURITY.md:22
 msgid "What a deployment must not assume"
 msgstr "部署时不能想当然的地方"
 
-#: ../../SECURITY.md:23
+#: ../../SECURITY.md:24
 msgid ""
 "`AGENTS.md` and `docs/developer/operations.md` describe the threat model "
 "for this service. Two deployment requirements bear repeating:"
 msgstr "本服务的威胁模型写在 `AGENTS.md` 和 `docs/developer/operations.md` 里。有两条部署要求，这里再强调一遍："
 
-#: ../../SECURITY.md:26
+#: ../../SECURITY.md:27
 msgid ""
 "The plain Docker runner profile isolates trusted repositories from each "
 "other. It does not isolate hostile code from the host. Do not offer it to"
 " untrusted users."
 msgstr "普通 Docker 的 runner 配置只能把受信任的仓库彼此隔开，挡不住恶意代码攻击主机。不要把它开放给不受信任的用户。"
 
-#: ../../SECURITY.md:29
+#: ../../SECURITY.md:30
 msgid ""
-"The sandbox never holds a long-lived gateway credential. It receives a "
-"short-lived, job-scoped grant. Putting an admin token into a sandbox "
-"removes the security property that this design rests on."
-msgstr "沙箱里永远不放长期有效的网关凭据，只拿到一个短期、仅限当前任务的授权。一旦把管理员令牌放进沙箱，这套设计赖以成立的安全前提就不存在了。"
-
+"The sandbox never holds a platform or administration credential. It holds"
+" the owner's own provider key for the turn it runs, and short-lived "
+"scoped tokens. Putting an admin token into a sandbox removes the security"
+" property that this design rests on."
+msgstr "沙箱从不持有平台或管理凭据。它只在运行某一轮时持有所有者自己的服务商密钥，以及短期、限定范围的令牌。把管理员令牌放进沙箱，就会破坏这个设计赖以成立的安全性质。"

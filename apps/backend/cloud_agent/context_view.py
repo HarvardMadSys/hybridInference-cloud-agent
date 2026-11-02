@@ -104,7 +104,7 @@ class ContextPoint(BaseModel):
     #: the same attempt (or the attempt's last event), as the platform received them.
     step_ms: int | None = None
     #: The provider's id for this response where the CLI reported it (Claude
-    #: Code): the key the Gateway's request timing joins on.
+    #: Code): the key a recorded request's timing would join on.
     usage_id: str | None = None
 
 

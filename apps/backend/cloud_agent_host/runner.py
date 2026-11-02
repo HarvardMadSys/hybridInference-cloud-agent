@@ -120,6 +120,7 @@ from cloud_agent_host.measurement_delivery import (
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
+from cloud_agent_host.retired_configuration import refuse_retired_host_configuration
 from cloud_agent_host.runner_stop import (
     STOPPING as _STOPPING,
     drain_on_sigterm as _drain_on_sigterm,
@@ -2008,7 +2009,6 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
     heart: Heartbeater,
     backend: SandboxBackend,
     host: str | None,
-    gateway_base_url: str,
     agent_timeout_s: float,
     finish_attempt: Any,
     measurement: operation_profiling.Measurement | None = None,
@@ -2664,7 +2664,6 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             native_session_id=native_session_id,
             model=job.model,
             reasoning_effort=job.reasoning_effort,
-            gateway_base_url=gateway_base_url,
             credential=None,
             github_token=job.github_token,
             environment=job.environment,
@@ -3017,7 +3016,6 @@ def run_turn(
     job: ClaimedJob,
     *,
     base_url: str,
-    gateway_url: str = "",
     worker_id: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
@@ -3037,7 +3035,6 @@ def run_turn(
         return _run_turn(
             job,
             base_url=base_url,
-            gateway_url=gateway_url,
             worker_id=worker_id,
             lease_ttl=lease_ttl,
             agent_timeout_s=agent_timeout_s,
@@ -3235,7 +3232,6 @@ def _run_turn(
     job: ClaimedJob,
     *,
     base_url: str,
-    gateway_url: str = "",
     worker_id: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
@@ -3308,7 +3304,6 @@ def _run_turn(
             heart=heart,
             backend=backend,
             host=host,
-            gateway_base_url=gateway_url,
             agent_timeout_s=agent_timeout_s,
             finish_attempt=control.finish,
             measurement=measurement,
@@ -3438,7 +3433,6 @@ def _spawn_turn(
     payload: dict[str, Any],
     *,
     base_url: str,
-    gateway_url: str,
     worker_id: str,
     lease_ttl: float,
     agent_timeout_s: float,
@@ -3455,7 +3449,6 @@ def _spawn_turn(
     return spawn_turn(
         payload,
         base_url=base_url,
-        gateway_url=gateway_url,
         worker_id=worker_id,
         lease_ttl=lease_ttl,
         agent_timeout_s=agent_timeout_s,
@@ -3470,7 +3463,6 @@ def _serve_turn(
     *,
     handover_fd: int,
     base_url: str,
-    gateway_url: str,
     worker_id: str,
     lease_ttl: float,
     agent_timeout_s: float,
@@ -3568,7 +3560,6 @@ def _serve_turn(
     return run_turn(
         job,
         base_url=base_url,
-        gateway_url=gateway_url,
         worker_id=handed_worker_id(payload, worker_id),
         lease_ttl=lease_ttl,
         agent_timeout_s=host_settings.get("agent_timeout_s", agent_timeout_s),
@@ -3582,7 +3573,6 @@ def _serve_turn(
 def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     base_url: str,
-    gateway_url: str = "",
     worker_id: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
@@ -3623,10 +3613,6 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         qualification.backend.check_network()
     else:
         backend.preflight()
-
-    checker = getattr(backend, "check_gateway_reachable", None)
-    if checker is not None:
-        checker(gateway_url or base_url)
 
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
@@ -3672,7 +3658,6 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     # starts one, so a host given its own launcher never has one.
     spare = TurnSpare(
         base_url=base_url,
-        gateway_url=gateway_url or base_url,
         worker_id=worker_id,
         lease_ttl=lease_ttl,
         agent_timeout_s=agent_timeout_s,
@@ -3682,7 +3667,6 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         lambda payload: _spawn_turn(
             payload,
             base_url=base_url,
-            gateway_url=gateway_url or base_url,
             worker_id=str(payload.get("_worker_id") or worker_id),
             lease_ttl=lease_ttl,
             agent_timeout_s=agent_timeout_s,
@@ -4580,26 +4564,12 @@ def build_parser() -> argparse.ArgumentParser:
     a runner container crash-loops.
     """
     parser = argparse.ArgumentParser(description="Run queued agent jobs.")
-    # **Two origins, and after the split they are two services.** The runner
-    # claims work, reports events and renews its lease against this *control
-    # plane*; the sandbox calls models against the *gateway*. They were one
-    # value while the agent lived inside the gateway, and pointing that single
-    # value at either service after the split breaks whichever half it is not.
-    #
-    # `AGENT_CONTROL_PLANE_URL` falls back to the gateway URL so a host that
-    # has not been reconfigured keeps behaving exactly as it did — wrong in the
-    # same way as before rather than newly broken, which is the only safe
-    # default while both shapes are deployed.
+    # The control plane is the only origin a host is configured with; owners
+    # supply their own inference connections.
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("AGENT_CONTROL_PLANE_URL")
-        or os.environ.get("AGENT_GATEWAY_URL", ""),
+        default=os.environ.get("AGENT_CONTROL_PLANE_URL", ""),
         help="Control plane: claim, heartbeat, events, lifecycle, terminals.",
-    )
-    parser.add_argument(
-        "--gateway-url",
-        default=os.environ.get("AGENT_GATEWAY_URL", ""),
-        help="Inference gateway, as the sandbox reaches it. Model calls only.",
     )
     parser.add_argument("--worker-id", default=default_worker_id())
     parser.add_argument(
@@ -4647,8 +4617,12 @@ def main(argv: list[str] | None = None) -> int:
     # nowhere.
     configure_process_logging()
 
+    try:
+        refuse_retired_host_configuration()
+    except ValueError as exc:
+        parser.error(str(exc))
     if not args.base_url:
-        parser.error("AGENT_CONTROL_PLANE_URL (or AGENT_GATEWAY_URL) is required")
+        parser.error("AGENT_CONTROL_PLANE_URL is required")
 
     if args.turn:
         if args.handover_fd is None:
@@ -4656,7 +4630,6 @@ def main(argv: list[str] | None = None) -> int:
         return _serve_turn(
             handover_fd=args.handover_fd,
             base_url=args.base_url,
-            gateway_url=args.gateway_url or args.base_url,
             worker_id=args.worker_id,
             lease_ttl=args.lease_ttl,
             agent_timeout_s=args.agent_timeout,
@@ -4667,7 +4640,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--spare is a turn process's flag; the host service supplies it with --turn")
     return run_forever(
         base_url=args.base_url,
-        gateway_url=args.gateway_url or args.base_url,
         worker_id=args.worker_id,
         lease_ttl=args.lease_ttl,
         agent_timeout_s=args.agent_timeout,

@@ -277,7 +277,7 @@ class ConversationContext(BaseModel):
     #: The largest window a CLI reported for these runs; None when none did.
     context_window: int | None = None
     compactions: int = Field(ge=0)
-    #: Gateway-recorded usage and cost of these runs, summed by the server.
+    #: Agent-reported usage of these runs, summed by the server; no cost is known.
     usage: AdminUsageAggregate | None = None
     #: Recorded content and reported request sizes of these runs.
     composition: ContextComposition | None = None

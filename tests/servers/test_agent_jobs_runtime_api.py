@@ -7,6 +7,7 @@ telemetry and session lifecycle independently schedulable.
 from __future__ import annotations
 
 import hashlib
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import call
 
@@ -24,9 +25,7 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     _api_key_secret,
     _attach_shared_workspace,
     _build_app,
-    _configured_identity_issuer,
     _create_job,
-    _FakeGrants,
     _next_turn,
     _send,
     _thread_of,
@@ -37,10 +36,10 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     pytest,
     sandbox_manager_routing,
     store,
-    timedelta,
     worker,
 )
 from tests.servers.test_agent_jobs_mcp_api import _binding, _job_body
+from tests.support.owners import connection_claim, on_connection
 
 from cloud_agent.application.follow_ups import PreparedFollowUp
 
@@ -50,7 +49,9 @@ pytestmark = pytest.mark.asyncio
 async def test_the_owner_sees_what_their_turn_consumed(client: AsyncClient, store: FakeStorage):
     """The footer's numbers, end to end: runner posts, owner reads."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
 
     ack = await client.post(
@@ -84,7 +85,9 @@ async def test_shared_member_accounting_refuses_container_attribution(
     charge one chat for the other's work.
     """
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     endpoint = f"/v1/agent/worker/jobs/{job_id}/resources"
     base = {
@@ -140,7 +143,9 @@ async def test_resource_sequences_and_process_references_are_consistent(
 ):
     """Malformed worker evidence is a 422, never a database primary-key 500."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     endpoint = f"/v1/agent/worker/jobs/{job_id}/resources"
     call = {
@@ -193,7 +198,9 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
     the store can see.
     """
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
 
     ack = await client.post(
@@ -307,7 +314,9 @@ async def test_a_turn_with_no_per_call_rows_reads_as_an_empty_list(
 ):
     """Every turn recorded before this shipped, and every unmeasured one."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     await client.post(
         f"/v1/agent/worker/jobs/{job_id}/resources",
@@ -327,7 +336,9 @@ async def test_more_calls_than_the_cap_are_refused_rather_than_truncated_server_
 ):
     """The runner caps and flags; the server must not quietly cap a second time."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
 
     response = await client.post(
@@ -350,7 +361,9 @@ async def test_a_rollup_is_the_same_window_said_twice_not_two_windows(
 ):
     """Retrying the post must not double a turn's consumption."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     body = {"cpu_usec": 1_000, "sample_count": 5, "coverage": 1.0, "sampler_version": "1"}
 
@@ -366,7 +379,9 @@ async def test_a_superseded_attempt_cannot_relabel_what_the_live_one_used(
 ):
     """Fenced like every other worker write."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     # A takeover moves the fence to a new attempt generation.
     store.live_fence = (101, 2)
@@ -435,7 +450,9 @@ async def test_a_turn_resource_snapshot_is_acknowledged_and_its_retry_too(
 ):
     """An acknowledged checkpoint whose response was lost must be safe to resend."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     endpoint = f"/v1/agent/worker/jobs/{job_id}/turn-resources"
     body = _turn_resources_body(report_seq=2)
@@ -455,7 +472,9 @@ async def test_a_stale_or_disagreeing_snapshot_is_refused_with_409(
 ):
     """``conflict`` is not ``lease_lost``: the worker keeps going, the post does not."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     endpoint = f"/v1/agent/worker/jobs/{job_id}/turn-resources"
     assert (
@@ -479,7 +498,9 @@ async def test_a_superseded_attempt_cannot_file_a_turn_resource_snapshot(
 ):
     """The fence is the same one every other worker write uses."""
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     store.live_fence = (101, 2)
 
@@ -504,7 +525,9 @@ async def test_an_oversized_turn_resource_snapshot_is_refused_before_parsing(
     only correct answer is 413: the contract bounds the payload itself.
     """
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     body = _turn_resources_body()
     body["padding"] = "x" * (16 * 1024)
@@ -527,7 +550,9 @@ async def test_a_turn_resource_response_never_echoes_body_identity(
     caller's own fenced attempt and answered with no identity at all.
     """
     job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     body = _turn_resources_body()
     body.update({"attempt_id": 999, "lease_generation": 7, "job_id": "ajob_someone_else"})
@@ -747,41 +772,6 @@ async def test_attempt_telemetry_is_fenced_to_the_owned_job(
 # ── Reasoning effort ───────────────────────────────────────────────────
 
 
-async def test_effort_is_offered_only_where_runtime_and_model_both_deliver(client: AsyncClient):
-    """The composer is told both halves; it offers their intersection."""
-    config = (await client.get("/v1/agent/config")).json()
-
-    # claude-code can express effort; the Tier 2 runtimes cannot, and are
-    # absent rather than listed with an empty vocabulary.
-    # The raw capability, still the CLI's own vocabulary — the composer
-    # narrows it to the platform list rather than the backend pre-chewing it.
-    assert config["runtime_reasoning_efforts"]["claude-code"] == [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    ]
-    assert config["runtime_reasoning_efforts"]["codex"][:3] == ["none", "minimal", "low"]
-    assert config["runtime_reasoning_efforts"]["pi"] == ["minimal", "low", "medium", "high"]
-    assert config["model_reasoning_efforts"] == {"glm-5.1": ["low", "high", "max"]}
-
-
-async def test_a_turn_records_the_effort_it_was_created_with(client: AsyncClient):
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "high",
-        },
-    )
-
-    assert response.status_code == 201, response.text
-    assert response.json()["reasoning_effort"] == "high"
-
-
 async def test_a_turn_without_an_effort_is_auto(client: AsyncClient):
     """Auto is null, and null is what every turn before this control reports."""
     job_id = await _create_job(client)
@@ -791,175 +781,19 @@ async def test_a_turn_without_an_effort_is_auto(client: AsyncClient):
     assert job["reasoning_effort"] is None
 
 
-async def test_a_level_outside_the_platform_list_is_refused(client: AsyncClient):
-    """``xhigh`` is a real claude-code level, and not one this platform offers.
-
-    Refused rather than clamped to a neighbour: a turn served at a depth
-    nobody chose, while reporting the one they did, is the same lie as a flag
-    that resolves to nothing.
-    """
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "xhigh",
-        },
-    )
-
-    assert response.status_code == 400
-    detail = response.json()["detail"]["error"]
-    assert detail["type"] == "reasoning_effort_not_available"
-    # The refusal names what *is* available, so the caller can retry once.
-    assert "low, medium, high, max" in detail["message"]
-
-
-async def test_the_platform_list_is_offered_whatever_the_model_documents(
-    client: AsyncClient,
-):
-    """The model entry is a yes/no, not a vocabulary.
-
-    Per-model domains were withdrawn because the providers' docs disagreed
-    with their own APIs, so a level the platform offers is accepted for any
-    model that takes the parameter at all — `medium` here, which this
-    fixture's model does not list.
-    """
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "medium",
-        },
-    )
-
-    assert response.status_code == 201, response.text
-    assert response.json()["reasoning_effort"] == "medium"
-
-
-async def test_an_effort_on_a_model_that_takes_none_is_refused(client: AsyncClient):
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "qwen-next",
-            "reasoning_effort": "high",
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["message"].endswith("Available: none.")
-
-
-async def test_a_follow_up_inherits_the_efforts_of_the_turn_before_it(
-    client: AsyncClient, store: FakeStorage
-):
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "high",
-        },
-    )
-    parent_id = created.json()["id"]
-
-    inherited = await _next_turn(client, store, parent_id, {"prompt": "keep going"})
-    assert inherited["reasoning_effort"] == "high"
-
-    switched = await _next_turn(
-        client, store, inherited["id"], {"prompt": "now the easy bit", "reasoning_effort": "low"}
-    )
-    assert switched["reasoning_effort"] == "low"
-
-
-async def test_a_follow_up_can_reset_an_inherited_effort_to_auto(
-    client: AsyncClient, store: FakeStorage
-):
-    """Null already means "inherit", so clearing takes the explicit sentinel."""
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "max",
-        },
-    )
-    parent_id = created.json()["id"]
-
-    reset = await _next_turn(
-        client, store, parent_id, {"prompt": "back to normal", "reasoning_effort": "auto"}
-    )
-
-    assert reset["reasoning_effort"] is None
-
-
-async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
-    client: AsyncClient, store: FakeStorage
-):
-    """A pair offered last turn need not be offered this one."""
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "high",
-        },
-    )
-    parent_id = created.json()["id"]
-
-    response = await _send(
-        client,
-        store,
-        parent_id,
-        {"prompt": "switch", "model": "qwen-next", "reasoning_effort": "high"},
-    )
-
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
-    assert store.pending == {}
-
-
-async def test_a_level_the_runtime_cannot_express_is_refused_at_create(client: AsyncClient):
-    """The other half of the intersection: the model takes it, the CLI cannot say it.
-
-    pi reaches the wire with four of its six flag levels — `xhigh` arrives as
-    `high` and `off` sends nothing — so offering `xhigh` would hand someone a
-    depth this runtime cannot actually ask for. The refusal belongs here,
-    before the job exists.
-    """
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "runtime": "pi",
-            "model": "glm-5.1",
-            "reasoning_effort": "xhigh",
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
-
-
 async def test_every_runtime_still_takes_ordinary_turns(client: AsyncClient):
     """And nothing else about them changed: Auto is every turn they ever ran."""
     for runtime in ("pi", "opencode", "kilo", "codex"):
         response = await client.post(
             "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "runtime": runtime,
-                "model": "glm-5.1",
-            },
+            json=on_connection(
+                {
+                    "repo": "owner/name",
+                    "task_prompt": "fix it",
+                    "runtime": runtime,
+                    "model": "glm-5.1",
+                }
+            ),
         )
         assert response.status_code == 201, f"{runtime}: {response.text}"
         assert response.json()["reasoning_effort"] is None
@@ -970,7 +804,9 @@ async def test_a_thread_read_returns_what_earlier_turns_did(
 ):
     """A follow-up must not make the previous turn's tool activity unreachable."""
     first_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     await client.post(
         f"/v1/agent/worker/jobs/{first_id}/events",
@@ -1167,20 +1003,7 @@ async def test_session_delete_revokes_and_closes_released_residencies(
     )
     monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_host", lambda host: manager)
 
-    class RecordingGrants(_FakeGrants):
-        def __init__(self) -> None:
-            super().__init__()
-            self.revoked: list[str] = []
-
-        async def revoke(self, grant_id: str) -> bool:
-            self.revoked.append(grant_id)
-            return True
-
-    grants = RecordingGrants()
     app = _build_app(store)
-    from cloud_agent.api.deps import get_grant_client
-
-    app.dependency_overrides[get_grant_client] = lambda: grants
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
@@ -1190,7 +1013,6 @@ async def test_session_delete_revokes_and_closes_released_residencies(
     # process on its next residency heartbeat instead.
     assert response.status_code == 200
     assert response.json() == {"thread_ids": ["athr_1", "athr_2"]}
-    assert grants.revoked == ["agr_1"]
     # Rows are closed concurrently, so only the set of calls is fixed.
     assert sorted(manager.shared_residency_lost.await_args_list, key=lambda made: made.args[0]) == [
         call("athr_1", generation=4),
@@ -1233,20 +1055,7 @@ async def test_session_delete_does_not_wait_on_a_host_that_never_answers(
     manager = SimpleNamespace(shared_residency_lost=AsyncMock(side_effect=silent))
     monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_host", lambda host: manager)
 
-    class RecordingGrants(_FakeGrants):
-        def __init__(self) -> None:
-            super().__init__()
-            self.revoked: list[str] = []
-
-        async def revoke(self, grant_id: str) -> bool:
-            self.revoked.append(grant_id)
-            return True
-
-    grants = RecordingGrants()
     app = _build_app(store)
-    from cloud_agent.api.deps import get_grant_client
-
-    app.dependency_overrides[get_grant_client] = lambda: grants
     transport = ASGITransport(app=app)
     loop = asyncio.get_running_loop()
     started = loop.time()
@@ -1259,9 +1068,7 @@ async def test_session_delete_does_not_wait_on_a_host_that_never_answers(
     assert response.json() == {"thread_ids": thread_ids}
     # One deadline for the whole batch, not one per silent host.
     assert loop.time() - started < 2
-    # Every grant is revoked even though no host ever answered and every close
-    # slot stayed taken; at most the bounded number of hosts was being waited on.
-    assert sorted(grants.revoked) == sorted(row["grant_id"] for row in released)
+    # At most the bounded number of hosts was being waited on.
     assert (
         manager.shared_residency_lost.await_count == residency.RELEASED_RESIDENCY_CLOSE_CONCURRENCY
     )
@@ -1500,7 +1307,7 @@ async def test_a_submission_key_reaches_the_store_with_a_fingerprint(
     """The ``Idempotency-Key`` header becomes the job's submission key."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}),
         headers={"Idempotency-Key": "submit-1"},
     )
     assert response.status_code == 201, response.text
@@ -1574,7 +1381,7 @@ async def test_a_reused_key_under_different_content_is_a_409(
     monkeypatch.setattr(store, "create_job", conflict)
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}),
         headers={"Idempotency-Key": "submit-1"},
     )
     assert response.status_code == 409
@@ -1689,7 +1496,7 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
     monkeypatch.setattr(store, "select_skills", lookup)
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        json=on_connection({"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"}),
         headers={"Idempotency-Key": "skill-submit"},
     )
     assert created.status_code == 201, created.text
@@ -1706,12 +1513,12 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
     lookup.reset_mock()
     replay = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        json=on_connection({"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"}),
         headers={"Idempotency-Key": "skill-submit"},
     )
     assert replay.json()["id"] == job["id"]
     lookup.assert_not_awaited()
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     assert claim.status_code == 200, claim.text
     assert "Inspect tests and edge cases." in claim.json()["task_prompt"]
     assert "A later edit." not in claim.json()["task_prompt"]
@@ -1733,12 +1540,14 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
 async def test_invalid_skill_selections_never_create_jobs(client, store, selection, status):
     result = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "model": "glm-5.1",
-            "task_prompt": "fix it",
-            "skill_ids": selection,
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "model": "glm-5.1",
+                "task_prompt": "fix it",
+                "skill_ids": selection,
+            }
+        ),
     )
     assert result.status_code == status
     assert not store.jobs
@@ -1754,7 +1563,9 @@ async def test_a_turn_that_never_started_goes_back_to_the_queue(store: FakeStora
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "worker-1"})
+        )
         auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
         released = await client.post(
@@ -1784,7 +1595,9 @@ async def test_a_turn_that_started_cannot_be_returned(store: FakeStorage):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "worker-1"})
+        )
         auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
         store.jobs[job_id]["admitted"] = True
 
@@ -1805,7 +1618,9 @@ async def test_returning_a_turn_needs_that_turn_own_worker_token(store: FakeStor
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
-        await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
+        await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "worker-1"})
+        )
 
         unauthenticated = await client.post(
             f"/v1/agent/worker/jobs/{job_id}/release", json={"reason": "launch_failed"}
@@ -1825,7 +1640,9 @@ async def test_a_release_reason_outside_the_audit_vocabulary_is_refused(
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "worker-1"})
+        )
         auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
         refused = await client.post(
@@ -1917,7 +1734,8 @@ async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
     app = _build_app(store, claim_auth=True)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as runner:
         claimed = await runner.post(
-            "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
+            "/v1/agent/worker/claim",
+            json=connection_claim({"worker_id": "w-1", "lease_ttl_seconds": 60}),
         )
     assert claimed.status_code == 200, claimed.text
     assert claimed.json()["mcp_bindings"] == [
@@ -1942,10 +1760,10 @@ async def test_claim_puts_durable_memories_with_their_ids_before_the_task(
     monkeypatch.setattr(store, "mark_memories_used", mark, raising=False)
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        json=on_connection({"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"}),
     )
     assert created.status_code == 201, created.text
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     assert claim.status_code == 200, claim.text
     prompt = claim.json()["task_prompt"]
     read.assert_awaited_once_with(_OWNER, "owner/name")
@@ -1962,9 +1780,9 @@ async def test_unavailable_durable_memory_never_blocks_a_claim(client, store, mo
     )
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        json=on_connection({"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"}),
     )
     assert created.status_code == 201, created.text
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     assert claim.status_code == 200, claim.text
     assert claim.json()["task_prompt"] == "fix it"

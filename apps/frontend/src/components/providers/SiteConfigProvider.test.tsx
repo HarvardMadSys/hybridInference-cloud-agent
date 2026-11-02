@@ -13,13 +13,12 @@ import { NEUTRAL_SITE_CONFIG, type RuntimeSiteConfig } from '@/config/site';
 import { SiteConfigProvider, useSiteConfig } from './SiteConfigProvider';
 
 function Probe() {
-  const { branding, features } = useSiteConfig();
+  const { branding } = useSiteConfig();
   return (
     <dl>
       <dd data-testid="app-name">{branding.appName}</dd>
       <dd data-testid="org-name">{branding.orgName}</dd>
-      <dd data-testid="gateway-url">{branding.gatewayUrl}</dd>
-      <dd data-testid="rag">{String(features.rag)}</dd>
+      <dd data-testid="docs-url">{branding.docsUrl}</dd>
     </dl>
   );
 }
@@ -32,9 +31,7 @@ const CONFIG: RuntimeSiteConfig = {
     statusUrl: 'https://status.acme.example',
     docsUrl: 'https://docs.acme.example/agents/',
     contactUrl: 'mailto:support@acme.example',
-    gatewayUrl: 'https://gateway.acme.example',
   },
-  features: { rag: true },
 };
 
 afterEach(cleanup);
@@ -49,8 +46,7 @@ describe('SiteConfigProvider', () => {
 
     expect(screen.getByTestId('app-name')).toHaveTextContent('Acme Agents');
     expect(screen.getByTestId('org-name')).toHaveTextContent('Acme Research');
-    expect(screen.getByTestId('gateway-url')).toHaveTextContent('https://gateway.acme.example');
-    expect(screen.getByTestId('rag')).toHaveTextContent('true');
+    expect(screen.getByTestId('docs-url')).toHaveTextContent('https://docs.acme.example/agents/');
   });
 
   it('shows the neutral identity when no provider is above it', () => {
@@ -59,7 +55,6 @@ describe('SiteConfigProvider', () => {
     render(<Probe />);
 
     expect(screen.getByTestId('app-name')).toHaveTextContent(NEUTRAL_SITE_CONFIG.branding.appName);
-    expect(screen.getByTestId('gateway-url')).toHaveTextContent('');
-    expect(screen.getByTestId('rag')).toHaveTextContent('false');
+    expect(screen.getByTestId('docs-url')).toHaveTextContent('');
   });
 });

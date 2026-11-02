@@ -915,11 +915,10 @@ class PostgresSnapshotRepository:
                              AND member.resident_slot_id IS NOT NULL
                        ), '[]'::jsonb) AS members,
                        j.thread_id, j.parent_job_id, j.user_id, t.repo,
-                       j.task_prompt, j.metadata, j.model,
+                       j.task_prompt, j.metadata, j.model, j.model_connection_id,
                        prior.published_pr_url AS parent_pr_url,
-                       -- The release before 0081 recorded its pushes in
-                       -- published_commit_sha, and keeps doing so until it is
-                       -- replaced, after the migration ran: read both.
+                       -- The release before 0081 recorded its pushes in published_commit_sha,
+                       -- and keeps doing so until replaced, after the migration ran: read both.
                        COALESCE((
                            SELECT jsonb_agg(DISTINCT own.sha)
                            FROM agent_sandbox_snapshots pushed
@@ -1026,6 +1025,7 @@ class PostgresSnapshotRepository:
                     "base_sha": snapshot["base_sha"],
                     "task_prompt": snapshot["task_prompt"],
                     "model": snapshot["model"],
+                    "model_connection_id": snapshot["model_connection_id"],
                     "metadata": load_json(snapshot["metadata"]),
                     "patch": snapshot["patch"],
                     "own_pushes": load_json(snapshot["own_pushes"]) or [],

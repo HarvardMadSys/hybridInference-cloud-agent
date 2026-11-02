@@ -481,4 +481,3 @@ msgid ""
 msgstr ""
 "连续启动失败时，这台主机会停止认领并逐步拉长重试间隔。心跳会上报 `launch_error`，显示在 Admin → Servers "
 "里这台主机的旁边。"
-

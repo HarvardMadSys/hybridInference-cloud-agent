@@ -449,7 +449,6 @@ def _job(**overrides: Any) -> Any:
             "runtime": "claude-code",
             "model": "m",
             "worker_token": "w",
-            "sandbox_token": "s",
             **overrides,
         }
     )

@@ -6,7 +6,6 @@ setting and owns the stored snapshot, and re-exported from it.
 
 from __future__ import annotations
 
-import ipaddress
 import math
 import re
 from dataclasses import dataclass
@@ -68,13 +67,6 @@ class Setting:
     empty_env_imports: bool = False
     #: A URL the code that uses it requires to be HTTPS, with no query.
     https_only: bool = False
-    #: Where the control plane sends its gateway dispatch token, fetches the
-    #: keys that identity tokens are checked against, or sends a browser to
-    #: sign in. A new value must use HTTPS unless it names this machine or a
-    #: private name (see :func:`_private_host`). A value saved or imported
-    #: before this rule still loads, so an internal plain-HTTP gateway keeps
-    #: working.
-    https_unless_private: bool = False
     #: Also takes ``mailto:`` and one address: a support address is as likely
     #: as a support page. One plain address only: header fields would let the
     #: link prefill a message the user did not write.
@@ -144,15 +136,8 @@ class Setting:
         if self.mailto and value[:7].lower() == "mailto:":
             return bool(_CONTACT_MAILTO.fullmatch(value))
         parsed = _web_url(value)
-        return (
-            parsed is not None
-            and (not self.https_only or (parsed.scheme == "https" and not parsed.query))
-            and (
-                not self.https_unless_private
-                or saved
-                or parsed.scheme == "https"
-                or _private_host(parsed.hostname or "")
-            )
+        return parsed is not None and (
+            not self.https_only or (parsed.scheme == "https" and not parsed.query)
         )
 
     def definition(self) -> dict[str, Any]:
@@ -177,21 +162,6 @@ class Setting:
         return result
 
 
-def _private_host(host: str) -> bool:
-    """Whether plain HTTP to ``host`` stays on this machine or a private network.
-
-    Loopback addresses and ``localhost`` names, and a single-label name such
-    as a Compose service (``local-gateway``), which public DNS cannot answer.
-    """
-    host = host.lower().rstrip(".")
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return bool(host) and "." not in host
-
-
 def _web_url(value: str) -> SplitResult | None:
     """``value`` parsed, if it is an absolute HTTP(S) URL a browser can use as written."""
     if any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value):
@@ -214,25 +184,6 @@ def _web_url(value: str) -> SplitResult | None:
     ):
         return None
     return parsed
-
-
-def _issuer(value: str) -> bool:
-    """Exactly what the Gateway signs: no surrounding space or control characters."""
-    return value == value.strip() and not any(ord(char) < 32 for char in value)
-
-
-def _grant_base_path(value: str) -> bool:
-    """A path prefix the grant clients accept.
-
-    They check it during startup as well as on live requests, so an unusable
-    prefix is refused before it can be saved.
-    """
-    return (
-        value.rstrip("/").startswith("/")
-        and not value.startswith("//")
-        and not any(char in value for char in ("?", "#", "\\"))
-        and not any(char.isspace() or ord(char) < 32 for char in value)
-    )
 
 
 def _s3_bucket(value: str) -> bool:

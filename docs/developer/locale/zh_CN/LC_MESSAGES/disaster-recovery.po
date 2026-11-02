@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-16 06:17-0400\n"
+"POT-Creation-Date: 2026-10-30 22:23-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -323,17 +323,13 @@ msgid ""
 "Verify the selected set's hashes and decryption material. Restore into an"
 " isolated database first, using compatible Postgres and the selected "
 "release. Restore the matching configuration/root keys before starting a "
-"listener. Follow [identity binding](minimal-identity.md) and the existing"
-" [database recovery procedures](operations.md#preserving-an-old-chain-"
-"database) for historical schema chains. Do not improvise an Alembic "
-"downgrade."
-msgstr ""
-"核对所选恢复集的哈希，确认解密材料齐全。先恢复到一个隔离的数据库里，使用兼容版本的 Postgres "
-"和所选的发布。启动任何监听器之前，先恢复对应的配置和根密钥。如果是历史上的旧 schema 链，按[身份绑定](minimal-"
-"identity.md)和已有的[数据库恢复流程](operations.md#preserving-an-old-chain-"
-"database)处理。不要自己临时拼一个 Alembic 降级。"
+"listener. A restored database must be bound to the account system; a "
+"Gateway-era one is refused and stays an archive ([old "
+"databases](operations.md#preserving-an-old-chain-database)). Do not "
+"improvise an Alembic downgrade."
+msgstr "核对所选集合的哈希和解密材料。先用兼容的 Postgres 和所选版本恢复到一个隔离的数据库中。在启动任何监听器之前，恢复对应的配置和根密钥。恢复出的数据库必须绑定到账号系统；Gateway 时代的数据库会被拒绝，并保留为归档（[旧数据库](operations.md#preserving-an-old-chain-database)）。不要临时拼凑 Alembic 降级。"
 
-#: ../developer/disaster-recovery.md:129
+#: ../developer/disaster-recovery.md:130
 msgid ""
 "Restore the complete stopped host state with a compatible Docker/storage "
 "driver and the correct mounts. Check mount availability before starting "
@@ -346,7 +342,7 @@ msgstr ""
 "之前，先确认挂载都在。注册凭据、命名空间和容器 ID "
 "要和原来一致。启动并检查对应的守护进程，但先不接新任务；不要为了让不一致的状态\"看起来干净\"，就去跑通用的 prune 或孤儿清理。"
 
-#: ../developer/disaster-recovery.md:134
+#: ../developer/disaster-recovery.md:135
 msgid ""
 "Compare every retained group's database owner and recorded container "
 "identity with the restored Docker labels. Reconcile stale attempts, "
@@ -357,7 +353,7 @@ msgstr ""
 "把每个保留沙箱组在数据库里记录的所有者和容器身份，和恢复出来的 Docker 标签逐个比对。过期的 "
 "attempt、租约和计算资源操作，走它们各自受支持的恢复路径去调和。容器不见了或凭据对不上，说明恢复卡住了，而不是说明换一台主机就能重建原生会话。"
 
-#: ../developer/disaster-recovery.md:139
+#: ../developer/disaster-recovery.md:140
 msgid ""
 "Run namespace verification and Kata/candidate checks, then use the phased"
 " deployment sequence to bootstrap listeners before host live checks. "
@@ -377,7 +373,7 @@ msgstr ""
 "探测。这样一来，恢复后的数据库里已经排队的工作可能就会开始执行。在完成激活、检查恢复后的系统期间，外部入口一直保持关闭。用几个用完即弃的测试对话，逐项验证：登录、文件访问、保留会话的续接、Fork"
 " 出的独立上下文、排队的轮次、取消、发布，以及主机重启。这些检查和外部的健康、队列监控都通过之后，才重新对生产开放。"
 
-#: ../developer/disaster-recovery.md:151
+#: ../developer/disaster-recovery.md:152
 msgid ""
 "Perform an isolated restore drill quarterly and after changing storage "
 "topology, key handling or deployment protocol. Record the set/release "
@@ -400,11 +396,11 @@ msgstr ""
 "sandboxes)。这时只要它的主机被移出资源池、节点被确认已回收，或者主机在租期结束前迁出，另一台主机就会在这个组的下一轮把它恢复出来。如果源磁盘、它在节点外的副本和所有检查点全都丢了，原生上下文就没办法从"
 " Postgres 里恢复了。"
 
-#: ../developer/disaster-recovery.md:163
+#: ../developer/disaster-recovery.md:164
 msgid "Recover a previous artifact release"
 msgstr "恢复到上一个产物发布"
 
-#: ../developer/disaster-recovery.md:165
+#: ../developer/disaster-recovery.md:166
 msgid ""
 "The host deployer does not automatically restore an older artifact "
 "manifest: it is handed only one release. The consuming distribution must "
@@ -416,7 +412,7 @@ msgstr ""
 "主机部署器不会自动退回到更早的产物清单，因为它每次只拿到一个发布。使用这个发行版的一方必须在 `DEPLOY_ROOT` "
 "之外，和评审过的锁定文件放在一起，保留之前验证过的发布材料。每个发布放进单独的、不再改动的目录；不要用一个失败的候选版本覆盖上一个 recipe。"
 
-#: ../developer/disaster-recovery.md:171
+#: ../developer/disaster-recovery.md:172
 msgid ""
 "Before rollback, verify the previous manifest's pinned hash, the recipe "
 "hash, registry digests/platforms/labels and deployment protocol. Check "
@@ -432,13 +428,13 @@ msgstr ""
 "commit，并确认上一个发布和当前已装的数据库兼容。兼容性记录为空，不能说明可以安全地在线回滚。旧 recipe "
 "不能反向执行迁移，也不能跨过部署协议的栅栏；在线兼容性没有得到证实时，请使用测试过的、停止所有写入后再恢复的流程。"
 
-#: ../developer/disaster-recovery.md:179
+#: ../developer/disaster-recovery.md:180
 msgid ""
 "For a compatible rollback, on **each** machine select its previously "
 "verified directory and stable deployment root:"
 msgstr "确认兼容、准备回滚时，在**每台**机器上指定它之前验证过的发布目录和固定的部署根目录："
 
-#: ../developer/disaster-recovery.md:190
+#: ../developer/disaster-recovery.md:191
 #, python-brace-format
 msgid ""
 "Run the [phased deployment sequence](../../deploy/release/README.md"
@@ -463,7 +459,7 @@ msgstr ""
 "会拒绝执行。所以在决定在线回滚之前，先在隔离环境里对着当前的 schema 验证一遍。不要为了绕过这个拒绝去删除迁移历史或执行 "
 "stamp。也就是说，回滚有可能需要一个专门测试过的兼容 recipe，或者一次完整的停写恢复。"
 
-#: ../developer/disaster-recovery.md:201
+#: ../developer/disaster-recovery.md:202
 msgid ""
 "Read both `.deployed-sha` files and host readiness after success. Record "
 "the incident as a failed candidate rollout even when the previous release"
@@ -473,4 +469,3 @@ msgstr ""
 "完成后，读一下两边的 `.deployed-sha` "
 "文件和主机就绪状态。即使上一个发布已经重新开始服务，这次事件也要记为一次失败的候选版本上线。重新放流量之前，确认保留会话能正常续接，sandbox"
 " manager 访问也正常。"
-

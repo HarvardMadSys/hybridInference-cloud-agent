@@ -744,8 +744,8 @@ async def remove_agent_runner_host(
         False,
         description=(
             "Remove a host that is still running attempts. Their leases expire "
-            "at once, so the removed machine can no longer heartbeat, renew "
-            "grants, establish residencies or call tools for them; the next "
+            "at once, so the removed machine can no longer heartbeat, "
+            "establish residencies or call tools for them; the next "
             "reaper pass requeues them or, for an indeterminate retained-chat "
             "activation, marks the chat LOST instead of replaying it."
         ),
@@ -788,7 +788,7 @@ async def remove_agent_runner_host(
     attempt and residency leases in the same transaction. The attempts' worker
     tokens name no host, so a lease left to run would be one the removed
     machine could keep renewing. Lease fencing then rejects every later write
-    from it, and the reaper supersedes the attempts and revokes their grants
+    from it, and the reaper supersedes the attempts and lapses their residencies
     on its next pass. A retained activation is not replayed because the
     platform cannot know whether its prompt ran, so that chat is marked LOST.
 

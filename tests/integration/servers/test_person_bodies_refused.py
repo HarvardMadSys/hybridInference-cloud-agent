@@ -22,17 +22,16 @@ from tests.integration.servers.test_pending_message_queue import (
     _OWNER,
     _REPO,
     _claim_body,
-    _Gateway,
-    _Grants,
     pool as pool,
 )
+from tests.support.model_connections import verified_connection
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, FakeOwners, on_connection
 
 from cloud_agent.api import worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
-    get_grant_client,
+    get_owner_directory,
     get_storage,
 )
 from cloud_agent.api.worker import verify_claiming_host
@@ -53,7 +52,10 @@ async def http(pool, monkeypatch):
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", _REPO)
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "person-bodies-secret")
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "person-bodies-sandbox-manager")
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
     store = Storage(pool)
+    # The owner's verified connection, the one `on_connection` names.
+    await verified_connection(store, _OWNER, connection_id=CONNECTION_ID, models=CONNECTION_MODELS)
     await store.host_pool.register_host(
         host=_HOST,
         credential_hash=_HOST_CREDENTIAL,
@@ -72,8 +74,7 @@ async def http(pool, monkeypatch):
     monkeypatch.setattr(worker, "_worker_sandbox_manager", no_sandbox_manager)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = _Gateway
-    app.dependency_overrides[get_grant_client] = _Grants
+    app.dependency_overrides[get_owner_directory] = lambda: FakeOwners()
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
@@ -94,7 +95,9 @@ async def http(pool, monkeypatch):
         assert environment.status_code == 201, environment.text
         job = await client.post(
             "/v1/agent/jobs",
-            json={"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40},
+            json=on_connection(
+                {"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40}
+            ),
         )
         assert job.status_code == 201, job.text
         yield (

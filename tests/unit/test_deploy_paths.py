@@ -30,7 +30,7 @@ _OWN_DIRS = (
     "apps",
     "deploy",
     "docs",
-    "gateway_contracts",
+    "api_contracts",
     "migrations",
     "tests",
 )

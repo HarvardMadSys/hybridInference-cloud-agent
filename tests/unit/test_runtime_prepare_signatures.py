@@ -34,7 +34,7 @@ from cloud_agent_host.runtimes import (
 _SESSION_KWARGS: dict[str, Any] = {
     "workdir": "/workspace",
     "model": "glm-5.1",
-    "gateway_base_url": "http://gateway:8080",
+    "model_base_url": "http://gateway:8080",
     "credential": "agr.fake.fake",
     "provides_isolation": False,
     "mcp_config": EMPTY_RUNTIME_MCP_CONFIG,
@@ -48,7 +48,7 @@ _SESSION_KWARGS: dict[str, Any] = {
 _CLAUDE_SESSION_KWARGS: dict[str, Any] = {
     "workdir": "/workspace",
     "model": "",
-    "gateway_base_url": "http://gateway:8080",
+    "model_base_url": "http://gateway:8080",
     "credential": "agr.fake.fake",
     "provides_isolation": False,
     "mcp_config": EMPTY_RUNTIME_MCP_CONFIG,

@@ -12,7 +12,7 @@
 // Two variants are built, because they are two images and the paths differ:
 //
 //   web-root    basePath ""        browser API /api         (own hostname)
-//   web-agents  basePath "/agents" browser API /agents/api  (gateway hostname)
+//   web-agents  basePath "/agents" browser API /agents/api  (shared hostname)
 //
 // For each variant, and each of two configured deployments, this checks:
 //
@@ -21,12 +21,12 @@
 //   2. `<title>` and the rendered `<h1>` are the *configured* name — the body,
 //      not only the head, so a document that merely echoes its own <title>
 //      cannot pass;
-//   3. the sign-in link and the asset URLs carry the variant's prefix. These
-//      are the two things a wrongly-built variant gets wrong, and the sign-in
-//      URL is the one string this app hands to another service;
+//   3. the asset URLs carry the variant's prefix, which is what a wrongly
+//      built variant gets wrong (the sign-in form itself renders in the
+//      browser, so the document carries no link of its own to check);
 //   4. every configured identity value — name, organisation, organisation
-//      URL, status URL, gateway origin — reaches the document, and the
-//      feature switch has the configured value;
+//      URL, status URL — reaches the document, and the retired Gateway link
+//      and docs-assistant switch reach nothing;
 //   5. no value from the *other* deployment appears anywhere, which is what a
 //      fallback to a build-time constant looks like;
 //   6. a secret-looking variable in the environment reaches neither the HTML
@@ -39,24 +39,21 @@
 //      markup does, exactly. The document proves the *server* rendered the
 //      runtime values; the payload is the half a client component reads, so a
 //      tree that would hydrate from the neutral default is only visible here;
-//   8. `return_to` survives the mount prefix — asked to return to a path that
-//      carries the prefix, the link hands the control plane a path that
-//      carries it once. Applied twice it returned to `/agents/agents`;
-//   9. a deployment that configures nothing renders the neutral identity, with
+//   8. a deployment that configures nothing renders the neutral identity, with
 //      no `AGENT_WEB_*` in the environment at all. "The image carries no
 //      deployment's brand" is shown rather than inferred, and a fallback that
 //      named a real site is what this fails on;
-//  10. an illegal value fails the request instead of being read as "unset";
-//  11. the artifact itself is unchanged by any of it — a digest over the
+//   9. an illegal value fails the request instead of being read as "unset";
+//  10. the artifact itself is unchanged by any of it — a digest over the
 //      standalone server and the static chunks is taken before the first
 //      render and after the last, so "one image, many deployments" is checked
 //      rather than inferred from the shape of the loop.
-//  12. metadata and layout share one saved-settings fetch per request, while
+//  11. metadata and layout share one saved-settings fetch per request, while
 //      the next request sees saved edits without restarting the server.
-//  13. stalled settings headers or bodies cannot delay pages for seconds:
+//  12. stalled settings headers or bodies cannot delay pages for seconds:
 //      cold processes render neutral branding and warmed processes retain the
 //      last valid appearance, with successful edits still visible on recovery.
-//  14. every document carries the security headers, its mount point included,
+//  13. every document carries the security headers, its mount point included,
 //      and every script in it is one its Content-Security-Policy allows: the
 //      policy comes from middleware whose matcher is relative to `basePath`,
 //      so a page the matcher misses is only visible in a served build. A
@@ -84,6 +81,8 @@ import {
 import { fail, runRuntimeGuard, withRuntimeResources } from './runtime-site-config-lifecycle.mjs';
 
 const SENTINEL = 'sentinel-runtime-config-must-not-leak';
+// Set as the retired Gateway link in every deployment's environment.
+const RETIRED_GATEWAY_URL = 'https://retired-gateway.example';
 const STARTUP_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 400;
 
@@ -104,11 +103,8 @@ const VARIANTS = CATALOG.artifacts
 if (VARIANTS.length === 0) throw new Error('Artifact catalog declares no web variants');
 
 function deployment(spec) {
-  const gateway = new URL(spec.gatewayUrl);
   return {
     ...spec,
-    gatewayOrigin: gateway.origin,
-    gatewayHost: gateway.host,
     env: {
       AGENT_WEB_APP_NAME: spec.appName,
       AGENT_WEB_ORG_NAME: spec.orgName,
@@ -116,8 +112,10 @@ function deployment(spec) {
       AGENT_WEB_STATUS_URL: spec.statusUrl,
       AGENT_WEB_DOCS_URL: spec.docsUrl,
       AGENT_WEB_CONTACT_URL: spec.contactUrl,
-      AGENT_WEB_GATEWAY_URL: spec.gatewayUrl,
-      AGENT_WEB_FEATURE_RAG: String(spec.rag),
+      // Retired with the Gateway: the web server reads neither, so neither
+      // may reach the document. The control plane refuses both at startup.
+      AGENT_WEB_GATEWAY_URL: RETIRED_GATEWAY_URL,
+      AGENT_WEB_FEATURE_RAG: 'true',
       AGENT_DEPLOYMENT_SHA: spec.version,
       AGENT_WEB_DEPLOYED_AT: spec.deployedAt,
       // Not configuration. It is here to prove that an unrelated environment
@@ -138,8 +136,6 @@ const DEPLOYMENTS = [
     statusUrl: 'https://status.alpha.example/',
     docsUrl: 'https://docs.alpha.example/agents/',
     contactUrl: 'mailto:help@alpha.example',
-    gatewayUrl: 'https://gateway-alpha.example/authorize',
-    rag: true,
   }),
   deployment({
     name: 'beta',
@@ -151,8 +147,6 @@ const DEPLOYMENTS = [
     statusUrl: 'https://status.beta.example/',
     docsUrl: 'https://docs.beta.example/',
     contactUrl: 'https://support.beta.example/',
-    gatewayUrl: 'https://gateway-beta.example',
-    rag: false,
   }),
 ];
 
@@ -170,8 +164,6 @@ const NEUTRAL = {
   statusUrl: '',
   docsUrl: '',
   contactUrl: '',
-  gatewayUrl: '',
-  rag: false,
 };
 
 function titleOf(html) {
@@ -204,7 +196,6 @@ function identityValues(target) {
     ['status URL', target.statusUrl],
     ['documentation URL', target.docsUrl],
     ['contact URL', target.contactUrl],
-    ['gateway origin', target.gatewayOrigin],
   ];
 }
 
@@ -266,23 +257,7 @@ function expectedIdentity(target) {
     statusUrl: new URL(target.statusUrl).toString(),
     docsUrl: new URL(target.docsUrl).toString(),
     contactUrl: new URL(target.contactUrl).toString(),
-    gatewayUrl: target.gatewayOrigin,
   };
-}
-
-/** The sign-in link the document offers, as an absolute path or URL. */
-function signInHref(html) {
-  return firstMatch(html, /href="([^"]*\/v1\/session\/login[^"]*)"/);
-}
-
-/**
- * The same-site path the sign-in link asks the control plane to return to.
- *
- * Read back through `URL`, not matched as text: `return_to` is escaped in the
- * link, and the property under test is the value the control plane receives.
- */
-function returnToOf(href) {
-  return new URL(href, 'http://127.0.0.1').searchParams.get('return_to');
 }
 
 /** Every JavaScript chunk the browser would download for this build. */
@@ -421,18 +396,6 @@ function assertRendered(variant, target, rendered) {
     fail(`${where}: an unconfigured footer must not invent deployment metadata`);
   }
 
-  // The one URL this app hands to another service, and the string the gateway
-  // matches as an exact redirect target.
-  const signIn = signInHref(html);
-  const expectedSignIn = `${variant.apiUrl}/v1/session/login`;
-  if (!signIn) fail(`${where}: no sign-in link in the document`);
-  if (!signIn.startsWith(expectedSignIn)) {
-    fail(
-      `${where}: the sign-in link is ${JSON.stringify(signIn)}, expected it to ` +
-        `start with ${JSON.stringify(expectedSignIn)}`,
-    );
-  }
-
   // Assets carry the mount prefix; a /agents deployment that loads the root
   // app's chunks renders unstyled and inert, or 404s outright.
   const asset = firstMatch(html, /(?:src|href)="([^"]*\/_next\/static\/[^"]*)"/);
@@ -452,13 +415,6 @@ function assertRendered(variant, target, rendered) {
     }
   }
 
-  // The feature switch is a boolean, so it is asserted structurally rather
-  // than as a substring of the escaped flight payload.
-  const unescaped = html.replaceAll('\\"', '"');
-  if (!unescaped.includes(`"rag":${target.rag}`)) {
-    fail(`${where}: the feature switch is not ${target.rag} in the serialized config`);
-  }
-
   // The half the client hydrates from. Compared as an object rather than
   // searched for as substrings: a payload carrying one field of this
   // deployment and the rest of another's is also a document that renders
@@ -472,13 +428,7 @@ function assertRendered(variant, target, rendered) {
     );
   }
 
-  const rag = payload.match(/"features":\{"rag":(true|false)\}/);
-  if (!rag) {
-    fail(`${where}: the RSC payload carries no serialized feature switch`);
-  }
-  if (rag[1] !== String(target.rag)) {
-    fail(`${where}: the RSC payload's feature switch is ${rag[1]}, expected ${target.rag}`);
-  }
+  assertNoRetired(where, html, payload);
 
   // Anything belonging to the other deployment means a fallback to a
   // build-time constant, which is the whole failure this work removed.
@@ -490,6 +440,21 @@ function assertRendered(variant, target, rendered) {
   }
   if (payload.includes(SENTINEL)) {
     fail(`${where}: a variable that is not on the allowlist reached the RSC payload`);
+  }
+}
+
+/** The retired Gateway link and docs-assistant switch reach neither half of the page. */
+function assertNoRetired(where, html, payload) {
+  for (const [subject, text] of [
+    ['the document', html],
+    ['the RSC payload', payload],
+  ]) {
+    if (
+      text.includes('retired-gateway.example') ||
+      /"features":/.test(text.replaceAll('\\"', '"'))
+    ) {
+      fail(`${where}: ${subject} carries a retired Gateway setting`);
+    }
   }
 }
 
@@ -506,7 +471,6 @@ function assertBundleIsClean(variant) {
       ['status URL', target.statusUrl],
       ['documentation URL', target.docsUrl],
       ['contact URL', target.contactUrl],
-      ['gateway host', target.gatewayHost],
     ]) {
       if (bundle.includes(value)) {
         fail(
@@ -515,41 +479,6 @@ function assertBundleIsClean(variant) {
         );
       }
     }
-  }
-}
-
-/**
- * The mount prefix reaches the control plane once.
- *
- * `return_to` is captured from `window.location.pathname`, which already
- * carries the prefix, and the control plane appends it back when it builds the
- * landing URL. Handed over unchanged it is applied twice: signing in at
- * `/agents` returned to `/agents/agents`, which this app resolved as a job
- * whose id was `agents` and rendered as "No such agent job". The unit tests pin
- * `safeReturnTo`; this pins what the built page actually links to.
- */
-async function assertReturnTo(variant) {
-  const landing = '/jobs/abc';
-  const asked = `${variant.basePath}${landing}`;
-  const where = `${variant.name} / return_to`;
-  const rendered = await render(
-    variant,
-    DEPLOYMENTS[0].env,
-    `/login?return_to=${encodeURIComponent(asked)}`,
-  );
-  if (rendered.status !== 200) {
-    fail(`${where}: the page answered ${rendered.status}\n${rendered.logs}`);
-  }
-
-  const href = signInHref(rendered.html);
-  if (!href) fail(`${where}: no sign-in link in the document`);
-
-  const returnTo = returnToOf(href);
-  if (returnTo !== landing) {
-    fail(
-      `${where}: asked to return to ${JSON.stringify(asked)}, the sign-in link asks the control ` +
-        `plane for ${JSON.stringify(returnTo)}, expected ${JSON.stringify(landing)}`,
-    );
   }
 }
 
@@ -594,7 +523,6 @@ async function assertNeutralDeployment(variant) {
     statusUrl: NEUTRAL.statusUrl,
     docsUrl: NEUTRAL.docsUrl,
     contactUrl: NEUTRAL.contactUrl,
-    gatewayUrl: NEUTRAL.gatewayUrl,
   };
   if (JSON.stringify(identity) !== JSON.stringify(expected)) {
     fail(
@@ -603,10 +531,7 @@ async function assertNeutralDeployment(variant) {
     );
   }
 
-  const rag = payload.match(/"features":\{"rag":(true|false)\}/);
-  if (!rag || rag[1] !== String(NEUTRAL.rag)) {
-    fail(`${where}: the feature switch is ${rag ? rag[1] : 'absent'}, expected ${NEUTRAL.rag}`);
-  }
+  assertNoRetired(where, rendered.html, payload);
 
   assertNoForeignIdentity(where, 'the document', rendered.html, NEUTRAL);
   assertNoForeignIdentity(where, 'the RSC payload', payload, NEUTRAL);
@@ -630,7 +555,6 @@ async function assertSavedConfigRequestScope(variant) {
     reads += 1;
     const saved = {
       branding: expectedIdentity(target),
-      features: { rag: target.rag },
     };
     if (mode === 'http') {
       response.writeHead(503).end();
@@ -638,7 +562,7 @@ async function assertSavedConfigRequestScope(variant) {
     }
     if (mode === 'invalid') {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ ...saved, features: { rag: 'invalid' } }));
+      response.end(JSON.stringify({ branding: { ...saved.branding, docsUrl: 'javascript:1' } }));
       return;
     }
     if (mode === 'slow body') {
@@ -730,7 +654,6 @@ async function assertSavedConfigRequestScope(variant) {
         statusUrl: '',
         docsUrl: '',
         contactUrl: '',
-        gatewayUrl: '',
       };
       for (const stalled of ['slow headers', 'slow body']) {
         mode = stalled;
@@ -870,7 +793,6 @@ async function main() {
       assertRendered(variant, target, await render(variant, target.env));
     }
 
-    await assertReturnTo(variant);
     await assertNeutralDeployment(variant);
     await assertSavedConfigRequestScope(variant);
     await assertSecurityHeaders(variant);

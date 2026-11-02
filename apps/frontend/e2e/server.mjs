@@ -20,7 +20,6 @@ const env = {
   NEXT_PUBLIC_BASE_PATH: '',
   NEXT_PUBLIC_AGENT_API_URL: '/api',
   AGENT_WEB_APP_NAME: 'Browser Regression Fixture',
-  AGENT_WEB_GATEWAY_URL: '',
   AGENT_CONTROL_PLANE_URL: '',
 };
 const variant = { name: 'web-root', basePath: '', apiUrl: '/api' };

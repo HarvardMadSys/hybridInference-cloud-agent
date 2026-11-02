@@ -33,8 +33,8 @@ def good_log() -> str:
             "[deploy] previous: unknown",
             "[deploy] pulling release images",
             "[deploy] starting deployment database",
+            "[deploy] checking that the Agent database is empty or holds Cloud Agent accounts",
             "[deploy] migrating deployment database",
-            "[deploy] checking the Agent database identity issuer",
             "[deploy] waiting for bootstrap control plane at http://127.0.0.1:8000/healthz",
             "[deploy] bootstrap control plane: ok",
             "[deploy] bootstrap MCP relay: ok",
@@ -306,11 +306,12 @@ def test_a_stage_that_never_happened_is_refused(stage: str) -> None:
 
 
 def test_the_stages_are_checked_in_order() -> None:
-    """A set would accept a deployment that migrated after checking identity."""
+    """A set would accept a deployment that migrated a database before checking it."""
     lines = good_log().splitlines()
     migrate = next(i for i, line in enumerate(lines) if "migrating deployment database" in line)
-    identity = next(i for i, line in enumerate(lines) if "identity issuer" in line)
-    lines[migrate], lines[identity] = lines[identity], lines[migrate]
+    check = next(i for i, line in enumerate(lines) if "holds Cloud Agent accounts" in line)
+    assert check < migrate
+    lines[migrate], lines[check] = lines[check], lines[migrate]
     with pytest.raises(ac.AcceptanceFailure, match="never got as far as"):
         ac.check_stages(result("\n".join(lines)))
 

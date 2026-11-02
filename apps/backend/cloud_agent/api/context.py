@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.admin_observability import decode_cursor, encode_cursor
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_grant_client, get_storage, require_store
+from cloud_agent.api.deps import get_storage, require_store
 from cloud_agent.api.owner_usage import resolve_period, usage_unavailable
 from cloud_agent.command_executions import (
     DEFAULT_COMMAND_PAGE,
@@ -51,13 +51,11 @@ from cloud_agent.context_request import RequestComposition
 from cloud_agent.context_timing import ThreadTiming, assemble_timing
 from cloud_agent.context_view import ThreadContextView, assemble_thread_context
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.model_ttft import read_request_pages
 from cloud_agent.storage.admin_usage_queries import UsageQueryTooLarge, UsageQueryUnavailable
 from cloud_agent.usage_batches import owner_usage
 from cloud_agent.usage_range import RangePreset  # noqa: TC001 — FastAPI resolves it.
 
 if TYPE_CHECKING:
-    from cloud_agent.grants import GrantClient
     from cloud_agent.ports import CommandExecutionQueries, ContextQueries, OwnerUsageQueries
     from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 
@@ -69,7 +67,6 @@ class _ContextStorage(Protocol):
 
     context_queries: ContextQueries
     command_executions: CommandExecutionQueries
-    ledger: Any
     owner_usage: OwnerUsageQueries
     admin_usage: AdminUsageQueries
 
@@ -106,38 +103,27 @@ async def get_thread_context(
     )
 
 
-#: Started executions whose Gateway request rows one timing read covers, newest
-#: first; each costs one bounded page. Older executions stay "not split".
-THREAD_TIMING_SOURCES = 16
-
-
 @router.get("/jobs/{job_id}/thread/context/timing", response_model=ThreadTiming)
 async def get_thread_context_timing(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ContextStorage | None = Depends(get_storage),
-    grants: GrantClient = Depends(get_grant_client),
 ) -> ThreadTiming:
     """Where the caller's conversation's execution time went.
 
     Read when the dashboard asks, never at settlement: the attempts' recorded
-    spans and tool windows, and the Gateway's own request log for the newest
-    executions (TTFT and latency per request). Nothing is asked of a CLI.
+    spans and tool windows. No request log is recorded for an owner's own
+    model connection, so TTFT and generation stay "not recorded" and each
+    execution's model and harness time is reported together, not split.
+    Nothing is asked of a CLI.
     """
     context_store: _ContextStorage = require_store(store)
     result = await context_store.context_queries.thread_context(
         job_id=job_id, user_id=user["user_id"]
     )
-    read = await context_store.ledger.thread_request_sources(
-        job_id=job_id, user_id=user["user_id"], limit=THREAD_TIMING_SOURCES
-    )
-    if result is None or read is None:
+    if result is None:
         raise _not_found(job_id)
-    sources, more = read
-    pages = await read_request_pages(sources, more_sources=more, grants=grants, scope=job_id)
-    return assemble_timing(
-        result["attempts"], pages.pages, gateway_gap=pages.gap, gateway_started=pages.started
-    )
+    return assemble_timing(result["attempts"], [], gateway_gap=None, gateway_started=0)
 
 
 @router.get("/jobs/{job_id}/thread/context/dna", response_model=DnaBands)

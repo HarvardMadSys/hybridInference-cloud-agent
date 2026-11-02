@@ -17,7 +17,7 @@ import { codeReviewFixPrompt } from './codeReview';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { describeConversationTurns } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
-import { choiceLabel, turnChoice, turnModelPicker } from './modelSource';
+import { choiceLabel, isModelUnavailable, turnChoice, turnModelPicker } from './modelSource';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
 import { NativeQuestionPrompt } from './NativeQuestionPrompt';
@@ -40,6 +40,10 @@ interface SideChatProps {
   config: AgentConfigApi | null;
   active: boolean;
   tab?: SideChatTab;
+}
+
+function sideChatBusy(submitting: boolean, active: boolean, status: string): boolean {
+  return submitting || (active && status === 'preparing');
 }
 
 function SideChatBoundary(props: SideChatProps) {
@@ -178,6 +182,7 @@ function SideChatContent({
   }, [config, effort, efforts]);
   const inheritedTurn = current ?? sourceJob;
   const picker = turnModelPicker(config, runtime, model, setModel, t, turnChoice(inheritedTurn));
+  const modelUnavailable = isModelUnavailable(config, runtime, model);
 
   useEffect(() => {
     if (running) return;
@@ -295,7 +300,15 @@ function SideChatContent({
       return;
     }
     const threadId = current?.threadId ?? session?.threadId;
-    if (!current || !threadId || !body.prompt || unavailable || submission.current) return;
+    if (
+      !current ||
+      !threadId ||
+      !body.prompt ||
+      unavailable ||
+      modelUnavailable ||
+      submission.current
+    )
+      return;
     submission.current = true;
     setSubmitting(true);
     setActionError(null);
@@ -511,7 +524,7 @@ function SideChatContent({
                   </>
                 ) : (
                   <span className="min-w-0 flex-1 truncate text-xs text-gray-500 dark:text-gray-400">
-                    {choiceLabel(config, model, t, { runtime })}
+                    {choiceLabel(config, model, t, { runtime, unavailable: modelUnavailable })}
                   </span>
                 )}
                 {running ? (
@@ -534,9 +547,14 @@ function SideChatContent({
                   <ComposerSendButton
                     label={t('sideChat.send')}
                     title={t('sideChat.sendHint')}
-                    busy={submitting || (active && status === 'preparing')}
+                    busy={sideChatBusy(submitting, active, status)}
                     disabled={
-                      !ready || unavailable || !draft.trim() || submitting || attachments.uploading
+                      !ready ||
+                      unavailable ||
+                      modelUnavailable ||
+                      !draft.trim() ||
+                      submitting ||
+                      attachments.uploading
                     }
                   />
                 </div>

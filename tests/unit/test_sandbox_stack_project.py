@@ -170,9 +170,6 @@ _SHARED_HOST_ENV = "\n".join(
         "SIBLING_COMPOSE_PROJECTS=freeinference-cloud-agent-sandbox-staging",
         "AGENT_ENROLL_TOKEN=test-enrollment-token",
         "AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:prod",
-        "AGENT_TUNNEL_SSH_DESTINATION=user@gateway",
-        "AGENT_TUNNEL_SSH_KEY=/dev/null",
-        "AGENT_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
         "AGENT_MCP_TUNNEL_SSH_DESTINATION=user@control",
         "AGENT_MCP_TUNNEL_SSH_KEY=/dev/null",
         "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
@@ -243,7 +240,7 @@ def test_each_stack_discovers_only_its_own_relays(tmp_path: Path) -> None:
 
     Docker DNS answers an alias with every container that claims it on a
     network; two stacks on one relay network would hand each other's sandboxes
-    the other environment's gateway and MCP tunnels.
+    the other environment's MCP and control-plane tunnels.
     """
     (tmp_path / "staging").mkdir()
     (tmp_path / "prod").mkdir()
@@ -362,7 +359,7 @@ def test_the_stray_matcher_still_recognises_this_stack(tmp_path: Path) -> None:
             "ours ours-runner-1",
             "ours ours-sandbox-manager-1",
             "sibling sibling-runner-1",
-            "agenthost agenthost-agent-gateway-tunnel-1",
+            "agenthost agenthost-mcp-tunnel-1",
             "legacy legacy-agent-sandbox-manager-1",
             "unrelated some-postgres",
         ]
@@ -376,7 +373,7 @@ def test_the_stray_matcher_still_recognises_this_stack(tmp_path: Path) -> None:
     )
 
     reported = result.stdout
-    assert "agenthost-agent-gateway-tunnel-1" in reported
+    assert "agenthost-mcp-tunnel-1" in reported
     assert "legacy-agent-sandbox-manager-1" in reported, "the pre-rename shape must still match"
     assert "ours-runner-1" not in reported
     assert "sibling-runner-1" not in reported
