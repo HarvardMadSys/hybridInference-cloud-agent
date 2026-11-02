@@ -474,7 +474,7 @@ def test_wait_reads_foreground_failure_even_while_a_guest_wait_is_in_flight():
     def exec_capture(_spec, argv, **_kwargs):
         limits.append(argv[-1])
         if argv[-1] == "0":
-            return SimpleNamespace(returncode=0, stdout=b"7")
+            return SimpleNamespace(returncode=0, stdout=b"7 0")
         # The guest wait, still waiting when wait() reads.
         waiting.set()
         release.wait(5)
@@ -566,7 +566,8 @@ def test_environment_script_starts_in_the_workspace_without_importing_from_it(tm
     assert helper.returncode == 0, helper.stderr
     # Its script still starts there, with the owner's variables.
     assert helper.stdout == f"{workspace.resolve()} src"
-    assert status.read_text() == "0"
+    # The receipt counts the bytes the script wrote beside its exit status.
+    assert status.read_text() == f"0 {len(helper.stdout.encode())}"
     # The one exec that reaps and prepares its identity runs isolated as well.
     assert [argv[:2] for argv in commands if argv[0] == "python3"] == [["python3", "-I"]] * 2
 

@@ -3594,6 +3594,9 @@ class _RetainedExecProcess(SandboxProcess):
         assert self._process.stdout is not None
         yield from text_chunks(self._process.stdout)
 
+    def byte_chunks(self) -> Iterator[bytes]:
+        yield from self._pipe_bytes(self._process.stdout)
+
     def write_line(self, text: str) -> None:
         if self._process.stdin is None:
             raise SandboxError("this retained exec was not spawned with live input")

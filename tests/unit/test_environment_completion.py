@@ -1,17 +1,25 @@
-"""An environment script's end: its receipt, waited for in the guest, and its last output.
+"""An environment script's end: its receipt, waited for in the guest, and its output.
 
 A script that leaves a process holding its output ends before its stream
 does, so its end is read from its completion receipt. The receipt is noticed
-within a guest check, at one exec per guest wait, and the output the script
-wrote last stays its own when the receipt arrives first.
+within a guest check, at one exec per guest wait. It counts the bytes the
+script wrote, which its helper forwards first, so the script's output is
+split exactly from a service's: a started service gets the stream at that
+count, and any other phase is reaped at once without losing a byte.
 """
 
 from __future__ import annotations
 
+import array
+import contextlib
+import fcntl
 import os
 import queue
+import select
+import signal
 import subprocess
 import sys
+import termios
 import threading
 import time
 from concurrent.futures import Future
@@ -21,18 +29,14 @@ import pytest
 
 from cloud_agent_host import environment_process
 from cloud_agent_host.environment_process import EnvironmentProcess
-from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.setup import (
-    FINAL_OUTPUT_CHARS,
-    FINAL_OUTPUT_QUIET_S,
-    FINAL_OUTPUT_WAIT_S,
-    run_setup,
-)
+from cloud_agent_host.sandbox import SandboxError, _PopenProcess
+from cloud_agent_host.setup import SCRIPT_OUTPUT_WAIT_S, run_setup
 
 #: How long a script's last output takes to arrive once its receipt is read:
 #: the tens of milliseconds bytes take to cross a docker or kata exec.
 _IN_FLIGHT_S = 0.03
 _SECRET = "demo-secret-123456"
+_SERVICE = {"chatty": b"service output\n", "flood": b"x" * 65536}
 
 
 def _eventually(check, seconds=5.0):
@@ -43,46 +47,61 @@ def _eventually(check, seconds=5.0):
 
 
 class _Script:
-    """An environment script whose receipt is read before its last output arrives.
+    """An environment script whose receipt is read before the last of its output arrives.
 
-    The stream yields what the script printed, then, once the receipt has been
-    read, ``last`` a moment later: those bytes were still crossing the exec,
-    and a kill before they arrive loses them with the helper. Then the stream
-    ends with the script, or stays open for a service until the phase's kill:
-    one that is silent, chatty, or floods it.
+    Its stream carries what the script printed, then, once the receipt has
+    been read, ``last``: bytes the helper forwarded before writing the
+    receipt, still crossing the exec, so a kill no longer stops them. The
+    receipt counts all of them. A service may write after them, silent,
+    chatty or flooding, until the phase's kill, its first output in the same
+    chunk as the script's last bytes.
     """
 
-    def __init__(self, *, code, last, service=None):
+    def __init__(
+        self, *, code, last, service=None, in_flight=_IN_FLIGHT_S, runs_for=0.0, missing=0
+    ):
         self.code = code
-        self.last = [last] if isinstance(last, str) else list(last)
+        self.printed = [b"working\n"]
+        pieces = last if isinstance(last, list) else [last]
+        self.last = [piece.encode() if isinstance(piece, str) else piece for piece in pieces]
         self.service = service
+        self.in_flight = in_flight
+        self.runs_for = runs_for
+        # The receipt counts bytes that never arrive.
+        self.counted = len(self.printed[0]) + sum(map(len, self.last)) + missing
+        self.reaped_first = None
+        self.script_bytes = None
         self.ended = threading.Event()
         self.read = threading.Event()
         self.killed = threading.Event()
         self.read_at = None
         self.service_chunks = 0
+        self.kills = 0
 
-    def chunks(self):
-        yield "working\n"
+    def byte_chunks(self):
+        yield from self.printed
+        time.sleep(self.runs_for)
         self.ended.set()
         self.read.wait(5)
-        if self.killed.wait(_IN_FLIGHT_S):
+        time.sleep(self.in_flight)
+        self.reaped_first = self.killed.is_set()
+        yield from self.last[:-1]
+        if self.killed.is_set():
+            yield self.last[-1]
             return
-        yield from self.last
+        yield self.last[-1] + _SERVICE.get(self.service, b"")
         pause = {"chatty": 0.02, "flood": 0}.get(self.service, 0.5)
         while self.service and not self.killed.wait(pause):
             if self.service != "silent":
                 self.service_chunks += 1
-                yield "service output\n" if self.service == "chatty" else "x" * 65536
-
-    def lines(self):
-        yield from self.chunks()
+                yield _SERVICE[self.service]
 
     def poll(self):
         if not self.ended.is_set():
             return None
         if self.read_at is None:
             self.read_at = time.monotonic()
+            self.script_bytes = self.counted
         self.read.set()
         return self.code
 
@@ -90,6 +109,7 @@ class _Script:
         return self.code
 
     def kill(self):
+        self.kills += 1
         self.killed.set()
 
     def stderr_text(self):
@@ -118,7 +138,7 @@ def scripts():
         script.kill()
 
 
-def _run(script, phase, output, on_output=None):
+def _run(script, phase, output, *, on_output=None, timeout_s=60, stop=None, cancel=None):
     """Run ``script`` as ``phase``; return its result and when it returned after its receipt."""
     finished: Future = Future()
 
@@ -128,9 +148,11 @@ def _run(script, phase, output, on_output=None):
                 script="./script",
                 workdir="/workspace",
                 backend=_ScriptBackend(script),
-                timeout_s=60,
+                timeout_s=timeout_s,
                 secrets={"TOKEN": _SECRET},
                 on_output=on_output or output.append,
+                stop=stop,
+                cancel=cancel,
                 phase=phase,
             )
             finished.set_result((result, time.monotonic() - script.read_at))
@@ -142,95 +164,181 @@ def _run(script, phase, output, on_output=None):
     return finished.result(timeout=10)
 
 
-@pytest.mark.parametrize(
-    ("service", "last", "shown"),
-    [
-        # The stream ends with the script: it is finished, so even the "["
-        # held back in case it begins a mask marker is shown.
-        (None, f"listening with {_SECRET} on [", "listening with [secret:TOKEN] on ["),
-        ("silent", f"listening with {_SECRET}\n", "listening with [secret:TOKEN]\n"),
-    ],
-)
-def test_a_start_scripts_last_lines_are_kept_when_its_receipt_comes_first(
-    scripts, service, last, shown
-):
-    script = scripts(code=0, last=last, service=service)
+@pytest.mark.parametrize("service", [None, "silent", "chatty", "flood"])
+def test_a_start_scripts_output_ends_exactly_where_its_receipt_counts(scripts, service):
+    # It ends on what could begin a mask marker: the script's output is whole
+    # there, so even the "[" held back for it is shown.
+    script = scripts(code=0, last=f"listening with {_SECRET} on [", service=service)
     output = []
 
     result, handed_over = _run(script, "start", output)
 
     assert result.exit_code == 0
-    assert "".join(output) == "working\n" + shown
-    # A started service keeps running, and has its stream once it is quiet.
+    assert "".join(output) == "working\nlistening with [secret:TOKEN] on ["
+    # A started service keeps running, and gets its stream once the counted
+    # bytes have crossed the exec, not after a second of its own output.
     assert not script.killed.is_set()
-    assert handed_over < _IN_FLIGHT_S + FINAL_OUTPUT_QUIET_S + 0.5
+    assert handed_over < _IN_FLIGHT_S + 0.25
 
 
-def test_a_start_script_with_a_chatty_service_hands_over_within_the_wait(scripts):
-    script = scripts(code=0, last="listening\n", service="chatty")
-    output = []
-
-    result, handed_over = _run(script, "start", output)
-
-    assert result.exit_code == 0
-    assert "working\nlistening\n" in "".join(output)
-    assert handed_over < FINAL_OUTPUT_WAIT_S + 0.5
-    # The service's pipe keeps flowing, and nothing it writes now is the step's.
-    seen, written = len(output), script.service_chunks
-    time.sleep(0.3)
-    assert script.service_chunks > written + 3
-    assert len(output) == seen
-
-
-def test_a_start_script_whose_service_floods_hands_over_once_enough_is_read(scripts):
-    # Output never has to be waited for, so only the amount read ends the reading.
-    script = scripts(code=0, last="listening\n", service="flood")
+def test_the_split_counts_raw_bytes_before_decoding_and_masking(scripts):
+    # A character cut across two reads, an invalid byte, a secret masked
+    # longer than itself and a mark: the count is of bytes as read.
+    last = b"\xc3\xa9 \xff " + _SECRET.encode() + b" \xe2\x9c\x93\n"
+    script = scripts(code=0, last=last, service="flood")
+    script.printed = [b"working h\xc3", b"\xa9llo "]
+    script.counted = len(b"working h\xc3\xa9llo ") + len(last)
     output = []
 
     result, _ = _run(script, "start", output)
 
     assert result.exit_code == 0
-    assert "working\nlistening\n" in "".join(output)
-    assert FINAL_OUTPUT_CHARS <= sum(map(len, output)) < FINAL_OUTPUT_CHARS + 2 * 65536
+    assert "".join(output) == "working héllo é � [secret:TOKEN] ✓\n"
 
 
-def test_a_slow_consumer_does_not_cut_a_scripts_last_lines_short(scripts):
-    # Reporting the first of the last lines takes longer than the whole wait,
-    # while the second, and the service's output, queue behind it.
+def test_a_start_whose_service_output_was_read_first_hands_over_at_once(scripts):
+    # The service wrote after the script's end, and that was read before the
+    # receipt was: the stream is past the count already.
+    script = scripts(code=0, last=b"", service="chatty", in_flight=0, runs_for=0.2)
+    script.printed = [b"working\n", b"listening\n", b"service output\n"]
+    script.counted = len(b"working\nlistening\n")
+    output = []
+
+    result, handed_over = _run(script, "start", output)
+
+    assert result.exit_code == 0
+    # What was read before the receipt stays the step's; nothing after it is.
+    assert "".join(output) == "working\nlistening\nservice output\n"
+    assert handed_over < 0.2
+
+
+def test_a_start_whose_counted_bytes_never_arrive_hands_over_after_its_wait(scripts):
+    script = scripts(code=0, last="listening\n", service="silent", missing=10)
+    output = []
+
+    result, handed_over = _run(script, "start", output)
+
+    assert result.exit_code == 0
+    assert "".join(output) == "working\nlistening\n"
+    assert SCRIPT_OUTPUT_WAIT_S - 0.1 < handed_over < SCRIPT_OUTPUT_WAIT_S + 0.5
+
+
+def test_a_start_whose_stream_ends_short_of_its_count_is_finished(scripts):
+    # No service holds the stream, and it ends before the count: it is over,
+    # so even the "[" held back for a mask marker is shown, and at once.
+    script = scripts(code=0, last="listening on [", missing=10)
+    output = []
+
+    result, handed_over = _run(script, "start", output)
+
+    assert result.exit_code == 0
+    assert "".join(output) == "working\nlistening on ["
+    assert handed_over < 0.25
+
+
+def test_a_slow_report_does_not_cut_a_starts_counted_bytes_short(scripts):
+    # Reporting the first of the counted bytes takes longer than their whole
+    # wait, while the rest, and the service's output, queue behind them.
     script = scripts(code=0, last=["error: first\n", "error: second\n"], service="chatty")
     output = []
 
     def report(text):
         output.append(text)
         if "first" in text:
-            time.sleep(FINAL_OUTPUT_WAIT_S + 0.3)
+            time.sleep(SCRIPT_OUTPUT_WAIT_S + 0.3)
 
     result, _ = _run(script, "start", output, on_output=report)
 
     assert result.exit_code == 0
-    assert "working\nerror: first\nerror: second\n" in "".join(output)
+    assert "".join(output) == "working\nerror: first\nerror: second\n"
+
+
+@pytest.mark.parametrize("by", ["deadline", "stop", "cancel"])
+def test_the_deadline_or_a_stop_ends_the_hand_over(scripts, by):
+    # The counted bytes take longer to arrive than the deadline or the stop.
+    script = scripts(code=0, last="listening\n", service="chatty", in_flight=1.5, runs_for=0.3)
+    output = []
+    stopped, cancel = threading.Event(), threading.Event()
+    if by != "deadline":
+        script_read = script.read
+
+        def stop_soon():
+            script_read.wait(5)
+            time.sleep(0.1)
+            (stopped if by == "stop" else cancel).set()
+
+        threading.Thread(target=stop_soon, daemon=True).start()
+    started = time.monotonic()
+
+    result, handed_over = _run(
+        script,
+        "start",
+        output,
+        timeout_s=0.5 if by == "deadline" else 60,
+        stop=stopped.is_set,
+        cancel=cancel,
+    )
+
+    # The script succeeded before either came: its result stands, and the
+    # service it started keeps the stream.
+    assert result.exit_code == 0
+    assert "".join(output) == "working\n"
+    assert not script.killed.is_set()
+    if by == "deadline":
+        assert time.monotonic() - started < 0.5 + 0.2
+    else:
+        assert 0.05 < handed_over < 0.1 + 0.2
+
+
+def test_a_report_that_fails_during_a_start_hand_over_leaves_the_service_drained(scripts):
+    script = scripts(code=0, last="listening\n", service="chatty")
+
+    def report(text):
+        if "listening" in text:
+            raise RuntimeError("control plane answered 503")
+
+    with pytest.raises(RuntimeError, match="503"):
+        _run(script, "start", [], on_output=report)
+
+    # The service runs on, and its pipe keeps flowing.
+    assert not script.killed.is_set()
+    written = script.service_chunks
+    time.sleep(0.3)
+    assert script.service_chunks > written + 3
+
+
+def test_a_report_that_fails_after_a_failed_phase_leaves_it_reaped(scripts):
+    script = scripts(code=1, last="error: the build failed\n", service="chatty")
+
+    def report(text):
+        if "error:" in text:
+            raise RuntimeError("control plane answered 503")
+
+    with pytest.raises(RuntimeError, match="503"):
+        _run(script, "setup", [], on_output=report)
+
+    assert script.killed.is_set()
 
 
 @pytest.mark.parametrize(
     ("phase", "service"),
-    [("setup", "silent"), ("update", "chatty"), ("start", "silent"), ("verify", "chatty")],
+    [("setup", "silent"), ("update", "chatty"), ("start", "chatty"), ("verify", "flood")],
 )
-def test_a_failing_scripts_final_lines_are_kept_before_the_kill(scripts, phase, service):
-    # A background process holds the stream, so only the receipt says the
-    # script ended. Its output ends on what could begin a mask marker.
+def test_a_failing_scripts_last_lines_survive_a_process_it_left_writing(scripts, phase, service):
+    # The phase is reaped as soon as the receipt is read; what the script
+    # wrote was already in the stream, and the leftover writes nothing more.
     script = scripts(code=1, last=f"error: {_SECRET} was refused\n[", service=service)
     output = []
 
     result, _ = _run(script, phase, output)
 
     assert result.exit_code == 1
-    shown = "".join(output)
-    assert "working\nerror: [secret:TOKEN] was refused\n[" in shown
-    assert _SECRET not in shown
-    assert script.killed.is_set()
-    if service == "silent":
-        # The kill ended the stream, so even the held "[" is shown.
-        assert result.detail.endswith("was refused\n[")
+    # Reaped once, as soon as the receipt came and before the script's last
+    # bytes had crossed; nothing of the identity is left after.
+    assert script.kills == 1
+    assert script.reaped_first is True
+    assert "".join(output) == "working\nerror: [secret:TOKEN] was refused\n["
+    assert result.detail == "working\nerror: [secret:TOKEN] was refused\n["
 
 
 def test_an_idle_stream_is_looked_at_every_check_interval():
@@ -240,11 +348,9 @@ def test_an_idle_stream_is_looked_at_every_check_interval():
     class _Idle:
         """A script that prints nothing and runs until it is stopped."""
 
-        def chunks(self):
+        def byte_chunks(self):
             killed.wait(5)
             yield from ()
-
-        lines = chunks
 
         def poll(self):
             polls.append(time.monotonic())
@@ -275,6 +381,94 @@ def test_an_idle_stream_is_looked_at_every_check_interval():
     assert len(polls) >= 6
 
 
+@pytest.mark.parametrize(
+    ("receipt", "read"),
+    [(b"0 12", (0, 12)), (b"-9 0", (-9, 0)), (b"1 9999999999", (1, 9999999999))],
+)
+def test_a_receipt_records_the_exit_status_and_the_scripts_byte_count(receipt, read):
+    process = EnvironmentProcess.__new__(EnvironmentProcess)
+
+    process._take(receipt)
+
+    assert (process._code, process.script_bytes) == read
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        *(b"", b"0", b"0 ", b" 0 1", b"0  1", b"0 1\n", b"0 -1", b"0 1 2", b"x 1", b"0 0x1"),
+        *(b"0 1_0", b"0 " + b"9" * 20, b"-" + b"1" * 11 + b" 0"),
+    ],
+)
+def test_a_malformed_receipt_is_refused(receipt):
+    process = EnvironmentProcess.__new__(EnvironmentProcess)
+
+    with pytest.raises(SandboxError, match="Invalid environment completion receipt"):
+        process._take(receipt)
+
+
+def _fionread(fd):
+    waiting = array.array("i", [0])
+    fcntl.ioctl(fd, termios.FIONREAD, waiting)
+    return waiting[0]
+
+
+def test_the_helper_forwards_what_the_script_wrote_before_its_receipt_and_counts_it(tmp_path):
+    status = tmp_path / "status"
+    # More than the pipes hold, written just before the end, then a writer
+    # that starts after it.
+    script = (
+        "head -c 307200 /dev/zero | tr '\\000' a; "
+        "(sleep 0.5; while :; do printf b; sleep 0.01; done) &"
+    )
+    helper = subprocess.Popen(
+        [sys.executable, "-I", "-u", "-c", environment_process._HELPER],
+        env={
+            "PATH": os.environ["PATH"],
+            "AGENT_SCRIPT_STATUS": str(status),
+            "AGENT_ENVIRONMENT_SCRIPT": script,
+        },
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    fd = helper.stdout.fileno()
+    taken = bytearray()
+    lock = threading.Lock()
+    done = threading.Event()
+
+    def read_slowly():
+        while not done.is_set():
+            if select.select([fd], [], [], 0.05)[0]:
+                with lock:
+                    data = os.read(fd, 4096)
+                    taken.extend(data)
+                if not data:
+                    return
+                time.sleep(0.005)
+
+    reader = threading.Thread(target=read_slowly, daemon=True)
+    reader.start()
+    try:
+        _eventually(status.exists, seconds=20)
+        with lock:
+            forwarded = len(taken) + _fionread(fd)
+        code, count = status.read_text().split()
+        # Every byte the script wrote was in the stream when the receipt
+        # appeared, and the receipt counts exactly those.
+        assert (code, count) == ("0", "307200")
+        assert forwarded >= 307200
+        _eventually(lambda: len(taken) > 307200, seconds=20)
+        assert bytes(taken[:307200]) == b"a" * 307200
+        assert set(bytes(taken[307200:])) == {ord("b")}
+    finally:
+        done.set()
+        os.killpg(helper.pid, signal.SIGKILL)
+        reader.join(5)
+        helper.wait()
+        helper.stdout.close()
+
+
 class _Helper:
     """The helper's exec: a stream the test feeds until the helper ends or is reaped."""
 
@@ -295,12 +489,9 @@ class _Helper:
             self._ended.set()
         self._stream.put(None)
 
-    def chunks(self):
+    def byte_chunks(self):
         while (chunk := self._stream.get()) is not None:
-            yield chunk
-
-    def lines(self):
-        yield from self.chunks()
+            yield chunk.encode()
 
     def poll(self):
         return self.code
@@ -323,6 +514,7 @@ class _Sandbox:
         self.backend = SimpleNamespace(gid=10001)
         self.helper = _Helper()
         self.calls = []
+        self.started = []
         self.reaps = 0
 
     def base_env(self):
@@ -342,6 +534,7 @@ class _Sandbox:
             self.reap()
             return SimpleNamespace(returncode=0, stdout=b"")
         self.calls.append((argv, kwargs))
+        self.started.append(time.monotonic())
         return self.guest_wait(float(argv[5]))
 
     def guest_wait(self, limit):
@@ -364,14 +557,14 @@ class _Guest(_Sandbox):
     def __init__(self, tmp_path):
         super().__init__()
         self.status = tmp_path / "status"
-        self.waits_fail = False
+        self.ends_at_once = None
         self.running = set()
         self.most_at_once = 0
         self._lock = threading.Lock()
 
     def guest_wait(self, limit):
-        if self.waits_fail:
-            return SimpleNamespace(returncode=137, stdout=b"")
+        if self.ends_at_once is not None:
+            return SimpleNamespace(returncode=self.ends_at_once, stdout=b"")
         wait = subprocess.Popen(
             [sys.executable, "-I", "-c", environment_process._WAIT, str(self.status), str(limit)],
             stdout=subprocess.PIPE,
@@ -393,10 +586,44 @@ class _Guest(_Sandbox):
             wait.kill()
         super().reap()
 
-    def write_receipt(self, code):
+    def write_receipt(self, receipt):
         temporary = self.status.with_name("status.tmp")
-        temporary.write_text(str(code))
+        temporary.write_text(receipt)
         os.replace(temporary, self.status)
+
+
+class _Local(_Guest):
+    """The guest on this machine running the real helper, its script as this user."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path)
+        self.workdir = tmp_path
+        self.popen = None
+
+    def base_env(self):
+        return {"PATH": os.environ["PATH"]}
+
+    def spawn(self, _spec, argv, *, env, **_kwargs):
+        self.popen = subprocess.Popen(
+            [sys.executable, *argv[1:]],
+            env={**env, "AGENT_SCRIPT_STATUS": str(self.status)},
+            cwd=self.workdir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        return _PopenProcess(self.popen)
+
+    def reap(self):
+        if self.popen is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.popen.pid, signal.SIGKILL)
+        with self._lock:
+            running = list(self.running)
+        for wait in running:
+            wait.kill()
 
 
 class _ClockGuest(_Sandbox):
@@ -413,7 +640,7 @@ class _ClockGuest(_Sandbox):
             until = min(self.now + limit, self.ends_at)
             self._turned.wait_for(lambda: self.now >= until, timeout=10)
             if self.now >= self.ends_at:
-                return SimpleNamespace(returncode=0, stdout=b"0")
+                return SimpleNamespace(returncode=0, stdout=b"0 0")
             return SimpleNamespace(returncode=environment_process._NOT_YET, stdout=b"")
 
     def turn(self, seconds):
@@ -427,6 +654,57 @@ def guest(tmp_path):
     made = _Guest(tmp_path)
     yield made
     made.reap()
+
+
+@pytest.fixture
+def local(tmp_path):
+    made = _Local(tmp_path)
+    yield made
+    made.reap()
+
+
+def test_a_start_with_the_real_helper_hands_over_at_its_last_line(local):
+    script = "(while :; do echo svc; sleep 0.02; done) & sleep 0.3; echo last-line"
+    output = []
+
+    result = run_setup(
+        script=script,
+        workdir="/workspace",
+        backend=local,
+        timeout_s=30,
+        on_output=output.append,
+        phase="start",
+    )
+    returned = time.time()
+
+    assert result.exit_code == 0
+    shown = "".join(output)
+    # The service's lines written while the script ran are counted with it;
+    # what it writes after the end is drained, but what arrived before the
+    # receipt did.
+    assert "last-line\n" in shown
+    assert shown.split("last-line\n", 1)[1].count("svc\n") <= 8
+    assert returned - local.status.stat().st_mtime < 0.5
+
+
+def test_a_failing_scripts_error_survives_a_chatty_leftover_with_the_real_helper(local):
+    script = (
+        '(while :; do echo "server: GET /healthz 200 0.4ms from 127.0.0.1"; sleep 0.05; done) & '
+        "sleep 0.3; echo error: build failed; exit 1"
+    )
+    output = []
+
+    result = run_setup(
+        script=script,
+        workdir="/workspace",
+        backend=local,
+        timeout_s=30,
+        on_output=output.append,
+        phase="setup",
+    )
+
+    assert result.exit_code == 1
+    assert "error: build failed" in result.detail
 
 
 def test_a_guest_wait_runs_isolated_as_the_phase_identity_with_only_its_receipt(guest):
@@ -454,20 +732,22 @@ def test_completion_is_noticed_within_a_guest_check(guest):
     assert process.poll() is None
     time.sleep(0.3)
 
-    guest.write_receipt(0)
+    guest.write_receipt("0 42")
     written = time.monotonic()
     while (code := process.poll()) is None:
         assert time.monotonic() - written < 5
         time.sleep(0.005)
 
-    assert code == 0
+    assert (code, process.script_bytes) == (0, 42)
     # One check every 50 ms and the wait's own exit.
     assert time.monotonic() - written < 0.25
     assert guest.limits() == ["30"]
 
 
-def test_a_long_script_costs_one_exec_per_guest_wait():
-    # Ten minutes of a script that holds its output: a read a second was 600 execs.
+def test_a_long_script_costs_one_exec_per_guest_wait(monkeypatch):
+    # Ten minutes of a script that holds its output: a read a second was 600
+    # execs. The floor between starts keeps real time; this clock is the test's.
+    monkeypatch.setattr(environment_process, "_RETRY_S", 0)
     guest = _ClockGuest(ends_at=600)
     process = guest.spawn_environment_script(phase="setup", script="./build", env={})
 
@@ -482,13 +762,14 @@ def test_a_long_script_costs_one_exec_per_guest_wait():
 
 def test_a_guest_wait_that_runs_out_is_followed_by_the_next(guest, monkeypatch):
     monkeypatch.setattr(environment_process, "_WAIT_S", 0.2)
+    monkeypatch.setattr(environment_process, "_RETRY_S", 0.05)
     process = guest.spawn_environment_script(phase="start", script="./serve &", env={})
     waited = time.monotonic() + 2.0
     while time.monotonic() < waited:
         assert process.poll() is None
         time.sleep(0.01)
 
-    guest.write_receipt(3)
+    guest.write_receipt("3 0")
     _eventually(lambda: process.poll() is not None)
 
     assert process.poll() == 3
@@ -498,19 +779,23 @@ def test_a_guest_wait_that_runs_out_is_followed_by_the_next(guest, monkeypatch):
     assert guest.most_at_once == 1
 
 
-def test_a_guest_wait_that_fails_is_not_started_again_at_once(guest):
-    # As when the script's own processes kill it.
-    guest.waits_fail = True
+@pytest.mark.parametrize("ending", [137, environment_process._NOT_YET])
+def test_guest_waits_that_end_at_once_start_no_closer_than_the_floor(guest, ending):
+    # As when the script's own processes kill each wait, or one finds a clock
+    # that makes it exit at once.
+    guest.ends_at_once = ending
     process = guest.spawn_environment_script(phase="setup", script="./install", env={})
-    for _ in range(20):
+    began = time.monotonic()
+    while time.monotonic() - began < 2.5:
         assert process.poll() is None
         time.sleep(0.01)
-    assert len(guest.calls) == 1
 
-    time.sleep(environment_process._RETRY_S)
-
-    assert process.poll() is None
-    _eventually(lambda: len(guest.calls) == 2)
+    # Started at about 0, 1 and 2 s: at most an exec a second.
+    assert 2 <= len(guest.started) <= 3
+    gaps = [
+        later - earlier for earlier, later in zip(guest.started, guest.started[1:], strict=False)
+    ]
+    assert min(gaps) >= environment_process._RETRY_S - 0.05
 
 
 @pytest.mark.parametrize(
@@ -525,7 +810,7 @@ def test_a_guest_wait_that_failed_or_read_no_receipt_raises_as_a_read_would(gues
 
         guest.guest_wait = refuse
     else:
-        guest.write_receipt("not a number")
+        guest.write_receipt("0")
     process = guest.spawn_environment_script(phase="start", script="./serve &", env={})
 
     with pytest.raises(SandboxError, match=error):
@@ -597,16 +882,16 @@ def test_the_guest_wait_reads_once_and_no_more_than_a_receipt(tmp_path):
     assert (absent.returncode, absent.stdout) == (environment_process._NOT_YET, b"")
     assert time.monotonic() - started < 5
 
-    status.write_text("7")
+    status.write_text("7 12")
     found = _wait_script(status, 0)
-    assert (found.returncode, found.stdout) == (0, b"7")
+    assert (found.returncode, found.stdout) == (0, b"7 12")
 
     # A receipt the script's own processes replaced is read only as far as one.
     status.write_text("1" * 100_000)
     assert _wait_script(status, 0).stdout == b"1" * 64
     status.unlink()
     elsewhere = tmp_path / "elsewhere"
-    elsewhere.write_text("0")
+    elsewhere.write_text("0 0")
     status.symlink_to(elsewhere)
     linked = _wait_script(status, 0)
     assert linked.returncode not in (0, environment_process._NOT_YET)

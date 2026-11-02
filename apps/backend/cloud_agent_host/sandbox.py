@@ -29,7 +29,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.bounded_output import TextTail, protocol_lines, text_chunks
+from cloud_agent_host.bounded_output import TextTail, byte_chunks, protocol_lines, text_chunks
 from cloud_agent_host.docker_engine import DockerEngine, engine_from_env
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.runtime_images import DownloadedVersions
@@ -39,6 +39,7 @@ from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Mapping
+    from typing import IO
 
     from cloud_agent_host.network_guard import HostNetworkGuard
 
@@ -207,6 +208,21 @@ class SandboxProcess(ABC):
     def chunks(self) -> Iterator[str]:
         """Yield bounded stdout chunks; line-only test adapters may reuse lines."""
         yield from self.lines()
+
+    def byte_chunks(self) -> Iterator[bytes]:
+        """Yield bounded stdout chunks as read, before decoding, so they can be counted.
+
+        A text-only adapter's chunks are encoded again, which gives back the
+        bytes of valid UTF-8; an adapter reading a pipe yields what it read.
+        """
+        for chunk in self.chunks():
+            yield chunk.encode()
+
+    @staticmethod
+    def _pipe_bytes(pipe: IO[str] | None) -> Iterator[bytes]:
+        """Read an adapter's pipe in bounded chunks of raw bytes."""
+        assert pipe is not None
+        yield from byte_chunks(pipe)
 
     @abstractmethod
     def kill(self) -> None:
@@ -441,6 +457,9 @@ class _PopenProcess(SandboxProcess):
     def chunks(self) -> Iterator[str]:
         assert self._process.stdout is not None
         yield from text_chunks(self._process.stdout)
+
+    def byte_chunks(self) -> Iterator[bytes]:
+        yield from self._pipe_bytes(self._process.stdout)
 
     def kill(self) -> None:
         """Kill the child process."""
