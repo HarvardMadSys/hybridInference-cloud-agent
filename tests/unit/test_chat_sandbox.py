@@ -2855,7 +2855,7 @@ def test_retained_backend_reports_the_cli_version_pinned_in_its_container(monkey
     monkeypatch.setattr(
         manager.backend,
         "version_stamp",
-        lambda: {
+        lambda **_: {
             "sandbox_image_digest": "sha256:new-runner-image",
             "runtime_versions": {"claude-code": "2.1.999"},
             "runtime_versions_available": {"claude-code": ["2.1.999"]},

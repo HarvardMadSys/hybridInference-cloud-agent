@@ -152,7 +152,7 @@ def test_a_turn_handed_no_settings_runs_with_the_hosts_own(monkeypatch):
     assert kwargs["host_settings"] == {}
 
 
-def _stamp() -> dict[str, Any]:
+def _stamp(**_: object) -> dict[str, Any]:
     return {
         "sandbox_image_digest": "sha256:shared-image",
         "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
