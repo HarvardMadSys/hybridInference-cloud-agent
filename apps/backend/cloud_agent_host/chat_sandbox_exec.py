@@ -9,14 +9,22 @@ inspected afterwards: it raises what an inspection first would have raised,
 and a same-name replacement is refused rather than entered. A spawn is still
 inspected first, since its refusal would surface only when it exits, and so is
 every lifecycle transition and archive read.
+
+A network proof stands for a short time too (:func:`standing_network_proof`):
+the exact running container it proved, unchanged and not restarted, may be
+admitted on it again without repeating the guest's network sync. A proof
+that fails withdraws the one before it.
 """
 
 from __future__ import annotations
 
+import functools
+import math
 import threading
-from typing import TYPE_CHECKING, Any, TypeVar
+import time
+from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar
 
-from cloud_agent_host.chat_sandbox_models import RetainedChatLost
+from cloud_agent_host.chat_sandbox_models import ChatSandboxStatus, RetainedChatLost
 from cloud_agent_host.install_locks import install_lock
 from cloud_agent_host.sandbox import SandboxError
 
@@ -30,6 +38,8 @@ if TYPE_CHECKING:
 NOT_RUNNING = "chat sandbox must be started before exec"
 
 Result = TypeVar("Result", bound="subprocess.CompletedProcess[Any]")
+Proved = TypeVar("Proved")
+ProofArgs = ParamSpec("ProofArgs")
 
 
 class ProvenContainers:
@@ -42,6 +52,12 @@ class ProvenContainers:
         #: is the helper's path, followed by its content's digest when a host
         #: could install other content there.
         self._helpers: set[tuple[str, str]] = set()
+        #: Each name's last network proof that passed: what it proved, and when
+        #: it began (monotonic).
+        self._proofs: dict[str, tuple[ChatSandboxSpec, ChatSandboxInspection, float]] = {}
+        #: When a network proof of each name last failed. No proof begun
+        #: earlier stands, even one that passed after the failure.
+        self._withdrawn: dict[str, float] = {}
 
     def record(
         self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection
@@ -54,6 +70,8 @@ class ProvenContainers:
     def forget(self, spec: ChatSandboxSpec) -> None:
         """Drop the container held for ``spec``'s name, which is being created or removed."""
         with self._lock:
+            self._proofs.pop(spec.container_name, None)
+            self._withdrawn.pop(spec.container_name, None)
             dropped = self._proven.pop(spec.container_name, None)
             if dropped is not None and self._helpers:
                 gone = dropped[1].container_id
@@ -64,6 +82,34 @@ class ProvenContainers:
         with self._lock:
             proven = self._proven.get(spec.container_name)
         return proven[1] if proven is not None and proven[0] == spec else None
+
+    def note_proof(self, spec: ChatSandboxSpec, proved_from: float) -> None:
+        """Keep the container just proved for ``spec`` as its standing network proof.
+
+        ``proved_from`` is when the proof began. A proof of the same name that
+        failed after that withdrew it already, so it is not kept.
+        """
+        name = spec.container_name
+        with self._lock:
+            proven = self._proven.get(name)
+            if (
+                proven is not None
+                and proven[0] == spec
+                and proved_from > self._withdrawn.get(name, -math.inf)
+            ):
+                self._proofs[name] = (spec, proven[1], proved_from)
+
+    def withdraw_proof(self, spec: ChatSandboxSpec) -> None:
+        """Drop ``spec``'s standing network proof: a proof of it just failed."""
+        with self._lock:
+            self._proofs.pop(spec.container_name, None)
+            self._withdrawn[spec.container_name] = time.monotonic()
+
+    def standing_proof(self, spec: ChatSandboxSpec) -> tuple[ChatSandboxInspection, float] | None:
+        """The container ``spec``'s last passed network proof saw, and when it began."""
+        with self._lock:
+            proof = self._proofs.get(spec.container_name)
+        return (proof[1], proof[2]) if proof is not None and proof[0] == spec else None
 
     def holds_helper(self, proven: ChatSandboxInspection | None, path: str) -> bool:
         """Whether ``path`` was found installed in exactly the container ``proven``."""
@@ -99,6 +145,79 @@ class ProvenContainers:
                     for held in self._helpers
                     if held[0] != proven.container_id or not held[1].startswith(prefix)
                 }
+
+
+def guest_unproven(manager: ChatSandboxManager, container_id: str) -> bool:
+    """Whether a start of this exact container has not passed its network check."""
+    with manager._unproven_guests_lock:
+        return container_id in manager._unproven_guests
+
+
+def network_proof(
+    method: Callable[Concatenate[ChatSandboxManager, ChatSandboxSpec, ProofArgs], Proved],
+) -> Callable[Concatenate[ChatSandboxManager, ChatSandboxSpec, ProofArgs], Proved]:
+    """Make a manager method that proves ``spec``'s network keep or withdraw that proof.
+
+    One that returns proved the container it recorded; one that raises, for
+    any reason, leaves no earlier proof standing.
+    """
+
+    @functools.wraps(method)
+    def proving(
+        manager: ChatSandboxManager,
+        spec: ChatSandboxSpec,
+        /,
+        *args: ProofArgs.args,
+        **kwargs: ProofArgs.kwargs,
+    ) -> Proved:
+        proved_from = time.monotonic()
+        try:
+            result = method(manager, spec, *args, **kwargs)
+        except BaseException:
+            manager._proven.withdraw_proof(spec)
+            raise
+        manager._proven.note_proof(spec, proved_from)
+        return result
+
+    return proving
+
+
+def standing_network_proof(
+    manager: ChatSandboxManager,
+    spec: ChatSandboxSpec,
+    current: ChatSandboxInspection,
+    *,
+    max_age_s: float,
+) -> float | None:
+    """When the network proof ``current`` may still be admitted on began; ``None`` if none.
+
+    ``current`` is a fresh inspection. The proof stands only for exactly the
+    container it proved, still running, not restarted since (Docker's start
+    time), on exactly the bridge object it was proved on and nothing else, for
+    under ``max_age_s`` after it began, with no failed proof of the name since
+    and no start of it still unproven. The host's rules are still required:
+    the guard trusts its own verification no longer than it does for a start,
+    and checks again, or raises, once that lapses. A stand-in manager that
+    keeps no proofs has none standing.
+    """
+    proofs: ProvenContainers | None = getattr(manager, "_proven", None)
+    standing = None if proofs is None else proofs.standing_proof(spec)
+    if standing is None:
+        return None
+    proved, proved_from = standing
+    seen = (current.container_id, current.started_at, current.networks, current.network_ids)
+    if (
+        guest_unproven(manager, current.container_id)
+        or time.monotonic() - proved_from >= max_age_s
+        or not current.running
+        or current.status is not ChatSandboxStatus.RUNNING
+        or not current.started_at
+        or seen != (proved.container_id, proved.started_at, proved.networks, proved.network_ids)
+        or current.networks != (manager.network.network_for(spec),)
+    ):
+        return None
+    manager.network.require_host_rules()
+    return proved_from
 
 
 def install_once(

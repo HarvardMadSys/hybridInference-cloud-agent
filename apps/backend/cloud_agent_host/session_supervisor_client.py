@@ -504,8 +504,14 @@ class SessionSupervisorClient:
         expected_container_id: str,
         preparation_id: str,
         base_sha: str,
+        defer_upload: bool = False,
     ) -> dict[str, Any]:
-        """Persist the prepared pre-prompt workspace exactly once."""
+        """Persist the prepared pre-prompt workspace exactly once.
+
+        With ``defer_upload`` a sandbox manager that can returns once the bundle
+        is durable on its host (``upload: pending``) and uploads it after; an
+        older one ignores the field and stores it first.
+        """
         return self._shared_request(
             "POST",
             thread_id,
@@ -518,6 +524,7 @@ class SessionSupervisorClient:
                 "token": token,
                 "preparation_id": preparation_id,
                 "base_sha": base_sha,
+                "defer_upload": defer_upload,
             },
         )
 

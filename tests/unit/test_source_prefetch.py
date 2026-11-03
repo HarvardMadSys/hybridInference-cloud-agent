@@ -238,7 +238,7 @@ def test_a_new_group_offered_a_snapshot_starts_while_its_archive_is_built(monkey
     workdirs = _script_runner_steps(monkeypatch, archive)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(
-        backend, "version_stamp", lambda: {**_stamp(), "sandbox_image_digest": _IMAGE}
+        backend, "version_stamp", lambda **_: {**_stamp(), "sandbox_image_digest": _IMAGE}
     )
     imported: list[tuple[str, bytes]] = []
     manager = Mock()

@@ -27,7 +27,7 @@ import subprocess
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.bounded_output import TextTail, byte_chunks, protocol_lines, text_chunks
 from cloud_agent_host.docker_engine import DockerEngine, engine_from_env
@@ -86,6 +86,13 @@ HELPER_VERSION_LABEL_SUFFIX = ".version"
 #: then reads the npm install behind the ``codex`` PATH found, to start that
 #: version's native binary without its Node shim (``runtimes.codex``).
 RUNTIME_BIN_ROOT = "/opt/runtimes"
+
+#: How a version stamp reads the versions downloaded since the image was built
+#: (``ContainerBackend.version_stamp``): ``"recent"``, the menu this process
+#: last read, without waiting for Docker once it has one; ``"fresh"``, Docker
+#: read now; ``"skip"``, none of them — the image's own menu alone, and no
+#: Docker listing at all.
+DownloadsRead = Literal["recent", "fresh", "skip"]
 
 # Must match `useradd --uid` in deploy/sandbox/Dockerfile.agent-sandbox. The
 # retained container creates the workspace for this id, so a drift between the
@@ -328,13 +335,15 @@ class SandboxBackend(ABC):
         """Return trusted, owner-visible metadata for this execution backend."""
         return {"sandbox_backend": self.name}
 
-    def version_stamp(self) -> dict[str, Any]:
+    def version_stamp(self, *, downloads: DownloadsRead = "recent") -> dict[str, Any]:
         """What actually runs here, for the host heartbeat to report.
 
         Empty for backends with nothing to attest. The container backend
         reports its isolation runtime, image digest and the CLI versions baked
         into the image, so the control plane can stamp attempts with what
         executed them (issue #54) instead of trusting documentation.
+        ``downloads`` says how to read the versions downloaded since
+        (:data:`DownloadsRead`); a backend without any ignores it.
         """
         return {}
 
@@ -618,7 +627,8 @@ class ContainerBackend(SandboxBackend):
         self._version_stamp: dict[str, Any] | None = None
         # Versions an admin updated to after this image was built. Unlike the
         # labels these change while the process runs, so they are read again
-        # (briefly cached) rather than frozen into the stamp.
+        # (cached, and refreshed in the background) rather than frozen into
+        # the stamp.
         self.downloaded_versions = DownloadedVersions(docker_binary, sandbox_namespace)
         # What the last stamp too long to report left off, per runtime.
         self._left_off: dict[str, list[str]] = {}
@@ -645,7 +655,7 @@ class ContainerBackend(SandboxBackend):
             metadata["sandbox_runtime"] = self.runtime
         return metadata
 
-    def version_stamp(self) -> dict[str, Any]:
+    def version_stamp(self, *, downloads: DownloadsRead = "recent") -> dict[str, Any]:
         """Report runtime, image, CLI versions and the preflight kernel probe.
 
         ``sandbox_runtime`` is always present and ``""`` is a positive
@@ -658,23 +668,36 @@ class ContainerBackend(SandboxBackend):
         failing the heartbeat: liveness reporting must not come to depend on
         the local image store answering. For the same reason no runtime's menu
         is ever longer than the control plane accepts (:meth:`_bounded`).
+
+        Everything but the downloaded versions is read once per image. Those
+        are listed from Docker, which takes seconds on a host holding many
+        images, so ``downloads`` says how (:data:`DownloadsRead`): the beat
+        and the claim take the ``"recent"`` menu, which seldom waits for
+        Docker (``DownloadedVersions.versions``); a turn that needs only the
+        image's facts ``"skip"``s it; and a check about to fail a turn for a
+        version missing from what it holds asks for it ``"fresh"``.
         """
         if self._version_stamp is None:
             self._version_stamp = self._collect_version_stamp()
         stamp = {**self._version_stamp, **self._kernel_probe}
         own = stamp.get("runtime_versions_available") or {}
         menus = {runtime: list(versions) for runtime, versions in own.items()}
-        for runtime, versions in self.downloaded_versions.versions().items():
+        downloaded = (
+            {}
+            if downloads == "skip"
+            else self.downloaded_versions.versions(fresh=downloads == "fresh")
+        )
+        for runtime, versions in downloaded.items():
             # After the image's own menu, whose head is the default: a
             # downloaded version is offered, never what a job with no
             # selection runs.
             menu = menus.setdefault(runtime, [])
             menu.extend(version for version in versions if version not in menu)
-        stamp["runtime_versions_available"] = self._bounded(menus, own)
+        stamp["runtime_versions_available"] = self._bounded(menus, own, report=downloads != "skip")
         return stamp
 
     def _bounded(
-        self, menus: dict[str, list[str]], own: dict[str, list[str]]
+        self, menus: dict[str, list[str]], own: dict[str, list[str]], *, report: bool = True
     ) -> dict[str, list[str]]:
         """Each runtime's menu, no longer than the control plane accepts.
 
@@ -682,9 +705,14 @@ class ContainerBackend(SandboxBackend):
         host out of the pool. Downloaded versions nothing needs are removed
         (``runtime_downloads``), so a menu meets the cap only when chats still
         run many versions, or when that cleanup cannot run.
+
+        Only a menu that ``report``s what it left off — one with the
+        downloaded versions in it — says so in the log: an image's own menu
+        is not the menu this host offers.
         """
         if all(len(menu) <= HOST_VERSION_MENU_MAX_ITEMS for menu in menus.values()):
-            self._left_off = {}
+            if report:
+                self._left_off = {}
             return menus
         needed = self.downloaded_versions.needed()
         bounded = {
@@ -700,7 +728,7 @@ class ContainerBackend(SandboxBackend):
             for runtime, menu in menus.items()
             if len(menu) != len(bounded[runtime])
         }
-        if left_off != self._left_off:
+        if report and left_off != self._left_off:
             # Once per change, not on every beat and claim that asks.
             self._left_off = left_off
             logger.warning(

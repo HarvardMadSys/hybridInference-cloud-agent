@@ -176,13 +176,28 @@ def test_the_menu_keeps_the_image_order() -> None:
 
 
 class _Backend:
-    """Only what version selection reads off a sandbox backend."""
+    """Only what version selection reads off a sandbox backend.
 
-    def __init__(self, available: dict[str, list[str]] | None) -> None:
+    ``available`` is the image's own menu; ``downloaded`` what a fresh Docker
+    listing finds since. ``asked`` records how each stamp read the latter.
+    """
+
+    def __init__(
+        self,
+        available: dict[str, list[str]],
+        downloaded: dict[str, list[str]] | None = None,
+    ) -> None:
         self._available = available
+        self._downloaded = downloaded or {}
+        self.asked: list[str] = []
 
-    def version_stamp(self) -> dict[str, Any]:
-        return {"runtime_versions_available": self._available}
+    def version_stamp(self, *, downloads: str = "recent") -> dict[str, Any]:
+        self.asked.append(downloads)
+        menus = {runtime: list(versions) for runtime, versions in self._available.items()}
+        if downloads != "skip":
+            for runtime, versions in self._downloaded.items():
+                menus.setdefault(runtime, []).extend(versions)
+        return {"runtime_versions_available": menus}
 
 
 def _job(version: str | None) -> ClaimedJob:
@@ -206,6 +221,38 @@ def test_the_reason_is_reportable_before_the_agent_starts() -> None:
     """``run_turn`` fails the attempt with this rather than letting it time out."""
     assert runtime_version_unavailable(_job("9.9.9"), _Backend(_MENU)) is not None
     assert runtime_version_unavailable(_job("2.1.235"), _Backend(_MENU)) is None
+
+
+def test_a_version_the_image_holds_is_confirmed_without_listing_downloads() -> None:
+    """Listing downloaded versions takes seconds on a busy host; a turn start skips it."""
+    backend = _Backend(_MENU, {"claude-code": ["2.1.300"]})
+
+    assert runtime_version_unavailable(_job("2.1.235"), backend) is None
+    assert backend.asked == ["skip"]
+
+
+def test_a_downloaded_version_is_confirmed_from_a_fresh_listing() -> None:
+    """Not in the image, so Docker is asked now: a menu read earlier may predate it."""
+    backend = _Backend(_MENU, {"claude-code": ["2.1.300"]})
+
+    assert runtime_version_unavailable(_job("2.1.300"), backend) is None
+    assert backend.asked == ["skip", "fresh"]
+
+
+def test_a_version_the_host_does_not_hold_fails_only_after_a_fresh_listing() -> None:
+    backend = _Backend(_MENU, {"claude-code": ["2.1.300"]})
+
+    reason = runtime_version_unavailable(_job("9.9.9"), backend)
+
+    assert reason is not None and "2.1.300" in reason
+    assert backend.asked == ["skip", "fresh"]
+
+
+def test_no_selection_reads_no_stamp_at_all() -> None:
+    backend = _Backend(_MENU)
+
+    assert runtime_version_unavailable(_job(None), backend) is None
+    assert backend.asked == []
 
 
 # ── The wire between them ────────────────────────────────────────────────

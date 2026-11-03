@@ -373,7 +373,7 @@ def _plain_group_network(monkeypatch):
     """
     monkeypatch.setattr(ChatSandboxNetwork, "network_for", lambda _self, _spec: "agent-net")
     monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
-    monkeypatch.setattr(ChatSandboxNetwork, "verify_host_rules", lambda *_args: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "verify_host_rules", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         ChatSandboxNetwork,
         "_require_group_network",
@@ -2855,7 +2855,7 @@ def test_retained_backend_reports_the_cli_version_pinned_in_its_container(monkey
     monkeypatch.setattr(
         manager.backend,
         "version_stamp",
-        lambda: {
+        lambda **_: {
             "sandbox_image_digest": "sha256:new-runner-image",
             "runtime_versions": {"claude-code": "2.1.999"},
             "runtime_versions_available": {"claude-code": ["2.1.999"]},

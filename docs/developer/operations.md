@@ -2161,6 +2161,24 @@ uses the separate [restorable checkpoints](#restorable-checkpoints) below, and
 the retained Docker writable layer remains authoritative for normal stop/start
 continuity.
 
+The first prompt waits for the initial capture, not for S3. The Sandbox Manager
+writes the bundle under
+`AGENT_SANDBOX_ARCHIVE_STATE_DIR/initial-uploads/<sha256(namespace)>/`, fsyncs
+it, writes the sandbox's initial marker naming those bytes, and returns. A
+background upload then stores the object under the policy revision the marker
+pinned and removes the directory (event `sandbox_initial_archive_uploaded`,
+`deferred: true`). A failed attempt is retried after 5 seconds, 30 seconds, 2
+minutes, then every 10 minutes until S3 holds the object
+(`sandbox_initial_archive_deferred_retry`), and again after a Sandbox Manager
+restart; a later attempt of the same chat that probes the marker uploads from
+the same directory. Until then that directory holds the only copy of the chat's
+pre-prompt workspace, so keep it on the host's persistent state disk and drain
+it before removing a host. When it is full (8 GiB, counting one new bundle's
+worst case) or cannot be written, the capture stores the object before the
+prompt starts, as it always did (`sandbox_initial_archive_handoff_unavailable`
+when unwritable). A bundle that no longer matches its marker is dropped and
+logged as `sandbox_initial_archive_handoff_corrupt`.
+
 A stop the Sandbox Manager did not perform cleanly has no final archive. This
 covers a host crash or reboot, a Sandbox Manager that exited while sandboxes
 kept running, a `docker stop` issued behind it, and a native transport that

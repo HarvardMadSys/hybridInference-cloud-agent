@@ -704,6 +704,68 @@ def test_a_verification_past_its_minute_takes_the_full_check(monkeypatch) -> Non
     assert nft.calls[-1][0][nft.calls[-1][0].index("--entrypoint") + 1] == "ip"
 
 
+def _aged(monkeypatch, guard: HostNetworkGuard, age_s: float) -> None:
+    """Make the guard's last verification ``age_s`` old."""
+    from cloud_agent_host import network_guard
+
+    assert guard._verified_at is not None
+    made = guard._verified_at
+    monkeypatch.setattr(network_guard.time, "monotonic", lambda: made + age_s)
+
+
+def test_an_activations_read_back_leaves_the_renewal_to_the_sweep(monkeypatch) -> None:
+    """Inside the minute an activation trusts, it reads the kernel and installs nothing."""
+    from cloud_agent_host import network_guard
+
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    verified_at = guard._verified_at
+    installs, calls = len(nft.transactions()), len(nft.calls)
+    _aged(monkeypatch, guard, network_guard.GUARD_RENEW_S + 1)
+
+    guard.recheck(renew_after_s=GUARD_RECHECK_S)
+
+    assert len(nft.transactions()) == installs, "an activation renewed the verification"
+    assert _steps(nft.calls[calls:]) == ["python3"]
+    assert json.loads(nft.calls[-1][1] or "{}") == {"reads": guard._verification_reads()}
+    assert guard._verified_at == verified_at
+
+    guard.recheck()
+
+    assert len(nft.transactions()) == installs + 1, "the sweep's renewal was skipped"
+    assert _steps(nft.calls[calls:]) == ["python3", "python3", "ip"]
+
+
+def test_an_activations_read_back_still_repairs_a_changed_table(monkeypatch) -> None:
+    from cloud_agent_host import network_guard
+
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    installs = len(nft.transactions())
+    nft.table("inet", guard.network.table)["rules"]["from_group"] = 0
+    _aged(monkeypatch, guard, network_guard.GUARD_RENEW_S + 1)
+
+    guard.recheck(renew_after_s=GUARD_RECHECK_S)
+
+    assert len(nft.transactions()) == installs + 1
+    assert nft.table("inet", guard.network.table)["rules"]["from_group"] > 0
+
+
+def test_an_activations_read_back_past_the_minute_takes_the_full_check(monkeypatch) -> None:
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    installs, calls = len(nft.transactions()), len(nft.calls)
+    _aged(monkeypatch, guard, GUARD_RECHECK_S)
+
+    guard.recheck(renew_after_s=GUARD_RECHECK_S)
+
+    assert len(nft.transactions()) == installs + 1
+    assert _steps(nft.calls[calls:]) == ["python3", "ip"]
+
+
 def test_the_managers_host_rule_check_reads_the_kernel_every_time() -> None:
     from types import SimpleNamespace
 

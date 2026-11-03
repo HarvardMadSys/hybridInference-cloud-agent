@@ -53,7 +53,7 @@ _JOB = ClaimedJob(
 )
 
 
-def _stamp() -> dict:
+def _stamp(**_: object) -> dict:
     return {
         "sandbox_image_digest": "sha256:shared-image",
         "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
@@ -126,7 +126,7 @@ def test_a_claim_without_the_fork_helper_attests_no_shared_capability(monkeypatc
     monkeypatch.setattr(backend, "version_stamp", _stamp)
     assert runner_mod._claim_attestation(backend)["runner_capabilities"]
 
-    def without_fork_helper() -> dict:
+    def without_fork_helper(**_: object) -> dict:
         stamp = _stamp()
         del stamp["helper_versions"]["claude-session-fork"]
         return stamp

@@ -118,6 +118,7 @@ from cloud_agent_host.measurement_delivery import (
     classify_response,
 )
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
+from cloud_agent_host.resident_probe import probe_live_resident
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.retired_configuration import refuse_retired_host_configuration
@@ -1074,6 +1075,11 @@ def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str
     container: the image's labels, which ``install-runtimes.sh`` writes from
     the same argument it installs, plus the versions this host downloaded since
     an admin updated the agent, each kept only after its check passed.
+
+    The image's own menu, and a retained chat's pinned version, answer without
+    Docker. Only a version found in neither lists the downloaded ones, which
+    takes seconds on a host holding many images, and it lists them anew: a menu
+    read earlier could predate the download, and must not fail the turn.
     """
     version = job.runtime_version
     if not version:
@@ -1081,8 +1087,14 @@ def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str
         # that never reported a version. The image default is exactly right.
         return None
     stamper = getattr(backend, "version_stamp", None)
-    stamp: dict[str, Any] = stamper() if stamper is not None else {}
-    available = (stamp.get("runtime_versions_available") or {}).get(job.runtime)
+    if stamper is None:
+        return None
+    available = (stamper(downloads="skip").get("runtime_versions_available") or {}).get(job.runtime)
+    if available is not None and version in available:
+        return None
+    available = (stamper(downloads="fresh").get("runtime_versions_available") or {}).get(
+        job.runtime
+    )
     if available is None or version in available:
         return None
     return (
@@ -2044,7 +2056,10 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
         job = replace(job, mcp_bindings=[])
 
     manager = ChatSandboxManager(backend)
-    stamp = backend.version_stamp()
+    # Only the image's facts are read here. The downloaded versions take a
+    # Docker listing of seconds, which the version check below makes only
+    # when it must.
+    stamp = backend.version_stamp(downloads="skip")
     existing = job.thread_sandbox or {}
     if existing and existing.get("shared_live") is not True:
         finish_attempt("failed", "the control plane returned a non-shared sandbox mapping")
@@ -2407,11 +2422,13 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
 
         imported_base: str | None = None
         recovered_initial = False
-        if not has_context:
+        if not has_context and container_action != "create":
             # A previous activation may have committed the immutable S3
             # baseline and then died before returning its receipt. Resolve
             # that durable marker before reset, setup, permissions, or uploads
-            # can alter the exact prepared bytes it names.
+            # can alter the exact prepared bytes it names. A container this
+            # acquire created holds no marker it wrote, so none to resolve: the
+            # capture clears one a checkpoint carried and refuses any other.
             stage = _stage(measurement, "initial_archive_status")
             initial_status = supervisor.initial_archive_status(
                 spec,
@@ -2556,12 +2573,15 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                 expected_container_id=str(lease["container_id"]),
                 preparation_id=job.job_id,
                 base_sha=base_sha,
+                # The bundle durable on the host fixes the bytes; S3 can follow.
+                defer_upload=True,
             )
             archive_enabled = initial_archive.get("enabled")
             archive_stored = initial_archive.get("stored")
+            pending = archive_stored is False and initial_archive.get("upload") == "pending"
             if not (
-                (archive_enabled is False and archive_stored is False)
-                or (archive_enabled is True and archive_stored is True)
+                (archive_enabled is False and archive_stored is False and not pending)
+                or (archive_enabled is True and (archive_stored is True or pending))
             ):
                 raise SandboxError("sandbox manager returned an invalid initial archive receipt")
             control.append_event(
@@ -2571,6 +2591,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                         "phase": "initial_archive",
                         "enabled": archive_enabled,
                         "stored": archive_stored,
+                        **({"upload": "pending"} if pending else {}),
                     },
                 )
             )
@@ -2681,23 +2702,14 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             **model_connection_launch(job),
         )
         stage = _stage(measurement, "resident_start")
-        resident_descriptor: dict[str, Any] | None = None
-        if lease.get("resident_state") == "live":
-            try:
-                resident_call = operation_profiling.expect_fragment(
-                    measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
-                )
-                resident_descriptor = supervisor.ensure_shared_resident(
-                    job.thread_id,
-                    token=lease_token,
-                    launch=launch,
-                    profiling=operation_profiling.measurement_context(measurement, resident_call),
-                )
-            except SessionSupervisorError:
-                # A process-fixed model/MCP setting changed, the process died,
-                # or this sandbox manager restarted. Rotate only this member's grant and
-                # resume its exact native session below.
-                resident_descriptor = None
+        resident_descriptor, resident_call = probe_live_resident(
+            measurement,
+            supervisor,
+            lease=lease,
+            thread_id=job.thread_id,
+            token=lease_token,
+            launch=launch,
+        )
         if resident_descriptor is None:
             residency = control.establish_shared_residency(
                 sandbox_id=spec.sandbox_id,
@@ -3801,7 +3813,8 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         sandbox_image_digest=stamp.get("sandbox_image_digest"),
         runtime_versions=stamp.get("runtime_versions"),
         # Read per beat: the image's own menu, plus whatever has been
-        # downloaded since this runner started.
+        # downloaded since this runner started, as last listed; each beat
+        # past a few seconds lists it again in the background.
         runtime_versions_available=(
             (lambda: backend.version_stamp().get("runtime_versions_available"))
             if stamper is not None
