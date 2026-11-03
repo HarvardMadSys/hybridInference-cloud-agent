@@ -1154,7 +1154,7 @@ class ChatSandboxManager:
                     defer_network_release=defer_network_release,
                 )
             with substage(observer, "host_rules_recheck"):
-                self._network_lifecycle.verify_host_rules([spec])
+                self._network_lifecycle.verify_host_rules([spec], renew_after_s=GUARD_RECHECK_S)
         except RetainedChatFailStopped:
             raise
         except Exception as exc:

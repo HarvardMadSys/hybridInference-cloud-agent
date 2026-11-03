@@ -88,20 +88,26 @@ class FakeGuard:
         self.fail: Exception | None = None
         self.recheck_fail: Exception | None = None
         self.rechecks = 0
+        #: Each recheck's ``renew_after_s``, ``None`` for the guard's default.
+        self.renew_after: list[float | None] = []
+        #: How many rules checks asked to warm the helper.
+        self.warmed = 0
         self.relays: dict[str, set[tuple[str, int]]] = {}
         self.network_ids: dict[str, str | None] = {}
         self.ssh_targets: dict[str, set[tuple[str, int]]] = {}
         self.events: list[str] = []
 
-    def ensure(self, **_kwargs: Any) -> None:
+    def ensure(self, *, warm: bool = False, **_kwargs: Any) -> None:
         self.events.append("ensure")
         if self.fail is not None:
             raise self.fail
         self.ensured += 1
+        self.warmed += warm
 
-    def recheck(self) -> None:
+    def recheck(self, *, renew_after_s: float | None = None) -> None:
         self.events.append("recheck")
         self.rechecks += 1
+        self.renew_after.append(renew_after_s)
         if self.recheck_fail is not None:
             raise self.recheck_fail
         return None
@@ -924,6 +930,32 @@ def test_cold_start_rechecks_host_rules_after_guest_proof(monkeypatch):
     assert errors[0].inspection.running is False
     assert docker.containers["sandbox-container"]["running"] is False
     assert guard.rechecks == 1
+
+
+def test_a_create_warms_the_helper_and_its_start_leaves_renewal_to_the_sweep(monkeypatch):
+    """The start's read-back reads the kernel; renewing the verification is the sweep's."""
+    from cloud_agent_host.network_guard import GUARD_RECHECK_S, GUARD_RENEW_S
+
+    manager, docker, guard = _world(monkeypatch)
+    docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")
+    spec = _spec()
+    monkeypatch.setattr(
+        manager._network_lifecycle, "_verify_guest_network", lambda *_args, **_kwargs: None
+    )
+
+    manager.create(spec)
+
+    assert guard.events == ["ensure"]
+    assert guard.warmed == 1, "the create did not start the helper ahead of the relay update"
+
+    manager.start(spec)
+
+    assert guard.events[-1] == "recheck", "the read-back did not come last"
+    assert guard.renew_after == [GUARD_RECHECK_S]
+
+    manager.network.verify_host_rules([spec])
+
+    assert guard.renew_after == [GUARD_RECHECK_S, GUARD_RENEW_S], "the sweep's renewal moved"
 
 
 def test_cold_start_raw_stops_when_structured_stop_inspection_breaks(monkeypatch):

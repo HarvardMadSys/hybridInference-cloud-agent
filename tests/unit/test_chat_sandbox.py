@@ -373,7 +373,7 @@ def _plain_group_network(monkeypatch):
     """
     monkeypatch.setattr(ChatSandboxNetwork, "network_for", lambda _self, _spec: "agent-net")
     monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
-    monkeypatch.setattr(ChatSandboxNetwork, "verify_host_rules", lambda *_args: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "verify_host_rules", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         ChatSandboxNetwork,
         "_require_group_network",

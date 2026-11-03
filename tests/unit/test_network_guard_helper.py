@@ -1801,3 +1801,122 @@ def test_an_update_waits_for_an_install_on_the_long_lived_helper_not_for_a_dispo
     assert helpers.overlaps == [], "an update ran beside an install"
     assert helpers.started == ["install", "routes", _X]
     assert steps.kinds()[-2:] == ["long-lived", "long-lived"]
+
+
+# ── warming the helper ahead of an activation's step ────────────────────
+
+
+def test_a_warmed_helper_waits_for_its_first_request_and_takes_the_next_step(long_lived) -> None:
+    """Its container starts before the step, which then finds it waiting."""
+    _nft, steps, guard, started = long_lived()
+
+    guard.warm()
+
+    assert len(started) == 1 and started[0].requests == [], "a warm sends no request"
+    assert steps.kinds() == []
+    guard.ensure()
+    guard.warm()  # already waiting: nothing more starts
+    guard.sync_relays(_X, {("10.240.0.3", 8080)})
+
+    assert len(started) == 1, "the step started a helper of its own"
+    assert steps.kinds() == ["long-lived", "long-lived"]
+    assert [request for _kind, request in steps.ran] == started[0].requests
+
+
+def test_only_a_rules_check_that_asks_warms_the_helper(monkeypatch, long_lived) -> None:
+    """An activation's check asks; the sweep's renewal on an empty host never does."""
+    _nft, steps, guard, started = long_lived()
+    guard.ensure()
+    monkeypatch.setattr(network_guard_helper, "RETIRE_IDLE_S", 0.0)  # it has idled out
+
+    guard.ensure()
+    guard.ensure(max_age_s=network_guard.GUARD_RENEW_S)
+
+    assert len(started) == 1, "a check that stood started a helper unasked"
+    guard.ensure(warm=True)
+    assert len(started) == 2 and started[1].requests == []
+    assert steps.kinds() == ["long-lived"], "a check that stood ran a step"
+
+
+def test_a_step_on_a_warmed_helper_still_allows_for_its_container_to_start(
+    monkeypatch, quick, long_lived
+) -> None:
+    """Warming moves the start ahead of the step; the step's time for it stays."""
+    monkeypatch.setattr(network_guard_helper, "START_ALLOWANCE_S", 1.6)
+
+    def slow_start(stand_in: _StandIn, frame: dict[str, Any]) -> bytes:
+        time.sleep(0.8)  # twice the request time and margin, half what the allowance adds
+        return _answers(stand_in, frame)
+
+    _nft, steps, guard, started = long_lived(slow_start)
+    guard.warm()
+
+    guard.ensure()
+
+    assert len(started) == 1
+    assert steps.kinds() == ["long-lived"]
+
+
+def test_a_guard_cooling_down_or_closed_warms_nothing(monkeypatch, quick, long_lived) -> None:
+    monkeypatch.setattr(network_guard_helper, "COOLDOWN_S", 60.0)
+    _nft, steps, guard, started = long_lived(_exits)
+    guard.ensure()
+    assert steps.kinds() == ["disposable"] and len(started) == 1
+
+    guard.warm()
+
+    assert len(started) == 1, "a helper started during the cooldown"
+    _nft, _steps, closed, closed_started = long_lived()
+    closed.close()
+    closed.warm()
+    assert closed_started == []
+
+
+def test_a_helper_that_cannot_be_warmed_is_handled_as_a_failed_step(
+    quick, long_lived, caplog
+) -> None:
+    """Nothing raises into the activation; the step that follows runs on a disposable helper."""
+    _nft, steps, guard, started = long_lived()
+    assert guard._long_lived is not None
+
+    def unstartable(_argv: list[str], _errors: Any) -> Any:
+        raise OSError("docker: not found")
+
+    guard._long_lived._spawn = unstartable  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING):
+        guard.warm()
+
+    assert started == []
+    assert any(
+        getattr(record, "event", "") == "network_guard_helper_discarded"
+        and "docker: not found" in getattr(record, "detail", "")
+        for record in caplog.records
+    )
+    guard.ensure()
+    assert steps.kinds() == ["disposable"], "a step ran on a long-lived helper during the cooldown"
+
+
+def test_warming_without_a_long_lived_helper_or_an_image_runs_nothing(monkeypatch, caplog) -> None:
+    nft = FakeNft()
+    HostNetworkGuard(_network(), helper_image=_IMAGE, run=nft).warm()
+    assert nft.calls == [], "a guard without a long-lived helper started something"
+
+    monkeypatch.setenv("HOSTNAME", "runner-1")
+
+    def no_image(argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        nft.calls.append((argv, stdin))
+        return subprocess.CompletedProcess(argv, 1, "", "Error: No such container: runner-1")
+
+    def spawn(_argv: list[str], _errors: Any) -> Any:
+        raise AssertionError("a helper started without its image")
+
+    guard = HostNetworkGuard(_network(), run=no_image, spawn=spawn)
+    with caplog.at_level(logging.WARNING):
+        guard.warm()
+    guard.close()
+
+    assert [argv[1:3] for argv, _ in nft.calls] == [["container", "inspect"]]
+    assert any(
+        getattr(record, "event", "") == "network_guard_helper_not_warmed"
+        for record in caplog.records
+    )

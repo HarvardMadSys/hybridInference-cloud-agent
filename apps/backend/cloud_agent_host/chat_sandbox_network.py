@@ -845,8 +845,8 @@ class ChatSandboxNetwork:
         )
 
     def require_host_rules(self) -> None:
-        """Install and verify this deployment's host rules, unless a recent check stands."""
-        self.backend.network_guard().ensure()
+        """Verify the host rules unless a recent check stands, and warm the helper a start uses."""
+        self.backend.network_guard().ensure(warm=True)
 
     def renew_host_rules(self) -> None:
         """Renew the host-rule verification before it lapses, so a start need not.
@@ -1500,22 +1500,22 @@ class ChatSandboxNetwork:
             stopped,
         )
 
-    def verify_host_rules(self, running: Sequence[ChatSandboxSpec] = ()) -> None:
+    def verify_host_rules(
+        self, running: Sequence[ChatSandboxSpec] = (), *, renew_after_s: float = GUARD_RENEW_S
+    ) -> None:
         """Prove the host still enforces this deployment's rules, repairing them if not.
 
-        Reads the tables from the kernel on every call, so the sweep that
-        calls this sees a flushed ruleset on its next pass rather than when
-        the guard's last verification ages out; a difference reinstalls and
-        reads back. A raise means the host cannot show the boundary every
-        running group was started behind.
+        Reads the kernel's tables every call, so the sweep sees a flushed ruleset
+        on its next pass; a difference, or a verification ``renew_after_s`` old
+        (:meth:`HostNetworkGuard.recheck`), reinstalls and reads back. A raise
+        means the host cannot show the boundary its running groups started behind.
 
-        A reinstalled table holds no group's exceptions, and a group that kept
-        running would stay cut off from its relays and SSH servers until its
-        next turn. So each group in ``running`` whose bridge the read-back
-        shows without them gets them back. One that cannot is logged, not
-        raised: the rules stand, and its next activation syncs it again.
+        A reinstalled table holds no group's exceptions, so each group in
+        ``running`` whose bridge the read-back shows without them gets them
+        back rather than stay cut off from its relays and SSH servers. One
+        that cannot is logged: the rules stand, and its next activation syncs.
         """
-        held = self.backend.network_guard().recheck()
+        held = self.backend.network_guard().recheck(renew_after_s=renew_after_s)
         if held is None:
             return
         for spec in running:

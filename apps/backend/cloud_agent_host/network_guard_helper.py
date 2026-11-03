@@ -195,7 +195,8 @@ RETIRE_AGE_S = 300.0
 #: How long the guard waits for an answer beyond :data:`SERVE_REQUEST_S`.
 ANSWER_MARGIN_S = 2.0
 #: How much longer a step that starts the helper may take, for the container
-#: to start.
+#: to start: a step on a helper that has not answered yet, whether it started
+#: the helper or :meth:`LongLivedHelper.warm` did.
 START_ALLOWANCE_S = 15.0
 #: How long the guard waits for a failed helper's client to exit once killed;
 #: SIGKILL ends a client in milliseconds.
@@ -397,6 +398,8 @@ class _Helper:
     started_at: float
     #: When it last answered, or started.
     used_at: float
+    #: Whether it has answered a step, which shows its container started.
+    answered: bool = False
 
 
 @dataclass
@@ -479,6 +482,43 @@ class LongLivedHelper:
         finally:
             self._slot.release()
 
+    def warm(self, argv: list[str]) -> None:
+        """Start the helper for ``argv`` now, if none is waiting, for a step that comes soon.
+
+        Starting a helper's container costs far more than a step on it, and
+        the first step after the helper idled out paid that inside the step.
+        A caller that knows a step is coming (an activation, whose group
+        bridge takes a relay update after its Docker work) starts it here
+        instead, so the container starts beside that work. The helper is the
+        one the step would have started, flag for flag, and it takes no
+        request until a step sends one; one that no step reaches idles out
+        as any helper does.
+
+        Never waits and never raises for the helper's sake: a step under way,
+        a helper already waiting, a closed guard or one cooling down after a
+        failure leave everything as it is. A helper that cannot be started is
+        taken down as a step takes down one that failed it, cooldown and all.
+        """
+        if not self._slot.acquire(blocking=False):
+            return
+        try:
+            self._reap()
+            if self._closed or time.monotonic() < self._resume_at:
+                return
+            try:
+                self._ready(argv)
+            except BaseException as exc:
+                with contextlib.suppress(HelperStuck):
+                    self._abandon(
+                        "could not be started ahead of its step: "
+                        + (str(exc) or type(exc).__name__),
+                        time.monotonic() + KILL_REAP_S + REMOVE_TIMEOUT_S,
+                    )
+                if not isinstance(exc, Exception):
+                    raise
+        finally:
+            self._slot.release()
+
     def close(self) -> None:
         """Stop the helper, after any step it is running, and start no other."""
         with self._slot:
@@ -496,9 +536,11 @@ class LongLivedHelper:
         # the request: that request never ran.
         for _attempt in range(2):
             try:
-                helper, started = self._ready(argv)
+                helper = self._ready(argv)
                 answer_by = time.monotonic() + SERVE_REQUEST_S + ANSWER_MARGIN_S
-                answer_by += START_ALLOWANCE_S if started else 0.0
+                # Started for this step or warmed ahead of it, its container
+                # may still be starting.
+                answer_by += 0.0 if helper.answered else START_ALLOWANCE_S
                 answer = _exchange(helper.process, argv, stdin, min(answer_by, deadline))
                 result = accept(answer)
             except _Retired:
@@ -513,11 +555,12 @@ class LongLivedHelper:
                     self._abandon("was interrupted", deadline)
                 raise
             helper.used_at = time.monotonic()
+            helper.answered = True
             return result
         return None
 
-    def _ready(self, argv: list[str]) -> tuple[_Helper, bool]:
-        """A helper waiting for the next step, and whether it was started for this one."""
+    def _ready(self, argv: list[str]) -> _Helper:
+        """A helper waiting for the next step, started now if none is."""
         helper = self._running.helper
         now = time.monotonic()
         if helper is not None and (
@@ -531,8 +574,8 @@ class LongLivedHelper:
             self._retire()
             helper = None
         if helper is not None:
-            return helper, False
-        return self._start(argv), True
+            return helper
+        return self._start(argv)
 
     def _start(self, argv: list[str]) -> _Helper:
         errors, path = tempfile.mkstemp(prefix="network-guard-helper-")

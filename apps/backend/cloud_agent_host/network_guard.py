@@ -490,12 +490,22 @@ class HostNetworkGuard:
 
     # ── public surface ──────────────────────────────────────────────────
 
-    def ensure(self, *, max_age_s: float = GUARD_RECHECK_S) -> HeldExceptions | None:
+    def ensure(
+        self, *, max_age_s: float = GUARD_RECHECK_S, warm: bool = False
+    ) -> HeldExceptions | None:
         """Install (idempotently) and verify, at most once per ``max_age_s``.
 
         Returns what the read-back showed each bridge holding, or ``None``
-        when the last verification still stood and nothing was read.
+        when the last verification still stood and nothing was read. With
+        ``warm``, a verification that stands then starts the long-lived
+        helper for the step its caller is about to take (:meth:`warm`).
         """
+        held = self._ensure(max_age_s)
+        if warm:
+            self.warm()
+        return held
+
+    def _ensure(self, max_age_s: float) -> HeldExceptions | None:
         with self._state:
             if self._verified_within(max_age_s):
                 return None
@@ -525,7 +535,7 @@ class HostNetworkGuard:
         """Whether the last verification is younger than ``max_age_s``; ``_state`` held."""
         return self._verified_at is not None and time.monotonic() - self._verified_at < max_age_s
 
-    def recheck(self) -> HeldExceptions | None:
+    def recheck(self, *, renew_after_s: float = GUARD_RENEW_S) -> HeldExceptions | None:
         """Read this deployment's tables from the kernel now, and repair them if changed.
 
         :meth:`ensure` trusts a verification for a minute, which suits
@@ -536,10 +546,19 @@ class HostNetworkGuard:
         reinstalling, and only a difference (or a failed read) costs the full
         :meth:`ensure`: reinstall, read back, and the neighbour and route
         checks. That raises when the rules still cannot be shown, which is
-        what stops the running groups. A verification past
-        :data:`GUARD_RENEW_S` takes the full path regardless, so those checks
-        keep their cadence and an activation never finds the verification
-        lapsed.
+        what stops the running groups. A verification ``renew_after_s`` old,
+        :data:`GUARD_RENEW_S` unless told otherwise, takes the full path
+        regardless, so the sweep keeps those checks on their cadence and an
+        activation never finds the verification lapsed.
+
+        An activation's own read-back, after its guest's network check, passes
+        :data:`GUARD_RECHECK_S`. What it needs is the kernel read now, which
+        it gets at any age, and it already trusts a full verification that
+        young, as its :meth:`ensure` did moments before. Renewing is the
+        sweep's to do: a start that met the renewal window paid for a
+        reinstall, a neighbour read and a route helper on its way to the
+        prompt. A verification past :data:`GUARD_RECHECK_S`, or one a failed
+        read invalidated, still takes the full path there too.
 
         Returns what the read-back showed each bridge holding, as
         :meth:`ensure` does: a table reinstalled here, or by another process
@@ -552,7 +571,7 @@ class HostNetworkGuard:
             # Wait for it, so this pass reads the table it leaves.
             with self._lock.exclusive(), self._state:
                 verified_at = self._verified_at
-        if verified_at is not None and time.monotonic() - verified_at < GUARD_RENEW_S:
+        if verified_at is not None and time.monotonic() - verified_at < renew_after_s:
             try:
                 read_at = time.monotonic()
                 listings = self._list_many(self._verification_reads())
@@ -575,13 +594,43 @@ class HostNetworkGuard:
                     },
                 )
                 self.invalidate()
-        return self.ensure(max_age_s=GUARD_RENEW_S)
+        return self.ensure(max_age_s=renew_after_s)
 
     def invalidate(self) -> None:
         """Forget the last verification, so the next activation reads the kernel."""
         with self._lock.exclusive(), self._state:
             self._verified_at = None
             self._held = {}
+
+    def warm(self) -> None:
+        """Start the long-lived helper ahead of a step an activation is about to take.
+
+        For an activation, never the sweep: a host with nothing running keeps
+        no helper (:mod:`cloud_agent_host.idle_host_rules`). A create calls it
+        once its rules check stands (``ensure(warm=True)``). The start that
+        follows gives a new or stopped group's fresh bridge its relay update
+        after the bridge's Docker work, and that update otherwise waited for a
+        helper container to start whenever the last one had idled out.
+        Started here, the container starts beside the create and that Docker
+        work instead. It is the same helper, flag for flag, and nothing about
+        a step changes. Never raises and never waits: a guard without a
+        long-lived helper, a busy one, or one whose image cannot be found
+        leaves the step to start what it needs, as it always did.
+        """
+        if self._long_lived is None:
+            return
+        try:
+            command = self._command("python3", ["-c", _NFT_SERVE], interactive=True)
+            self._long_lived.warm(command)
+        except Exception as exc:
+            logger.warning(
+                "network_guard_helper_not_warmed",
+                extra={
+                    "event": "network_guard_helper_not_warmed",
+                    "table": self.network.table,
+                    "detail": str(exc)[:300],
+                },
+            )
 
     def close(self) -> None:
         """Stop the long-lived helper; every later step runs on a disposable one.
