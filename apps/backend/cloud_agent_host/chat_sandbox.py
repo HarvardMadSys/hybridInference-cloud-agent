@@ -129,6 +129,7 @@ from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
+    DownloadsRead,
     SandboxBackend,
     SandboxError,
     SandboxProcess,
@@ -3898,9 +3899,9 @@ class RetainedChatBackend(SandboxBackend):
             "sandbox_id": self.spec.sandbox_id,
         }
 
-    def version_stamp(self) -> dict[str, Any]:
+    def version_stamp(self, *, downloads: DownloadsRead = "recent") -> dict[str, Any]:
         """Return a stamp that describes the retained image, not today's image."""
-        stamp = self.manager.backend.version_stamp()
+        stamp = self.manager.backend.version_stamp(downloads=downloads)
         if self.spec.sandbox_image_digest:
             stamp = {
                 **stamp,
