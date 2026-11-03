@@ -1,4 +1,7 @@
-"""The teams a deleted account still owns, and handing them to one of their members.
+"""Each account's teams, and handing a deleted account's teams to one of their members.
+
+The administration list names the active teams each account is an active
+member of, with its role there.
 
 A team belongs to its members as much as to its owner, so erasing an owner
 never deletes a team others still use (see
@@ -39,11 +42,34 @@ WHERE m.team_id = ANY($1::text[]) AND m.user_id <> $2 AND m.state = 'active'
 ORDER BY m.team_id, (m.role = 'admin') DESC, m.joined_at, m.user_id
 """
 
+#: The owner is whoever the team names; a member row's role is admin or member.
+_MEMBERSHIPS_SQL = """
+SELECT m.user_id, t.id, t.name,
+       CASE WHEN t.owner_user_id = m.user_id THEN 'owner' ELSE m.role END AS role
+FROM agent_team_members m
+JOIN agent_teams t ON t.id = m.team_id
+WHERE m.user_id = ANY($1::text[]) AND m.state = 'active' AND t.state = 'active'
+ORDER BY m.user_id, (t.owner_user_id = m.user_id) DESC, (m.role = 'admin') DESC, t.name, t.id
+"""
+
 
 class TeamsMixin:
-    """Teams of a deleted owner; mixed into the local-account repository."""
+    """Teams of an account; mixed into the local-account repository."""
 
     _pool: asyncpg.Pool
+
+    async def team_memberships(self, account_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """The active teams each listed account is in, owned ones first, with its role."""
+        if not account_ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_MEMBERSHIPS_SQL, list(account_ids))
+        teams: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            teams.setdefault(row["user_id"], []).append(
+                {"id": row["id"], "name": row["name"], "role": row["role"]}
+            )
+        return teams
 
     async def owned_teams(self, account_id: str) -> list[dict[str, Any]]:
         """The active teams the account owns, each with its other active members."""

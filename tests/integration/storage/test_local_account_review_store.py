@@ -453,6 +453,48 @@ async def _team(pool, team_id: str, owner: str, *members: str) -> None:
         )
 
 
+async def test_the_account_list_names_each_accounts_teams_and_narrows_to_one(storage, pool):
+    """Admin → Users: the active teams each account is in, and one team's members."""
+    owner = await make_account(storage, "lead@lab.edu")
+    member = await make_account(storage, "student@lab.edu")
+    visitor = await make_account(storage, "visitor@lab.edu")
+    await _team(pool, "team-lab", owner, member)
+    await _team(pool, "team-side", member)
+    await _team(pool, "team-gone", visitor, member)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_teams SET state = 'deleted', deleted_at = NOW() WHERE id = 'team-gone'"
+        )
+        await conn.execute(
+            "INSERT INTO agent_team_members (team_id, user_id, state, departed_at) "
+            "VALUES ('team-lab', $1, 'left', NOW())",
+            visitor,
+        )
+    accounts = storage.local_accounts
+
+    teams = await accounts.team_memberships([owner, member, visitor])
+    assert teams == {
+        owner: [{"id": "team-lab", "name": "Team team-lab", "role": "owner"}],
+        # Owned first; a deleted team and a team left are not listed.
+        member: [
+            {"id": "team-side", "name": "Team team-side", "role": "owner"},
+            {"id": "team-lab", "name": "Team team-lab", "role": "member"},
+        ],
+    }
+    assert await accounts.team_memberships([]) == {}
+
+    async def listed(team_id: str, query: str | None = None) -> list[str]:
+        records, total = await accounts.list_accounts(
+            admission_status=None, limit=10, offset=0, query=query, team_id=team_id
+        )
+        assert total == len(records)
+        return [record.id for record in records]
+
+    assert await listed("team-lab") == [member, owner]
+    assert await listed("team-lab", "lead") == [owner]
+    assert await listed("team-missing") == []
+
+
 async def test_erasing_deletes_a_team_the_account_owns_alone(storage, pool):
     """repro [C] alone: refused with a generic error before; now the team goes with it."""
     owner = await make_account(storage, "alone@lab.edu")

@@ -137,6 +137,15 @@ describe('Admin → Teams → one team', () => {
     expect(within(rows[2]).getByText('carol')).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Waiting to join (1)' })).toHaveTextContent('Dave');
     expect(screen.getByText('1 open · 3 claimed · 2 expired · 0 revoked')).toBeInTheDocument();
+    // The team's members, and each person, open in the People view.
+    expect(within(members).getByRole('link', { name: 'Show in People' })).toHaveAttribute(
+      'href',
+      '/admin/users?team=ateam_1',
+    );
+    expect(within(rows[1]).getByRole('link', { name: 'bob@example.com' })).toHaveAttribute(
+      'href',
+      '/admin/users?q=bob',
+    );
 
     const history = screen.getByRole('region', { name: 'History' });
     expect(history).toHaveTextContent('removed carol@example.com');

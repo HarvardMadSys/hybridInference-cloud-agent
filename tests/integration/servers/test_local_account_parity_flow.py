@@ -561,7 +561,10 @@ async def test_administrators_search_annotate_mail_outcomes_and_erase(env):
     async with _client(env) as http:
         found = await http.get("/v1/admin/accounts", params={"q": "APPLICANT"}, headers=_ADMIN)
         assert [a["id"] for a in found.json()["accounts"]] == [applicant]
+        assert found.json()["accounts"][0]["teams"] == []
         assert found.json()["counts"]["admission:pending"] == 1
+        in_team = await http.get("/v1/admin/accounts", params={"team": "t-none"}, headers=_ADMIN)
+        assert (in_team.status_code, in_team.json()["accounts"]) == (200, [])
         approved = await _admin(http, env, applicant, "approve")
         assert approved.status_code == 200
         assert mailer.last("approved").to == "applicant@example.edu"

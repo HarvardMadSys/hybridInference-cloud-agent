@@ -1,10 +1,11 @@
 'use client';
 
-// Admin → Teams: every team on the platform, newest first.
+// Admin → Users → Teams: every team on the platform, newest first.
 //
-// Read-only. Owners and admins manage their teams from Settings; this page is
+// Read-only. Owners and admins manage their teams from Settings; this view is
 // for answering "which teams are there, and who is in them" across all of
-// them, deleted teams included.
+// them, deleted teams included. A team's member count opens its members in
+// the People view.
 
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -17,8 +18,9 @@ import {
 } from '@/lib/api/adminTeams';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import { AdminNavigation } from '../AdminNavigation';
-import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
+import { AdminNavigation } from '../../AdminNavigation';
+import { ADMIN_PAGE, AdminPageHeader } from '../../AdminPageHeader';
+import { UsersTabs } from '../UsersTabs';
 import {
   accessDenied,
   AdminRequired,
@@ -27,7 +29,7 @@ import {
   ErrorNotice,
   INPUT,
   dateTime,
-} from '../runs/shared';
+} from '../../runs/shared';
 
 const STATES: { key: AdminTeamStateFilter; label: string }[] = [
   { key: 'active', label: 'Active' },
@@ -94,10 +96,11 @@ export default function AdminTeamsPage() {
     <div className="min-w-0 flex-1 overflow-y-auto">
       <section className={ADMIN_PAGE}>
         <AdminPageHeader
-          section="Teams"
+          section="Users"
           description="Every team on the platform, who is in it, and what changed. Owners and admins manage their teams from Settings."
         />
-        <AdminNavigation current="teams" />
+        <AdminNavigation current="users" />
+        <UsersTabs current="teams" />
 
         <div className="mt-6 flex flex-wrap items-center gap-3">
           <form
@@ -198,7 +201,7 @@ export default function AdminTeamsPage() {
                   <tr key={team.id} className="hover:bg-surface-hover/50">
                     <td className="px-4 py-3">
                       <Link
-                        href={`/admin/teams/${encodeURIComponent(team.id)}`}
+                        href={`/admin/users/teams/${encodeURIComponent(team.id)}`}
                         className="ui-focus-ring rounded font-medium text-foreground hover:underline"
                       >
                         {team.name}
@@ -216,7 +219,15 @@ export default function AdminTeamsPage() {
                         <div className="text-xs text-muted">{team.owner.email}</div>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">{team.member_count}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      <Link
+                        href={`/admin/users?team=${encodeURIComponent(team.id)}`}
+                        aria-label={`${team.member_count} members of ${team.name}`}
+                        className="ui-focus-ring rounded text-foreground hover:underline"
+                      >
+                        {team.member_count}
+                      </Link>
+                    </td>
                     <td className="px-4 py-3 text-right tabular-nums">{team.admin_count}</td>
                     <td className="px-4 py-3 text-right tabular-nums">
                       {team.pending_request_count}

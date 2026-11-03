@@ -1,7 +1,8 @@
 'use client';
 
-// Admin → Teams → one team: its members past and present, the requests
-// waiting on its owner, its invitation links and its audit history. Read-only.
+// Admin → Users → Teams → one team: its members past and present, the
+// requests waiting on its owner, its invitation links and its audit history.
+// Read-only. Each person opens their account in the People view.
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
@@ -14,12 +15,13 @@ import {
   type AdminTeamAuditEvent,
   type AdminTeamDetail,
   type AdminTeamPerson,
+  type AdminTeamSummary,
 } from '@/lib/api/adminTeams';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import { AdminNavigation } from '../../AdminNavigation';
+import { AdminNavigation } from '../../../AdminNavigation';
 import { describeTeamEvent } from '../describe';
-import { ADMIN_PAGE } from '../../AdminPageHeader';
+import { ADMIN_PAGE } from '../../../AdminPageHeader';
 import {
   accessDenied,
   AdminRequired,
@@ -27,13 +29,15 @@ import {
   CARD,
   ErrorNotice,
   dateTime,
-} from '../../runs/shared';
+} from '../../../runs/shared';
 
 const ROLE_LABELS = { owner: 'Owner', admin: 'Admin', member: 'Member' } as const;
 const STATE_LABELS = { active: 'Member', left: 'Left', removed: 'Removed' } as const;
 
 function Person({ person }: { person: AdminTeamPerson }) {
   const label = personLabel(person);
+  // The People view finds an account by its id; it holds the account's actions.
+  const account = `/admin/users?q=${encodeURIComponent(person.user_id)}`;
   // Whatever the label did not already say: the email, then the account id.
   const detail = [person.email, person.user_id].filter((part) => part && part !== label);
   return (
@@ -42,12 +46,30 @@ function Person({ person }: { person: AdminTeamPerson }) {
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={person.avatar_data_url} alt="" className="h-8 w-8 shrink-0 rounded-full" />
       <div className="min-w-0">
-        <div className="truncate text-foreground">{label}</div>
+        <Link
+          href={account}
+          className="ui-focus-ring block truncate rounded text-foreground hover:underline"
+        >
+          {label}
+        </Link>
         {detail.length > 0 && (
           <div className="truncate font-mono text-xs text-muted">{detail.join(' · ')}</div>
         )}
       </div>
     </div>
+  );
+}
+
+/** The team's current members in the People view; a deleted team has none. */
+function ShowInPeople({ team }: { team: AdminTeamSummary }) {
+  if (team.state !== 'active') return null;
+  return (
+    <Link
+      href={`/admin/users?team=${encodeURIComponent(team.id)}`}
+      className="ui-focus-ring rounded text-xs text-accent hover:underline"
+    >
+      Show in People
+    </Link>
   );
 }
 
@@ -119,8 +141,8 @@ export default function AdminTeamPage() {
       <section className={ADMIN_PAGE}>
         <header>
           <h1 className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted">
-            <Link href="/admin/teams" className="hover:underline">
-              Admin · Teams
+            <Link href="/admin/users/teams" className="hover:underline">
+              Admin · Users · Teams
             </Link>
           </h1>
           <p className="text-lg font-semibold tracking-tight text-foreground">
@@ -133,7 +155,7 @@ export default function AdminTeamPage() {
           </p>
           <p className="mt-0.5 font-mono text-[13px] text-muted">{teamId}</p>
         </header>
-        <AdminNavigation current="teams" />
+        <AdminNavigation current="users" />
 
         {error && (
           <div className="mt-6">
@@ -156,9 +178,12 @@ export default function AdminTeamPage() {
           <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
             <div className="min-w-0 space-y-6">
               <section aria-labelledby="team-members" className={`${CARD} overflow-x-auto`}>
-                <h2 id="team-members" className="px-4 pt-4 text-sm font-semibold text-foreground">
-                  Members ({active.length})
-                </h2>
+                <div className="flex flex-wrap items-baseline justify-between gap-2 px-4 pt-4">
+                  <h2 id="team-members" className="text-sm font-semibold text-foreground">
+                    Members ({active.length})
+                  </h2>
+                  <ShowInPeople team={team} />
+                </div>
                 <table className="mt-2 w-full min-w-[560px] text-left text-sm">
                   <thead className="border-b border-border text-xs text-muted">
                     <tr>

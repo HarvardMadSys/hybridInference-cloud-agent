@@ -317,7 +317,7 @@ def _admin_notifier(
                 AccountMail(
                     kind="new_application",
                     to=recipient,
-                    link=f"{base}/admin/accounts",
+                    link=f"{base}/admin/users?status=pending",
                     details={
                         "account": record.label,
                         "user_name": record.user_name or "",
