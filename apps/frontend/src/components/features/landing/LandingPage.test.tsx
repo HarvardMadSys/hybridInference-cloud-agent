@@ -169,6 +169,24 @@ describe('the signed-out home page', () => {
     );
   });
 
+  it('shows the task title again when a replay lands on it mid-fade', async () => {
+    render(<LandingPage />);
+    await advance(0);
+    const fading = () => demo().querySelectorAll('[data-fading="true"]').length;
+
+    // Up to the moment the task is sent and its title starts to replace "New task".
+    for (let elapsed = 0; message()?.getAttribute('data-in') !== 'true'; elapsed += 10) {
+      if (elapsed > 20_000) throw new Error('the task was never sent');
+      await advance(10);
+    }
+    expect(fading()).toBeGreaterThan(0);
+
+    // Replaying the first step goes back to "New task" before the swap happens.
+    fireEvent.click(screen.getByRole('button', { name: /Give it a task/ }));
+    await advance(1000);
+    expect(fading()).toBe(0);
+  });
+
   it('switches to the chosen example', async () => {
     render(<LandingPage />);
     await advance(2000);

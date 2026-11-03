@@ -21,16 +21,20 @@ import { TermsConsent } from './TermsConsent';
 import { TurnstileWidget } from './TurnstileWidget';
 import { useAuthOptions } from './useAuthOptions';
 
+type SignupMethod = 'email' | 'phone';
+
 function PhoneSignup({
   details,
   countryCode,
   siteKey,
   onCaptchaUsed,
+  onDone,
 }: {
   details: SignupDetails;
   countryCode: string;
   siteKey?: string | null;
   onCaptchaUsed: () => void;
+  onDone: () => void;
 }) {
   const t = useT();
   const [phone, setPhone] = useState('');
@@ -52,6 +56,7 @@ function PhoneSignup({
           accepted_tos: details.accepted_tos,
         }),
       );
+      onDone();
     } catch (cause) {
       setError(getErrorMessage(cause));
     } finally {
@@ -90,8 +95,8 @@ function MethodTabs({
   method,
   onMethod,
 }: {
-  method: 'email' | 'phone';
-  onMethod: (value: 'email' | 'phone') => void;
+  method: SignupMethod;
+  onMethod: (value: SignupMethod) => void;
 }) {
   const t = useT();
   return (
@@ -112,11 +117,7 @@ function MethodTabs({
   );
 }
 
-function chooseMethod(
-  method: 'email' | 'phone',
-  emailOpen: boolean,
-  phoneOpen: boolean,
-): 'email' | 'phone' {
+function chooseMethod(method: SignupMethod, emailOpen: boolean, phoneOpen: boolean): SignupMethod {
   if (method === 'phone' && phoneOpen) return 'phone';
   return emailOpen ? 'email' : 'phone';
 }
@@ -145,12 +146,23 @@ function SignupClosed() {
   );
 }
 
-/** Account, then the email check when the deployment asks for one, then access. */
-function SignupSteps({ verify, sent }: { verify: boolean; sent: boolean }) {
+/**
+ * Account, then the email check when an email sign-up needs one, then access.
+ * A phone sign-up proves its number with the code, so it has no check to wait for.
+ */
+function SignupSteps({
+  method,
+  done,
+  verifyEmail,
+}: {
+  method: SignupMethod;
+  done: SignupMethod | null;
+  verifyEmail: boolean;
+}) {
   const t = useT();
   const steps = [t('signup.stepAccount'), t('signup.stepAccess')];
-  if (verify) steps.splice(1, 0, t('signup.stepVerify'));
-  return <AccountSteps steps={steps} current={sent ? 1 : 0} />;
+  if ((done ?? method) === 'email' && verifyEmail) steps.splice(1, 0, t('signup.stepVerify'));
+  return <AccountSteps steps={steps} current={done ? 1 : 0} />;
 }
 
 export function SignupPage() {
@@ -160,8 +172,9 @@ export function SignupPage() {
   const [userName, setUserName] = useState('');
   const [useCase, setUseCase] = useState('');
   const [captcha, setCaptcha] = useState<string | null>(null);
-  const [method, setMethod] = useState<'email' | 'phone'>('email');
-  const [sent, setSent] = useState(false);
+  const [method, setMethod] = useState<SignupMethod>('email');
+  // Which form created the account, once one has.
+  const [done, setDone] = useState<SignupMethod | null>(null);
   const [captchaReset, setCaptchaReset] = useState(0);
   const onToken = useCallback((token: string | null) => setCaptcha(token), []);
   // A token is good for one request: after each, a fresh challenge replaces it.
@@ -185,10 +198,14 @@ export function SignupPage() {
   return (
     <AccountFrame
       title={t(
-        sent && options.require_email_verification ? 'account.checkEmail' : 'account.signup',
+        done === 'email' && options.require_email_verification
+          ? 'account.checkEmail'
+          : 'account.signup',
       )}
       description={t('signup.description')}
-      steps={<SignupSteps verify={options.require_email_verification} sent={sent} />}
+      steps={
+        <SignupSteps method={chosen} done={done} verifyEmail={options.require_email_verification} />
+      }
     >
       <div className="space-y-4">
         <AccountField id="user-name" label={t('signup.name')}>
@@ -228,7 +245,7 @@ export function SignupPage() {
           details={details}
           verified={!options.require_email_verification}
           ready={ready}
-          onDone={() => setSent(true)}
+          onDone={() => setDone('email')}
           onAttempt={needsCaptcha ? resetCaptcha : undefined}
         />
       ) : (
@@ -239,6 +256,7 @@ export function SignupPage() {
             countryCode={options.phone.default_country_code}
             siteKey={options.turnstile_site_key}
             onCaptchaUsed={resetCaptcha}
+            onDone={() => setDone('phone')}
           />
         )
       )}

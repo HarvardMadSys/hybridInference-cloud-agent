@@ -21,7 +21,12 @@ function useCrossfade<T>(value: T, instant: boolean): [T, boolean] {
   const [shown, setShown] = useState(value);
   const [fading, setFading] = useState(false);
   useEffect(() => {
-    if (Object.is(value, shown)) return;
+    // Back to the value on screen before the fade finished (a replay, say):
+    // the pending swap was cancelled, so nothing will end the fade but this.
+    if (Object.is(value, shown)) {
+      setFading(false);
+      return;
+    }
     if (instant) {
       setShown(value);
       setFading(false);
