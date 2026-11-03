@@ -188,15 +188,23 @@ class InitialUploadSpool:
         return SpooledInitialUpload(reservation.entry_id, target, marker)
 
     def commit(self, entry: SpooledInitialUpload) -> None:
-        """Record that the container's marker names ``entry``: it is uploaded from now on."""
-        descriptor = os.open(
-            entry.directory / _COMMITTED, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        _sync_directory(entry.directory)
+        """Record that the container's marker names ``entry``: it is uploaded from now on.
+
+        ``committed`` is visible to :meth:`entries` before the directory is
+        synced, so the commit holds the entry's claim: an uploader cannot
+        store and remove the entry until the commit is durable.
+        """
+        with self._lock:
+            claim = self._claims.setdefault(entry.entry_id, threading.Lock())
+        with claim:
+            descriptor = os.open(
+                entry.directory / _COMMITTED, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            _sync_directory(entry.directory)
 
     def discard(self, handoff: InitialUploadReservation | SpooledInitialUpload) -> None:
         """Drop a hand-off no committed marker names; the old synchronous rules apply."""

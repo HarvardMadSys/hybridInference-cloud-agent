@@ -25,7 +25,10 @@ from tests.unit.test_sandbox_archives import (
     _zero_clock,
 )
 
-from cloud_agent_host import sandbox_archive_runtime as archive_runtime
+from cloud_agent_host import (
+    sandbox_archive_runtime as archive_runtime,
+    sandbox_initial_uploads as uploads_mod,
+)
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatBackend
 from cloud_agent_host.sandbox import ProcessBackend
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
@@ -280,6 +283,64 @@ def test_a_probe_that_waited_out_the_background_upload_asks_s3_again(tmp_path) -
     assert uploader.calls == []
     assert len(uploader.exists_calls) == 2
     assert [call["path"] for call in manager.export_calls] == ["/workspace"]
+    service.close()
+
+
+def test_a_probe_whose_hand_off_was_already_uploaded_asks_s3_before_rebuilding(tmp_path) -> None:
+    """The worker stored the entry and removed it between the probe's HEAD and its lookup.
+
+    The prompt has since changed the workspace, so a rebuild could only fail:
+    S3 is asked again first, and it holds the marked object.
+    """
+    manager = _Manager(_spec(), running=True)
+    uploader = _Uploader(_config(), exists_outcomes=[False, True])
+    spool = _spool(tmp_path)
+    service = _service(manager, uploader, spool)
+    _capture(service, manager, defer_upload=True)
+    [entry] = spool.entries()
+    manager.payloads["/workspace"] = b"the agent edited the workspace"
+    spool.remove(entry)
+
+    receipt = _probe(service, manager)
+
+    assert receipt["stored"] is True
+    assert receipt["prepared"] is True
+    assert uploader.calls == []
+    assert len(uploader.exists_calls) == 2
+    assert [call["path"] for call in manager.export_calls] == ["/workspace"]
+    service.close()
+
+
+def test_the_worker_cannot_take_an_entry_before_its_commit_is_durable(
+    tmp_path, monkeypatch
+) -> None:
+    """``committed`` is visible before the entry directory is synced; the worker must wait."""
+    manager = _Manager(_spec(), running=True)
+    uploader = _Uploader(_config())
+    spool = _spool(tmp_path)
+    service = _service(manager, uploader, spool)
+    sync = uploads_mod._sync_directory
+    racers: list[threading.Thread] = []
+
+    def worker_races_the_commit(directory: Path) -> None:
+        if (directory / "committed").exists() and not racers:
+            [entry] = spool.entries()
+            racer = threading.Thread(target=service.upload_spooled_initial, args=(entry,))
+            racers.append(racer)
+            racer.start()
+            # Unguarded, the worker uploads and removes the directory right here.
+            racer.join(timeout=0.5)
+        sync(directory)
+
+    monkeypatch.setattr(uploads_mod, "_sync_directory", worker_races_the_commit)
+    receipt = _capture(service, manager, defer_upload=True)
+    [racer] = racers
+    racer.join(_WAIT_S)
+
+    assert receipt["upload"] == "pending"
+    assert not racer.is_alive()
+    assert len(uploader.calls) == 1
+    assert spool.entries() == []
     service.close()
 
 

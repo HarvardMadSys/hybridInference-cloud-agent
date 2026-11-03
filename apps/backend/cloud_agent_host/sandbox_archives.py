@@ -885,10 +885,13 @@ class SandboxArchiveService:
             receipt = self._upload_spooled(spool, entry, marker, deadline=deadline)
             if receipt is not None:
                 return receipt
-            # The background upload stored it while this waited, or the bundle
-            # lost its bytes; only S3 can say which.
-            if self._initial_stored(spec, marker, deadline=deadline):
-                return {"enabled": True, "stored": True, "already_exists": True}
+        # With a hand-off directory, a missing entry may be one the background
+        # upload stored and removed -- while this waited for it, or after the
+        # caller's HEAD and before the lookup -- or a bundle that lost its
+        # bytes. Only S3 can say which, and a rebuild after the prompt changed
+        # the workspace could only fail.
+        if spool is not None and self._initial_stored(spec, marker, deadline=deadline):
+            return {"enabled": True, "stored": True, "already_exists": True}
         archive = self._rebuild_initial(
             spec,
             inspection,
