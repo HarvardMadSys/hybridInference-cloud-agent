@@ -125,18 +125,23 @@ async def test_the_two_mints_overlap():
     app = _app(_ClaimStore())
     app.dependency_overrides[get_agent_app_credentials] = SlowGitHub
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # Timed around the request alone: building the app is no part of it.
-        started = time.monotonic()
         response = await client.post(
             "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
         )
-        elapsed = time.monotonic() - started
+        answered = time.monotonic()
 
     assert response.status_code == 200, response.text
     assert sorted(windows) == ["ghs_clone", "ghs_sandbox"]
     # Both mints began before either had finished: neither waited for the other.
     assert max(start for start, _ in windows.values()) < min(end for _, end in windows.values())
-    assert elapsed < 1.75 * delay_s, f"took {elapsed:.2f}s; one at a time takes {2 * delay_s}s"
+    # Timed from the first mint, not from the request: the claim's work before
+    # it mints, which a loaded runner slows far more than the mints' overlap
+    # saves, is no part of what is measured. One mint after the other would
+    # still take two delays from here.
+    waited = answered - min(start for start, _ in windows.values())
+    assert waited < 1.75 * delay_s, (
+        f"took {waited:.2f}s from the first mint; one at a time takes {2 * delay_s}s"
+    )
 
 
 async def test_a_workspace_without_a_repository_asks_github_nothing():
