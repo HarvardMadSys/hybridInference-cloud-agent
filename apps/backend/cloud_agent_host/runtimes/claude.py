@@ -64,12 +64,39 @@ class ClaudeCodeRuntime(AgentRuntime):
     # counter must not be able to flood the stream just because nobody had
     # heard of it yet.
     MILESTONE_SUBTYPES = frozenset({"init", "compact_boundary"})
+    #: System subtypes that are understood and deliberately not stored, so they
+    #: no longer arrive once per job as "unclassified" and bury a subtype that
+    #: really is new. Progress counters (``status``, ``thinking_tokens``,
+    #: ``task_progress``), and notices whose substance is already an event: a
+    #: task is a ``Bash``/``Agent`` tool call with its own result, and the
+    #: driver reads ``task_*`` and ``background_tasks_changed`` straight from
+    #: the stream to decide when a turn settles. Seen on the pinned 2.1.300.
+    SILENT_SUBTYPES = frozenset(
+        {
+            "status",
+            "thinking_tokens",
+            "task_started",
+            "task_progress",
+            "task_updated",
+            "task_notification",
+            "background_tasks_changed",
+            "session_title_changed",
+            "vcs_state_changed",
+        }
+    )
+    #: Top-level types likewise. ``tool_progress`` is a running tool's heartbeat
+    #: (one every few seconds, hundreds a job); the ``control_*`` lines are the
+    #: driver's own exchange with the CLI (questions, plan approval,
+    #: interrupts), which it reads from the stream and records itself.
+    SILENT_TYPES = frozenset(
+        {"tool_progress", "control_request", "control_response", "control_cancel_request"}
+    )
 
     def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
-        """Track which unclassified subtypes this run has already reported."""
+        """Track which unclassified lines this run has already reported."""
         # One adapter instance per job (see get_runtime), so this is per-run
         # state — the suppression below cannot leak across jobs.
-        self._reported_subtypes: set[str] = set()
+        self._reported: set[str] = set()
         #: The CLI's own session id, captured from the ``init`` event. The
         #: retained container resumes this native locator directly; ``None``
         #: until the CLI has announced itself.
@@ -262,7 +289,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             return False
         return isinstance(event, dict) and event.get("type") == "result"
 
-    def parse_event(self, line: str) -> NormalizedEvent | None:  # noqa: C901, PLR0912 complexity baseline, #771
+    def parse_event(self, line: str) -> NormalizedEvent | None:
         """Normalize one stream-json line."""
         line = line.strip()
         if not line:
@@ -276,50 +303,7 @@ class ClaudeCodeRuntime(AgentRuntime):
 
         kind = event.get("type")
         if kind == "system":
-            subtype = str(event.get("subtype") or "system").strip() or "system"
-            if subtype == "api_retry":
-                # Each notice describes a new request attempt and its wait;
-                # suppressing repeated subtypes would hide the retry progress.
-                return NormalizedEvent(
-                    LIFECYCLE,
-                    {
-                        "phase": "api_retry",
-                        "attempt": event.get("attempt"),
-                        "max_retries": event.get("max_retries"),
-                        "retry_delay_ms": event.get("retry_delay_ms"),
-                        "error_status": event.get("error_status"),
-                    },
-                )
-            if subtype not in self.MILESTONE_SUBTYPES:
-                # Not discarded outright: the first occurrence is kept as a raw
-                # diagnostic so a subtype nobody has classified yet is still
-                # discoverable in the event log. Repeats are dropped, which is
-                # what turns 408 rows into 1.
-                if subtype in self._reported_subtypes:
-                    return None
-                self._reported_subtypes.add(subtype)
-                return self._raw(line, f"unclassified system subtype {subtype!r}")
-            # Only the session's own init is republished as its inventory. A
-            # subagent emits the same subtype for a narrower menu, and the
-            # normalized event carries no marker saying which one it was, so
-            # attaching the inventory there would read as the session's.
-            harness: dict[str, Any] | None = None
-            if subtype == "init" and not event.get("parent_tool_use_id"):
-                captured = str(event.get("session_id") or "").strip()
-                if captured:
-                    self.session_id = captured
-                harness = _harness_inventory(event)
-            payload: dict[str, Any] = {
-                "phase": subtype,
-                "model": event.get("model"),
-                "runtime_version": event.get("claude_code_version"),
-                "session_id": self.session_id,
-            }
-            if harness is not None:
-                payload["harness"] = harness
-            payload.update(_compaction_fields(subtype, event))
-            self._summary_anchor = _summary_anchor(subtype, event) or self._summary_anchor
-            return NormalizedEvent(LIFECYCLE, payload)
+            return self._from_system(line, event)
         if kind == "stream_event":
             return self._from_stream(event)
         if kind == "assistant":
@@ -334,7 +318,64 @@ class ClaudeCodeRuntime(AgentRuntime):
             self._preview.clear()
             self._message_id = self._text_block = None
             return self._from_result(event)
-        return self._raw(line, f"unknown type {kind!r}")
+        if kind in self.SILENT_TYPES:
+            return None
+        return self._report_once(line, f"unknown type {kind!r}")
+
+    def _report_once(self, line: str, reason: str) -> NormalizedEvent | None:
+        """A raw diagnostic for the first line of its kind this run, then nothing.
+
+        Not discarded outright, so a line nobody has classified yet is still
+        discoverable in the event log. Repeats are dropped: an unclassified
+        counter or heartbeat would otherwise be stored once per emission, which
+        is what once turned 408 ``thinking_tokens`` lines into 408 rows.
+        """
+        if reason in self._reported:
+            return None
+        self._reported.add(reason)
+        return self._raw(line, reason)
+
+    def _from_system(self, line: str, event: dict[str, Any]) -> NormalizedEvent | None:
+        """A ``type: "system"`` line: a milestone, a retry notice, or telemetry."""
+        subtype = str(event.get("subtype") or "system").strip() or "system"
+        if subtype == "api_retry":
+            # Each notice describes a new request attempt and its wait;
+            # suppressing repeated subtypes would hide the retry progress.
+            return NormalizedEvent(
+                LIFECYCLE,
+                {
+                    "phase": "api_retry",
+                    "attempt": event.get("attempt"),
+                    "max_retries": event.get("max_retries"),
+                    "retry_delay_ms": event.get("retry_delay_ms"),
+                    "error_status": event.get("error_status"),
+                },
+            )
+        if subtype in self.SILENT_SUBTYPES:
+            return None
+        if subtype not in self.MILESTONE_SUBTYPES:
+            return self._report_once(line, f"unclassified system subtype {subtype!r}")
+        # Only the session's own init is republished as its inventory. A
+        # subagent emits the same subtype for a narrower menu, and the
+        # normalized event carries no marker saying which one it was, so
+        # attaching the inventory there would read as the session's.
+        harness: dict[str, Any] | None = None
+        if subtype == "init" and not event.get("parent_tool_use_id"):
+            captured = str(event.get("session_id") or "").strip()
+            if captured:
+                self.session_id = captured
+            harness = _harness_inventory(event)
+        payload: dict[str, Any] = {
+            "phase": subtype,
+            "model": event.get("model"),
+            "runtime_version": event.get("claude_code_version"),
+            "session_id": self.session_id,
+        }
+        if harness is not None:
+            payload["harness"] = harness
+        payload.update(_compaction_fields(subtype, event))
+        self._summary_anchor = _summary_anchor(subtype, event) or self._summary_anchor
+        return NormalizedEvent(LIFECYCLE, payload)
 
     def _from_stream(self, event: dict[str, Any]) -> NormalizedEvent | None:
         """Preview the answer text the model is writing.
