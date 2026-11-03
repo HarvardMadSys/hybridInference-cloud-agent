@@ -90,6 +90,14 @@ _ARGV = ["docker", "run", "the-helper"]
 _READ = json.dumps({"reads": [["list", "tables"]]})
 
 
+class _Interrupted(BaseException):
+    """An interrupt, as a SIGINT's KeyboardInterrupt is to the guard.
+
+    Not KeyboardInterrupt itself: one a failing test let through would stop
+    the whole pytest session.
+    """
+
+
 def _listings(result: subprocess.CompletedProcess[str]) -> list[Any]:
     return json.loads(result.stdout)["listings"]
 
@@ -255,9 +263,9 @@ def test_an_interrupted_step_removes_its_helper(tmp_path) -> None:
     lab = _ProgramHelper(tmp_path)
 
     def interrupted(_result: subprocess.CompletedProcess[str]) -> None:
-        raise KeyboardInterrupt
+        raise _Interrupted
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(_Interrupted):
         lab.run(accept=interrupted)
     assert len(lab.removed) == 1
     assert lab.started[0].returncode is not None
@@ -590,9 +598,13 @@ class _StandIn:
         #: Whether SIGKILL ends the client, as it does unless the client is
         #: stuck in the kernel.
         self.reapable = True
+        #: Whether the guard's own process is interrupted, once, as it kills
+        #: the client.
+        self.interrupt_kill = False
         #: How long it takes to exit once its stdin closes.
         self.linger_s = 0.0
         self.gone = threading.Event()
+        self.errors_fd = errors
         self._events = events
         self._run, self._answer = run, answer
         os.write(errors, b"stand-in client: attached\n")
@@ -658,12 +670,14 @@ class _StandIn:
             self.returncode = -9 if self.removed else self.exit_status
 
     def poll(self) -> int | None:
-        if self.killed:
+        # A client killed, or whose container is gone, has exited: ``docker
+        # run`` returns once its container is removed.
+        if self.killed or self.removed:
             return -9
         return None if self._thread.is_alive() else self.returncode
 
     def wait(self, timeout: float | None = None) -> int | None:
-        if not self.killed:
+        if not (self.killed or self.removed):
             self._thread.join(timeout)
         status = self.poll()
         if status is None:
@@ -673,6 +687,9 @@ class _StandIn:
     def kill(self) -> None:
         """SIGKILL for its client, which ends unless it has ended already or cannot."""
         self._events.append(("killed", self.name))
+        if self.interrupt_kill:
+            self.interrupt_kill = False
+            raise _Interrupted
         if self.reapable and self._thread.is_alive():
             self.killed = True
 
@@ -909,6 +926,8 @@ def test_a_helper_that_does_not_answer_is_removed_before_a_disposable_one_reruns
     name = started[0].name
     assert steps.events == [("killed", name), ("removed", name), ("disposable", "")]
     assert started[0].removed and started[0].wait(5) is not None
+    assert guard._long_lived is not None
+    assert guard._long_lived._running.retiring == [], "a reaped client was kept to reap again"
 
 
 def _misanswering(make: Callable[[str, subprocess.CompletedProcess[str]], bytes]) -> Any:
@@ -1212,19 +1231,72 @@ def test_a_step_interrupted_while_it_removes_a_name_again_keeps_the_name(quick, 
 
     def interrupted(_timeout: float) -> bool:
         if interrupting:
-            raise KeyboardInterrupt
+            raise _Interrupted
         return True
 
     _nft, _steps, guard, started = long_lived(_for_relays(_silent), removable=interrupted)
     guard.ensure()
     guard.sync_relays(_X, {("10.240.0.3", 8080)})  # its helper fails, and leaves its name
     interrupting = True
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(_Interrupted):
         guard.sync_relays(_X, set())
     interrupting = False
 
     assert guard._long_lived is not None
     assert list(guard._long_lived._running.leftovers) == [started[0].name]
+
+
+def test_an_interrupted_take_down_leaves_its_name_and_its_client_to_later_steps(
+    quick, long_lived
+) -> None:
+    """A second SIGINT as the guard kills a failed helper's client, say: later steps finish it."""
+
+    def interrupted_as_it_is_killed(stand_in: _StandIn, frame: dict[str, Any]) -> bytes:
+        stand_in.interrupt_kill = True
+        return _stuck(stand_in, frame)
+
+    _nft, steps, guard, started = long_lived(_for_relays(interrupted_as_it_is_killed))
+    guard.ensure()
+    with pytest.raises(_Interrupted):
+        guard.sync_relays(_X, {("10.240.0.3", 8080)})
+    lived, helper = guard._long_lived, started[0]
+    assert lived is not None
+    assert list(lived._running.leftovers) == [helper.name], "its name was lost"
+    assert [kept.process for kept in lived._running.retiring] == [helper], "its client was lost"
+    assert helper.poll() is None
+
+    guard.relay_endpoints(_X)  # removes its name again, so its container and client end
+    guard.relay_endpoints(_X)  # reaps the client
+
+    assert helper.removed and ("removed", helper.name) in steps.events
+    assert lived._running.retiring == [], "its client was never reaped"
+    assert helper.stdin.closed and helper.stdout.closed
+
+
+def test_stopping_a_helper_whose_client_cannot_be_reaped_closes_its_stderr_file_once(
+    monkeypatch, long_lived
+) -> None:
+    """Its client stays among the retiring, whose files shutdown closes as well."""
+    monkeypatch.setattr(network_guard_helper, "CLOSE_GRACE_S", 0.1)
+    monkeypatch.setattr(network_guard_helper, "KILL_REAP_S", 0.1)
+    _nft, _steps, guard, started = long_lived()
+    guard.ensure()
+    helper = started[0]
+    helper.reapable = False  # stuck in the kernel,
+    helper.linger_s = 5.0  # so it does not end at EOF on its stdin either
+    closed: list[int] = []
+    close = os.close
+
+    def recording(fd: int) -> None:
+        closed.append(fd)
+        close(fd)
+
+    monkeypatch.setattr(os, "close", recording)
+
+    guard.close()
+
+    assert helper.removed
+    assert closed.count(helper.errors_fd) == 1
 
 
 def test_a_client_that_does_not_exit_when_killed_fails_the_step_and_is_reaped_later(

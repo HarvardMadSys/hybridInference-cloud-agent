@@ -391,7 +391,7 @@ class _Running:
     #: The helper that takes the next step, if one is running.
     helper: _Helper | None = None
     #: Helpers stopped with nothing under way, and failed helpers whose
-    #: clients did not exit when killed: reaped at later steps.
+    #: clients are not yet reaped: reaped at later steps.
     retiring: list[_Helper] = field(default_factory=list)
     #: Names of helpers that failed a step, removed again at later steps: each
     #: until it is shown gone at or after the time it maps to.
@@ -542,6 +542,8 @@ class LongLivedHelper:
             if helper.process.poll() is None:
                 still.append(helper)
             else:
+                # A take-down that was interrupted may have left them open.
+                _close_pipes(helper.process)
                 _close(helper.errors)
         running.retiring[:] = still
 
@@ -570,8 +572,6 @@ class LongLivedHelper:
             return
         _close(helper.errors)
         helper.errors = None
-        if status is None:
-            running.retiring.append(helper)
         if not removed:
             what = "its client did not exit" if status is None else "its removal was not confirmed"
             raise HelperStuck(
@@ -587,11 +587,17 @@ def _take_down(
 
     Returns the client's exit status, if it was reaped, and whether both are
     confirmed. The client goes first: once it is dead it creates, attaches and
-    starts nothing more, so a removal that found no container stays true.
+    starts nothing more, so a removal that found no container stays true. The
+    name and the client are where later steps look from the start, so an
+    interruption here, a second SIGINT say, leaves neither behind.
     """
+    running.leftovers[helper.name] = time.monotonic() + LEFTOVER_S
+    running.retiring.append(helper)
     with contextlib.suppress(OSError):
         helper.process.kill()
     status = _reaped(helper.process, _within(KILL_REAP_S, deadline))
+    if status is not None:
+        running.retiring.remove(helper)
     _close_pipes(helper.process)
     removed = _removed(remove, helper.name, _within(REMOVE_TIMEOUT_S, deadline))
     # A create the daemon had under way when the client died can still leave a
@@ -648,6 +654,8 @@ def _shutdown(running: _Running, remove: Remove, slot: threading.Lock) -> None:
                 until = time.monotonic() + KILL_REAP_S + REMOVE_TIMEOUT_S
                 _take_down(running, remove, helper, until)
             _close(helper.errors)
+            # A client the take-down could not reap is among the retiring.
+            helper.errors = None
         for retired in running.retiring:
             _ended(retired.process)
             _close(retired.errors)
