@@ -57,6 +57,7 @@ from cloud_agent_host.member_resources import (
     RUNNING_CHECKPOINT_INTERVAL_S,
 )
 from cloud_agent_host.parallel_window_census import take_censuses
+from cloud_agent_host.resident_probe import probe_refusal_message
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransport,
@@ -429,21 +430,6 @@ class _HeldInput:
     owner: str
     pending: PendingInput
     held_at: float
-
-
-def _probe_refusal_reason(current: Any, launch: ResidentLaunch, *, same_residency: bool) -> str:
-    """Why a credential-less probe could not borrow a live process, by field name only.
-
-    ``residency_generation`` means the process holds an older residency grant
-    than the activation; any other name is a process-fixed launch setting that
-    changed. The values stay out: several of these fields are credentials, and
-    the text crosses the sandbox manager API into a startup measurement.
-    """
-    names = getattr(current, "incompatible_fields", None)
-    fields = list(names(launch)) if callable(names) else []
-    if not same_residency:
-        fields.append("residency_generation")
-    return "differs: " + ",".join(fields) if fields else "differs: unknown"
 
 
 class SharedChatSessionSupervisor:
@@ -4816,14 +4802,8 @@ class SharedChatSessionSupervisor:
                 # A probe from a new turn intentionally omits credentials so a
                 # HOT hit never rotates the residency grant. Preserve the
                 # existing process until the caller explicitly obtains a
-                # replacement grant. The message names why the process could
-                # not be borrowed -- field names only, never values -- so the
-                # runner's startup measurement can tell a stale residency
-                # from a changed launch setting.
-                raise SandboxError(
-                    "resident process restart requires a renewable credential "
-                    f"({_probe_refusal_reason(current, launch, same_residency=same_residency)})"
-                )
+                # replacement grant. The message names what differs, never values.
+                raise SandboxError(probe_refusal_message(current, launch, same_residency))
             member.transport = None
             member.resident_state = "restarting" if member.native_session_id else "starting"
         if current is not None:
