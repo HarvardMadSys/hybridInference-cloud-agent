@@ -468,28 +468,42 @@ def docker(tmp_path: Path) -> Callable[..., tuple[str, Path]]:
 @pytest.mark.parametrize(
     "plan",
     [
-        pytest.param(["removed"], id="removed"),
-        pytest.param(["gone"], id="no-such-container-and-success"),
-        pytest.param(["missing"], id="no-such-container-from-an-older-client"),
-        pytest.param(["busy", "missing"], id="another-removal-under-way"),
-        pytest.param(["garbled", "removed"], id="output-that-is-not-text"),
+        pytest.param("removed", id="removed"),
+        pytest.param("gone", id="no-such-container-and-success"),
+        pytest.param("missing", id="no-such-container-from-an-older-client"),
     ],
 )
-def test_removing_a_helper_by_name_shows_it_gone(docker, plan) -> None:
-    binary, calls = docker(*plan)
+def test_one_removal_by_name_shows_a_helper_gone(docker, plan) -> None:
+    binary, calls = docker(plan)
 
     assert _REMOVE_HELPER(binary, _NAME, 10.0) is True
 
-    assert calls.read_text().splitlines() == [f"rm -f {_NAME}"] * len(plan)
+    assert calls.read_text().splitlines() == [f"rm -f {_NAME}"]
 
 
-def test_a_removal_the_daemon_refuses_is_tried_again_until_its_time_runs_out(docker) -> None:
-    binary, calls = docker("down")
+@pytest.mark.parametrize(
+    "plan",
+    [
+        pytest.param("busy", id="another-removal-under-way"),
+        pytest.param("garbled", id="output-that-is-not-text"),
+        pytest.param("down", id="daemon-unreachable"),
+    ],
+)
+def test_one_removal_that_is_not_confirmed_says_so_and_tries_no_more(docker, plan) -> None:
+    """Whether and when to try again is the guard's to decide."""
+    binary, calls = docker(plan, "removed")
 
-    began = time.monotonic()
-    assert _REMOVE_HELPER(binary, _NAME, 1.0) is False
-    assert time.monotonic() - began < 2.0
-    assert len(calls.read_text().splitlines()) > 1, "tried only once"
+    assert _REMOVE_HELPER(binary, _NAME, 10.0) is False
+
+    assert calls.read_text().splitlines() == [f"rm -f {_NAME}"]
+
+
+def test_a_removal_with_no_time_left_runs_nothing(docker) -> None:
+    binary, calls = docker("removed")
+
+    assert _REMOVE_HELPER(binary, _NAME, 0.0) is False
+
+    assert not calls.exists()
 
 
 def test_a_removal_whose_client_hangs_is_not_confirmed_once_its_time_is_up(docker) -> None:
@@ -790,10 +804,11 @@ def long_lived() -> Iterator[Callable[..., tuple[FakeNft, _Steps, HostNetworkGua
 
 @pytest.fixture
 def quick(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A long-lived step gives up in half a second rather than tens of seconds."""
+    """A long-lived step, and a removal not confirmed, give up in half a second, not in tens."""
     monkeypatch.setattr(network_guard_helper, "SERVE_REQUEST_S", 0.3)
     monkeypatch.setattr(network_guard_helper, "ANSWER_MARGIN_S", 0.1)
     monkeypatch.setattr(network_guard_helper, "START_ALLOWANCE_S", 0.1)
+    monkeypatch.setattr(network_guard_helper, "REMOVE_TIMEOUT_S", 0.5)
 
 
 def test_every_step_runs_on_one_long_lived_helper_and_routes_stay_unprivileged(long_lived) -> None:
@@ -1101,7 +1116,26 @@ def test_a_helper_that_cannot_be_shown_removed_fails_the_step_and_nothing_reruns
         guard.sync_relays(_X, {("10.240.0.3", 8080)})
 
     name = started[0].name
-    assert steps.events == [("killed", name), ("removed", name)], "a step ran beside a live helper"
+    assert steps.events[0] == ("killed", name)
+    assert set(steps.events[1:]) == {("removed", name)}, "a step ran beside a live helper"
+    assert len(steps.events) > 2, "the removal was not tried again while there was time"
+    # Half a second of removal, tried again every RETRY_S: a few tries, not a flood.
+    assert len(steps.events) - 1 <= 2 + 0.5 / network_guard_helper.RETRY_S, steps.events
+
+
+def test_a_take_down_tries_a_removal_again_while_another_is_under_way(quick, long_lived) -> None:
+    """The daemon's own removal, for ``--rm``, may be under way: it ends in a moment."""
+    answers = iter([False, False])
+    _nft, steps, guard, started = long_lived(
+        _for_relays(_silent), removable=lambda _timeout: next(answers, True)
+    )
+    guard.ensure()
+
+    guard.sync_relays(_X, {("10.240.0.3", 8080)})
+
+    name = started[0].name
+    assert steps.events[:5] == [("killed", name)] + [("removed", name)] * 3 + [("disposable", "")]
+    assert guard.relay_endpoints(_X) == {("10.240.0.3", 8080)}
 
 
 def test_a_hung_step_takes_no_longer_than_a_disposable_helpers_minute(
@@ -1181,24 +1215,92 @@ def test_a_container_left_created_is_removed_by_later_steps_until_it_has_settled
 
 
 def test_a_helper_not_shown_removed_is_removed_again_by_later_steps_which_go_ahead(
-    quick, long_lived
+    monkeypatch, quick, long_lived
 ) -> None:
-    """Only the step it failed fails; each later step first tries the removal again."""
+    """Only the step it failed fails; a later step tries the removal again once it is due."""
+    monkeypatch.setattr(network_guard_helper, "BACKOFF_S", 0.3)
     works = False
     _nft, steps, guard, started = long_lived(_for_relays(_stuck), removable=lambda _timeout: works)
     guard.ensure()
     with pytest.raises(NetworkGuardError, match="its removal was not confirmed"):
         guard.sync_relays(_X, {("10.240.0.3", 8080)})
-    name = started[0].name
 
     guard.sync_relays(_X, {("10.240.0.3", 8080)})
-    assert steps.events[-2:] == [("removed", name), ("disposable", "")]
+    assert steps.events[-1] == ("disposable", "")
     assert not started[0].removed
     works = True
+    time.sleep(0.35)
     guard.sync_relays(_X, set())
 
     assert started[0].removed, "a later step did not remove it once it could"
     assert guard.relay_endpoints(_X) == set()
+
+
+def test_a_name_not_shown_removed_costs_later_steps_nothing_until_it_is_due(
+    monkeypatch, quick, long_lived
+) -> None:
+    """A removal that never comes off, for an ``nft`` in uninterruptible sleep, say."""
+    monkeypatch.setattr(network_guard_helper, "BACKOFF_S", 0.5)
+
+    def stuck(timeout: float) -> bool:
+        time.sleep(min(timeout, 0.5))  # each try costs its step half a second
+        return False
+
+    _nft, steps, guard, started = long_lived(_for_relays(_silent), removable=stuck)
+    guard.ensure()
+    with pytest.raises(NetworkGuardError, match="its removal was not confirmed"):
+        guard.sync_relays(_X, {("10.240.0.3", 8080)})
+    removal = ("removed", started[0].name)
+    tried = steps.events.count(removal)
+
+    took = []
+    for _ in range(4):
+        began = time.monotonic()
+        guard.relay_endpoints(_X)
+        took.append(time.monotonic() - began)
+    assert steps.events.count(removal) == tried, "tried again before it was due"
+    assert max(took) < 0.3, took
+    time.sleep(0.5)
+    guard.relay_endpoints(_X)
+    guard.relay_endpoints(_X)
+
+    assert steps.events.count(removal) == tried + 1, "not one removal once due, then put off"
+
+
+def test_a_name_not_shown_removed_is_put_off_twice_as_long_each_time_up_to_the_cooldown() -> None:
+    running = network_guard_helper._Running()
+    leftover = network_guard_helper._Leftover(settled_at=0.0)
+    running.leftovers["t-helper-0123456789ab"] = leftover
+    put_off = []
+    for works in (False,) * 6 + (True,):
+        leftover.due = 0.0  # due now
+
+        def remove(_name: str, _timeout: float, works: bool = works) -> bool:
+            return works
+
+        network_guard_helper._sweep(running, remove, time.monotonic() + 1)
+        put_off.append(leftover.backoff)
+
+    assert put_off[:6] == [30.0, 60.0, 120.0, 240.0, 300.0, 300.0]
+    assert network_guard_helper.COOLDOWN_S == 300.0
+    assert running.leftovers == {}, "shown gone once it had settled, and kept"
+
+
+def test_a_name_shown_gone_before_it_has_settled_is_due_again_at_the_next_step() -> None:
+    """A create still under way may yet leave a container: its removals are cheap, so no wait."""
+    running = network_guard_helper._Running()
+    leftover = network_guard_helper._Leftover(settled_at=time.monotonic() + 60)
+    running.leftovers["t-helper-0123456789ab"] = leftover
+    for works in (False, False, True):
+        leftover.due = 0.0  # due now
+
+        def remove(_name: str, _timeout: float, works: bool = works) -> bool:
+            return works
+
+        network_guard_helper._sweep(running, remove, time.monotonic() + 1)
+
+    assert list(running.leftovers) == ["t-helper-0123456789ab"]
+    assert (leftover.due, leftover.backoff) == (0.0, 0.0)
 
 
 def test_a_later_step_spends_no_more_than_its_share_removing_names_again(
@@ -1341,7 +1443,8 @@ def test_a_removal_that_raises_counts_as_not_shown_removed(quick, long_lived, ca
     failures = [
         r for r in caplog.records if r.getMessage() == "network_guard_helper_removal_failed"
     ]
-    assert [r.detail for r in failures] == ["RuntimeError: an answer the client could not read"]
+    assert failures, "nothing said why"
+    assert {r.detail for r in failures} == {"RuntimeError: an answer the client could not read"}
     guard.sync_relays(_X, {("10.240.0.3", 8080)})  # later steps go ahead all the same
     assert guard.relay_endpoints(_X) == {("10.240.0.3", 8080)}
 

@@ -104,21 +104,27 @@ does not start, does not take its request, exits, answers late, answers with
 anything but one line for that request, or reports that the step failed.
 Before the step runs again the guard kills the helper's ``docker run`` client
 and reaps it, and only then removes the container by name (``docker rm -f``,
-which ends every process in it) and confirms that it is gone. The client goes
+which ends every process in it) and confirms that it is gone, trying again
+every :data:`RETRY_S` while another removal is under way. The client goes
 first because ``docker rm -f`` succeeds for a name no container has yet too: a
 client still creating its container would start it after such a removal, and
 the request it holds would run after all. A dead client creates, attaches and
 starts nothing more. A create the daemon still had under way can leave a
 container that was created and never started, and holds no request; later
-steps remove that name again for :data:`LEFTOVER_S`.
+steps remove that name again for :data:`LEFTOVER_S`. A create that settles
+later still leaves such a container, named as the guard's helpers are, until
+it is removed by hand; that happens once at most per :data:`COOLDOWN_S`.
 
 If the client is not reaped within :data:`KILL_REAP_S`, or the removal is not
 confirmed within :data:`REMOVE_TIMEOUT_S`, the step fails as a timed-out
 per-run helper does, and nothing runs it again. So does a helper whose ``nft``
 call is in uninterruptible sleep: ``docker rm -f`` cannot end it, and the
-removal stays unconfirmed. Later steps go ahead, and each first tries to
-remove that name again, within :data:`SWEEP_S`; until one shows it gone, what
-that helper held may still land, as what a timed-out per-run helper held may.
+removal stays unconfirmed. Later steps go ahead. One tries to remove that name
+again after :data:`BACKOFF_S`, the next after twice as long, and so on up to
+:data:`COOLDOWN_S`, each with one ``docker rm -f`` within :data:`SWEEP_S` of
+its step, so a name that never comes off costs the steps in between nothing.
+Until one shows it gone, what that helper held may still land, as what a
+timed-out per-run helper held may.
 For :data:`COOLDOWN_S` after a failure every step runs on per-run helpers, so
 a helper that fails every time costs one failure per period rather than one
 per step. A helper that idled out just as a request reached it (its exit
@@ -136,7 +142,12 @@ takes at most :data:`CLOSE_GRACE_S` to see. Taking down a helper that failed
 takes at most :data:`KILL_REAP_S` to kill and reap its client and
 :data:`REMOVE_TIMEOUT_S` to remove its container. All of that together is less
 than the minute, and the per-run helper that runs the step again gets what is
-left of it, so a step takes no longer than it could before.
+left of it, so a step takes no longer than it could before. On a daemon that
+is slow but working, though, the split can fail a step that a per-run helper
+given the whole minute would have finished: when starting a container takes
+half a minute or more, the step that starts a helper gives up on it, and the
+per-run helper that runs the step again may not start in what is left. That
+happens once at most per :data:`COOLDOWN_S`.
 
 **A step applied in part.** A step is a few ``nft`` calls: an optional
 install, reads, then one or two set updates. Each ``nft -f`` transaction is
@@ -192,12 +203,18 @@ KILL_REAP_S = 2.0
 #: How long removing a helper that failed a step, and confirming it is gone,
 #: may take before the step fails instead.
 REMOVE_TIMEOUT_S = 10.0
+#: How long the take-down waits before it tries again a removal that was not
+#: confirmed: another under way, the daemon's own for ``--rm`` among them, ends.
+RETRY_S = 0.2
 #: How long after a failed helper's client is killed later steps remove its
 #: name again: a create the daemon still had under way has settled by then. A
 #: name not yet shown gone is kept until it is.
 LEFTOVER_S = 30.0
 #: How much of a step removing those names again may take.
 SWEEP_S = 2.0
+#: How long later steps put off removing again a name whose removal was not
+#: confirmed; each such removal doubles it, up to :data:`COOLDOWN_S`.
+BACKOFF_S = 30.0
 #: How long the guard waits for a helper to end on its own when it closes.
 CLOSE_GRACE_S = 2.0
 #: How long stopping the helper at interpreter exit waits for a step under way.
@@ -323,34 +340,32 @@ def spawn_helper(argv: list[str], errors: int) -> HelperProcess:
 
 
 def remove_helper(docker_binary: str, name: str, timeout: float) -> bool:
-    """Remove a helper container by name, and say whether it is gone.
+    """Remove a helper container by name with one ``docker rm -f``, and say whether it is gone.
 
     ``docker rm -f`` kills the container's first process, which ends every
     process in its PID namespace, and returns once the container is removed.
     It succeeds for a name no container has, too (an older client says "No
     such container"), so it cannot tell a container that is gone from one not
     created yet: the guard kills the helper's client before it calls this. A
-    removal another one has under way is waited for. A process the kill cannot
-    end, such as one in uninterruptible sleep, leaves the removal unconfirmed.
+    removal another one has under way, or a process the kill cannot end, such
+    as one in uninterruptible sleep, leaves it unconfirmed; whether and when
+    to try again is the guard's to decide.
     """
-    deadline = time.monotonic() + timeout
-    while (left := deadline - time.monotonic()) > 0:
-        try:
-            removed = subprocess.run(
-                [docker_binary, "rm", "-f", name],
-                capture_output=True,
-                text=True,
-                # Whatever the client prints, its exit status still decides.
-                errors="replace",
-                timeout=left,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        if removed.returncode == 0 or "no such container" in removed.stderr.lower():
-            return True
-        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
-    return False
+    if timeout <= 0:
+        return False
+    try:
+        removed = subprocess.run(
+            [docker_binary, "rm", "-f", name],
+            capture_output=True,
+            text=True,
+            # Whatever the client prints, its exit status still decides.
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return removed.returncode == 0 or "no such container" in removed.stderr.lower()
 
 
 class HelperStuck(Exception):
@@ -385,6 +400,19 @@ class _Helper:
 
 
 @dataclass
+class _Leftover:
+    """The name of a helper that failed a step, which later steps remove again."""
+
+    #: Once a create still under way has settled: a name shown gone at or
+    #: after this is forgotten.
+    settled_at: float
+    #: When the next removal is due, and how long the last one that was not
+    #: confirmed put it off.
+    due: float = 0.0
+    backoff: float = 0.0
+
+
+@dataclass
 class _Running:
     """The guard's helpers, kept apart from :class:`LongLivedHelper` for its finalizer."""
 
@@ -393,9 +421,8 @@ class _Running:
     #: Helpers stopped with nothing under way, and failed helpers whose
     #: clients are not yet reaped: reaped at later steps.
     retiring: list[_Helper] = field(default_factory=list)
-    #: Names of helpers that failed a step, removed again at later steps: each
-    #: until it is shown gone at or after the time it maps to.
-    leftovers: dict[str, float] = field(default_factory=dict)
+    #: Names of helpers that failed a step, which later steps remove again.
+    leftovers: dict[str, _Leftover] = field(default_factory=dict)
 
 
 class LongLivedHelper:
@@ -591,7 +618,7 @@ def _take_down(
     name and the client are where later steps look from the start, so an
     interruption here, a second SIGINT say, leaves neither behind.
     """
-    running.leftovers[helper.name] = time.monotonic() + LEFTOVER_S
+    running.leftovers[helper.name] = _Leftover(time.monotonic() + LEFTOVER_S)
     running.retiring.append(helper)
     with contextlib.suppress(OSError):
         helper.process.kill()
@@ -599,24 +626,54 @@ def _take_down(
     if status is not None:
         running.retiring.remove(helper)
     _close_pipes(helper.process)
-    removed = _removed(remove, helper.name, _within(REMOVE_TIMEOUT_S, deadline))
+    removed = _removed_within(remove, helper.name, _within(REMOVE_TIMEOUT_S, deadline))
     # A create the daemon had under way when the client died can still leave a
     # container, created and never started: later steps remove the name again.
-    running.leftovers[helper.name] = time.monotonic() + LEFTOVER_S
+    leftover = running.leftovers[helper.name] = _Leftover(time.monotonic() + LEFTOVER_S)
+    if not removed:
+        _put_off(leftover)
     return status, removed and status is not None
 
 
 def _sweep(running: _Running, remove: Remove, until: float) -> None:
-    """Remove failed helpers' names again until ``until``, forgetting each once it is done."""
-    for name, keep_until in list(running.leftovers.items()):
-        left = until - time.monotonic()
-        if left <= 0:
+    """Remove failed helpers' names again until ``until``: one ``docker rm -f`` each that is due.
+
+    A name forgotten once it is shown gone and has settled. One not shown
+    gone is put off, so a name that never comes off, for an ``nft`` in
+    uninterruptible sleep say, costs the steps in between nothing.
+    """
+    for name, leftover in list(running.leftovers.items()):
+        now = time.monotonic()
+        if leftover.due > now:
+            continue
+        if until <= now:
             return
         # Tried again at a later step, after the others, unless done now: kept
         # until then, so a step interrupted mid-removal loses no name.
         running.leftovers[name] = running.leftovers.pop(name)
-        if _removed(remove, name, left) and time.monotonic() >= keep_until:
+        if not _removed(remove, name, until - now):
+            _put_off(leftover)
+        elif time.monotonic() >= leftover.settled_at:
             del running.leftovers[name]
+        else:
+            leftover.due = leftover.backoff = 0.0
+
+
+def _put_off(leftover: _Leftover) -> None:
+    """After a removal that was not confirmed: the next waits twice as long as the last did."""
+    leftover.backoff = min(max(2 * leftover.backoff, BACKOFF_S), COOLDOWN_S)
+    leftover.due = time.monotonic() + leftover.backoff
+
+
+def _removed_within(remove: Remove, name: str, timeout: float) -> bool:
+    """Whether ``remove`` shows the container gone within ``timeout``, trying again till then."""
+    until = time.monotonic() + timeout
+    while not _removed(remove, name, max(0.0, until - time.monotonic())):
+        left = until - time.monotonic()
+        if left <= 0:
+            return False
+        time.sleep(min(RETRY_S, left))
+    return True
 
 
 def _removed(remove: Remove, name: str, timeout: float) -> bool:
@@ -813,6 +870,7 @@ def _left(deadline: float) -> float:
 
 __all__ = [
     "ANSWER_MARGIN_S",
+    "BACKOFF_S",
     "CLOSE_GRACE_S",
     "COOLDOWN_S",
     "IDLE_EXIT",
@@ -822,6 +880,7 @@ __all__ = [
     "REMOVE_TIMEOUT_S",
     "RETIRE_AGE_S",
     "RETIRE_IDLE_S",
+    "RETRY_S",
     "SERVE_IDLE_S",
     "SERVE_REQUEST_S",
     "SHUTDOWN_WAIT_S",
