@@ -80,6 +80,12 @@ _SEARCH_SQL = """
  OR lower(a.user_name) LIKE '%' || lower($3) || '%' ESCAPE '\\')
 """
 
+#: Narrowed by the administration page to one team's active members.
+_TEAM_SQL = """
+($4::text IS NULL OR EXISTS (SELECT 1 FROM agent_team_members tm
+ WHERE tm.team_id = $4 AND tm.user_id = a.id AND tm.state = 'active'))
+"""
+
 
 def _like_term(query: str | None) -> str | None:
     term = (query or "").strip()
@@ -389,12 +395,14 @@ class PostgresLocalAccountRepository(
         account_status: str | None = None,
         query: str | None = None,
         sort: str = "created",
+        team_id: str | None = None,
     ) -> tuple[list[AccountRecord], int]:
         """Return one page of accounts and the filtered total.
 
         ``sort`` is ``created`` (newest first, the default) or ``last_login``
         (most recently signed in first, never-signed-in last), as
-        HybridInference's account list sorts.
+        HybridInference's account list sorts. ``team_id`` keeps the team's
+        active members only.
         """
         term = _like_term(query)
         order = (
@@ -404,21 +412,18 @@ class PostgresLocalAccountRepository(
         )
         where = (
             "WHERE ($1::text IS NULL OR m.status = $1) AND ($2::text IS NULL OR a.status = $2) "
-            f"AND {_SEARCH_SQL}"
+            f"AND {_SEARCH_SQL} AND {_TEAM_SQL}"
         )
+        filters = (admission_status, account_status, term, team_id)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {ACCOUNT_COLUMNS} {ACCOUNT_FROM} {where} "
-                f"ORDER BY {order} LIMIT $4 OFFSET $5",
-                admission_status,
-                account_status,
-                term,
+                f"ORDER BY {order} LIMIT $5 OFFSET $6",
+                *filters,
                 limit,
                 offset,
             )
-            total = await conn.fetchval(
-                f"SELECT count(*) {ACCOUNT_FROM} {where}", admission_status, account_status, term
-            )
+            total = await conn.fetchval(f"SELECT count(*) {ACCOUNT_FROM} {where}", *filters)
         return [record(row) for row in rows], int(total)
 
     async def account_counts(self) -> dict[str, int]:

@@ -208,9 +208,9 @@ export default function AccountMailPage() {
           section={t('adminAccounts.section')}
           description={t('adminAccounts.mail.description')}
         />
-        <AdminNavigation current="accounts" />
+        <AdminNavigation current="users" />
         <div className="mt-5 space-y-4">
-          <Link className="text-sm text-accent underline" href="/admin/accounts">
+          <Link className="text-sm text-accent underline" href="/admin/users">
             {t('adminAccounts.back')}
           </Link>
           <MailComposer onSent={() => setReload((v) => v + 1)} />

@@ -153,7 +153,7 @@ function AgentsHeader({
             link only keeps it out of the way of everyone else. */}
         {hasAgentPermission(state.user?.agent_access, 'agent.admin') && (
           <Link
-            href="/admin/hosts"
+            href="/admin/users"
             className={onAdmin ? NAV_ITEM_CURRENT : NAV_ITEM}
             aria-current={onAdmin ? 'page' : undefined}
           >

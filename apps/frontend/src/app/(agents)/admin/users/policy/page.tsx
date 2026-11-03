@@ -167,9 +167,9 @@ export default function AccountPolicyPage() {
           section={t('adminAccounts.section')}
           description={t('adminAccounts.policy.description')}
         />
-        <AdminNavigation current="accounts" />
+        <AdminNavigation current="users" />
         <div className="mt-5 space-y-4">
-          <Link className="text-sm text-accent underline" href="/admin/accounts">
+          <Link className="text-sm text-accent underline" href="/admin/users">
             {t('adminAccounts.back')}
           </Link>
           <DomainList />

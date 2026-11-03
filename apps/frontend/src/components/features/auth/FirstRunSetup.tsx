@@ -37,7 +37,7 @@ export function FirstRunSetup() {
         display_name: displayName.trim() || undefined,
       });
       announceSession(user.id);
-      window.location.assign(`${basePath}/admin/accounts`);
+      window.location.assign(`${basePath}/admin/users`);
     } catch (cause) {
       setError(getErrorMessage(cause));
       setBusy(false);

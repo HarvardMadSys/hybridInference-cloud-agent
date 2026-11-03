@@ -43,6 +43,13 @@ export interface AccountEntry {
   deleted_at?: string | null;
   erased_at?: string | null;
   reviewed_by?: string | null;
+  /** The active teams the account is in, owned ones first; named by the admin list only. */
+  teams?: AccountTeam[] | null;
+}
+export interface AccountTeam {
+  id: string;
+  name: string;
+  role: 'owner' | 'admin' | 'member';
 }
 export type AccountAction =
   | 'approve'
@@ -210,6 +217,8 @@ export interface AccountFilters {
   accountStatus?: 'active' | 'suspended' | 'deleted' | '';
   q?: string;
   sort?: 'created' | 'last_login';
+  /** Only this team's active members. */
+  team?: string;
 }
 export async function listAccounts(
   status: WaitlistStatus | '',
@@ -222,6 +231,7 @@ export async function listAccounts(
   if (filters.accountStatus) query.set('account_status', filters.accountStatus);
   if (filters.q?.trim()) query.set('q', filters.q.trim());
   if (filters.sort && filters.sort !== 'created') query.set('sort', filters.sort);
+  if (filters.team) query.set('team', filters.team);
   return jsonOrThrow(
     await fetchWithAuth(agentApiBase, `/v1/admin/accounts?${query}`, { cache: 'no-store', signal }),
   );

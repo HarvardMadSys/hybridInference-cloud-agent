@@ -5,12 +5,11 @@ import { useEffect, useRef } from 'react';
 import { AdminSetupNotice } from './AdminSetupNotice';
 
 const SECTIONS = [
+  { key: 'users', label: 'Users', href: '/admin/users' },
   { key: 'servers', label: 'Servers', href: '/admin/hosts' },
   { key: 'sandboxes', label: 'Sandboxes', href: '/admin/sandboxes' },
   { key: 'activity', label: 'Activity', href: '/admin/activity' },
   { key: 'usage', label: 'Usage', href: '/admin/usage' },
-  { key: 'accounts', label: 'Accounts', href: '/admin/accounts' },
-  { key: 'teams', label: 'Teams', href: '/admin/teams' },
   { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
   { key: 'settings', label: 'Settings', href: '/admin/settings' },
   { key: 'database', label: 'Database', href: '/admin/database' },
@@ -21,13 +20,12 @@ export function AdminNavigation({
   current,
 }: {
   current:
+    | 'users'
     | 'servers'
     | 'sandboxes'
     | 'runs'
     | 'activity'
     | 'usage'
-    | 'accounts'
-    | 'teams'
     | 'measurements'
     | 'settings'
     | 'database'

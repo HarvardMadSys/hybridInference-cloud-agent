@@ -125,7 +125,7 @@
     },
     {
       "files": [
-        "src/app/(agents)/admin/teams/\\[teamId\\]/page.tsx",
+        "src/app/(agents)/admin/users/teams/\\[teamId\\]/page.tsx",
         "src/components/features/agents/conversationTurnNavigation.ts",
         "src/components/features/agents/mcp/McpApprovalsProvider.tsx",
         "src/components/features/settings/ProfileSettings.tsx"

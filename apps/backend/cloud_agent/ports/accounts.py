@@ -195,7 +195,11 @@ class AccountBroadcasts(Protocol):
 
 
 class AccountTeams(Protocol):
-    """The teams a deleted account still owns, handed to their members before erasure."""
+    """Each account's teams, and a deleted account's teams handed on before erasure."""
+
+    async def team_memberships(self, account_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """The active teams each listed account is in, owned ones first, with its role."""
+        ...
 
     async def owned_teams(self, account_id: str) -> list[dict[str, Any]]:
         """The active teams the account owns, each with its other active members."""
@@ -269,6 +273,7 @@ class LocalAccountRepository(AccountBroadcasts, AccountTeams, Protocol):
         account_status: str | None = None,
         query: str | None = None,
         sort: str = "created",
+        team_id: str | None = None,
     ) -> tuple[list[AccountRecord], int]:
         """Return one page of accounts and the filtered total."""
         ...

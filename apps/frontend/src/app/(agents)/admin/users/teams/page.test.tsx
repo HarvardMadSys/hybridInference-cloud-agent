@@ -58,7 +58,13 @@ describe('Admin → Teams', () => {
     render(<AdminTeamsPage />);
 
     const link = await screen.findByRole('link', { name: 'Platform' });
-    expect(link).toHaveAttribute('href', '/admin/teams/ateam_1');
+    expect(link).toHaveAttribute('href', '/admin/users/teams/ateam_1');
+    // The member count opens the team's members in the People view.
+    expect(screen.getByRole('link', { name: '3 members of Platform' })).toHaveAttribute(
+      'href',
+      '/admin/users?team=ateam_1',
+    );
+    expect(screen.getByRole('link', { name: 'Users' })).toHaveAttribute('aria-current', 'page');
     const row = link.closest('tr')!;
     expect(within(row).getByText('Alice Liddell')).toBeInTheDocument();
     expect(within(row).getByText('alice@example.com')).toBeInTheDocument();

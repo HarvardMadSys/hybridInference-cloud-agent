@@ -17,6 +17,15 @@ and the decision to keep only this system is
 [independent accounts only](../agents/specs/2026-10-30-independent-accounts-only.md).
 This page describes what is implemented.
 
+Administrators work in **Admin → Users**. Its **People** view lists every
+account with its application state, account state, teams and last sign-in.
+The counts above the table are quick views, the filters stay in the address
+bar, and **Review** opens an account's actions, note and sign-in history under
+its row. Its **Teams** view lists every team
+([Teams](operations.md#teams)). The sign-up policy and mail to accounts are
+linked from People. The old `/admin/accounts` and `/admin/teams` addresses
+open the same pages there.
+
 ## How a request is admitted
 
 | Concern | How it works |
@@ -147,7 +156,7 @@ only, so a 422 never repeats a password or a token.
 | `GET /v1/session/me` | The account: `id`, `agent_access`, `email`, `waitlist`, `identity` and `is_local_admin`. There is no `auth_mode`. |
 | `POST /v1/session/logout` | Signs the browser's active account out; the cookie goes with its last account. |
 | `GET`/`POST /v1/waitlist` | Needs a verified, signed-in account only. Submitting again while pending changes nothing. A rejected or revoked application is submitted again only when its owner asks. |
-| `GET /v1/admin/accounts` | `q` (email, login name, phone or name anywhere, or an id prefix), `status`, `account_status`, `sort` (`created` or `last_login`); the answer has counts per state. |
+| `GET /v1/admin/accounts` | `q` (email, login name, phone or name anywhere, or an id prefix), `status`, `account_status`, `sort` (`created` or `last_login`), `team` (that team's active members); each account names the active teams it is in, with its role, and the answer has counts per state. |
 | `PATCH /v1/admin/accounts/{id}` | `approve`, `reject`, `revoke`, `suspend`, `restore`, `grant_admin`, `revoke_admin`, `delete`, `resume`, at `expected_version`. Approval and rejection are mailed to the account. Withdrawing what the administrator address list grants back is refused (`listed_admin_address`). |
 | `PATCH /v1/admin/accounts/{id}/notes`, `GET /{id}/login-events`, `POST /{id}/erase` | The private note and suspension message, sign-in history, permanent erasure. |
 | `GET /v1/admin/accounts/{id}/teams`, `POST /{id}/teams/{team}/transfer` | The teams a deleted account owns, and handing one to a member before erasure. |

@@ -310,6 +310,6 @@ describe('first-run setup', () => {
         display_name: undefined,
       }),
     );
-    expect(assign).toHaveBeenCalledWith('/admin/accounts');
+    expect(assign).toHaveBeenCalledWith('/admin/users');
   });
 });
