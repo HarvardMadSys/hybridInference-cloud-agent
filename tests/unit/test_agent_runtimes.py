@@ -563,23 +563,15 @@ def test_a_preview_piece_is_not_a_model_response():
 def test_a_claude_subagents_text_is_not_previewed():
     """A subagent's answer is reported by its complete lines only.
 
-    Its stream yields nothing but each model call's output count, under the
-    subagent's own call ids and tagged with the Task call that owns it.
+    Its stream yields nothing, not even an output count: the CLI does not
+    forward a subagent's stream, so its calls are counted by the ``result``.
     """
     runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
-    counted = []
     for line in _partial_stream_lines():
         record = json.loads(line)
         if record["type"] == "stream_event":
             record["parent_tool_use_id"] = "toolu_task"
-            event = runtime.parse_event(json.dumps(record))
-            if event is not None:
-                assert event.event_type == "usage"
-                counted.append(event.payload)
-    assert counted == [
-        {"usage": {"output_tokens": 9}, "usage_id": "msg_1", "parent_tool_use_id": "toolu_task"},
-        {"usage": {"output_tokens": 5}, "usage_id": "msg_2", "parent_tool_use_id": "toolu_task"},
-    ]
+            assert runtime.parse_event(json.dumps(record)) is None
 
 
 def test_each_model_call_reports_its_output_as_it_ends():
@@ -614,6 +606,39 @@ def test_each_model_call_reports_its_output_as_it_ends():
         ],
     )
     assert before_result.output_tokens == 14
+
+
+def test_a_call_reporting_its_output_twice_counts_the_later_total():
+    """``message_delta`` counts are cumulative; a call may send more than one.
+
+    The pinned CLI was seen reporting 2 and then 9 for one call. Each rise is
+    reported under the call's id, so the stats (largest per id) read 9.
+    """
+    runtime = ClaudeCodeRuntime()
+
+    def stream(event):
+        return runtime.parse_event(json.dumps({"type": "stream_event", "event": event}))
+
+    start = {"type": "message_start", "message": {"id": "msg_1", "usage": {"output_tokens": 1}}}
+    assert stream(start) is None
+    reported = [
+        event.payload
+        for count in (2, 9, 9, 4)
+        if (event := stream({"type": "message_delta", "usage": {"output_tokens": count}}))
+    ]
+    assert reported == [
+        {"usage": {"output_tokens": 2}, "usage_id": "msg_1"},
+        {"usage": {"output_tokens": 9}, "usage_id": "msg_1"},
+    ]
+    rollup = summarize_attempt_rollup(
+        attempt_id=1,
+        job_id="ajob_1",
+        events=[
+            {"event_type": "usage", "payload": payload, "seq": seq}
+            for seq, payload in enumerate(reported, start=1)
+        ],
+    )
+    assert rollup.output_tokens == 9
 
 
 @pytest.mark.parametrize(
