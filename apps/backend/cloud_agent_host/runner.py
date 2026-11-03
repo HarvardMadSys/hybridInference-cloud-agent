@@ -3601,7 +3601,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     owns every retained container and resident Agent CLI process, so this loop
     never creates or bind-mounts a host worktree.
     """
-    backend = backend or build_backend_from_env()
+    backend = backend or build_backend_from_env(keep_network_helper=True)
     # The host proves its runtime here, once, and its children inherit that
     # verdict rather than each booting a probe guest of its own.
     qualification = (

@@ -3546,15 +3546,27 @@ table="cloud_agent_ca$digits"
 ```
 
 The runner and the sandbox manager hold no `NET_ADMIN` and are not in the host's network
-namespace. They change host rules through a short-lived helper: their own
-image, run in the host's network namespace with `NET_ADMIN` and no other
-capability and a read-only root filesystem — the `host_nft` function below has
-the same shape. Each guard step is one helper: a short Python step in it runs
-`nft` for the install and its read-back together, or reads, compares and
-writes one bridge's relay exceptions, because starting the helper costs far
-more than the `nft` calls it makes. It runs under runc whatever the
-daemon's default runtime is, because a Kata VM would change its own kernel's
-rules, not the host's.
+namespace. They change host rules through a helper: their own image, run in
+the host's network namespace with `NET_ADMIN` and no other capability and a
+read-only root filesystem — the `host_nft` function below has the same shape.
+Each guard step is a short Python step that runs `nft` for the install and its
+read-back together, or reads, compares and writes one bridge's relay
+exceptions. Starting a helper costs far more than the `nft` calls it makes, so
+the runner and the sandbox manager each keep one helper running while they use
+it and hand it one step at a time on its standard input; a turn's own process
+starts a helper per step. That helper has the same flags and a name of its
+own, listens on nothing, reads the kernel afresh for every step, and exits when
+its process does or after 15 seconds without a step; a fresh one replaces it
+every five minutes. A step that finds it busy runs in a helper of its own, as
+every step once did. A step it fails or answers wrongly runs again in a helper
+of its own only once the failed helper's `docker run` client has been killed
+and its container removed by name and confirmed gone, and within the minute a
+step always had; if that cannot be confirmed, the step fails, and later steps
+try the removal again. The process then logs
+`network_guard_helper_discarded` and runs every step in a helper of its own for
+five minutes. Every helper runs under runc whatever the daemon's default
+runtime is, because a Kata VM would change its own kernel's rules, not the
+host's.
 
 - **Installed before anything joins a bridge.** The runner's and the sandbox manager's
   startup preflight install the tables and read them back — every chain, its

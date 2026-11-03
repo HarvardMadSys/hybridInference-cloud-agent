@@ -285,6 +285,8 @@ def lab():
             sandbox_network=network,
             sandbox_namespace=namespace,
             network_helper_image=helper,
+            # As the sandbox manager's: its guard keeps a long-lived helper.
+            keep_network_helper=True,
         )
     )
     routed_net = ipaddress.IPv4Network(

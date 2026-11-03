@@ -1480,7 +1480,9 @@ class _HeldHelpers:
         self._changed = threading.Condition()
         self._model = threading.Lock()
 
-    def __call__(self, argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, argv: list[str], stdin: str | None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         name = _helper_name(argv, stdin)
         with self._changed:
             if name not in _UNCHECKED:
