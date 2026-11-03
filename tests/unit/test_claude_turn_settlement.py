@@ -493,6 +493,79 @@ def test_a_notice_is_not_taken_for_an_owner_message_written_into_the_turn(reside
     assert _settled(turn).final_output == "noted; tests pass"
 
 
+def test_a_notice_read_in_one_turn_and_reported_in_the_next_is_not_owed_again(resident):
+    """Read before its ``task_notification``, the read still counts a turn later.
+
+    Should that record reach stdout only after the result, it falls in the
+    next turn's slice, after that turn's ``init``; the read is the session's.
+    """
+    process = resident.process
+    process.emit(
+        _INIT,
+        *_shell_backgrounded_by_its_timeout(),
+        _call("toolu_poll", "sleep 5"),
+        _notice("bash-1"),
+        _tool_result("toolu_poll", ""),
+        _say("All 214 tests pass."),
+        _RESULT,
+    )
+    assert _settled(_turn(resident, "run the tests")).final_output == "All 214 tests pass."
+
+    process.emit(
+        _INIT, _read("now lint it"), _finished("bash-1"), _running(), _say("lint is clean"), _RESULT
+    )
+    follow_up = _settled(_turn(resident, "now lint it"))
+
+    assert follow_up.status == "completed"
+    assert follow_up.final_output == "lint is clean"
+
+
+def test_an_owner_message_quoting_a_notice_is_still_the_owners(resident):
+    """A notice pasted from a log names no task of this session: it is a message."""
+    process = resident.process
+    pasted = "what does this mean?\n" + _notice("bash-9")["message"]["content"]
+    turn = _turn(resident, "run the tests")
+    events = turn.iter_events()
+    next(events)  # turn started
+    process.emit(_INIT, *_shell_backgrounded_by_its_timeout(), _call("toolu_poll", "sleep 5"))
+    for _ in range(6):
+        next(events)
+    assert turn.inject(pasted, message_id="apmsg_1") == InputOutcome(True)
+
+    process.emit(_tool_result("toolu_poll", ""), _read(pasted), _say("an old run"), _RESULT)
+    rest = list(events)
+
+    assert [event.payload for event in rest if event.event_type == USER_MESSAGE_EVENT] == [
+        {"text": pasted, "pending_message_id": "apmsg_1"}
+    ]
+    assert rest[-1].event_type == TURN_COMPLETED
+    assert _settled(turn).final_output == "an old run"
+    assert resident.session.retire_after_turn is False
+
+
+def test_a_subagents_read_does_not_answer_the_main_conversations_notice(resident):
+    """A read echoed from a subagent's sidechain is not Claude reading the notice."""
+    process = resident.process
+    sidechain = {**_notice("bash-1"), "parent_tool_use_id": "toolu_agent"}
+    process.emit(
+        _INIT,
+        _running(("bash-1", "local_bash")),
+        _call("toolu_poll", "sleep 1"),
+        _finished("bash-1"),
+        _running(),
+        sidechain,
+        _tool_result("toolu_poll", ""),
+        _say("still working"),
+        _RESULT,
+    )
+    waiting = _Background(_turn(resident, "serve").wait)
+    assert waiting.still_running(), "a subagent's read ended the main turn's wait"
+
+    process.emit(_INIT, _notice("bash-1"), _say("the server exited"), _NOTIFIED)
+
+    assert waiting.result().final_output == "still working\n\nthe server exited"
+
+
 @pytest.mark.parametrize(
     ("record", "expected"),
     [
@@ -507,25 +580,33 @@ def test_a_notice_is_not_taken_for_an_owner_message_written_into_the_turn(reside
         ({**_read("a scheduled trigger fired"), "origin": {"kind": "task-notification"}}, set()),
         (_read("did <task-notification> run?"), None),
         (_read("run the tests"), None),
+        # Unmarked, a quoted notice naming no task of this session is the owner's.
+        (_read("why did this fail? " + _notice("bash-9")["message"]["content"]), None),
     ],
 )
 def test_which_replayed_messages_are_task_notifications(record, expected):
     text = record["message"]["content"]
     text = text if isinstance(text, str) else text[0]["text"]
 
-    assert notified_tasks(record, text) == expected
+    assert notified_tasks(record, text, {"bash-1", "b-2"}) == expected
 
 
-def test_a_notice_naming_no_task_still_lets_the_turn_end(resident):
+@pytest.mark.parametrize(
+    "read_first", [False, True], ids=["notified-then-read", "read-then-notified"]
+)
+def test_a_notice_naming_no_task_still_lets_the_turn_end(resident, read_first):
     """Unable to match it, the driver still ends the turn rather than wait for ever."""
+    finished = [_finished("bash-1"), _running()]
+    notice = [
+        {**_read("[a notification in a newer shape]"), "origin": {"kind": "task-notification"}}
+    ]
     resident.process.emit(
         _INIT,
         *_shell_backgrounded_by_its_timeout(),
         _call("toolu_poll", "sleep 5"),
-        _finished("bash-1"),
-        _running(),
+        *(notice if read_first else finished),
         _tool_result("toolu_poll", ""),
-        {**_read("[a notification in a newer shape]"), "origin": {"kind": "task-notification"}},
+        *(finished if read_first else notice),
         _say("the tests passed"),
         _RESULT,
     )

@@ -27,29 +27,56 @@ from typing import Any
 _NOTIFIED_TASK = re.compile(r"<task-notification>\s*<task-id>([^<]+)</task-id>")
 
 
-def notified_tasks(record: dict[str, Any], text: str) -> frozenset[str] | None:
+def is_task_notification(record: dict[str, Any]) -> bool:
+    """Whether Claude marked this record as coming from a task notification."""
+    origin = record.get("origin")
+    return isinstance(origin, dict) and origin.get("kind") == "task-notification"
+
+
+def notified_tasks(record: dict[str, Any], text: str, known: set[str]) -> frozenset[str] | None:
     """The tasks a replayed message tells Claude finished; ``None`` for any other message.
 
-    An empty set is a notification naming no task the driver can match.
+    Without the ``origin`` mark (the pinned 2.1.220) only the text tells, so it
+    must name a task Claude listed for this session: an owner's message that
+    quotes a notification, say pasted from a log, names none of them. An empty
+    set is a marked notification naming no task the driver can match.
     """
-    origin = record.get("origin")
-    marked = isinstance(origin, dict) and origin.get("kind") == "task-notification"
     tasks = frozenset(task.strip() for task in _NOTIFIED_TASK.findall(text))
-    return tasks if marked or tasks else None
+    if is_task_notification(record):
+        return tasks
+    listed = tasks & known
+    return listed or None
+
+
+class SessionTasks:
+    """Claude's background tasks as one resident session saw them, across its turns."""
+
+    def __init__(self) -> None:
+        # Every task Claude has listed: a shell can outlive the turn that
+        # started it, and its end still opens a turn.
+        self.known: set[str] = set()
+        # Every notification Claude has read: the read can be echoed before its
+        # ``task_notification``, and that record may come only after the
+        # result, in the next turn's slice.
+        self.read: set[str] = set()
 
 
 class BackgroundWork:
     """What one turn still waits for: running agents and unread notifications."""
 
-    def __init__(self, known: set[str]) -> None:
-        # Every task Claude has listed for the session, shared with it: a shell
-        # can outlive the turn that started it, and its end still opens a turn.
-        self._known = known
+    def __init__(self, session: SessionTasks) -> None:
+        self._known = session.known
+        self._read = session.read
         self.running_agents: set[str] = set()
         # Finished tasks whose notification Claude has not read yet.
         self._unread: set[str] = set()
-        # Notifications read in this turn, in case the read is echoed first.
-        self._read: set[str] = set()
+        # Notifications read but matched to no task, whose ``task_notification``
+        # has not arrived yet: that many are already answered when they do.
+        self._unmatched_reads = 0
+
+    def notified(self, record: dict[str, Any], text: str) -> frozenset[str] | None:
+        """``notified_tasks`` for a replay in this session."""
+        return notified_tasks(record, text, self._known)
 
     @property
     def unanswered(self) -> bool:
@@ -73,11 +100,15 @@ class BackgroundWork:
             # A stopped task gets no turn of its own; a foreground agent's
             # notification is answered by its tool result.
             if (
-                task_id in self._known
-                and record.get("status") != "stopped"
-                and task_id not in self._read
+                task_id not in self._known
+                or record.get("status") == "stopped"
+                or task_id in self._read
             ):
-                self._unread.add(task_id)
+                return
+            if self._unmatched_reads:
+                self._unmatched_reads -= 1
+                return
+            self._unread.add(task_id)
         elif subtype == "init":
             # The turn Claude opens reads every notification still queued.
             self._unread.clear()
@@ -86,8 +117,12 @@ class BackgroundWork:
         """Claude read these tasks' notification: the next result answers it."""
         if not tasks:
             # A notification the driver cannot match is still read: waiting for
-            # a turn Claude will not open would hold the result forever.
-            self._unread.clear()
+            # a turn Claude will not open would hold the result forever. Its
+            # task is one already waited for, or one whose notice is to come.
+            if self._unread:
+                self._unread.clear()
+            else:
+                self._unmatched_reads += 1
             return
         self._read |= tasks
         self._unread -= tasks

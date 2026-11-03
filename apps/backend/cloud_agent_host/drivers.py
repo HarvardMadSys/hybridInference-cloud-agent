@@ -37,7 +37,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.bounded_output import OutputPump
-from cloud_agent_host.claude_background import BackgroundWork, notified_tasks
+from cloud_agent_host.claude_background import BackgroundWork, SessionTasks, is_task_notification
 from cloud_agent_host.codex_app_server import CodexTurnUsage, codex_error_text, codex_tool_output
 from cloud_agent_host.harness_event import LINE, HarnessEvent
 from cloud_agent_host.http_bridge_parts import ContextRecords, answer_preview, tool_call_event
@@ -2181,7 +2181,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         # background task is answered (see ``claude_background``).
         self._prompt_read = False
         self._answered = False
-        self._background = BackgroundWork(session._background_tasks)
+        self._background = BackgroundWork(session._claude_tasks)
         # Tool calls the model made that have no result yet. Claude folds a
         # message written while one is running into this turn's next model
         # request; written at any other moment it opens a turn of its own.
@@ -2247,9 +2247,10 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         if record is None:
             return False
         kind = record.get("type")
-        if kind == "user" and record.get("isReplay"):
+        # A subagent's own reads are its sidechain, not this conversation's.
+        if kind == "user" and record.get("isReplay") and not record.get("parent_tool_use_id"):
             text = _record_text(record)
-            read = notified_tasks(record, text)
+            read = self._background.notified(record, text)
             if read is not None:
                 self._background.observe_read(read)
             elif self._prompt:
@@ -2263,8 +2264,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             return True
         if kind != "result":
             return False
-        origin = record.get("origin")
-        notification = isinstance(origin, dict) and origin.get("kind") == "task-notification"
+        notification = is_task_notification(record)
         self._answered = self._answered or not notification or self._prompt_read
         if not self._answered or self._background.running_agents:
             return False
@@ -2312,10 +2312,9 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         record = _json_object(line)
         if record is not None and record.get("type") == "user" and record.get("isReplay"):
             echoed = _record_text(record)
-            if notified_tasks(record, echoed) is not None:
-                echoed = ""
+            notice = self._background.notified(record, echoed)
             with self._input_lock:
-                taken = [pending for pending in self._written if echoed and pending.text in echoed]
+                taken = [] if notice is not None else [p for p in self._written if p.text in echoed]
                 self._written = [pending for pending in self._written if pending not in taken]
             if taken:
                 return [user_message_event(pending, raw_line=line) for pending in taken]
@@ -2622,9 +2621,8 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         #: only meaningful once ``_process`` exists.
         self._reasoning_effort: str | None = None
         self._live_turn: ClaudeCodeLiveTurn | None = None
-        # Every task Claude has listed as running in the background. A shell
-        # can outlive the turn that started it, and its end still opens a turn.
-        self._background_tasks: set[str] = set()
+        # Claude's background tasks across turns: see ``claude_background``.
+        self._claude_tasks = SessionTasks()
         # The turn's prompt, an interrupt and a mid-turn message can come from
         # different threads; stdin takes them one whole line at a time.
         self._write_lock = threading.Lock()
