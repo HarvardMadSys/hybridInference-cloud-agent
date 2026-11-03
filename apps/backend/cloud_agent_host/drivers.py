@@ -267,21 +267,6 @@ def _json_object(line: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _record_text(record: dict[str, Any]) -> str:
-    """The text blocks of one stream-json message record, joined."""
-    message = record.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    return "\n".join(
-        str(block.get("text") or "")
-        for block in content
-        if isinstance(block, dict) and block.get("type") == "text"
-    )
-
-
 def _http_agent_error_text(error: Any) -> str:
     """Read an OpenCode/Kilo session error the way their own CLI prints it.
 
@@ -2203,10 +2188,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         """Preserve terminal failure independently of the resident process exit."""
         # Inspect the wire record: the runtime deduplicates unknown system
         # subtypes, so normalized events can hide a later retry notification.
-        try:
-            record = json.loads(line)
-        except (ValueError, TypeError):
-            record = None
+        record = self._background.read(line)[0]
         if isinstance(record, dict) and not record.get("parent_tool_use_id"):
             observed = str(record.get("session_id") or "").strip()
             expected = self._runtime.session_id or self._session._resume_session_id
@@ -2243,18 +2225,14 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         turn's prompt was answered, left by a task that finished between
         turns, does not end it either: a notification read is never the prompt.
         """
-        record = _json_object(line)
+        record, text, read = self._background.read(line)
         if record is None:
             return False
         kind = record.get("type")
-        # A subagent's own reads are its sidechain, not this conversation's.
-        if kind == "user" and record.get("isReplay") and not record.get("parent_tool_use_id"):
-            text = _record_text(record)
-            read = self._background.notified(record, text)
-            if read is not None:
-                self._background.observe_read(read)
-            elif self._prompt:
-                self._prompt_read = self._prompt_read or self._prompt in text
+        if read is not None:
+            self._background.observe_read(read)
+        elif text is not None and self._prompt:
+            self._prompt_read = self._prompt_read or self._prompt in text
         if kind == "system" and not record.get("parent_tool_use_id"):
             self._background.observe_system(record)
         if kind == "control_response" and self._cancelled and self._answered:
@@ -2309,12 +2287,10 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         That echo is where the turn took the message. A task notification's
         echo is Claude reading the notification, never an owner's message.
         """
-        record = _json_object(line)
-        if record is not None and record.get("type") == "user" and record.get("isReplay"):
-            echoed = _record_text(record)
-            notice = self._background.notified(record, echoed)
+        _, echoed, notice = self._background.read(line)
+        if echoed is not None and notice is None:
             with self._input_lock:
-                taken = [] if notice is not None else [p for p in self._written if p.text in echoed]
+                taken = [pending for pending in self._written if pending.text in echoed]
                 self._written = [pending for pending in self._written if pending not in taken]
             if taken:
                 return [user_message_event(pending, raw_line=line) for pending in taken]

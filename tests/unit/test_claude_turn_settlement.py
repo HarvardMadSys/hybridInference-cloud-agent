@@ -27,7 +27,7 @@ import pytest
 from tests.unit.test_agent_runner import _run_shared_boundary_case
 from tests.unit.test_agent_sandbox_manager import _app, _SharedSupervisor
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import claude_background, runner as runner_mod
 from cloud_agent_host.claude_background import notified_tasks
 from cloud_agent_host.drivers import (
     TURN_COMPLETED,
@@ -564,6 +564,40 @@ def test_a_subagents_read_does_not_answer_the_main_conversations_notice(resident
     process.emit(_INIT, _notice("bash-1"), _say("the server exited"), _NOTIFIED)
 
     assert waiting.result().final_output == "still working\n\nthe server exited"
+
+
+def test_each_line_is_parsed_and_matched_once(resident, monkeypatch):
+    """Settling on a line and turning it into events read it once between them."""
+    parsed: list[str] = []
+    matched: list[str] = []
+    real_loads, real_notified = claude_background.json.loads, claude_background.notified_tasks
+
+    def loads(line):
+        parsed.append(line)
+        return real_loads(line)
+
+    def notified(record, text, known):
+        matched.append(text)
+        return real_notified(record, text, known)
+
+    monkeypatch.setattr(claude_background, "json", SimpleNamespace(loads=loads))
+    monkeypatch.setattr(claude_background, "notified_tasks", notified)
+    feed = [
+        _INIT,
+        _read("run the tests"),
+        *_shell_backgrounded_by_its_timeout(),
+        *_absorbed("bash-1", origin=True, read_first=False),
+        _say("All 214 tests pass."),
+        _RESULT,
+    ]
+    resident.process.emit(*feed)
+    turn = _turn(resident, "run the tests")
+
+    events = _Background(lambda: list(turn.iter_events())).result()
+
+    assert events[-1].event_type == TURN_COMPLETED
+    assert len(parsed) == len(feed)
+    assert len(matched) == 2  # the prompt's echo and the notice's
 
 
 @pytest.mark.parametrize(

@@ -56,7 +56,10 @@ bookkeeping, which used to sit inline in `_settles`:
   `task_notification`, that record is not waited for either. The turn must
   not wait forever for a turn Claude will not open.
 - A replay from a subagent's sidechain (`parent_tool_use_id` set) is not the
-  main conversation reading a notification or the prompt.
+  main conversation reading a notification, the prompt or an owner's message.
+- Each stdout line is parsed, and a replay matched, once: the turn settles on
+  a line and then turns the same line object into events, so the second read
+  reuses the first.
 - A notification replay is never taken as the turn's prompt, or as an owner's
   mid-turn message. Notifications contain words such as `status` and
   `completed`. A prompt of `status` used to end the next turn with the
@@ -65,7 +68,7 @@ bookkeeping, which used to sit inline in `_settles`:
 These behaviours are unchanged: a background agent that is still running
 holds the result, a notification left unread at the result waits for its own
 turn, and cancel, retirement and follow-up turns on the same process work as
-before. `drivers.py` shrank from 2,891 to 2,880 lines, and its size-budget
+before. `drivers.py` shrank from 2,891 to 2,856 lines, and its size-budget
 entry is lowered to match.
 
 ## Tests
@@ -87,6 +90,7 @@ of a scripted feed. The tests cover:
 - a notification read in one turn whose `task_notification` comes in the next;
 - an owner's message quoting a notice of a task the session never listed;
 - a subagent's read of a notification the main conversation still owes;
+- each line of a turn parsed once, and each replay matched once;
 - the whole chain: the real driver, `ResidentTurn`, the sandbox manager's
   `/shared-sandboxes/{id}/turn` endpoint, `SessionSupervisorClient`, the
   runner's `_stream_shared_agent_turn`, and `_run_shared_live_attempt`
@@ -95,7 +99,7 @@ of a scripted feed. The tests cover:
 On the original driver, the 9 cases the fix targets failed: each hung until
 its bounded wait, or ended with the wrong turn's answer or a wrongly taken
 message. The 4 cases that check preserved behaviour passed. With the fix, all
-24 cases pass. 7 of the 24 test the parser in the new module on its own.
+25 cases pass. 7 of the 25 test the parser in the new module on its own.
 
 A review of the first revision found that the read was kept per turn and that
 an unmatched read counted in one order only, and that an owner's quoted notice

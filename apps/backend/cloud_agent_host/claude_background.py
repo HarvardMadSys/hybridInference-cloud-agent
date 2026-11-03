@@ -20,11 +20,31 @@ follows, in a turn of its own that it opens after its result with a
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 #: Claude's notification message, and the task it names.
 _NOTIFIED_TASK = re.compile(r"<task-notification>\s*<task-id>([^<]+)</task-id>")
+
+#: A stdout line's record, and for a replay in the main conversation its text
+#: and the tasks it tells Claude finished (``None``: not a notification).
+ReadLine = tuple[dict[str, Any] | None, str | None, frozenset[str] | None]
+
+
+def record_text(record: dict[str, Any]) -> str:
+    """The text blocks of one stream-json message record, joined."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(block.get("text") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
 
 
 def is_task_notification(record: dict[str, Any]) -> bool:
@@ -73,10 +93,35 @@ class BackgroundWork:
         # Notifications read but matched to no task, whose ``task_notification``
         # has not arrived yet: that many are already answered when they do.
         self._unmatched_reads = 0
+        # The last line read, and what ``read`` made of it.
+        self._last: tuple[str, ReadLine] | None = None
 
-    def notified(self, record: dict[str, Any], text: str) -> frozenset[str] | None:
-        """``notified_tasks`` for a replay in this session."""
-        return notified_tasks(record, text, self._known)
+    def read(self, line: str) -> ReadLine:
+        """One stdout line, parsed and, if it is a replay, matched once.
+
+        The turn settles on a line, then turns it into events: both read the
+        same line object, so the second read reuses the first.
+        """
+        if self._last is not None and self._last[0] is line:
+            return self._last[1]
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            record = None
+        if not isinstance(record, dict):
+            record = None
+        text = notice = None
+        # A subagent's replays are its sidechain, not this conversation's.
+        if (
+            record is not None
+            and record.get("type") == "user"
+            and record.get("isReplay")
+            and not record.get("parent_tool_use_id")
+        ):
+            text = record_text(record)
+            notice = notified_tasks(record, text, self._known)
+        self._last = (line, (record, text, notice))
+        return self._last[1]
 
     @property
     def unanswered(self) -> bool:
