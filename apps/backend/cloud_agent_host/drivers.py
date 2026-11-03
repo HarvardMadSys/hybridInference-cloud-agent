@@ -37,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.claude_background import BackgroundWork, notified_tasks
 from cloud_agent_host.codex_app_server import CodexTurnUsage, codex_error_text, codex_tool_output
 from cloud_agent_host.harness_event import LINE, HarnessEvent
 from cloud_agent_host.http_bridge_parts import ContextRecords, answer_preview, tool_call_event
@@ -2175,14 +2176,12 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         self._saw_result = False
         self._error_result = False
         self._saw_api_retry = False
-        # Ending the turn the way the one-shot CLI ends its run (the pinned
-        # 2.1.220): it holds its result while a background agent runs, and a
-        # finished background task is answered in a turn Claude opens itself,
-        # whose result says ``origin: task-notification``.
+        # Ending the turn the way the one-shot CLI ends its run: it holds its
+        # result while a background agent runs, and until every finished
+        # background task is answered (see ``claude_background``).
         self._prompt_read = False
         self._answered = False
-        self._running_agents: set[str] = set()
-        self._unanswered: set[str] = set()
+        self._background = BackgroundWork(session._background_tasks)
         # Tool calls the model made that have no result yet. Claude folds a
         # message written while one is running into this turn's next model
         # request; written at any other moment it opens a turn of its own.
@@ -2237,40 +2236,29 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         """Whether this line ends the turn, as the one-shot CLI's run would end.
 
         Not while a background agent is still running, and not before Claude
-        has answered a finished background task: the notification turn it then
-        opens comes after this turn's result, and read by the next turn it
-        would end that one with this one's answer. A notification turn read
-        before this turn's prompt was answered, left by a task that finished
-        between turns, does not end it either.
+        has answered a finished background task. One whose notification it
+        read inside this turn is answered by this turn's result; any other gets
+        a notification turn after it, and read by the next turn that would end
+        that one with this one's answer. A notification turn read before this
+        turn's prompt was answered, left by a task that finished between
+        turns, does not end it either: a notification read is never the prompt.
         """
         record = _json_object(line)
         if record is None:
             return False
         kind = record.get("type")
-        if kind == "user" and record.get("isReplay") and self._prompt:
-            self._prompt_read = self._prompt_read or self._prompt in _record_text(record)
+        if kind == "user" and record.get("isReplay"):
+            text = _record_text(record)
+            read = notified_tasks(record, text)
+            if read is not None:
+                self._background.observe_read(read)
+            elif self._prompt:
+                self._prompt_read = self._prompt_read or self._prompt in text
         if kind == "system" and not record.get("parent_tool_use_id"):
-            subtype = record.get("subtype")
-            if subtype == "background_tasks_changed":
-                tasks = [task for task in record.get("tasks") or [] if isinstance(task, dict)]
-                listed = {str(task["task_id"]): task for task in tasks if task.get("task_id")}
-                self._session._background_tasks |= set(listed)
-                self._running_agents = {
-                    task_id
-                    for task_id, task in listed.items()
-                    if task.get("task_type") == "local_agent"
-                }
-            elif subtype == "task_notification":
-                task_id = str(record.get("task_id") or "")
-                # A stopped task gets no turn of its own; a foreground agent's
-                # notification is answered by its tool result.
-                if task_id in self._session._background_tasks and record.get("status") != "stopped":
-                    self._unanswered.add(task_id)
-            elif subtype == "init":
-                self._unanswered.clear()
+            self._background.observe_system(record)
         if kind == "control_response" and self._cancelled and self._answered:
             # An interrupt stops the background agents and opens no turn.
-            if self._running_agents:
+            if self._background.running_agents:
                 self._session.retire_after_turn = True
             return True
         if kind != "result":
@@ -2278,9 +2266,9 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         origin = record.get("origin")
         notification = isinstance(origin, dict) and origin.get("kind") == "task-notification"
         self._answered = self._answered or not notification or self._prompt_read
-        if not self._answered or self._running_agents:
+        if not self._answered or self._background.running_agents:
             return False
-        return self._cancelled or not self._unanswered
+        return self._cancelled or not self._background.unanswered
 
     def raw_lines(self) -> Iterator[str]:
         """This turn's slice of the shared stream, up to the line that settles it."""
@@ -2318,13 +2306,16 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         With ``--replay-user-messages`` the CLI echoes a message on stdout at
         the moment it reads it into the conversation: after the tool it was
         written during, before the model's next request (the pinned 2.1.220).
-        That echo is where the turn took the message.
+        That echo is where the turn took the message. A task notification's
+        echo is Claude reading the notification, never an owner's message.
         """
         record = _json_object(line)
         if record is not None and record.get("type") == "user" and record.get("isReplay"):
             echoed = _record_text(record)
+            if notified_tasks(record, echoed) is not None:
+                echoed = ""
             with self._input_lock:
-                taken = [pending for pending in self._written if pending.text in echoed]
+                taken = [pending for pending in self._written if echoed and pending.text in echoed]
                 self._written = [pending for pending in self._written if pending not in taken]
             if taken:
                 return [user_message_event(pending, raw_line=line) for pending in taken]
