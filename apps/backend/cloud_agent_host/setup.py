@@ -40,8 +40,6 @@ SCRIPT_OUTPUT_WAIT_S = 1.0
 #: wrote was already in the stream, and nothing writes once the phase is
 #: reaped, so the end comes at once.
 REST_OUTPUT_S = 5.0
-#: How reading a successful start's output up to its byte count ended.
-_ENDED, _COMPLETE, _CUT = "ended", "complete", "cut"
 
 
 @dataclass(frozen=True)
@@ -92,7 +90,14 @@ def _drain_service(output: OutputPump[bytes]) -> None:
 
 
 class _Output:
-    """One script's output: counted as read, then decoded, masked, kept and reported."""
+    """One script's output: counted as read, then decoded, masked, kept and reported.
+
+    What the decoder and the redactor hold back, a character cut short or text
+    that may begin a secret, is shown only once the stream has ended. A stream
+    handed to a service, or not read to its end, goes on past what was read,
+    and what followed could complete it: shown on its own, a held-back start
+    of a secret would be unmasked, and so would one a cut character closed off.
+    """
 
     def __init__(
         self,
@@ -108,9 +113,17 @@ class _Output:
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         #: Raw bytes consumed, before decoding and masking change their size.
         self.read = 0
+        self.ended = False
         self.finished = False
         self.handed_over = False
         self.reaped = False
+
+    def get(self, timeout: float) -> bytes | None:
+        """Take the next raw chunk, or None once the stream has ended."""
+        data = self.pump.get(timeout=timeout)
+        if data is None:
+            self.ended = True
+        return data
 
     def consume(self, data: bytes) -> None:
         """Count, decode, mask, keep and report one piece of raw output."""
@@ -118,23 +131,10 @@ class _Output:
         self.show(self.redactor.feed(self.decoder.decode(data)))
 
     def finish(self) -> None:
-        """End the stream: what the decoder and the redactor held back is shown now.
-
-        A stream a service took over goes on, so nothing held back is shown.
-        """
-        if not (self.finished or self.handed_over):
+        """Show what the decoder and the redactor held back, if the stream has ended."""
+        if self.ended and not self.finished:
             self.finished = True
             self.show(self.redactor.feed(self.decoder.decode(b"", final=True), final=True))
-
-    def end_at_count(self) -> None:
-        """End the script's output at its byte count, keeping what may begin a secret.
-
-        A character the count cut is shown. What the redactor holds back is
-        not: the bytes past the count are a service's, and a secret the
-        counted bytes began may run on into them, unmasked if its start were
-        shown alone.
-        """
-        self.show(self.redactor.feed(self.decoder.decode(b"", final=True)))
 
     def show(self, safe: str) -> None:
         """Keep and report text that is already masked."""
@@ -148,7 +148,7 @@ class _Output:
         while waited < REST_OUTPUT_S and (left := deadline - time.monotonic()) > 0:
             asked = time.monotonic()
             try:
-                data = self.pump.get(timeout=min(left, REST_OUTPUT_S - waited))
+                data = self.get(timeout=min(left, REST_OUTPUT_S - waited))
             except queue.Empty:
                 return
             waited += time.monotonic() - asked
@@ -156,28 +156,25 @@ class _Output:
                 return
             self.consume(data)
 
-    def read_to(self, count: int, stopped: Callable[[], bool], deadline: float) -> str:
+    def read_to(self, count: int, stopped: Callable[[], bool], deadline: float) -> None:
         """Consume the stream up to its ``count``-th byte, the end of the script's output.
 
-        Returns ``_COMPLETE`` once exactly that much was read, ``_ENDED`` if the
-        stream ended first, and ``_CUT`` if the wait, the deadline or a stop came
-        first, or more had already been read.
+        It stops sooner when the stream ends, or when the wait for those bytes,
+        the deadline or a stop comes first.
         """
         waited = 0.0
-        while self.read < count:
+        while self.read < count and not self.ended:
             if waited >= SCRIPT_OUTPUT_WAIT_S or stopped() or time.monotonic() >= deadline:
-                return _CUT
+                return
             asked = time.monotonic()
             try:
-                data = self.pump.get(timeout=CHECK_INTERVAL_S)
+                data = self.get(timeout=CHECK_INTERVAL_S)
             except queue.Empty:
                 data = b""
             waited += time.monotonic() - asked
-            if data is None:
-                return _ENDED
-            # What follows the count, in this chunk and after it, is the service's.
-            self.consume(data[: count - self.read])
-        return _COMPLETE if self.read == count else _CUT
+            if data:
+                # What follows the count, in this chunk and after it, is the service's.
+                self.consume(data[: count - self.read])
 
     def hand_over(self) -> None:
         """Give the stream to a started service, whose output is drained, not kept."""
@@ -201,8 +198,9 @@ def _hand_over(
     Any phase but a successful start is reaped at once: all the script wrote
     is already in the stream, which the reap only ends. A started service
     keeps the stream once the host has read the bytes the receipt counts, or
-    when their wait, the deadline or a stop comes first. A process that
-    counts nothing hands its stream over at once.
+    when their wait, the deadline or a stop comes first; a process that
+    counts nothing hands its stream over at once. Nothing held back is shown
+    then, not even a character the count cut: the stream goes on.
     """
     if code != 0 or not start:
         process.kill()
@@ -211,16 +209,13 @@ def _hand_over(
         return
     count = getattr(process, "script_bytes", None)
     try:
-        ended = _CUT if count is None else output.read_to(count, stopped, deadline)
-        if ended == _ENDED:
-            return
-        if ended == _COMPLETE:
-            output.end_at_count()
-    except BaseException:
-        # The service's pipe must keep flowing whatever reporting did.
-        output.hand_over()
-        raise
-    output.hand_over()
+        if count is not None:
+            output.read_to(count, stopped, deadline)
+    finally:
+        # The service's pipe keeps flowing, whatever reporting did, unless the
+        # stream has ended and is finished like any other.
+        if not output.ended:
+            output.hand_over()
 
 
 def run_setup(
@@ -294,7 +289,7 @@ def run_setup(
                 )
                 break
             try:
-                chunk = output.pump.get(timeout=min(CHECK_INTERVAL_S, remaining))
+                chunk = output.get(timeout=min(CHECK_INTERVAL_S, remaining))
             except queue.Empty:
                 continue
             if chunk is None:

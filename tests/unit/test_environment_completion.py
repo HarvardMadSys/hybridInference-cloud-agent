@@ -214,26 +214,38 @@ def test_the_split_counts_raw_bytes_before_decoding_and_masking(scripts):
 class _Environment:
     """What run_step reads of a bound environment."""
 
+    def __init__(self, secret):
+        self.secret = secret
+
     def values(self, _which):
         return {}
 
     def secrets(self):
-        return {"TOKEN": _SECRET}
+        return {"TOKEN": self.secret}
 
 
-def test_a_secret_split_at_the_count_shows_no_part_of_it(scripts):
+@pytest.mark.parametrize(
+    ("secret", "written", "rest"),
+    [
+        (_SECRET, b"demo-se", b"cret-123456@db\n"),
+        # The count cuts a character inside the secret: closing it off as one
+        # that could not be read would tell the redactor no secret follows.
+        ("demo-secret-\u00e9123456", b"demo-secret-\xc3", b"\xa9123456@db\n"),
+    ],
+)
+def test_a_secret_split_at_the_count_shows_no_part_of_it(scripts, secret, written, rest):
     # A block-buffered service wrote the start of a secret before the script
     # ended silently, so the count takes it in; the rest came with its next
     # flush, past the count.
-    script = scripts(code=0, last=b"", service="chatty", after=b"cret-123456@db\n")
-    script.printed = [b"ready\n", b"service: db=postgres://app:demo-se"]
-    script.counted = len(b"ready\nservice: db=postgres://app:demo-se")
+    script = scripts(code=0, last=b"", service="chatty", after=rest)
+    script.printed = [b"ready\n", b"service: db=postgres://app:" + written]
+    script.counted = sum(map(len, script.printed))
     step = {"phase": "start", "state": "running", "output": ""}
     reported = []
 
     result = run_step(
         _ScriptBackend(script),
-        _Environment(),
+        _Environment(secret),
         step,
         script="./serve",
         values="runtime",
@@ -249,15 +261,31 @@ def test_a_secret_split_at_the_count_shows_no_part_of_it(scripts):
     assert all("demo" not in output for output in reported)
 
 
-def test_a_character_cut_at_the_count_is_shown_as_one_that_could_not_be_read(scripts):
-    # The script's last byte begins a character the service's first ends.
+def test_a_character_cut_at_the_count_is_not_shown(scripts):
+    # The script's last byte begins a character the service's first ends; the
+    # rest of it goes with the stream to the drain.
     script = scripts(code=0, last=b"caf\xc3", service="chatty", after=b"\xa9 service\n")
     output = []
 
     result, _ = _run(script, "start", output)
 
     assert result.exit_code == 0
-    assert "".join(output) == "working\ncaf\ufffd"
+    assert "".join(output) == "working\ncaf"
+
+
+def test_a_rest_cut_at_the_deadline_shows_nothing_held_back(scripts):
+    # A writer the reap did not reach began a secret and went quiet: the rest
+    # is cut at the deadline, not ended, so the start of the secret stays hidden.
+    script = scripts(
+        code=1, last="error: it failed\n", service="silent", escapes=True, after=b"token demo-se"
+    )
+    output = []
+
+    result, _ = _run(script, "setup", output, timeout_s=1.0)
+
+    assert result.exit_code == 1
+    assert "".join(output) == "working\nerror: it failed\ntoken "
+    assert "demo" not in result.detail
 
 
 def test_the_rest_of_a_reaped_phase_is_read_no_longer_than_its_deadline(scripts):
@@ -305,12 +333,16 @@ def test_a_start_whose_stream_ends_short_of_its_count_is_finished(scripts):
     # so even the "[" held back for a mask marker is shown, and at once.
     script = scripts(code=0, last="listening on [", missing=10)
     output = []
+    draining = {t for t in threading.enumerate() if t.name == "environment-service-output"}
 
     result, handed_over = _run(script, "start", output)
 
     assert result.exit_code == 0
     assert "".join(output) == "working\nlistening on ["
     assert handed_over < 0.25
+    # Nothing is left to drain an ended stream.
+    started = {t for t in threading.enumerate() if t.name == "environment-service-output"}
+    assert not started - draining
 
 
 def test_a_slow_report_does_not_cut_a_starts_counted_bytes_short(scripts):
