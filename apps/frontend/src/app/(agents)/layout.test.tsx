@@ -205,6 +205,42 @@ describe('AgentsLayout sidebar collapse', () => {
     expect(toggle()).toHaveAccessibleName('Expand task list');
   });
 
+  it.each(['0', '1'])(
+    'folds the task list away on every Admin visit and keeps the task app preference %s',
+    (preference) => {
+      localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, preference);
+      const page = (route: string) => {
+        pathname = route;
+        return (
+          <AgentsLayout>
+            <p>page</p>
+          </AgentsLayout>
+        );
+      };
+      const view = render(page('/admin/hosts'));
+
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(toggle()).toHaveAccessibleName('Expand task list');
+
+      // Opened on one admin page, it stays open on the next one...
+      fireEvent.click(toggle());
+      expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      view.rerender(page('/admin/accounts'));
+      expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+
+      // ...the task app keeps its own choice...
+      view.rerender(page('/job-1'));
+      if (preference === '0') expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      else expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+
+      // ...and the next visit to Admin starts folded again.
+      view.rerender(page('/admin/hosts'));
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+    },
+  );
+
   it.each([
     ['MacIntel', { metaKey: true }, { ctrlKey: true }],
     ['Win32', { ctrlKey: true }, { metaKey: true }],

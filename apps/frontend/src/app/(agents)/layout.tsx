@@ -310,6 +310,16 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Admin pages are wide tables, so the task list folds away on every visit
+  // there. Opening it lasts until the administrator leaves Admin and never
+  // changes the choice the task app remembers.
+  const onAdmin = pathname === '/admin' || !!pathname?.startsWith('/admin/');
+  const [adminSidebarOpen, setAdminSidebarOpen] = useState(false);
+  useEffect(() => {
+    if (!onAdmin) setAdminSidebarOpen(false);
+  }, [onAdmin]);
+  const desktopCollapsed = onAdmin ? !adminSidebarOpen : sidebarCollapsed;
+  const collapsed = mobile ? !mobileSidebarOpen : desktopCollapsed;
 
   const closeMobileSidebar = useCallback(() => {
     setMobileSidebarOpen(false);
@@ -334,6 +344,10 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
       setMobileSidebarOpen((current) => !current);
       return;
     }
+    if (onAdmin) {
+      setAdminSidebarOpen((current) => !current);
+      return;
+    }
     setSidebarCollapsed((current) => {
       const next = !current;
       try {
@@ -343,7 +357,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
       }
       return next;
     });
-  }, [mobile, mobileSidebarOpen, closeMobileSidebar]);
+  }, [mobile, mobileSidebarOpen, closeMobileSidebar, onAdmin]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -419,16 +433,13 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
               {t('nav.skipToWorkspace')}
             </a>
             <AgentsHeader
-              accountMenu={
-                !hasAgentPermission(state.user?.agent_access, 'agent.use') ||
-                (mobile ? !mobileSidebarOpen : sidebarCollapsed)
-              }
+              accountMenu={!hasAgentPermission(state.user?.agent_access, 'agent.use') || collapsed}
               sidebarToggle={
-                mobile || sidebarCollapsed ? (
+                mobile || collapsed ? (
                   <SidebarToggleButton
                     shortcut={shortcuts.sidebar}
                     settings={onSettings}
-                    sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+                    sidebarCollapsed={collapsed}
                     onToggleSidebar={toggleSidebar}
                   />
                 ) : undefined
@@ -440,9 +451,9 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
                   ? { backHref: chatReturn.userId === state.user?.id ? chatReturn.href : '/' }
                   : undefined
               }
-              sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+              sidebarCollapsed={collapsed}
               sidebarToggle={
-                !mobile && !sidebarCollapsed ? (
+                !mobile && !collapsed ? (
                   <SidebarToggleButton
                     shortcut={shortcuts.sidebar}
                     settings={onSettings}
