@@ -45,6 +45,8 @@ from cloud_agent_host.chat_sandbox_exec import (
     ProvenContainers,
     checked_exec,
     exec_target,
+    guest_unproven,
+    network_proof,
     spawn_target,
 )
 from cloud_agent_host.chat_sandbox_inspect import container_inspection, inspect_many
@@ -1044,6 +1046,7 @@ class ChatSandboxManager:
                     found.append(item)
         return found
 
+    @network_proof
     def start(
         self,
         spec: ChatSandboxSpec,
@@ -1076,9 +1079,7 @@ class ChatSandboxManager:
         if current.running:
             if facts is not None:
                 facts.note("reuse")
-            with self._unproven_guests_lock:
-                unproven = exact_container_id in self._unproven_guests
-            if unproven:
+            if guest_unproven(self, exact_container_id):
                 # A start of this exact container failed before its in-guest
                 # check and could not stop it either. Nothing has run in it
                 # since; prove it now, or stop it.
@@ -1262,6 +1263,7 @@ class ChatSandboxManager:
             raise RetainedChatLost("chat sandbox container identity changed during stop")
         return released
 
+    @network_proof
     def require_network(
         self, spec: ChatSandboxSpec, *, observer: StageObserver | None = None
     ) -> None:
@@ -1287,9 +1289,7 @@ class ChatSandboxManager:
                 f"retained chat network is {list(current.networks)!r}, not its group "
                 f"bridge {expected!r}"
             )
-        with self._unproven_guests_lock:
-            unproven = current.container_id in self._unproven_guests
-        if unproven:
+        if guest_unproven(self, current.container_id):
             raise SandboxError(
                 "retained chat started without passing its network check; it must be "
                 "activated again before anything runs in it"

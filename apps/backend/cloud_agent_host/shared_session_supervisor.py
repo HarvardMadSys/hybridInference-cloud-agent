@@ -73,6 +73,7 @@ from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
     StaleStartFence,
 )
+from cloud_agent_host.shared_admission_proof import admit_running, backend_proved_at, ensure_running
 from cloud_agent_host.shared_session_recovery import SharedSessionRecovery
 from cloud_agent_host.turn_arming import TurnFences, arm_turn
 from cloud_agent_host.upload_import import forget_deleted_container_uploads
@@ -354,6 +355,9 @@ class _Group:
     start_archive_completion_pending: bool = False
     container_lost: bool = False
     lifecycle_generation: int = 0
+    #: The lifecycle generation an admission last proved the network in, and
+    #: when that proof began (``shared_admission_proof``).
+    network_proof: tuple[int, float] | None = None
     lifecycle_check: _LifecycleCheck | None = field(default=None, repr=False)
     idle_deadline: float | None = None
     fork_mutex: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -3961,8 +3965,8 @@ class SharedChatSessionSupervisor:
     ) -> tuple[str, SharedSessionDescriptor]:
         """Admit one terminal or workspace operation; its token keeps the group awake.
 
-        Admission proves the group network (:meth:`_start_and_prove`), so the
-        caller runs the operation without another proof.
+        Admission proves the group network, or an operation's stands on a proof
+        that still holds (:func:`admit_running`); the caller runs on that proof.
         """
         kind = "terminal" if terminal else "operation"
         with self._lock:
@@ -3975,7 +3979,7 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost(f"shared membership changed before {kind} admission")
             self._require_mutation_admission(group)
             lifecycle_generation = group.lifecycle_generation
-        self._ensure_running(group, start_seq=start_seq)
+        admit_running(self, group, start_seq=start_seq, reuse=not terminal)
         with self._lock:
             self._wait_for_start_locked(group)
             current_group, current_member = self._member(thread_id)
@@ -4059,9 +4063,8 @@ class SharedChatSessionSupervisor:
         """Return the group's one backend; its commands may stand on an admission's proof."""
         with self._lock:
             group, _ = self._member(thread_id)
-            return RetainedChatBackend(
-                self._manager, group.spec, network_proved_at=network_proved_at
-            )
+            proved_at = backend_proved_at(group, network_proved_at)
+            return RetainedChatBackend(self._manager, group.spec, network_proved_at=proved_at)
 
     def status(self, thread_id: str) -> SharedSessionDescriptor:
         """Return fresh Docker and member process state.
@@ -4897,14 +4900,7 @@ class SharedChatSessionSupervisor:
     def _ensure_running(
         self, group: _Group, *, start_seq: int | _SameRun | None = _SAME_RUN
     ) -> None:
-        current = self._manager.inspect(group.spec.container_name)
-        if current is None:
-            raise RetainedChatLost("shared sandbox container is missing")
-        if group.stop_archive_pending:
-            raise SessionBusy("shared workspace final archive retry is pending")
-        if group.orphan_finalization_pending:
-            raise SessionBusy("shared workspace orphan finalization is pending")
-        group.inspection = self._start_and_prove(group, start_seq=start_seq)
+        ensure_running(self, group, start_seq=start_seq)
 
     def _recover_start_archive_completion(self, group: _Group) -> None:
         """Retry an idempotent post-start marker completion before admission."""
