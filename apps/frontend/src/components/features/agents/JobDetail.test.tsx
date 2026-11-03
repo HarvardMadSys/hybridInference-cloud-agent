@@ -2049,7 +2049,7 @@ describe('JobDetail', () => {
       expect.objectContaining({ name: path, type: 'image/png', size: image.size }),
     );
     expect(path).toMatch(/^pasted-image-[a-f0-9-]+\.png$/);
-    expect(screen.getByText(path!)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: path! })).toBeInTheDocument();
     expect(box).toHaveValue('Use this screenshot');
     expect(screen.getByRole('button', { name: 'Queue' })).toBeDisabled();
     fireEvent.keyDown(box, { key: 'Enter' });
