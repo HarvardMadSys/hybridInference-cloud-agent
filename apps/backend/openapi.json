@@ -165,6 +165,20 @@
             ],
             "title": "Suspension Message"
           },
+          "teams": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AccountTeam"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Teams"
+          },
           "waitlist": {
             "$ref": "#/components/schemas/WaitlistEntry"
           }
@@ -320,6 +334,35 @@
           "expected_version"
         ],
         "title": "AccountNotesRequest",
+        "type": "object"
+      },
+      "AccountTeam": {
+        "description": "An active team the account is an active member of, with its role there.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
+        "title": "AccountTeam",
         "type": "object"
       },
       "AcquireHostDrainFenceRequest": {
@@ -33250,7 +33293,7 @@
     },
     "/v1/admin/accounts": {
       "get": {
-        "description": "One page of accounts, newest first, filtered and searched, with counts per state.\n\n``q`` matches an email, login name, phone number or name anywhere, or an\naccount id by its prefix.",
+        "description": "One page of accounts, newest first, filtered and searched, with counts per state.\n\n``q`` matches an email, login name, phone number or name anywhere, or an\naccount id by its prefix; ``team`` keeps that team's active members. Each\naccount names the active teams it is in.",
         "operationId": "list_accounts_v1_admin_accounts_get",
         "parameters": [
           {
@@ -33350,6 +33393,24 @@
               ],
               "title": "Sort",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "team",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Team"
             }
           },
           {

@@ -47,6 +47,7 @@ from cloud_agent.schemas.accounts import (
     AccountActionRequest,
     AccountEntry,
     AccountNotesRequest,
+    AccountTeam,
     AdminAccountsResponse,
     EraseAccountRequest,
     EraseAccountResponse,
@@ -86,12 +87,14 @@ async def list_accounts(
     account_status: StatusFilter | None = Query(None),
     q: str | None = Query(None, max_length=320),
     sort: Literal["created", "last_login"] = Query("created"),
+    team: str | None = Query(None, min_length=1, max_length=128),
     _admin: str = Depends(verify_admin_access),
 ) -> AdminAccountsResponse:
     """One page of accounts, newest first, filtered and searched, with counts per state.
 
     ``q`` matches an email, login name, phone number or name anywhere, or an
-    account id by its prefix.
+    account id by its prefix; ``team`` keeps that team's active members. Each
+    account names the active teams it is in.
     """
     accounts = local_accounts(request)
     records, total = await accounts.list_accounts(
@@ -101,9 +104,16 @@ async def list_accounts(
         account_status=account_status,
         query=q,
         sort=sort,
+        team_id=team,
     )
+    teams = await accounts.team_memberships([record.id for record in records])
     return AdminAccountsResponse(
-        accounts=[account_entry(record) for record in records],
+        accounts=[
+            account_entry(record).model_copy(
+                update={"teams": [AccountTeam(**team) for team in teams.get(record.id, [])]}
+            )
+            for record in records
+        ],
         total=total,
         counts=await accounts.account_counts(),
     )

@@ -834,7 +834,7 @@ by user id only, because identity tokens carry no display name.
 ## Teams
 
 Owners and admins manage their own teams from **Settings → Teams**. Platform
-administrators see every team under **Admin → Teams**, read-only:
+administrators see every team under **Admin → Users → Teams**, read-only:
 
 - The list (`GET /admin/agent/teams`) shows teams newest first, with the owner,
   active members, admins besides the owner, and join requests waiting for a
@@ -853,6 +853,10 @@ administrators see every team under **Admin → Teams**, read-only:
   50 oldest likewise, and the team's `pending_request_count` counts them all.
   `GET /admin/agent/teams/{team_id}/audit-events` pages the team's own audit
   history with `before`.
+
+A team's member count in the list, and **Show in People** on its page, open
+its members in **Admin → Users → People**, where each row names the teams
+that person is in; each person on a team's page opens their account there.
 
 People are named by their profile name and account email, read on each
 request and never stored; an email that cannot be read is left out. Nothing

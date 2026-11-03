@@ -272,6 +272,14 @@ class WaitlistSubmitRequest(_Request):
     purpose: str = Field(default="", max_length=MAX_PURPOSE_CHARS)
 
 
+class AccountTeam(BaseModel):
+    """An active team the account is an active member of, with its role there."""
+
+    id: str
+    name: str
+    role: Literal["owner", "admin", "member"]
+
+
 class AccountEntry(BaseModel):
     """One account as the administration page lists it."""
 
@@ -289,6 +297,8 @@ class AccountEntry(BaseModel):
     deleted_at: datetime | None = None
     erased_at: datetime | None = None
     reviewed_by: str | None = None
+    #: Named by the administration list only; ``None`` where it was not read.
+    teams: list[AccountTeam] | None = None
 
 
 class AdminAccountsResponse(BaseModel):
@@ -508,6 +518,7 @@ __all__ = [
     "AccountEntry",
     "AccountIdentity",
     "AccountNotesRequest",
+    "AccountTeam",
     "AdminAccountsResponse",
     "AuthConfigResponse",
     "AuthOptionsResponse",
