@@ -2011,18 +2011,19 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
 
         ``call`` is this request's measurement fragment, if the inherited
         selection named one. It gates nothing: the workspace is admitted, which
-        proves its network, and the operation runs exactly as before. Only the
-        timings are conditional, and the answer is merged into the body so a
-        caller can tell a producer that collected nothing from one that never
-        reported at all.
+        proves its network or stands on a recent proof, and the operation runs
+        exactly as before. Only the timings are conditional, and the answer is
+        merged into the body so a caller can tell a producer that collected
+        nothing from one that never reported at all.
         """
         active = call if call is not None else closed()
         owner = retained_owner(workspace_id)
         token: str | None = None
         try:
-            # Admission proves the group network once for this operation, and
-            # a command the operation spawns stands on that proof rather than
-            # making another; the clock starts before it, as for a turn's.
+            # Admission proves the group network for this operation, or stands
+            # on a proof under a minute old (shared_admission_proof). A command
+            # the operation spawns stands on that proof rather than making
+            # another; its clock is the proof's, never later than this one.
             admitted_from = time.monotonic()
             with active.stage("admission"):
                 token, _ = owner.operation_opened(workspace_id, start_seq=start_seq)
