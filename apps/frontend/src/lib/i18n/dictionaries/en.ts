@@ -1,4 +1,5 @@
 import { accountsEn } from './accounts';
+import { landingEn } from './landing';
 import { composerEn } from './composer';
 import { modelSelectionEn } from './modelSelection';
 import { usageEn } from './usage';
@@ -16,6 +17,7 @@ import { usageEn } from './usage';
  */
 export const en = {
   ...accountsEn,
+  ...landingEn,
   'environment.title': 'Environment',
   'environment.configure': 'Configure Environment',
   'environment.sectionTitle': 'Environments',

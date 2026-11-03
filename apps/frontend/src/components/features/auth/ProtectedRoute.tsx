@@ -10,7 +10,7 @@
 // component; sending an unauthenticated visitor to a protected login page is a
 // loop.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/components/providers';
 import { basePath } from '@/config/env';
@@ -26,7 +26,18 @@ import { safeReturnTo } from '@/lib/auth/signin';
  */
 const SIGN_IN_ERROR_PARAM = 'sign_in_error';
 
-export function ProtectedRoute({ children }: { children: React.ReactNode }) {
+/**
+ * `signedOut`, when given, is what a visitor without a session sees instead of
+ * being sent to `/login`: the app's root shows its home page this way. Errors
+ * and the loading state are unchanged.
+ */
+export function ProtectedRoute({
+  children,
+  signedOut,
+}: {
+  children: React.ReactNode;
+  signedOut?: ReactNode;
+}) {
   const { state, refreshUser } = useAuth();
   const [error, setError] = useState<string | null>(null);
   // One redirect per mount. Without this a slow navigation lets the effect run
@@ -35,6 +46,7 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (state.loading || state.error || state.isAuthenticated || started.current) return;
+    if (signedOut) return;
     started.current = true;
     // Read from `location` rather than `useSearchParams`, which would force
     // every page under this layout behind a Suspense boundary at build time.
@@ -49,7 +61,7 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     // is still deciding nobody is signed in.
     const query = new URLSearchParams({ return_to: returnTo });
     window.location.assign(`${basePath}/login?${query.toString()}`);
-  }, [state.loading, state.error, state.isAuthenticated]);
+  }, [state.loading, state.error, state.isAuthenticated, signedOut]);
 
   if (state.error) {
     return (
@@ -97,6 +109,8 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
+
+  if (!state.loading && !state.isAuthenticated && signedOut) return <>{signedOut}</>;
 
   if (state.loading || !state.isAuthenticated) {
     return (

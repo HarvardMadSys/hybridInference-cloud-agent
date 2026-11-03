@@ -67,6 +67,10 @@ const IDENTITY: AccountIdentity = {
   label: 'me@example.edu',
 };
 const assign = vi.fn();
+const steps = () => screen.getAllByRole('listitem').map((item) => item.textContent);
+const currentStep = () =>
+  screen.getAllByRole('listitem').find((item) => item.getAttribute('aria-current') === 'step')
+    ?.textContent;
 function fill(label: string | RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
@@ -118,6 +122,30 @@ describe('sign-up', () => {
     fill('Verification code', '123456');
     fireEvent.submit(screen.getByRole('button', { name: 'Create account' }).closest('form')!);
     expect(await screen.findByText(/waits for an administrator/)).toBeInTheDocument();
+    // The code proved the number: no email to check, and the account is made.
+    expect(steps()).toEqual(['Account', 'Get access']);
+    expect(currentStep()).toBe('Get access');
+  });
+  it('shows the email check among the steps only for an email sign-up that needs one', async () => {
+    vi.mocked(api.signupAccount).mockResolvedValue({ ok: true });
+    render(<SignupPage />);
+    fireEvent.click(await screen.findByRole('checkbox'));
+    expect(steps()).toEqual(['Account', 'Verify email', 'Get access']);
+    expect(currentStep()).toBe('Account');
+    fireEvent.click(screen.getByRole('tab', { name: 'Phone number' }));
+    expect(steps()).toEqual(['Account', 'Get access']);
+    fireEvent.click(screen.getByRole('tab', { name: 'Email' }));
+    fill('Email', 'ada@example.edu');
+    fill('Password', 'Goodpass123');
+    fill('Confirm password', 'Goodpass123');
+    fireEvent.submit(screen.getByRole('button', { name: 'Create account' }).closest('form')!);
+    await waitFor(() => expect(currentStep()).toBe('Verify email'));
+  });
+  it('leaves the email check out when only phone sign-up is open', async () => {
+    vi.mocked(api.getAuthOptions).mockResolvedValue({ ...OPTIONS, signup_enabled: false });
+    render(<SignupPage />);
+    await screen.findByRole('checkbox');
+    expect(steps()).toEqual(['Account', 'Get access']);
   });
   it('says sign-up is closed when neither method is open', async () => {
     vi.mocked(api.getAuthOptions).mockResolvedValue({
