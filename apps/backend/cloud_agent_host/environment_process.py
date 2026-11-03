@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.sandbox import SandboxError, SandboxProcess
 
 if TYPE_CHECKING:
+    import subprocess
     from collections.abc import Iterator
 
     from cloud_agent_host.chat_sandbox import RetainedChatBackend
@@ -18,27 +21,81 @@ ACTION_UIDS = tuple(range(31000, 31064))
 
 # The attached helper outlives the foreground script while any service still
 # owns its pipe. A completion receipt lets the caller hand off without waiting
-# for service EOF. No output or variable values are written into the workspace.
+# for service EOF. When the script ends, all it wrote is either forwarded or
+# still in its pipe, so the helper forwards that much before it writes the
+# receipt, and records the count beside the exit status: what the stream holds
+# past it is a service's. The reader counts what it takes under the lock that
+# measuring the pipe holds, and waits for input outside it. No output or
+# variable values are written into the workspace.
 _HELPER = r"""
-import os, subprocess, threading, sys
+import array, fcntl, os, select, subprocess, sys, termios, threading
 path=os.environ.pop("AGENT_SCRIPT_STATUS")
 script=os.environ.pop("AGENT_ENVIRONMENT_SCRIPT")
 os.umask(0o002)
 p=subprocess.Popen(["/bin/sh","-c",script],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+fd=p.stdout.fileno()
+moved=threading.Condition()
+taken=sent=0
+ended=False
 def drain():
- while True:
-  chunk=os.read(p.stdout.fileno(),4096)
-  if not chunk: break
-  try: os.write(1,chunk)
-  except BrokenPipeError: pass
+ global taken,sent,ended
+ try:
+  while True:
+   select.select([fd],[],[])
+   with moved:
+    chunk=os.read(fd,4096)
+    taken+=len(chunk)
+   if not chunk: break
+   rest=chunk
+   while rest:
+    try: rest=rest[os.write(1,rest):]
+    except BrokenPipeError: rest=b""
+   with moved:
+    sent+=len(chunk)
+    moved.notify_all()
+ finally:
+  with moved:
+   ended=True
+   moved.notify_all()
 reader=threading.Thread(target=drain)
 reader.start()
 code=p.wait()
-with open(path+".tmp","w") as f: f.write(str(code))
+waiting=array.array("i",[0])
+with moved:
+ fcntl.ioctl(fd,termios.FIONREAD,waiting)
+ count=taken+waiting[0]
+ moved.wait_for(lambda: sent>=count or ended)
+with open(path+".tmp","w") as f: f.write(f"{code} {count}")
 os.replace(path+".tmp",path)
 reader.join()
 sys.exit(code)
 """
+
+# Waits in the guest for that receipt, checking every 50 ms up to its limit,
+# so the host learns of the end within a check and pays one exec per wait. A
+# wait that runs out exits 3 for the host to start the next; a limit of zero
+# reads once. It reads at most 64 bytes and follows no link, so a receipt the
+# script's own processes replaced cannot make the host capture more.
+_WAIT = """import os,sys,time
+path=sys.argv[1]
+end=time.monotonic()+float(sys.argv[2])
+while True:
+ try: fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ except FileNotFoundError:
+  if time.monotonic()>=end: sys.exit(3)
+  time.sleep(.05)
+  continue
+ os.write(1,os.read(fd,64))
+ sys.exit(0)
+"""
+#: How long one guest wait lasts, and its exit status when no receipt came.
+_WAIT_S = 30
+_NOT_YET = 3
+#: The least time between the starts of two guest waits, so waits that keep
+#: ending at once, failing or not, cost at most an exec a second.
+_RETRY_S = 1.0
+#: A receipt: the exit status, then the count of bytes the script wrote.
+_RECEIPT = re.compile(rb"(-?[0-9]{1,10}) ([0-9]{1,19})")
 
 
 # Reaps every process of the identity but its own, detached ones included.
@@ -258,7 +315,10 @@ class EnvironmentProcess(SandboxProcess):
             user_gid=backend.manager.backend.gid,
         )
         self._code: int | None = None
-        self._next_poll = 0.0
+        #: How many bytes of the stream the script wrote, from its receipt.
+        self.script_bytes: int | None = None
+        self._guest_wait: Future[subprocess.CompletedProcess[bytes]] | None = None
+        self._next_wait = 0.0
         self._lock = threading.Lock()
 
     def lines(self) -> Iterator[str]:
@@ -269,30 +329,72 @@ class EnvironmentProcess(SandboxProcess):
         """Yield bounded chunks while background services own their pipe."""
         yield from self.process.chunks()
 
-    def poll(self) -> int | None:
-        """Read the foreground completion receipt without waiting for service EOF."""
-        return self._poll(force=False)
+    def byte_chunks(self) -> Iterator[bytes]:
+        """Yield the attached output as read, so it can be split at ``script_bytes``."""
+        yield from self.process.byte_chunks()
 
-    def _poll(self, *, force: bool) -> int | None:
+    def poll(self) -> int | None:
+        """Read the foreground completion receipt without waiting for service EOF.
+
+        The receipt is waited for in the guest, by one exec at a time on a
+        thread of its own, so a call never blocks: it collects a wait that
+        ended and starts the next.
+        """
         with self._lock:
             if self._code is not None:
                 return self._code
-            if not force and time.monotonic() < self._next_poll:
-                return None
-            self._next_poll = time.monotonic() + 1
-            result = self.backend.manager.exec_capture(
-                self.backend.spec,
-                ["cat", self.status_path],
-                user_uid=self.uid,
-                user_gid=self.backend.manager.backend.gid,
-                workdir="/",
-                timeout_s=10,
-            )
+            wait = self._guest_wait
+            if wait is not None and wait.done():
+                self._guest_wait = None
+                # An exec that failed raises here, as it does from wait()'s read.
+                result = wait.result()
+                if result.returncode == 0:
+                    self._take(result.stdout)
+                    return self._code
+            if self._guest_wait is None and time.monotonic() >= self._next_wait:
+                self._next_wait = time.monotonic() + _RETRY_S
+                self._guest_wait = self._start_wait()
+            return None
+
+    def _take(self, stdout: bytes) -> None:
+        """Record what a receipt says: the exit status and the script's byte count."""
+        found = _RECEIPT.fullmatch(stdout)
+        if found is None:
+            raise SandboxError("Invalid environment completion receipt")
+        self._code, self.script_bytes = int(found[1]), int(found[2])
+
+    def _start_wait(self) -> Future[subprocess.CompletedProcess[bytes]]:
+        """Wait for the receipt in the guest, on a thread, for up to ``_WAIT_S``."""
+        wait: Future[subprocess.CompletedProcess[bytes]] = Future()
+
+        def run() -> None:
+            try:
+                wait.set_result(self._read(_WAIT_S))
+            except Exception as exc:
+                wait.set_exception(exc)
+
+        threading.Thread(target=run, daemon=True, name="environment-receipt-wait").start()
+        return wait
+
+    def _read(self, limit: float) -> subprocess.CompletedProcess[bytes]:
+        """Run the guest wait as this phase's identity; a zero limit reads once."""
+        return self.backend.manager.exec_capture(
+            self.backend.spec,
+            ["python3", "-I", "-c", _WAIT, self.status_path, str(limit)],
+            user_uid=self.uid,
+            user_gid=self.backend.manager.backend.gid,
+            workdir="/",
+            timeout_s=limit + 10,
+        )
+
+    def _read_now(self) -> int | None:
+        """Read the receipt once, or take the helper's own failure if it ended without one."""
+        with self._lock:
+            if self._code is not None:
+                return self._code
+            result = self._read(0)
             if result.returncode == 0:
-                try:
-                    self._code = int(result.stdout)
-                except ValueError:
-                    raise SandboxError("Invalid environment completion receipt") from None
+                self._take(result.stdout)
             else:
                 helper_code = self.process.poll()
                 if helper_code == 0:
@@ -302,17 +404,20 @@ class EnvironmentProcess(SandboxProcess):
 
     def wait(self) -> int:
         """Return the foreground result independently of background services."""
-        code = self._poll(force=True)
+        code = self._read_now()
         if code is not None:
             return code
         self.process.wait()
-        code = self._poll(force=True)
+        code = self._read_now()
         if code is None:
             raise SandboxError("Environment completion receipt is missing")
         return code
 
     def kill(self) -> None:
-        """Reap only this phase identity, including detached children."""
+        """Reap only this phase identity, including detached children.
+
+        A guest wait still running ends with them: it runs as the same identity.
+        """
         kill_identity(self.backend, self.uid)
 
     def stderr_text(self) -> str:
