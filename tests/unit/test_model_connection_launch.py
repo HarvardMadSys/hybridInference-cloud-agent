@@ -196,6 +196,16 @@ def test_a_rotated_key_or_a_source_switch_never_borrows_the_live_process():
     )
 
 
+def test_a_refused_borrow_names_the_fields_that_differ_and_never_their_values():
+    launch = _launch(credential=_KEY)
+    transport = ResidentTransport(launch=launch, session=SimpleNamespace())
+
+    assert transport.incompatible_fields(replace(launch, credential=None)) == ()
+    assert transport.incompatible_fields(
+        replace(launch, credential=None, model="other-model", inference_source="other@1")
+    ) == ("model", "inference_source")
+
+
 def test_a_resident_cannot_launch_without_its_connection():
     for missing in ("inference_source", "inference_base_url", "inference_protocol"):
         with pytest.raises(ValueError, match="owner's model connection"):

@@ -352,35 +352,50 @@ class ResidentTransport(Generic[_RuntimeT_co]):
         does a connection whose key, endpoint or protocols changed: its source
         names the credential revision, so the old key never serves a new turn.
         """
-        held_mcp = self.launch.mcp_credential
-        same_mcp = self.launch.mcp_server_ids == launch.mcp_server_ids and (
+        return not self.incompatible_fields(launch)
+
+    def incompatible_fields(self, launch: ResidentLaunch) -> tuple[str, ...]:
+        """Name the process-fixed launch fields that keep ``launch`` from borrowing this process.
+
+        The rule :meth:`compatible_with` applies, field by field. Only names
+        are returned, never values: several of these fields are credentials,
+        and the names are what a startup measurement records to explain why a
+        live process could not take another turn.
+        """
+        held = self.launch
+        held_mcp = held.mcp_credential
+        same_mcp = held.mcp_server_ids == launch.mcp_server_ids and (
             not launch.mcp_server_ids
             or (
-                self.launch.mcp_base_url == launch.mcp_base_url
+                held.mcp_base_url == launch.mcp_base_url
                 and (
                     held_mcp == launch.mcp_credential
                     or (not launch.mcp_credential and is_residency_mcp_credential(held_mcp))
                 )
             )
         )
-        return (
-            self.launch.thread_id == launch.thread_id
-            and self.launch.runtime_id == launch.runtime_id
-            and self.launch.runtime_version == launch.runtime_version
-            and self.launch.model == launch.model
-            and self.launch.reasoning_effort == launch.reasoning_effort
-            and self.launch.plugins == launch.plugins
-            and self.launch.inference_source == launch.inference_source
-            and self.launch.inference_base_url == launch.inference_base_url
-            and self.launch.inference_protocol == launch.inference_protocol
-            and self.launch.inference_client_protocol == launch.inference_client_protocol
-            and self.launch.inference_local_token == launch.inference_local_token
-            and same_mcp
-            and self.launch.github_token == launch.github_token
-            and self.launch.github_repo == launch.github_repo
-            and self.launch.environment == launch.environment
-            and self.launch.slot_id == launch.slot_id
+        checks = (
+            ("thread_id", held.thread_id == launch.thread_id),
+            ("runtime_id", held.runtime_id == launch.runtime_id),
+            ("runtime_version", held.runtime_version == launch.runtime_version),
+            ("model", held.model == launch.model),
+            ("reasoning_effort", held.reasoning_effort == launch.reasoning_effort),
+            ("plugins", held.plugins == launch.plugins),
+            ("inference_source", held.inference_source == launch.inference_source),
+            ("inference_base_url", held.inference_base_url == launch.inference_base_url),
+            ("inference_protocol", held.inference_protocol == launch.inference_protocol),
+            (
+                "inference_client_protocol",
+                held.inference_client_protocol == launch.inference_client_protocol,
+            ),
+            ("inference_local_token", held.inference_local_token == launch.inference_local_token),
+            ("mcp", same_mcp),
+            ("github_token", held.github_token == launch.github_token),
+            ("github_repo", held.github_repo == launch.github_repo),
+            ("environment", held.environment == launch.environment),
+            ("slot_id", held.slot_id == launch.slot_id),
         )
+        return tuple(name for name, same in checks if not same)
 
     def start_turn(
         self,

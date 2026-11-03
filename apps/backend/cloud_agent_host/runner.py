@@ -1954,6 +1954,32 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
         stream.close()
 
 
+#: The field list a sandbox manager names when a credential-less probe cannot
+#: borrow a live process. Only this shape is copied into a measurement: the
+#: rest of an error message is free text, and a measurement is not redacted.
+_PROBE_REFUSAL_FIELDS = re.compile(r"\(differs: ([a-z_]+(?:,[a-z_]+)*)\)")
+_PROBE_LEASE_STATES = frozenset({"starting", "restarting", "stopped", "live", "lost"})
+
+
+def _probe_refusal_fields(message: str) -> str:
+    """The process-fixed fields a refused probe named, or why there are none.
+
+    ``other`` is a refusal that is not a field mismatch -- the process died,
+    the lease was lost, the sandbox manager restarted -- whose message stays
+    out of the record.
+    """
+    found = _PROBE_REFUSAL_FIELDS.search(message or "")
+    return found.group(1) if found else "other"
+
+
+def _probe_lease_state(value: Any) -> str:
+    """A lease's resident state from a known vocabulary, for a measurement fact."""
+    state = str(value or "")
+    if not state:
+        return "absent"
+    return state if state in _PROBE_LEASE_STATES else "other"
+
+
 def _classify_startup_path(container_action: str, resident_action: str) -> str:
     """Name the startup path from the actions the supervisor actually took.
 
@@ -2687,17 +2713,38 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                 resident_call = operation_profiling.expect_fragment(
                     measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
                 )
+                # Timed here, not by the sandbox manager: a refused probe
+                # answers with an error, which carries no profiling fragment.
+                probe_started = measurement.offset_us() if measurement is not None else 0
                 resident_descriptor = supervisor.ensure_shared_resident(
                     job.thread_id,
                     token=lease_token,
                     launch=launch,
                     profiling=operation_profiling.measurement_context(measurement, resident_call),
                 )
-            except SessionSupervisorError:
+                operation_profiling.set_attributes(measurement, resident_probe="accepted")
+            except SessionSupervisorError as exc:
                 # A process-fixed model/MCP setting changed, the process died,
                 # or this sandbox manager restarted. Rotate only this member's grant and
-                # resume its exact native session below.
+                # resume its exact native session below. The refusal's reason
+                # is kept on the startup measurement: a probe that keeps
+                # failing turns every follow-up into a process restart.
                 resident_descriptor = None
+                operation_profiling.set_attributes(
+                    measurement,
+                    resident_probe="refused",
+                    resident_probe_us=(
+                        measurement.offset_us() - probe_started if measurement is not None else 0
+                    ),
+                    resident_probe_status=exc.status_code,
+                    resident_probe_differs=_probe_refusal_fields(exc.message),
+                )
+        else:
+            operation_profiling.set_attributes(
+                measurement,
+                resident_probe="skipped",
+                resident_probe_lease_state=_probe_lease_state(lease.get("resident_state")),
+            )
         if resident_descriptor is None:
             residency = control.establish_shared_residency(
                 sandbox_id=spec.sandbox_id,

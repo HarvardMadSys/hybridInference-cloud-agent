@@ -42,6 +42,7 @@ from cloud_agent_host.guest_observer import (
 )
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
+    ResidentTransport,
     ResidentTransportFactory,
 )
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError
@@ -371,6 +372,11 @@ class _Transport:
                 residency_generation=launch.residency_generation,
             )
             == launch
+        )
+
+    def incompatible_fields(self, launch: ResidentLaunch) -> tuple[str, ...]:
+        return ResidentTransport(launch=self.launch, session=SimpleNamespace()).incompatible_fields(
+            launch
         )
 
     def close(self) -> None:
@@ -5300,3 +5306,48 @@ def test_initial_archive_waits_out_a_concurrent_start_and_workspace_request() ->
     assert "error" not in outcome
     assert captured.is_set()
     assert supervisor._members["athr_source"].snapshotting is False
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"model": "glm-5.2"}, "(differs: model)"),
+        ({"residency_generation": 9}, "(differs: residency_generation)"),
+    ],
+)
+def test_a_refused_probe_names_what_differs_without_its_value(change, reason):
+    """A credential-less probe that cannot borrow the live process says why.
+
+    The startup measurement records this reason, so it carries field names
+    only: the model, keys and tokens a launch holds never reach the message.
+    """
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=_TransportFactory())
+    first = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", first.token, launch)
+    supervisor.settle("athr_source", first.token, job_id="ajob_source", context_status="live")
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+
+    with pytest.raises(SandboxError, match="requires a renewable credential") as refused:
+        supervisor.ensure_resident(
+            "athr_source", lease.token, replace(launch, credential=None, **change)
+        )
+
+    message = str(refused.value)
+    assert message.endswith(reason)
+    assert "glm-5.2" not in message
+    assert "provider-key" not in message
