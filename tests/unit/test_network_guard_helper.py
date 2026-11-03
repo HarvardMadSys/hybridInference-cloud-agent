@@ -15,6 +15,7 @@ import gc
 import json
 import logging
 import os
+import resource
 import select
 import signal
 import subprocess
@@ -50,7 +51,7 @@ from cloud_agent_host.network_guard_helper import LongLivedHelper, serve_program
 from cloud_agent_shared.egress import render_ruleset
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Collection, Iterator
 
 # ── the program, under a real interpreter ───────────────────────────────
 
@@ -117,6 +118,8 @@ class _ProgramHelper:
         self._program = serve_program(_NFT_BATCH, idle_s=idle_s, request_s=request_s)
         self.started: list[subprocess.Popen[bytes]] = []
         self.removed: list[str] = []
+        #: For each removal, whether the helper's client was still running.
+        self.alive_at_removal: list[bool] = []
         self._named: dict[str, subprocess.Popen[bytes]] = {}
         self.helper = LongLivedHelper(self._spawn, self._remove, name_prefix="test")
 
@@ -139,8 +142,9 @@ class _ProgramHelper:
 
     def _remove(self, name: str, timeout: float) -> bool:
         # What ``docker rm -f`` does to the container: everything in it ends.
-        self.removed.append(name)
         process = self._named[name]
+        self.removed.append(name)
+        self.alive_at_removal.append(process.poll() is None)
         with contextlib.suppress(OSError):
             process.kill()
         process.wait(timeout)
@@ -186,6 +190,7 @@ def test_a_failed_step_is_handed_back_after_its_helper_is_removed(tmp_path) -> N
     assert lab.run(refused) is None
 
     assert len(lab.removed) == 1
+    assert lab.alive_at_removal == [False], "removed before its client was killed and reaped"
     assert lab.started[0].returncode is not None, "the helper was left running"
     assert lab.run() is None, "not cooling down"
     assert len(lab.started) == 1
@@ -203,6 +208,7 @@ def test_an_idle_helper_ends_by_itself_and_the_next_step_starts_another(tmp_path
     assert lab.removed == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="reads the client's state from /proc")
 def test_the_next_step_reaps_a_helper_that_idled_out_and_closes_its_pipes(tmp_path) -> None:
     lab = _ProgramHelper(tmp_path, idle_s=1)
     try:
@@ -258,16 +264,31 @@ def test_an_interrupted_step_removes_its_helper(tmp_path) -> None:
 
 
 def test_a_helper_still_works_on_descriptors_past_1024(tmp_path) -> None:
-    """A pool of open files puts its pipes past what ``select.select`` can watch."""
-    fillers = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
-    lab = _ProgramHelper(tmp_path)
+    """A pool of open files puts its pipes past what ``select.select`` can watch.
+
+    Under a soft limit of 1024 open files, the usual default, the pool raises
+    that limit for itself as far as the hard limit lets it.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    room = 4096 if hard == resource.RLIM_INFINITY else min(hard, 4096)
+    if room < 1500:
+        pytest.skip(f"a hard limit of {hard} open files leaves no room past 1024")
+    if soft != resource.RLIM_INFINITY and soft < room:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (room, hard))
+    fillers: list[int] = []
     try:
-        answers = [lab.run() for _ in range(3)]
-        assert lab.started[0].stdout is not None and lab.started[0].stdout.fileno() >= 1024
+        while len(fillers) < 1100:
+            fillers.append(os.open(os.devnull, os.O_RDONLY))
+        lab = _ProgramHelper(tmp_path)
+        try:
+            answers = [lab.run() for _ in range(3)]
+            assert lab.started[0].stdout is not None and lab.started[0].stdout.fileno() >= 1024
+        finally:
+            lab.helper.close()
     finally:
-        lab.helper.close()
         for fd in fillers:
             os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
     assert all(answer is not None for answer in answers), answers
     assert len(lab.started) == 1 and lab.removed == []
 
@@ -320,6 +341,7 @@ print(json.dumps({"exit": guard.returncode, "answer": guard.stdout.strip(), "orp
 """
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="a child subreaper and /proc are Linux's")
 def test_a_guard_process_that_exits_leaves_no_client_for_its_parent_to_reap() -> None:
     harness = subprocess.run(
         [sys.executable, "-c", _SUBREAPER, _GUARD_PROCESS],
@@ -378,6 +400,101 @@ def test_the_helper_ends_when_the_process_that_started_it_is_killed() -> None:
                 os.kill(helper, signal.SIGKILL)
         starter.stdout.close()
     assert ended, "the helper outlived the process that started it"
+
+
+# ── removing a helper by name ───────────────────────────────────────────
+
+#: The real one: ``conftest`` puts a stand-in in its place for every test.
+_REMOVE_HELPER = network_guard_helper.remove_helper
+
+#: Stands in for ``docker``: each call records its arguments and does what the
+#: next word of its plan says, the last one again once the plan runs out.
+_FAKE_DOCKER = """\
+import pathlib, sys, time
+here = pathlib.Path(sys.argv[0]).parent
+plan = (here / "plan").read_text().split()
+with open(here / "calls", "a+") as calls:
+    calls.seek(0)
+    done = len(calls.readlines())
+    calls.write(" ".join(sys.argv[1:]) + "\\n")
+step, name = plan[min(done, len(plan) - 1)], sys.argv[-1]
+missing = "Error response from daemon: No such container: " + name + "\\n"
+if step == "removed":
+    print(name)
+elif step == "gone":
+    sys.stderr.write(missing)
+elif step == "missing":
+    sys.stderr.write(missing)
+    sys.exit(1)
+elif step == "busy":
+    sys.stderr.write("Error response from daemon: removal of container " + name)
+    sys.stderr.write(" is already in progress\\n")
+    sys.exit(1)
+elif step == "garbled":
+    sys.stderr.buffer.write(b"\\xff\\xfe\\n")
+    sys.exit(1)
+elif step == "down":
+    sys.stderr.write("Cannot connect to the Docker daemon at unix:///var/run/docker.sock\\n")
+    sys.exit(1)
+elif step == "hang":
+    time.sleep(60)
+"""
+_NAME = "t-helper-0123456789ab"
+
+
+@pytest.fixture
+def docker(tmp_path: Path) -> Callable[..., tuple[str, Path]]:
+    """A stand-in ``docker`` following the plan it is given: it, and where it records its calls."""
+
+    def plan(*steps: str) -> tuple[str, Path]:
+        (tmp_path / "docker.py").write_text(_FAKE_DOCKER)
+        binary = tmp_path / "docker"
+        binary.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{tmp_path / "docker.py"}" "$@"\n')
+        binary.chmod(0o755)
+        (tmp_path / "plan").write_text(" ".join(steps))
+        return str(binary), tmp_path / "calls"
+
+    return plan
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        pytest.param(["removed"], id="removed"),
+        pytest.param(["gone"], id="no-such-container-and-success"),
+        pytest.param(["missing"], id="no-such-container-from-an-older-client"),
+        pytest.param(["busy", "missing"], id="another-removal-under-way"),
+        pytest.param(["garbled", "removed"], id="output-that-is-not-text"),
+    ],
+)
+def test_removing_a_helper_by_name_shows_it_gone(docker, plan) -> None:
+    binary, calls = docker(*plan)
+
+    assert _REMOVE_HELPER(binary, _NAME, 10.0) is True
+
+    assert calls.read_text().splitlines() == [f"rm -f {_NAME}"] * len(plan)
+
+
+def test_a_removal_the_daemon_refuses_is_tried_again_until_its_time_runs_out(docker) -> None:
+    binary, calls = docker("down")
+
+    began = time.monotonic()
+    assert _REMOVE_HELPER(binary, _NAME, 1.0) is False
+    assert time.monotonic() - began < 2.0
+    assert len(calls.read_text().splitlines()) > 1, "tried only once"
+
+
+def test_a_removal_whose_client_hangs_is_not_confirmed_once_its_time_is_up(docker) -> None:
+    binary, calls = docker("hang")
+
+    began = time.monotonic()
+    assert _REMOVE_HELPER(binary, _NAME, 1.0) is False
+    assert time.monotonic() - began < 2.5
+    assert calls.read_text().splitlines() == [f"rm -f {_NAME}"]
+
+
+def test_a_removal_with_no_docker_client_to_run_is_not_confirmed(tmp_path) -> None:
+    assert _REMOVE_HELPER(str(tmp_path / "docker"), _NAME, 1.0) is False
 
 
 # ── the guard's steps on its long-lived helper ──────────────────────────
@@ -445,21 +562,38 @@ class _StandIn:
 
     Each request is the step a disposable helper would run, run through the
     guard's runner. What goes back is ``answer``'s to decide: ``None`` ends it
-    without an answer. Removing it, as ``docker rm -f`` does, ends everything
-    in it at once; killing its client, as the guard may, leaves it running.
+    without an answer. Removing the container, as ``docker rm -f`` does, ends
+    everything in it at once. Killing the client ends the client alone: a
+    container already started goes on, and one the daemon is still creating
+    never starts.
     """
 
-    def __init__(self, argv: list[str], run: Any, answer: Any, errors: Any) -> None:
+    def __init__(
+        self,
+        argv: list[str],
+        run: Any,
+        answer: Any,
+        errors: Any,
+        events: list[tuple[str, str]],
+        *,
+        late: bool = False,
+    ) -> None:
         self.argv = argv
         self.name = argv[3]
         self.requests: list[dict[str, Any]] = []
         self.returncode: int | None = None
         self.exit_status = 0
-        self.removed = False
+        #: "creating" while the daemon creates it, then "running", "created"
+        #: (never to start) or "removed".
+        self.container = "creating" if late else "running"
         self.killed = False
+        #: Whether SIGKILL ends the client, as it does unless the client is
+        #: stuck in the kernel.
+        self.reapable = True
         #: How long it takes to exit once its stdin closes.
         self.linger_s = 0.0
         self.gone = threading.Event()
+        self._events = events
         self._run, self._answer = run, answer
         os.write(errors, b"stand-in client: attached\n")
         requests, stdin = os.pipe()
@@ -468,9 +602,13 @@ class _StandIn:
         self._thread = threading.Thread(target=self._serve, args=(requests,), daemon=True)
         self._thread.start()
 
+    @property
+    def removed(self) -> bool:
+        return self.container == "removed"
+
     def step(self, frame: dict[str, Any]) -> subprocess.CompletedProcess[str]:
         """Run a request as a disposable helper runs it; a removed container runs nothing."""
-        if self.removed:
+        if self.container != "running":
             return subprocess.CompletedProcess(self.argv, -9, "", "")
         command = [*self.argv[:2], *self.argv[4:-1], _NFT_BATCH, _SERVED]
         return self._run(command, frame["stdin"])
@@ -485,13 +623,26 @@ class _StandIn:
         """Write to the guard, asked or not."""
         os.write(self._answers, data)
 
-    def remove(self) -> None:
-        self.removed = True
+    def rm_f(self) -> None:
+        """What ``docker rm -f`` does: everything in the container ends, and it is removed.
+
+        A container the daemon is still creating is not found, and the create
+        completes just after: a live client then starts it, and a dead one
+        leaves it created, never to start.
+        """
+        if self.container == "creating":
+            self.container = "created" if self.killed else "running"
+            return
+        self.container = "removed"
         self.gone.set()
 
     def _serve(self, requests_fd: int) -> None:
         try:
             with open(requests_fd, "rb") as requests, open(self._answers, "wb", 0) as answers:
+                while self.container == "creating" and not self.killed:
+                    time.sleep(0.005)
+                if self.container != "running":
+                    return  # its client died first, so nothing starts it
                 for line in requests:
                     frame = json.loads(line)
                     self.requests.append(json.loads(frame["stdin"]))
@@ -507,16 +658,23 @@ class _StandIn:
             self.returncode = -9 if self.removed else self.exit_status
 
     def poll(self) -> int | None:
+        if self.killed:
+            return -9
         return None if self._thread.is_alive() else self.returncode
 
     def wait(self, timeout: float | None = None) -> int | None:
-        self._thread.join(timeout)
-        if self._thread.is_alive():
+        if not self.killed:
+            self._thread.join(timeout)
+        status = self.poll()
+        if status is None:
             raise subprocess.TimeoutExpired(self.argv, timeout or 0)
-        return self.returncode
+        return status
 
     def kill(self) -> None:
-        self.killed = True
+        """SIGKILL for its client, which ends unless it has ended already or cannot."""
+        self._events.append(("killed", self.name))
+        if self.reapable and self._thread.is_alive():
+            self.killed = True
 
 
 def _line(request_id: str, returncode: Any, stdout: Any, stderr: Any = "") -> bytes:
@@ -561,30 +719,46 @@ def _for_relays(behaviour: Callable[[_StandIn, dict[str, Any]], Any]) -> Any:
 def long_lived() -> Iterator[Callable[..., tuple[FakeNft, _Steps, HostNetworkGuard, list[Any]]]]:
     """Guards whose helpers both run on the model; their first helpers answer as told.
 
-    ``removable=False`` stands for a daemon that cannot show a helper removed.
-    Every guard made is closed afterwards.
+    ``removable=False`` stands for a daemon that cannot show a helper removed;
+    a callable decides each removal, given its time. ``late`` lists the
+    helpers, by the order they start in, whose containers the daemon creates
+    only after the guard first tries to remove them. Every guard made is
+    closed afterwards.
     """
     guards: list[HostNetworkGuard] = []
 
     def make(
-        *answers: Any, removable: bool = True
+        *answers: Any,
+        removable: bool | Callable[[float], bool] = True,
+        late: Collection[int] = (),
     ) -> tuple[FakeNft, _Steps, HostNetworkGuard, list[_StandIn]]:
         nft = FakeNft()
         steps = _Steps(nft)
         started: list[_StandIn] = []
 
         def spawn(argv: list[str], errors: Any) -> _StandIn:
-            answer = answers[len(started)] if len(started) < len(answers) else _answers
-            started.append(_StandIn(argv, lambda *step: guard._run(*step), answer, errors))
+            index = len(started)
+            answer = answers[index] if index < len(answers) else _answers
+            started.append(
+                _StandIn(
+                    argv,
+                    lambda *step: guard._run(*step),
+                    answer,
+                    errors,
+                    steps.events,
+                    late=index in late,
+                )
+            )
             return started[-1]
 
-        def remove(name: str, _timeout: float) -> bool:
+        def remove(name: str, timeout: float) -> bool:
             steps.events.append(("removed", name))
-            if removable:
+            works = removable(timeout) if callable(removable) else removable
+            if works:
                 for stand_in in started:
                     if stand_in.name == name:
-                        stand_in.remove()
-            return removable
+                        stand_in.rm_f()
+            return works
 
         guard = HostNetworkGuard(
             _network(), helper_image=_IMAGE, run=steps, spawn=spawn, remove=remove
@@ -695,6 +869,32 @@ def test_a_step_on_the_long_lived_helper_shares_a_disposable_helpers_minute(long
     assert network_guard._HELPER_TIMEOUT_S - 1 < left <= network_guard._HELPER_TIMEOUT_S == 60
 
 
+def test_a_steps_minute_starts_once_its_image_is_known(monkeypatch, long_lived) -> None:
+    """Looking the image up is not the helper's time, as it never was a disposable helper's."""
+    _nft, steps, guard, _started = long_lived()
+    guard._helper_image = None
+    assert guard._long_lived is not None
+    serve = guard._long_lived.run
+    lefts: list[float] = []
+
+    def run(*args: Any, deadline: float, **kwargs: Any) -> Any:
+        lefts.append(deadline - time.monotonic())
+        return serve(*args, deadline=deadline, **kwargs)
+
+    def slow_lookup(argv: list[str], stdin: str | None, timeout: float | None = None) -> Any:
+        if argv[1:3] == ["container", "inspect"]:
+            time.sleep(0.5)
+        return steps(argv, stdin, timeout)
+
+    monkeypatch.setattr(guard._long_lived, "run", run)
+    monkeypatch.setattr(guard, "_run", slow_lookup)
+
+    guard.ensure()
+
+    assert guard._helper_image == _IMAGE
+    assert lefts[0] > network_guard._HELPER_TIMEOUT_S - 0.25, "the lookup came out of the minute"
+
+
 @pytest.mark.parametrize("answer", [_silent, _exits, _stuck], ids=["silent", "exits", "stuck"])
 def test_a_helper_that_does_not_answer_is_removed_before_a_disposable_one_reruns_its_step(
     quick, long_lived, answer
@@ -706,7 +906,8 @@ def test_a_helper_that_does_not_answer_is_removed_before_a_disposable_one_reruns
     assert ("inet", guard.network.table) in nft.tables
     assert steps.kinds() == ["disposable"]
     assert started[0].requests == [steps.ran[0][1]], "not the same step run again"
-    assert steps.events == [("removed", started[0].name), ("disposable", "")]
+    name = started[0].name
+    assert steps.events == [("killed", name), ("removed", name), ("disposable", "")]
     assert started[0].removed and started[0].wait(5) is not None
 
 
@@ -746,7 +947,8 @@ def test_any_answer_but_a_readable_success_reruns_the_step_after_removing_the_he
 
     assert steps.kinds() == ["long-lived", "long-lived", "disposable"]
     assert steps.ran[-2][1] == steps.ran[-1][1], "not the same step run again"
-    assert steps.events == [("removed", started[0].name), ("disposable", "")]
+    name = started[0].name
+    assert steps.events == [("killed", name), ("removed", name), ("disposable", "")]
     assert guard.relay_endpoints(_X) == {("10.240.0.3", 8080)}
 
 
@@ -778,16 +980,19 @@ def test_an_answer_line_past_its_limit_is_refused(monkeypatch, long_lived, caplo
         guard.ensure()
 
     assert steps.kinds() == ["disposable"]
-    assert steps.events[0] == ("removed", started[0].name)
+    assert steps.events[:2] == [("killed", started[0].name), ("removed", started[0].name)]
     (record,) = [r for r in caplog.records if r.getMessage() == "network_guard_helper_discarded"]
     assert record.detail == "answered more than 100 bytes"
 
 
-def test_a_step_that_starts_the_helper_allows_for_the_container_to_start(quick, long_lived) -> None:
+def test_a_step_that_starts_the_helper_allows_for_the_container_to_start(
+    monkeypatch, quick, long_lived
+) -> None:
     """A first answer may come later than a running helper's, by the start allowance."""
+    monkeypatch.setattr(network_guard_helper, "START_ALLOWANCE_S", 1.6)
 
     def slow_start(stand_in: _StandIn, frame: dict[str, Any]) -> bytes:
-        time.sleep(0.45)  # past the request time and margin, within the allowance
+        time.sleep(0.8)  # twice the request time and margin, half what the allowance adds
         return _answers(stand_in, frame)
 
     _nft, steps, guard, _started = long_lived(slow_start)
@@ -863,7 +1068,8 @@ def test_a_rerun_step_is_never_overtaken_by_the_helper_that_stalled_on_it(
     started[0].wait(5)
 
     assert guard.relay_endpoints(_X) == set()
-    assert steps.events[:2] == [("removed", started[0].name), ("disposable", "")]
+    name = started[0].name
+    assert steps.events[:3] == [("killed", name), ("removed", name), ("disposable", "")]
 
 
 def test_a_helper_that_cannot_be_shown_removed_fails_the_step_and_nothing_reruns_it(
@@ -875,7 +1081,8 @@ def test_a_helper_that_cannot_be_shown_removed_fails_the_step_and_nothing_reruns
     with pytest.raises(NetworkGuardError, match="could not be shown removed"):
         guard.sync_relays(_X, {("10.240.0.3", 8080)})
 
-    assert steps.events == [("removed", started[0].name)], "a step ran beside a live helper"
+    name = started[0].name
+    assert steps.events == [("killed", name), ("removed", name)], "a step ran beside a live helper"
 
 
 def test_a_hung_step_takes_no_longer_than_a_disposable_helpers_minute(
@@ -897,6 +1104,211 @@ def test_a_hung_step_takes_no_longer_than_a_disposable_helpers_minute(
     assert 0.35 < rerun_after < 1.0, "the running helper did not give up after its request time"
     assert given is not None and given < 2.0 - 0.35
     assert took < 2.3, "the step outlasted a disposable helper's minute"
+
+
+def test_a_container_created_only_after_the_removal_check_never_takes_the_step(
+    monkeypatch, quick, long_lived
+) -> None:
+    """``docker rm -f`` finds no container yet and succeeds; the create completes just after.
+
+    The guard killed and reaped the client first, so nothing starts that
+    container, and the update it was handed never lands. A client killed only
+    after the removal could start it, holding that update, to land whenever
+    the container got to it.
+    """
+    resumed = threading.Event()
+
+    def stalls(stand_in: _StandIn, frame: dict[str, Any]) -> bytes:
+        stand_in.hold(resumed)
+        stand_in.step(frame)
+        return b""
+
+    _nft, steps, guard, started = long_lived(_answers, stalls, late={1})
+    guard.ensure()
+    # The update starts a helper of its own: the one the daemon creates late.
+    monkeypatch.setattr(network_guard_helper, "RETIRE_AGE_S", 0.0)
+
+    guard.sync_relays(_X, {("10.240.0.3", 8080)})
+    late = started[1]
+    assert late.container == "created", "its client was alive to start it after the removal"
+    guard.sync_relays(_X, set())
+    resumed.set()
+    time.sleep(0.2)  # time for a container that did start to write
+
+    assert late.requests == [], "the container started after its removal and took the request"
+    assert guard.relay_endpoints(_X) == set()
+    assert steps.events[:3] == [("killed", late.name), ("removed", late.name), ("disposable", "")]
+
+
+def test_a_container_left_created_is_removed_by_later_steps_until_it_has_settled(
+    monkeypatch, quick, long_lived
+) -> None:
+    """A create the daemon had under way when the client died completes after the removal check."""
+    monkeypatch.setattr(network_guard_helper, "LEFTOVER_S", 0.5)
+    _nft, steps, guard, started = long_lived(late={1})
+    guard.ensure()
+    monkeypatch.setattr(network_guard_helper, "RETIRE_AGE_S", 0.0)
+
+    guard.relay_endpoints(_X)  # on the late helper, which never answers
+    late = started[1]
+    assert late.container == "created", "left behind, never to start"
+    guard.relay_endpoints(_X)
+    assert late.container == "removed", "the next step did not remove it"
+    time.sleep(0.6)
+    guard.relay_endpoints(_X)  # shown gone once more, now that it has settled
+    guard.relay_endpoints(_X)
+
+    assert steps.events.count(("removed", late.name)) == 3, "removed again, or never forgotten"
+
+
+def test_a_helper_not_shown_removed_is_removed_again_by_later_steps_which_go_ahead(
+    quick, long_lived
+) -> None:
+    """Only the step it failed fails; each later step first tries the removal again."""
+    works = False
+    _nft, steps, guard, started = long_lived(_for_relays(_stuck), removable=lambda _timeout: works)
+    guard.ensure()
+    with pytest.raises(NetworkGuardError, match="its removal was not confirmed"):
+        guard.sync_relays(_X, {("10.240.0.3", 8080)})
+    name = started[0].name
+
+    guard.sync_relays(_X, {("10.240.0.3", 8080)})
+    assert steps.events[-2:] == [("removed", name), ("disposable", "")]
+    assert not started[0].removed
+    works = True
+    guard.sync_relays(_X, set())
+
+    assert started[0].removed, "a later step did not remove it once it could"
+    assert guard.relay_endpoints(_X) == set()
+
+
+def test_a_later_step_spends_no_more_than_its_share_removing_names_again(
+    monkeypatch, quick, long_lived
+) -> None:
+    monkeypatch.setattr(network_guard_helper, "SWEEP_S", 0.3)
+    hanging = False
+
+    def hangs_later(timeout: float) -> bool:
+        if hanging:
+            time.sleep(timeout)
+        return not hanging
+
+    _nft, steps, guard, started = long_lived(_for_relays(_silent), removable=hangs_later)
+    guard.ensure()
+    guard.sync_relays(_X, {("10.240.0.3", 8080)})  # its helper fails, and leaves its name
+    hanging = True
+
+    began = time.monotonic()
+    guard.sync_relays(_X, set())
+    took = time.monotonic() - began
+    hanging = False
+
+    assert steps.events[-2:] == [("removed", started[0].name), ("disposable", "")]
+    assert took < 0.8, "removing a name again held up the step"
+
+
+def test_a_step_interrupted_while_it_removes_a_name_again_keeps_the_name(quick, long_lived) -> None:
+    interrupting = False
+
+    def interrupted(_timeout: float) -> bool:
+        if interrupting:
+            raise KeyboardInterrupt
+        return True
+
+    _nft, _steps, guard, started = long_lived(_for_relays(_silent), removable=interrupted)
+    guard.ensure()
+    guard.sync_relays(_X, {("10.240.0.3", 8080)})  # its helper fails, and leaves its name
+    interrupting = True
+    with pytest.raises(KeyboardInterrupt):
+        guard.sync_relays(_X, set())
+    interrupting = False
+
+    assert guard._long_lived is not None
+    assert list(guard._long_lived._running.leftovers) == [started[0].name]
+
+
+def test_a_client_that_does_not_exit_when_killed_fails_the_step_and_is_reaped_later(
+    monkeypatch, quick, long_lived
+) -> None:
+    """Until its client is gone it could still start a container, so nothing reruns the step."""
+    monkeypatch.setattr(network_guard_helper, "KILL_REAP_S", 0.2)
+
+    def stuck_in_the_kernel(stand_in: _StandIn, _frame: dict[str, Any]) -> bytes:
+        stand_in.reapable = False
+        stand_in.hold(threading.Event())
+        return b""
+
+    _nft, steps, guard, started = long_lived(_for_relays(stuck_in_the_kernel))
+    guard.ensure()
+    with pytest.raises(NetworkGuardError, match="its client did not exit"):
+        guard.sync_relays(_X, {("10.240.0.3", 8080)})
+    assert steps.kinds()[-1] == "long-lived", "a disposable helper reran the step"
+    assert guard._long_lived is not None
+    assert [helper.process for helper in guard._long_lived._running.retiring] == [started[0]]
+    started[0].wait(5)  # the removal ended its container, and with it the client
+
+    guard.relay_endpoints(_X)
+
+    assert guard._long_lived._running.retiring == [], "its client was never reaped"
+
+
+def test_a_removal_that_raises_counts_as_not_shown_removed(quick, long_lived, caplog) -> None:
+    def broken(_timeout: float) -> bool:
+        raise RuntimeError("an answer the client could not read")
+
+    _nft, steps, guard, _started = long_lived(_for_relays(_silent), removable=broken)
+    guard.ensure()
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(NetworkGuardError, match="its removal was not confirmed"),
+    ):
+        guard.sync_relays(_X, {("10.240.0.3", 8080)})
+
+    assert steps.kinds()[-1] == "long-lived", "a disposable helper reran the step"
+    failures = [
+        r for r in caplog.records if r.getMessage() == "network_guard_helper_removal_failed"
+    ]
+    assert [r.detail for r in failures] == ["RuntimeError: an answer the client could not read"]
+    guard.sync_relays(_X, {("10.240.0.3", 8080)})  # later steps go ahead all the same
+    assert guard.relay_endpoints(_X) == {("10.240.0.3", 8080)}
+
+
+def test_a_failed_long_lived_attempt_leaves_a_disposable_helper_time_in_the_minute() -> None:
+    """At worst: names removed again, a helper that idled out, a fresh one that never answers."""
+    h = network_guard_helper
+    idled_out = h.SERVE_REQUEST_S + h.ANSWER_MARGIN_S + h.CLOSE_GRACE_S
+    fresh = h.SERVE_REQUEST_S + h.ANSWER_MARGIN_S + h.START_ALLOWANCE_S
+    worst = h.SWEEP_S + idled_out + fresh + h.KILL_REAP_S + h.REMOVE_TIMEOUT_S
+    assert worst + 5 <= network_guard._HELPER_TIMEOUT_S, worst
+
+
+def test_every_part_of_a_failed_step_ends_with_its_minute(monkeypatch, long_lived) -> None:
+    """A helper that never answers, a client SIGKILL cannot end and a removal that hangs."""
+    monkeypatch.setattr(network_guard, "_HELPER_TIMEOUT_S", 1.0)
+    hanging = True
+
+    def stuck_in_the_kernel(stand_in: _StandIn, _frame: dict[str, Any]) -> bytes:
+        stand_in.reapable = False
+        stand_in.hold(threading.Event())
+        return b""
+
+    def hangs(timeout: float) -> bool:
+        if hanging:
+            time.sleep(timeout)
+        return not hanging
+
+    _nft, _steps, guard, started = long_lived(_for_relays(stuck_in_the_kernel), removable=hangs)
+    guard.ensure()
+
+    began = time.monotonic()
+    with pytest.raises(NetworkGuardError, match="could not be shown removed"):
+        guard.sync_relays(_X, {("10.240.0.3", 8080)})
+    took = time.monotonic() - began
+    hanging = False
+    started[0].rm_f()
+
+    assert 0.9 < took < 1.4, "a part of the step outlasted its minute"
 
 
 # ── when a helper is replaced ───────────────────────────────────────────
@@ -982,7 +1394,7 @@ def test_a_later_step_reaps_the_clients_of_retired_helpers(monkeypatch, long_liv
     monkeypatch.setattr(network_guard_helper, "RETIRE_AGE_S", 0.0)
     guard.recheck()
     assert guard._long_lived is not None
-    assert [client for client, _errors in guard._long_lived._running.retiring] == [started[0]]
+    assert [helper.process for helper in guard._long_lived._running.retiring] == [started[0]]
     started[0].wait(5)
     monkeypatch.setattr(network_guard_helper, "RETIRE_AGE_S", 300.0)
 
@@ -1025,6 +1437,71 @@ def test_closing_the_guard_ends_its_long_lived_helper_and_starts_no_other(long_l
     guard.ensure(max_age_s=0)
     assert len(started) == 1
     assert steps.kinds() == ["long-lived", "disposable"]
+
+
+def _until(condition: Callable[[], bool], seconds: float = 5) -> bool:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def _held_update(
+    long_lived: Any,
+) -> tuple[_Steps, HostNetworkGuard, _StandIn, threading.Event, Any]:
+    """A verified guard whose helper has taken a relay update, which it holds until let go."""
+    release = threading.Event()
+
+    def held(stand_in: _StandIn, frame: dict[str, Any]) -> bytes:
+        stand_in.hold(release)
+        return _answers(stand_in, frame)
+
+    _nft, steps, guard, started = long_lived(_for_relays(held))
+    guard.ensure()
+    taken = len(started[0].requests)
+    update = _in_thread(lambda: guard.sync_relays(_X, {("10.240.0.3", 8080)}))
+    assert _until(lambda: len(started[0].requests) > taken), "the update never reached the helper"
+    return steps, guard, started[0], release, update
+
+
+def test_stopping_at_exit_waits_for_a_step_under_way_and_leaves_it_its_helper(
+    long_lived,
+) -> None:
+    """The finalizer, as interpreter exit runs it, takes the step's slot before it stops anything."""
+    steps, guard, helper, release, update = _held_update(long_lived)
+    assert guard._long_lived is not None
+
+    stopping = _in_thread(guard._long_lived._stop)
+    time.sleep(0.2)
+    release.set()
+    update.result(5)
+    stopping.result(5)
+
+    assert steps.kinds()[-1] == "long-lived", "the step lost its helper to the finalizer"
+    assert ("removed", helper.name) not in steps.events
+    assert helper.poll() == 0 and not helper.removed, "stopped as an idle helper is, after the step"
+
+
+def test_stopping_at_exit_leaves_a_helper_to_a_step_that_outlasts_its_wait(
+    monkeypatch, long_lived
+) -> None:
+    """A step that holds its slot past the wait keeps its helper: nothing closes it under the step."""
+    monkeypatch.setattr(network_guard_helper, "SHUTDOWN_WAIT_S", 0.2)
+    steps, guard, helper, release, update = _held_update(long_lived)
+    lived = guard._long_lived
+    assert lived is not None
+
+    began = time.monotonic()
+    network_guard_helper._shutdown(lived._running, lived._remove, lived._slot)
+    gave_up_after = time.monotonic() - began
+    release.set()
+    update.result(5)
+
+    assert 0.15 < gave_up_after < 1.0
+    assert steps.kinds()[-1] == "long-lived", "the step lost its helper"
+    assert helper.poll() is None and lived._running.helper is not None
 
 
 # ── which processes keep one ─────────────────────────────────────────────

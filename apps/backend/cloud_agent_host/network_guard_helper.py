@@ -82,7 +82,9 @@ the same trusted code from the same image either way.
 
 **How long it lives.** At most :data:`SERVE_IDLE_S` without a request; the
 guard replaces it at its first step after :data:`RETIRE_AGE_S`, and stops it
-when the guard closes or its process exits normally. A guard process that dies
+when the guard closes or its process exits normally, after any step under way.
+At interpreter exit that wait lasts at most :data:`SHUTDOWN_WAIT_S`, and a
+helper a step still holds then ends as follows. A guard process that dies
 first leaves it running only until the end of its stdin reaches it, and for at
 most :data:`SERVE_REQUEST_S` more if a request is under way. When that process
 ends, even by SIGKILL, the kernel closes its end of the pipe. The ``docker run
@@ -100,23 +102,41 @@ answer the guard accepts is run again on a per-run helper, whose answer is
 final, so a failed check raises exactly as it did. That covers a helper that
 does not start, does not take its request, exits, answers late, answers with
 anything but one line for that request, or reports that the step failed.
-Before the step runs again the guard removes the helper by name (``docker rm
--f``, which ends every process in its container, a stuck ``nft`` included) and
-confirms that it is gone, so nothing it still held can land after the re-run
-or after a later step. If that cannot be confirmed within
-:data:`REMOVE_TIMEOUT_S`, the step fails as a timed-out per-run helper does, and
-nothing runs it again. For :data:`COOLDOWN_S` after a failure every step runs
-on per-run helpers, so a helper that fails every time costs one failure per
-period rather than one per step. A helper that idled out just as a request
-reached it (its exit status :data:`IDLE_EXIT`, before it read the request) has
-not failed: a new one takes the step.
+Before the step runs again the guard kills the helper's ``docker run`` client
+and reaps it, and only then removes the container by name (``docker rm -f``,
+which ends every process in it) and confirms that it is gone. The client goes
+first because ``docker rm -f`` succeeds for a name no container has yet too: a
+client still creating its container would start it after such a removal, and
+the request it holds would run after all. A dead client creates, attaches and
+starts nothing more. A create the daemon still had under way can leave a
+container that was created and never started, and holds no request; later
+steps remove that name again for :data:`LEFTOVER_S`.
 
-**One minute for a step.** The long-lived helper gives a step
-:data:`SERVE_REQUEST_S` and :data:`ANSWER_MARGIN_S` (and
-:data:`START_ALLOWANCE_S` more when the step starts it), removing a failed one
-takes at most :data:`REMOVE_TIMEOUT_S`, and the per-run helper that runs the
-step again gets what is left of the minute a per-run helper always had. So a
-step takes no longer than it could before.
+If the client is not reaped within :data:`KILL_REAP_S`, or the removal is not
+confirmed within :data:`REMOVE_TIMEOUT_S`, the step fails as a timed-out
+per-run helper does, and nothing runs it again. So does a helper whose ``nft``
+call is in uninterruptible sleep: ``docker rm -f`` cannot end it, and the
+removal stays unconfirmed. Later steps go ahead, and each first tries to
+remove that name again, within :data:`SWEEP_S`; until one shows it gone, what
+that helper held may still land, as what a timed-out per-run helper held may.
+For :data:`COOLDOWN_S` after a failure every step runs on per-run helpers, so
+a helper that fails every time costs one failure per period rather than one
+per step. A helper that idled out just as a request reached it (its exit
+status :data:`IDLE_EXIT`, before it read the request) has not failed: a new
+one takes the step.
+
+**One minute for a step.** A step's minute starts once its command line, and
+with it the image's id, is known, as a per-run helper's always did, and every
+part of the step on the long-lived helper ends with it. Removing earlier
+failures' names again takes at most :data:`SWEEP_S`. The helper gets
+:data:`SERVE_REQUEST_S` and :data:`ANSWER_MARGIN_S`, and
+:data:`START_ALLOWANCE_S` more when the step starts it; a second helper gets
+the same only after the first idled out before it read the request, which
+takes at most :data:`CLOSE_GRACE_S` to see. Taking down a helper that failed
+takes at most :data:`KILL_REAP_S` to kill and reap its client and
+:data:`REMOVE_TIMEOUT_S` to remove its container. All of that together is less
+than the minute, and the per-run helper that runs the step again gets what is
+left of it, so a step takes no longer than it could before.
 
 **A step applied in part.** A step is a few ``nft`` calls: an optional
 install, reads, then one or two set updates. Each ``nft -f`` transaction is
@@ -166,11 +186,22 @@ ANSWER_MARGIN_S = 2.0
 #: How much longer a step that starts the helper may take, for the container
 #: to start.
 START_ALLOWANCE_S = 15.0
+#: How long the guard waits for a failed helper's client to exit once killed;
+#: SIGKILL ends a client in milliseconds.
+KILL_REAP_S = 2.0
 #: How long removing a helper that failed a step, and confirming it is gone,
 #: may take before the step fails instead.
 REMOVE_TIMEOUT_S = 10.0
+#: How long after a failed helper's client is killed later steps remove its
+#: name again: a create the daemon still had under way has settled by then. A
+#: name not yet shown gone is kept until it is.
+LEFTOVER_S = 30.0
+#: How much of a step removing those names again may take.
+SWEEP_S = 2.0
 #: How long the guard waits for a helper to end on its own when it closes.
 CLOSE_GRACE_S = 2.0
+#: How long stopping the helper at interpreter exit waits for a step under way.
+SHUTDOWN_WAIT_S = 5.0
 #: How long every step runs on per-run helpers after the long-lived one failed.
 COOLDOWN_S = 300.0
 #: The most an answer may hold; a listing of this deployment's tables is far
@@ -295,9 +326,12 @@ def remove_helper(docker_binary: str, name: str, timeout: float) -> bool:
     """Remove a helper container by name, and say whether it is gone.
 
     ``docker rm -f`` kills the container's first process, which ends every
-    process in its PID namespace, and returns once the container is removed;
-    for a container that is gone already it succeeds too (an older client says
-    "No such container"). A removal another one has under way is waited for.
+    process in its PID namespace, and returns once the container is removed.
+    It succeeds for a name no container has, too (an older client says "No
+    such container"), so it cannot tell a container that is gone from one not
+    created yet: the guard kills the helper's client before it calls this. A
+    removal another one has under way is waited for. A process the kill cannot
+    end, such as one in uninterruptible sleep, leaves the removal unconfirmed.
     """
     deadline = time.monotonic() + timeout
     while (left := deadline - time.monotonic()) > 0:
@@ -306,6 +340,8 @@ def remove_helper(docker_binary: str, name: str, timeout: float) -> bool:
                 [docker_binary, "rm", "-f", name],
                 capture_output=True,
                 text=True,
+                # Whatever the client prints, its exit status still decides.
+                errors="replace",
                 timeout=left,
                 check=False,
             )
@@ -333,20 +369,33 @@ class _Retired(Exception):
     """The helper idled out before it read the request: no failure, and the request never ran."""
 
 
+@dataclass(eq=False)
+class _Helper:
+    """One helper container: its ``docker run`` client and its name."""
+
+    process: HelperProcess
+    name: str
+    argv: list[str]
+    #: The unlinked file its client's stderr goes to, for the warning if it
+    #: fails; ``None`` once closed.
+    errors: int | None
+    started_at: float
+    #: When it last answered, or started.
+    used_at: float
+
+
 @dataclass
 class _Running:
-    """The helper now running, kept apart from :class:`LongLivedHelper` for its finalizer."""
+    """The guard's helpers, kept apart from :class:`LongLivedHelper` for its finalizer."""
 
-    process: HelperProcess | None = None
-    #: The unlinked file its client's stderr goes to, for the warning if it fails.
-    errors: int | None = None
-    name: str = ""
-    argv: list[str] = field(default_factory=list)
-    started_at: float = 0.0
-    #: When it last answered, or started.
-    used_at: float = 0.0
-    #: Clients of helpers stopped with nothing under way, not yet reaped.
-    retiring: list[tuple[HelperProcess, int | None]] = field(default_factory=list)
+    #: The helper that takes the next step, if one is running.
+    helper: _Helper | None = None
+    #: Helpers stopped with nothing under way, and failed helpers whose
+    #: clients did not exit when killed: reaped at later steps.
+    retiring: list[_Helper] = field(default_factory=list)
+    #: Names of helpers that failed a step, removed again at later steps: each
+    #: until it is shown gone at or after the time it maps to.
+    leftovers: dict[str, float] = field(default_factory=dict)
 
 
 class LongLivedHelper:
@@ -356,8 +405,9 @@ class LongLivedHelper:
         self._spawn = spawn
         self._remove = remove
         self._name_prefix = name_prefix
-        #: Held for one step, and while the helper is started or stopped. Never
-        #: waited for: a step that finds it held runs on a per-run helper.
+        #: Held for one step, and while the helper is started or stopped. A
+        #: step never waits for it: one that finds it held runs on a per-run
+        #: helper.
         self._slot = threading.Lock()
         self._running = _Running()
         #: Until when every step runs on per-run helpers, after a failure.
@@ -366,7 +416,7 @@ class LongLivedHelper:
         # At close, garbage collection or interpreter exit, whichever comes
         # first: a client left to outlive this process would be inherited by
         # its parent, which in a container may reap nothing.
-        self._stop = weakref.finalize(self, _shutdown, self._running, remove)
+        self._stop = weakref.finalize(self, _shutdown, self._running, remove, self._slot)
 
     def run(
         self,
@@ -391,7 +441,12 @@ class LongLivedHelper:
             return None
         try:
             self._reap()
-            if self._closed or time.monotonic() < self._resume_at:
+            if self._closed:
+                return None
+            # Cooling down or not: the failure that started the cooldown is
+            # what leaves names to remove.
+            _sweep(self._running, self._remove, min(time.monotonic() + SWEEP_S, deadline))
+            if time.monotonic() < self._resume_at:
                 return None
             return self._serve(argv, stdin, deadline, accept)
         finally:
@@ -401,7 +456,7 @@ class LongLivedHelper:
         """Stop the helper, after any step it is running, and start no other."""
         with self._slot:
             self._closed = True
-            self._stop()
+        self._stop()
 
     def _serve(
         self,
@@ -414,10 +469,10 @@ class LongLivedHelper:
         # the request: that request never ran.
         for _attempt in range(2):
             try:
-                started = self._ready(argv)
+                helper, started = self._ready(argv)
                 answer_by = time.monotonic() + SERVE_REQUEST_S + ANSWER_MARGIN_S
                 answer_by += START_ALLOWANCE_S if started else 0.0
-                answer = _exchange(self._running, argv, stdin, min(answer_by, deadline))
+                answer = _exchange(helper.process, argv, stdin, min(answer_by, deadline))
                 result = accept(answer)
             except _Retired:
                 self._retire()
@@ -430,27 +485,29 @@ class LongLivedHelper:
                 with contextlib.suppress(HelperStuck):
                     self._abandon("was interrupted", deadline)
                 raise
-            self._running.used_at = time.monotonic()
+            helper.used_at = time.monotonic()
             return result
         return None
 
-    def _ready(self, argv: list[str]) -> bool:
-        """Have a helper waiting for the next step; whether it was started for this one."""
-        running = self._running
-        process = running.process
+    def _ready(self, argv: list[str]) -> tuple[_Helper, bool]:
+        """A helper waiting for the next step, and whether it was started for this one."""
+        helper = self._running.helper
         now = time.monotonic()
-        if process is not None and (
-            argv != running.argv
-            or now - running.used_at >= RETIRE_IDLE_S
-            or now - running.started_at >= RETIRE_AGE_S
+        if helper is not None and (
+            argv != helper.argv
+            or now - helper.used_at >= RETIRE_IDLE_S
+            or now - helper.started_at >= RETIRE_AGE_S
             # Output it was not asked for, or the end of its output: it is not
             # waiting for a request, and nothing it wrote is read as an answer.
-            or not _waiting(process)
+            or not _waiting(helper.process)
         ):
             self._retire()
-            process = None
-        if process is not None:
-            return False
+            helper = None
+        if helper is not None:
+            return helper, False
+        return self._start(argv), True
+
+    def _start(self, argv: list[str]) -> _Helper:
         errors, path = tempfile.mkstemp(prefix="network-guard-helper-")
         os.unlink(path)
         name = f"{self._name_prefix}-{secrets.token_hex(6)}"
@@ -459,86 +516,146 @@ class LongLivedHelper:
         except BaseException:
             _close(errors)
             raise
-        running.process, running.errors, running.name = process, errors, name
-        running.argv = list(argv)
-        running.started_at = running.used_at = time.monotonic()
+        now = time.monotonic()
+        helper = self._running.helper = _Helper(process, name, list(argv), errors, now, now)
         for stream in (process.stdin, process.stdout):
             if stream is None:
                 raise _Failed("started without its pipes")
             os.set_blocking(stream.fileno(), False)
-        return True
+        return helper
 
     def _retire(self) -> None:
         """Stop a helper with nothing under way: close its pipes, and reap its client later."""
         running = self._running
-        if running.process is not None:
-            _close_pipes(running.process)
-            running.retiring.append((running.process, running.errors))
-        running.process, running.errors = None, None
+        if running.helper is not None:
+            _close_pipes(running.helper.process)
+            running.retiring.append(running.helper)
+        running.helper = None
 
     def _reap(self) -> None:
         """Reap clients that have exited, the running one's included, without waiting for any."""
         running = self._running
-        if running.process is not None and running.process.poll() is not None:
+        if running.helper is not None and running.helper.process.poll() is not None:
             self._retire()
         still = []
-        for client, errors in running.retiring:
-            if client.poll() is None:
-                still.append((client, errors))
+        for helper in running.retiring:
+            if helper.process.poll() is None:
+                still.append(helper)
             else:
-                _close(errors)
+                _close(helper.errors)
         running.retiring[:] = still
 
     def _abandon(self, failure: str, deadline: float) -> None:
-        """Remove a helper that failed a step, and confirm it is gone, before the step reruns."""
+        """Take down a helper that failed a step, and confirm it, before the step runs again."""
         running = self._running
-        process, errors = running.process, running.errors
-        name = running.name if process is not None else ""
-        running.process, running.errors = None, None
+        helper, running.helper = running.helper, None
         self._resume_at = time.monotonic() + COOLDOWN_S
-        removed = True
         status: int | None = None
-        if process is not None:
-            _close_pipes(process)
-            left = deadline - time.monotonic()
-            removed = self._remove(name, min(REMOVE_TIMEOUT_S, max(1.0, left)))
-            status = _ended(process)
+        removed = True
+        if helper is not None:
+            status, removed = _take_down(running, self._remove, helper, deadline)
         logger.warning(
             "network_guard_helper_discarded",
             extra={
                 "event": "network_guard_helper_discarded",
                 "detail": failure[:300],
-                "helper": name,
+                "helper": helper.name if helper else "",
                 "removed": removed,
                 "exit_status": status,
-                "stderr": _tail(errors),
+                "stderr": _tail(helper.errors) if helper else "",
                 "cooldown_s": COOLDOWN_S,
             },
         )
-        _close(errors)
+        if helper is None:
+            return
+        _close(helper.errors)
+        helper.errors = None
+        if status is None:
+            running.retiring.append(helper)
         if not removed:
+            what = "its client did not exit" if status is None else "its removal was not confirmed"
             raise HelperStuck(
-                f"the long-lived helper {name} {failure}, and could not be shown removed "
-                f"within {REMOVE_TIMEOUT_S:.0f}s"
+                f"the long-lived helper {helper.name} {failure}, and could not be shown removed: "
+                + what
             )
 
 
-def _shutdown(running: _Running, remove: Remove) -> None:
-    """Stop the running helper and reap every client: at close, or when this process exits."""
-    process, errors, name = running.process, running.errors, running.name
-    running.process, running.errors = None, None
-    if process is not None:
-        _close_pipes(process)
-        try:
-            process.wait(timeout=CLOSE_GRACE_S)
-        except subprocess.TimeoutExpired:
-            remove(name, REMOVE_TIMEOUT_S)
-            _ended(process)
-        _close(errors)
-    for client, retired in running.retiring:
-        _ended(client)
-        _close(retired)
-    running.retiring.clear()
+def _take_down(
+    running: _Running, remove: Remove, helper: _Helper, deadline: float
+) -> tuple[int | None, bool]:
+    """Kill a helper's client and reap it, then remove its container, both by ``deadline``.
+
+    Returns the client's exit status, if it was reaped, and whether both are
+    confirmed. The client goes first: once it is dead it creates, attaches and
+    starts nothing more, so a removal that found no container stays true.
+    """
+    with contextlib.suppress(OSError):
+        helper.process.kill()
+    status = _reaped(helper.process, _within(KILL_REAP_S, deadline))
+    _close_pipes(helper.process)
+    removed = _removed(remove, helper.name, _within(REMOVE_TIMEOUT_S, deadline))
+    # A create the daemon had under way when the client died can still leave a
+    # container, created and never started: later steps remove the name again.
+    running.leftovers[helper.name] = time.monotonic() + LEFTOVER_S
+    return status, removed and status is not None
+
+
+def _sweep(running: _Running, remove: Remove, until: float) -> None:
+    """Remove failed helpers' names again until ``until``, forgetting each once it is done."""
+    for name, keep_until in list(running.leftovers.items()):
+        left = until - time.monotonic()
+        if left <= 0:
+            return
+        # Tried again at a later step, after the others, unless done now: kept
+        # until then, so a step interrupted mid-removal loses no name.
+        running.leftovers[name] = running.leftovers.pop(name)
+        if _removed(remove, name, left) and time.monotonic() >= keep_until:
+            del running.leftovers[name]
+
+
+def _removed(remove: Remove, name: str, timeout: float) -> bool:
+    """Whether ``remove`` shows the container gone; anything it raises counts as not."""
+    try:
+        return remove(name, timeout)
+    except Exception as exc:
+        logger.warning(
+            "network_guard_helper_removal_failed",
+            extra={
+                "event": "network_guard_helper_removal_failed",
+                "helper": name,
+                "detail": f"{type(exc).__name__}: {exc}"[:300],
+            },
+        )
+        return False
+
+
+def _shutdown(running: _Running, remove: Remove, slot: threading.Lock) -> None:
+    """Stop the helper and reap every client: at close, or when this process exits.
+
+    After any step under way, which holds ``slot``. At interpreter exit that
+    step's thread may never run again, so the wait is bounded, and a helper a
+    step still holds is left to it: it ends once this process's end of its
+    stdin closes.
+    """
+    if not slot.acquire(timeout=SHUTDOWN_WAIT_S):
+        return
+    try:
+        helper, running.helper = running.helper, None
+        if helper is not None:
+            _close_pipes(helper.process)
+            if _reaped(helper.process, CLOSE_GRACE_S) is None:
+                # It did not end at EOF on its stdin: down as a failed one goes.
+                until = time.monotonic() + KILL_REAP_S + REMOVE_TIMEOUT_S
+                _take_down(running, remove, helper, until)
+            _close(helper.errors)
+        for retired in running.retiring:
+            _ended(retired.process)
+            _close(retired.errors)
+        running.retiring.clear()
+        _sweep(running, remove, time.monotonic() + SWEEP_S)
+        running.leftovers.clear()
+    finally:
+        slot.release()
 
 
 def _close_pipes(process: HelperProcess) -> None:
@@ -546,6 +663,14 @@ def _close_pipes(process: HelperProcess) -> None:
         if stream is not None:
             with contextlib.suppress(OSError):
                 stream.close()
+
+
+def _reaped(process: HelperProcess, timeout: float) -> int | None:
+    """A client's exit status, once it exits within ``timeout``; ``None`` if it does not."""
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def _ended(process: HelperProcess) -> int | None:
@@ -587,11 +712,10 @@ def _close(fd: int | None) -> None:
 
 
 def _exchange(
-    running: _Running, argv: list[str], stdin: str, deadline: float
+    process: HelperProcess, argv: list[str], stdin: str, deadline: float
 ) -> subprocess.CompletedProcess[str]:
     """Send the helper one request and read its one answer, as a per-run helper's result."""
-    process = running.process
-    if process is None or process.stdin is None or process.stdout is None:
+    if process.stdin is None or process.stdout is None:
         raise _Failed("has no pipes")
     request_id = secrets.token_hex(8)
     frame = json.dumps({"id": request_id, "stdin": stdin}).encode() + b"\n"
@@ -670,21 +794,31 @@ def _receive(stream: IO[bytes], deadline: float) -> bytes:
                 raise _Failed(f"answered more than {ANSWER_MAX} bytes")
 
 
+def _within(limit: float, deadline: float) -> float:
+    """``limit`` seconds, cut short at ``deadline``."""
+    return max(0.0, min(limit, deadline - time.monotonic()))
+
+
 def _left(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
 
 
 __all__ = [
     "ANSWER_MARGIN_S",
+    "CLOSE_GRACE_S",
     "COOLDOWN_S",
     "IDLE_EXIT",
+    "KILL_REAP_S",
+    "LEFTOVER_S",
     "OVERDUE_EXIT",
     "REMOVE_TIMEOUT_S",
     "RETIRE_AGE_S",
     "RETIRE_IDLE_S",
     "SERVE_IDLE_S",
     "SERVE_REQUEST_S",
+    "SHUTDOWN_WAIT_S",
     "START_ALLOWANCE_S",
+    "SWEEP_S",
     "HelperProcess",
     "HelperStuck",
     "LongLivedHelper",

@@ -3559,9 +3559,10 @@ own, listens on nothing, reads the kernel afresh for every step, and exits when
 its process does or after 15 seconds without a step; a fresh one replaces it
 every five minutes. A step that finds it busy runs in a helper of its own, as
 every step once did. A step it fails or answers wrongly runs again in a helper
-of its own only once the failed helper has been removed by name and is
-confirmed gone, and within the minute a step always had; if that cannot be
-confirmed, the step fails. The process then logs
+of its own only once the failed helper's `docker run` client has been killed
+and its container removed by name and confirmed gone, and within the minute a
+step always had; if that cannot be confirmed, the step fails, and later steps
+try the removal again. The process then logs
 `network_guard_helper_discarded` and runs every step in a helper of its own for
 five minutes. Every helper runs under runc whatever the daemon's default
 runtime is, because a Kata VM would change its own kernel's rules, not the

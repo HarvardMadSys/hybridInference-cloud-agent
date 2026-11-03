@@ -128,11 +128,11 @@ and reads back the rules before any group joins its bridge.
 
 Network-rule reads share one helper request, which the runner's or the
 sandbox manager's long-lived helper takes when it is free; route reads use a
-separate disposable helper without capabilities. Reconciliation caches inspections only within one
-command, rereads after mutations, and verifies the final bridge identity,
-membership and relay addresses. It skips unchanged guest hosts/resolver writes
-while retaining ownership, mode and symlink checks. These optimizations preserve
-the network policy and freshness requirements.
+separate disposable helper without capabilities. Reconciliation caches
+inspections only within one command, rereads after mutations, and verifies the
+final bridge identity, membership and relay addresses. It skips unchanged guest
+hosts/resolver writes while retaining ownership, mode and symlink checks. These
+optimizations preserve the network policy and freshness requirements.
 
 A new chat's repository is cloned, scrubbed and archived on the host while the
 container starts. Its `checkout` measurement includes the remaining clone wait

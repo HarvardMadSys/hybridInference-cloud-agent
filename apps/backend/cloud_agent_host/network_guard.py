@@ -1069,14 +1069,12 @@ class HostNetworkGuard:
 
         if self._long_lived is None:
             return read(self._helper("python3", ["-c", _NFT_BATCH], stdin=stdin, label="nft"))
+        # The minute starts once the image is known, as a disposable helper's
+        # always did: looking it up is not the helper's time.
+        command = self._command("python3", ["-c", _NFT_SERVE], interactive=True)
         deadline = time.monotonic() + _HELPER_TIMEOUT_S
         try:
-            served = self._long_lived.run(
-                self._command("python3", ["-c", _NFT_SERVE], interactive=True),
-                stdin,
-                deadline=deadline,
-                accept=read,
-            )
+            served = self._long_lived.run(command, stdin, deadline=deadline, accept=read)
         except HelperStuck as exc:
             raise NetworkGuardError(f"network guard helper could not run: {exc}") from exc
         if served is not None:
