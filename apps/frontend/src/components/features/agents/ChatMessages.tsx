@@ -669,7 +669,7 @@ function processMayFold(event: AgentEvent): boolean {
     }
     return true;
   }
-  if (event.kind === 'thinking' || event.kind === 'usage') return true;
+  if (event.kind === 'thinking') return true;
   if (event.kind === 'terminal') return event.isError === false;
   if (event.kind === 'lifecycle')
     return lifecyclePhaseLabel(event.text).milestone && !lifecycleNeedsAttention(event.text);
@@ -680,7 +680,6 @@ function isProcessEvent(event: AgentEvent): boolean {
   return (
     event.kind === 'tool_use' ||
     event.kind === 'thinking' ||
-    event.kind === 'usage' ||
     event.kind === 'terminal' ||
     (event.kind === 'lifecycle' &&
       lifecyclePhaseLabel(event.text).milestone &&
@@ -1098,11 +1097,7 @@ export function EventRow({
       </pre>
     );
   }
-  return (
-    <p data-block-key={blockKey} className="py-1 text-[11px] text-gray-400 dark:text-gray-500">
-      {event.text}
-    </p>
-  );
+  return null;
 }
 
 export function HistoryTurn({

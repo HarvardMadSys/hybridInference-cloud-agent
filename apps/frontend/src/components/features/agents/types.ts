@@ -112,7 +112,6 @@ export type AgentEvent =
       attemptNo?: number;
       sourceEventId?: number;
     }
-  | { kind: 'usage'; text: string; attemptNo?: number; sourceEventId?: number }
   /** A message the owner sent into the running turn, where it arrived. */
   | { kind: 'user_message'; text: string; attemptNo?: number; sourceEventId?: number };
 

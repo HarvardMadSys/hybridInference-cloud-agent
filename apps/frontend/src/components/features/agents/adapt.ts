@@ -188,7 +188,9 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       ...(previewId ? { previewId } : {}),
     };
   }
-  if (type === 'usage') return { kind: 'usage', text: asText(payload, 'text'), sourceEventId };
+  // A model call's token counts: read by the usage and stats views, never a
+  // transcript row (it has no text, and each one counted as another step).
+  if (type === 'usage') return null;
   // A message the owner sent into the running turn reads where it arrived,
   // between what the agent did before it and what it did after.
   if (type === 'user_message') {
@@ -948,7 +950,7 @@ export function ownedBySubagent(
 /**
  * One subagent's own transcript, read as if that subagent were the
  * conversation: the records `ownedBySubagent` assigns to it. Its turn
- * milestones and usage stay runtime bookkeeping rather than rows.
+ * milestones stay runtime bookkeeping rather than rows.
  */
 export function subagentDisplayEvents(
   events: AgentJobEventApi[],
@@ -961,7 +963,7 @@ export function subagentDisplayEvents(
     const { parent_tool_use_id: _parent, agent_thread_id: _thread, ...rest } = payload;
     return [{ ...event, payload: rest }];
   });
-  return displayEvents(own, job).filter((row) => row.kind !== 'lifecycle' && row.kind !== 'usage');
+  return displayEvents(own, job).filter((row) => row.kind !== 'lifecycle');
 }
 
 /** Rename the host's rollup into the UI's shape, keeping every null a null. */
