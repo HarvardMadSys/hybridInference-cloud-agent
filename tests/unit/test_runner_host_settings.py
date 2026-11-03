@@ -193,6 +193,9 @@ def _run_new_chat(
     reservation_change: dict[str, Any] | None = None,
     reservation_omits_disk: bool = False,
     initial_archive_status: dict[str, object] | None = None,
+    container_action: str | None = None,
+    initial_archive: dict[str, object] | None = None,
+    fails_after_acquire: bool = False,
 ) -> SimpleNamespace:
     """Drive a first turn of a new chat to its settlement, with collaborators mocked."""
     backend = ContainerBackend(image="img")
@@ -247,6 +250,7 @@ def _run_new_chat(
         "activation_generation": 3,
         "context_status": "new",
         "resident_state": "live",
+        **({} if container_action is None else {"container_action": container_action}),
     }
     supervisor.initial_archive_status.return_value = (
         {
@@ -257,7 +261,7 @@ def _run_new_chat(
         if initial_archive_status is None
         else initial_archive_status
     )
-    supervisor.capture_initial_archive.return_value = {
+    supervisor.capture_initial_archive.return_value = initial_archive or {
         "enabled": False,
         "stored": False,
     }
@@ -287,7 +291,7 @@ def _run_new_chat(
     )
     reserved = control.reserve_chat_sandbox.call_args.args[0]
     if result != 0:
-        assert not supervisor.acquire_shared.called
+        assert supervisor.acquire_shared.called is fails_after_acquire
         assert not control.settle_chat_sandbox.called
         return SimpleNamespace(
             result=result,
@@ -347,6 +351,92 @@ def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkey
     [upload] = run.manager.import_archive.call_args_list
     assert upload.args[1] == CHAT_UPLOADS_DIR
     assert run.finish.call_args.kwargs["base_sha"] == recovered_base
+
+
+def _initial_archive_events(run: SimpleNamespace) -> list[dict[str, Any]]:
+    return [
+        call.args[0].payload
+        for call in run.control.append_event.call_args_list
+        if call.args[0].payload.get("phase") == "initial_archive"
+    ]
+
+
+def test_a_container_this_acquire_created_skips_the_marker_probe(monkeypatch):
+    """A new container holds no marker of its own, so there is nothing to resolve."""
+    run = _run_new_chat(monkeypatch, None, container_action="create")
+
+    assert run.result == 0
+    run.supervisor.initial_archive_status.assert_not_called()
+    # The capture still happens, and is where a carried or foreign marker is handled.
+    assert run.supervisor.capture_initial_archive.call_args.kwargs["defer_upload"] is True
+
+
+@pytest.mark.parametrize("container_action", ["start", "reuse", "unknown", None])
+def test_a_container_that_may_hold_a_marker_is_probed_first(monkeypatch, container_action):
+    """Only ``create`` proves the container new; anything else, or no answer, probes."""
+    run = _run_new_chat(monkeypatch, None, container_action=container_action)
+
+    assert run.result == 0
+    run.supervisor.initial_archive_status.assert_called_once()
+
+
+def test_a_pending_initial_upload_admits_the_prompt(monkeypatch):
+    """The bundle is durable on the host; S3 follows in the background."""
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive={
+            "enabled": True,
+            "stored": False,
+            "upload": "pending",
+            "size_bytes": 10,
+            "sha256": "a" * 64,
+        },
+    )
+
+    assert run.result == 0
+    assert run.supervisor.ensure_shared_resident.called
+    assert _initial_archive_events(run) == [
+        {"phase": "initial_archive", "enabled": True, "stored": False, "upload": "pending"}
+    ]
+
+
+def test_an_older_sandbox_managers_stored_receipt_is_still_accepted(monkeypatch):
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive={"enabled": True, "stored": True},
+    )
+
+    assert run.result == 0
+    assert _initial_archive_events(run) == [
+        {"phase": "initial_archive", "enabled": True, "stored": True}
+    ]
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {"enabled": True, "stored": False},
+        {"enabled": True, "stored": False, "upload": "failed"},
+        {"enabled": False, "stored": False, "upload": "pending"},
+    ],
+)
+def test_an_initial_receipt_that_is_neither_stored_nor_pending_stops_the_turn(monkeypatch, receipt):
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive=receipt,
+        fails_after_acquire=True,
+    )
+
+    assert run.result != 0
+    assert "invalid initial archive receipt" in str(run.failure)
+    run.supervisor.ensure_shared_resident.assert_not_called()
+    assert _initial_archive_events(run) == []
 
 
 def test_new_sandbox_resource_settings_reach_the_docker_limits(monkeypatch):

@@ -128,6 +128,7 @@ def test_initial_archive_sends_the_exact_sandbox_identity_with_a_long_timeout():
             expected_container_id="container-shared",
             preparation_id="ajob_initial",
             base_sha="b" * 40,
+            defer_upload=True,
         )
     finally:
         client.close()
@@ -159,6 +160,8 @@ def test_initial_archive_sends_the_exact_sandbox_identity_with_a_long_timeout():
         "token": "lease-token",
         "preparation_id": "ajob_initial",
         "base_sha": "b" * 40,
+        # Asked for; a sandbox manager without deferral ignores the field.
+        "defer_upload": True,
     }
     assert answer == {"enabled": True, "stored": True}
 

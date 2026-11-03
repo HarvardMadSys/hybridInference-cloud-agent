@@ -33,6 +33,7 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Uploader,
     is_sandbox_archive_conditional_conflict,
 )
+from cloud_agent_host.sandbox_capture_gate import CaptureGate, CaptureWaiter
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
@@ -50,6 +51,11 @@ if TYPE_CHECKING:
         CheckpointRestore,
         SandboxCheckpointCapture,
         SandboxCheckpointReceipt,
+    )
+    from cloud_agent_host.sandbox_initial_uploads import (
+        InitialUploadReservation,
+        InitialUploadSpool,
+        SpooledInitialUpload,
     )
     from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
@@ -79,6 +85,8 @@ INITIAL_ARCHIVE_MARKER_FORMAT_VERSION: Final = 2
 # so a host rolled back by one release still proves what this one stores.
 # Levels 6 (written from #760 until #1044) and 9 stay for their markers.
 INITIAL_ARCHIVE_COMPRESSION_LEVELS: Final = (1, 6, 9)
+#: ``marker_payload`` default: the service reads the marker itself.
+_UNREAD: Final = object()
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _ERROR_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -302,112 +310,6 @@ class SandboxInitialArchiveMarker:
         return marker
 
 
-class CaptureGate:
-    """The host's capture slots, handed first to work a person is waiting on.
-
-    A bounded semaphore otherwise: it caps how many captures spool at once,
-    and a wait for it ends at its timeout. But a first prompt or a cold start
-    must not queue behind a stopped chat's final archive or a checkpoint, so a
-    waiting ``urgent`` capture goes before any other; within each kind the
-    earliest goes first. A capture overtaken ``max_overtaken`` times goes next
-    regardless, so a stream of new chats cannot starve a stop's final archive.
-
-    Going first still waited for a capture already spooling, up to its whole
-    deadline. With a ``spool_budget_bytes``, one urgent capture may also spool
-    beside the ``capacity`` others, whenever the worst cases of all of them
-    (``spool_bytes`` each) fit that budget, so the budget, not the count,
-    bounds the scratch disk. Background work never takes that place, and an
-    urgent capture taking it overtakes nobody waiting for the others.
-    """
-
-    def __init__(
-        self, capacity: int = 1, *, max_overtaken: int = 2, spool_budget_bytes: int = 0
-    ) -> None:
-        self._capacity = capacity
-        self._free = capacity
-        self._max_overtaken = max_overtaken
-        self._spool_budget_bytes = spool_budget_bytes
-        self._spooling: list[_CaptureWaiter] = []
-        self._waiting: list[_CaptureWaiter] = []
-        self._changed = threading.Condition()
-
-    def acquire(
-        self,
-        blocking: bool = True,
-        timeout: float | None = None,
-        *,
-        urgent: bool = False,
-        spool_bytes: int = 0,
-    ) -> _CaptureWaiter | None:
-        """Take a slot once this capture is next, or return ``None`` at the timeout.
-
-        The slot is what :meth:`release` takes back. ``spool_bytes`` is the
-        most this capture can spool at once.
-        """
-        waiter = _CaptureWaiter(urgent=urgent, spool_bytes=spool_bytes)
-        deadline = None if timeout is None else time.monotonic() + timeout
-        with self._changed:
-            self._waiting.append(waiter)
-            try:
-                while not self._admit(waiter):
-                    remaining = None if deadline is None else deadline - time.monotonic()
-                    if not blocking or (remaining is not None and remaining <= 0):
-                        return None
-                    self._changed.wait(remaining)
-                self._spooling.append(waiter)
-                return waiter
-            finally:
-                self._waiting.remove(waiter)
-                self._changed.notify_all()
-
-    def release(self, slot: _CaptureWaiter | None = None) -> None:
-        """Return ``slot``, or any shared one, as ``BoundedSemaphore`` does: never more than taken."""
-        with self._changed:
-            if slot is None:
-                slot = next((held for held in self._spooling if not held.beside), None)
-            if slot is None or slot not in self._spooling:
-                raise ValueError("capture gate released too many times")
-            self._spooling.remove(slot)
-            if not slot.beside:
-                self._free += 1
-            self._changed.notify_all()
-
-    def _admit(self, waiter: _CaptureWaiter) -> bool:
-        if self._free and self._next() is waiter:
-            self._free -= 1
-            for earlier in self._waiting[: self._waiting.index(waiter)]:
-                earlier.overtaken += 1
-            return True
-        if (
-            self._spool_budget_bytes > 0
-            and waiter.urgent
-            and waiter is next(each for each in self._waiting if each.urgent)
-            and not any(held.beside for held in self._spooling)
-            and sum(held.spool_bytes for held in self._spooling) + waiter.spool_bytes
-            <= self._spool_budget_bytes
-        ):
-            waiter.beside = True
-            return True
-        return False
-
-    def _next(self) -> _CaptureWaiter:
-        for waiter in self._waiting:
-            if waiter.overtaken >= self._max_overtaken:
-                return waiter
-        return next((waiter for waiter in self._waiting if waiter.urgent), self._waiting[0])
-
-
-@dataclass(eq=False)
-class _CaptureWaiter:
-    """One capture waiting for a slot, then holding it. Identity tells two apart."""
-
-    urgent: bool
-    spool_bytes: int = 0
-    overtaken: int = 0
-    #: Holds the urgent place beside the shared slots, not one of them.
-    beside: bool = False
-
-
 class SandboxArchiveService:
     """Capture immutable points and synchronously persist stopped sandboxes.
 
@@ -434,6 +336,7 @@ class SandboxArchiveService:
         operation_timeout_s: float = DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S,
         clock: Callable[[], float] = time.monotonic,
         checkpoint_capture: SandboxCheckpointCapture | None = None,
+        initial_uploads: InitialUploadSpool | None = None,
     ) -> None:
         if not namespace:
             raise ValueError("sandbox archive namespace must not be empty")
@@ -501,6 +404,7 @@ class SandboxArchiveService:
         self._closing = False
         self._closed = False
         self._checkpoint_capture = checkpoint_capture
+        self._initial_uploads = initial_uploads
         self._phase_counts = {
             "initial": {"pending": 0, "uploaded": 0, "failed": 0},
             "final": {"pending": 0, "uploaded": 0, "failed": 0},
@@ -595,8 +499,18 @@ class SandboxArchiveService:
         preparation_id: str,
         base_sha: str,
         members: Sequence[SharedMemberManifest],
+        marker_payload: object = _UNREAD,
+        defer_upload: bool = False,
     ) -> dict[str, object]:
-        """Build and synchronously store the one pre-prompt workspace baseline."""
+        """Build the one pre-prompt workspace baseline and store it.
+
+        ``marker_payload`` is the marker the caller already read from this
+        exact container inside the same frozen boundary, sparing a second
+        guest exec. With ``defer_upload`` and room in the hand-off spool, the
+        bundle is written there and this returns ``upload: pending`` once it
+        is durable and committed under the container's marker; the upload
+        follows in the background. Otherwise it is stored before returning.
+        """
         _validate_preparation_id(preparation_id)
         with self._capture("initial", urgent=True) as operation:
             deadline = operation.deadline
@@ -608,49 +522,29 @@ class SandboxArchiveService:
                 running=True,
                 deadline=deadline,
             )
-            existing_payload = self._manager.read_initial_archive_marker(
-                backend.spec,
-                expected_container_id=inspection.container_id,
-            )
-            existing = (
-                None
-                if existing_payload is None
-                else SandboxInitialArchiveMarker.decode(existing_payload)
-            )
-            if existing is not None and self._carried_by_checkpoint(existing, backend.spec):
-                # Generation that stopped's baseline, not one this container
-                # prepared. The marker is never overwritten, so it goes first.
-                assert existing_payload is not None
-                self._manager.delete_initial_archive_marker(
-                    backend.spec,
-                    existing_payload,
-                    expected_container_id=inspection.container_id,
-                )
-                existing = None
-            if existing is not None:
-                if (
-                    not existing.matches(
-                        namespace_sha256=self._namespace_sha256,
-                        spec=backend.spec,
-                        container_id=inspection.container_id,
-                        preparation_id=preparation_id,
-                        policy=self._policy,
-                    )
-                    or existing.base_sha != base_sha
-                ):
-                    raise SandboxError(
-                        "existing initial archive marker does not match this preparation"
-                    )
-                raise SandboxError("initial sandbox archive is already prepared and must be probed")
-            archive = self._build(
+            self._refuse_existing_initial(
                 backend.spec,
                 inspection,
-                phase="initial",
-                members=members,
+                self._marker_payload(backend.spec, inspection, marker_payload),
+                preparation_id=preparation_id,
                 base_sha=base_sha,
-                compression_level=INITIAL_ARCHIVE_COMPRESSION_LEVELS[0],
-                deadline=deadline,
             )
+            reservation = self._reserve_initial(backend.spec) if defer_upload else None
+            try:
+                archive = self._build(
+                    backend.spec,
+                    inspection,
+                    phase="initial",
+                    members=members,
+                    base_sha=base_sha,
+                    compression_level=INITIAL_ARCHIVE_COMPRESSION_LEVELS[0],
+                    deadline=deadline,
+                    stream=None if reservation is None else reservation.stream,
+                )
+            except BaseException:
+                if reservation is not None:
+                    self._discard_initial(reservation)
+                raise
             try:
                 marker = SandboxInitialArchiveMarker(
                     namespace_sha256=self._namespace_sha256,
@@ -663,6 +557,12 @@ class SandboxArchiveService:
                     bundle_size_bytes=archive.size,
                     bundle_sha256=archive.sha256,
                 )
+                if reservation is not None:
+                    pending = self._hand_off_initial(backend.spec, inspection, reservation, marker)
+                    reservation = None
+                    # Neither stored nor failed yet: the background upload counts it.
+                    operation.outcome = None
+                    return pending
                 self._manager.write_initial_archive_marker(
                     backend.spec,
                     marker.encode(),
@@ -679,6 +579,174 @@ class SandboxArchiveService:
                 return receipt
             finally:
                 archive.close()
+                if reservation is not None:
+                    self._discard_initial(reservation)
+
+    def _marker_payload(
+        self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection, payload: object
+    ) -> bytes | None:
+        """The container's initial marker: as the caller read it, or read now."""
+        if payload is _UNREAD:
+            return self._manager.read_initial_archive_marker(
+                spec, expected_container_id=inspection.container_id
+            )
+        if payload is not None and not isinstance(payload, bytes):
+            raise TypeError("initial archive marker payload must be bytes or None")
+        return payload
+
+    def _refuse_existing_initial(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        payload: bytes | None,
+        *,
+        preparation_id: str,
+        base_sha: str,
+    ) -> None:
+        """Clear a checkpoint's carried marker; refuse a capture over any other."""
+        existing = None if payload is None else SandboxInitialArchiveMarker.decode(payload)
+        if existing is None:
+            return
+        if self._carried_by_checkpoint(existing, spec):
+            # Generation that stopped's baseline, not one this container
+            # prepared. The marker is never overwritten, so it goes first.
+            assert payload is not None
+            self._manager.delete_initial_archive_marker(
+                spec, payload, expected_container_id=inspection.container_id
+            )
+            return
+        if (
+            not existing.matches(
+                namespace_sha256=self._namespace_sha256,
+                spec=spec,
+                container_id=inspection.container_id,
+                preparation_id=preparation_id,
+                policy=self._policy,
+            )
+            or existing.base_sha != base_sha
+        ):
+            raise SandboxError("existing initial archive marker does not match this preparation")
+        raise SandboxError("initial sandbox archive is already prepared and must be probed")
+
+    def _reserve_initial(self, spec: ChatSandboxSpec) -> InitialUploadReservation | None:
+        """Scratch space in the hand-off spool, or ``None`` to store synchronously."""
+        spool = self._initial_uploads
+        if spool is None:
+            return None
+        entry_id = spool.entry_id(
+            namespace_sha256=self._namespace_sha256,
+            sandbox_id=spec.sandbox_id,
+            generation=spec.generation,
+        )
+        return spool.reserve(entry_id, self._config.max_archive_bytes)
+
+    def _discard_initial(self, handoff: InitialUploadReservation | SpooledInitialUpload) -> None:
+        assert self._initial_uploads is not None
+        self._initial_uploads.discard(handoff)
+
+    def _hand_off_initial(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        reservation: InitialUploadReservation,
+        marker: SandboxInitialArchiveMarker,
+    ) -> dict[str, object]:
+        """Publish the bundle durably, write the marker naming it, then commit it.
+
+        Publishing goes first, so a marker never names bytes this host could
+        lose. Until the commit, a failure leaves the supervisor's frozen-writer
+        rules to keep the workspace for a probe's rebuild, exactly as when a
+        synchronous upload fails; the published entry is dropped.
+        """
+        assert self._initial_uploads is not None
+        encoded = marker.encode()
+        # A publish that fails leaves only the reservation, which the caller drops.
+        entry = self._initial_uploads.publish(
+            reservation, marker=encoded, size=marker.bundle_size_bytes
+        )
+        try:
+            self._manager.write_initial_archive_marker(
+                spec, encoded, expected_container_id=inspection.container_id
+            )
+            self._initial_uploads.commit(entry)
+        except BaseException:
+            self._discard_initial(entry)
+            raise
+        return {
+            "enabled": True,
+            "stored": False,
+            "upload": "pending",
+            "size_bytes": marker.bundle_size_bytes,
+            "sha256": marker.bundle_sha256,
+        }
+
+    def upload_spooled_initial(self, entry: SpooledInitialUpload) -> dict[str, object] | None:
+        """Store one committed hand-off's exact bundle, off any request, then forget it.
+
+        ``None`` when there is nothing left to store: a probe stored it first,
+        or the bundle lost its marked bytes (logged by the spool).
+        """
+        spool = self._initial_uploads
+        if spool is None:
+            raise SandboxError("initial archive hand-off is not configured")
+        marker = SandboxInitialArchiveMarker.decode(entry.marker)
+        if marker.namespace_sha256 != self._namespace_sha256 or marker.policy != self._policy:
+            raise SandboxError("initial archive hand-off belongs to another archive service")
+        self._admit_capture("initial")
+        outcome: bool | None = False
+        try:
+            receipt = self._upload_spooled(spool, entry, marker, deadline=self._new_deadline())
+            outcome = None if receipt is None else True
+        finally:
+            self._finish_capture("initial", uploaded=outcome)
+        if receipt is None:
+            return None
+        logger.info(
+            "deferred initial sandbox archive uploaded",
+            extra={
+                "event": "sandbox_initial_archive_uploaded",
+                "deferred": True,
+                "archive_sha256": marker.bundle_sha256,
+                "archive_size_bytes": marker.bundle_size_bytes,
+            },
+        )
+        return receipt
+
+    def _upload_spooled(
+        self,
+        spool: InitialUploadSpool,
+        entry: SpooledInitialUpload,
+        marker: SandboxInitialArchiveMarker,
+        *,
+        deadline: float,
+    ) -> dict[str, object] | None:
+        """Upload a hand-off's bundle, then remove it.
+
+        ``None`` if another uploader here already removed it, or it lost the
+        marked bytes and was dropped.
+        """
+        with spool.claim(entry.entry_id, timeout=self._remaining(deadline)):
+            if spool.find(entry.entry_id, entry.marker) is None:
+                return None
+            stream = spool.open_bundle(
+                entry, size=marker.bundle_size_bytes, sha256=marker.bundle_sha256
+            )
+            if stream is None:
+                return None
+            archive = _BuiltArchive(
+                stream=stream, size=marker.bundle_size_bytes, sha256=marker.bundle_sha256
+            )
+            try:
+                receipt = self._upload_initial(
+                    sandbox_id=marker.sandbox_id,
+                    generation=marker.generation,
+                    archive=archive,
+                    deadline=deadline,
+                )
+            finally:
+                archive.close()
+            spool.remove(entry)
+        return receipt
 
     def probe_initial(
         self,
@@ -687,13 +755,17 @@ class SandboxArchiveService:
         expected_container_id: str,
         preparation_id: str,
         members: Sequence[SharedMemberManifest],
+        marker_payload: object = _UNREAD,
     ) -> dict[str, object]:
         """Resolve a prior prepared baseline without reading its S3 body.
 
-        An authoritative exact-key 404 rebuilds the frozen prepared state and
-        retries only if its bytes still exactly match the durable marker. Every
-        identity mismatch, drift, or other HEAD failure stops the activation
-        before the runner can reset the existing workspace.
+        An authoritative exact-key 404 uploads the bytes the marker names:
+        from this host's hand-off when the capture deferred its upload, else
+        by rebuilding the frozen prepared state, retried only if its bytes
+        still exactly match the durable marker. Every identity mismatch,
+        drift, or other HEAD failure stops the activation before the runner
+        can reset the existing workspace. ``marker_payload`` is as for
+        :meth:`capture_initial`.
         """
         _validate_preparation_id(preparation_id)
         with self._capture("initial", urgent=True) as operation:
@@ -706,10 +778,7 @@ class SandboxArchiveService:
                 running=True,
                 deadline=deadline,
             )
-            payload = self._manager.read_initial_archive_marker(
-                backend.spec,
-                expected_container_id=inspection.container_id,
-            )
+            payload = self._marker_payload(backend.spec, inspection, marker_payload)
             self._check_deadline(deadline)
             if payload is None:
                 operation.outcome = None
@@ -738,65 +807,104 @@ class SandboxArchiveService:
                 or marker.bundle_size_bytes > self._config.max_archive_bytes
             ):
                 raise SandboxError("initial archive marker does not match this preparation")
-            try:
-                stored = self._uploader.initial_exists(
-                    namespace=self._namespace,
-                    sandbox_id=backend.spec.sandbox_id,
-                    generation=backend.spec.generation,
-                    size=marker.bundle_size_bytes,
-                    sha256=marker.bundle_sha256,
-                    deadline=deadline,
-                )
-                self._check_deadline(deadline)
-            except Exception as exc:
-                if isinstance(exc, SandboxArchiveDeadlineExceeded):
-                    raise SandboxError("initial sandbox archive probe timed out") from exc
-                try:
-                    self._check_deadline(deadline)
-                except SandboxError:
-                    raise SandboxError("initial sandbox archive probe timed out") from exc
-                raise SandboxError("initial sandbox archive status could not be verified") from exc
-            if stored:
+            identity = {
+                "prepared": True,
+                "stored": True,
+                "base_sha": marker.base_sha,
+                "size_bytes": marker.bundle_size_bytes,
+                "sha256": marker.bundle_sha256,
+            }
+            if self._initial_stored(backend.spec, marker, deadline=deadline):
                 operation.outcome = None
-                return {
-                    "enabled": True,
-                    "prepared": True,
-                    "stored": True,
-                    "base_sha": marker.base_sha,
-                    "size_bytes": marker.bundle_size_bytes,
-                    "sha256": marker.bundle_sha256,
-                }
-            # A timed-out conditional write can still commit after HEAD returns
-            # 404. Never delete the marker and rerun a potentially non-idempotent
-            # setup. Rebuild while the supervisor holds the writer freeze, then
-            # retry only the exact immutable bytes named by the marker. Either
-            # racing conditional writer may win; the other can reconcile its
-            # 412 only when the same metadata is present.
-            archive = self._rebuild_initial(
-                backend.spec,
-                inspection,
-                marker,
-                members=members,
+                return {"enabled": True, **identity}
+            receipt = self._store_marked_initial(
+                backend.spec, inspection, payload, marker, members=members, deadline=deadline
+            )
+            operation.outcome = True
+            return {**receipt, **identity}
+
+    def _initial_stored(
+        self, spec: ChatSandboxSpec, marker: SandboxInitialArchiveMarker, *, deadline: float
+    ) -> bool:
+        """Whether S3 holds exactly the marked object; any doubt fails the probe."""
+        try:
+            stored = self._uploader.initial_exists(
+                namespace=self._namespace,
+                sandbox_id=spec.sandbox_id,
+                generation=spec.generation,
+                size=marker.bundle_size_bytes,
+                sha256=marker.bundle_sha256,
                 deadline=deadline,
             )
+            self._check_deadline(deadline)
+        except Exception as exc:
+            if isinstance(exc, SandboxArchiveDeadlineExceeded):
+                raise SandboxError("initial sandbox archive probe timed out") from exc
             try:
-                receipt = self._upload_initial(
-                    sandbox_id=backend.spec.sandbox_id,
-                    generation=backend.spec.generation,
-                    archive=archive,
-                    deadline=deadline,
-                )
-                operation.outcome = True
-                return {
-                    **receipt,
-                    "prepared": True,
-                    "stored": True,
-                    "base_sha": marker.base_sha,
-                    "size_bytes": marker.bundle_size_bytes,
-                    "sha256": marker.bundle_sha256,
-                }
-            finally:
-                archive.close()
+                self._check_deadline(deadline)
+            except SandboxError:
+                raise SandboxError("initial sandbox archive probe timed out") from exc
+            raise SandboxError("initial sandbox archive status could not be verified") from exc
+        return stored
+
+    def _store_marked_initial(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        payload: bytes,
+        marker: SandboxInitialArchiveMarker,
+        *,
+        members: Sequence[SharedMemberManifest],
+        deadline: float,
+    ) -> dict[str, object]:
+        """Upload the bytes ``marker`` names, which S3 does not hold.
+
+        A deferred capture's hand-off holds them: once its prompt ran, the
+        workspace no longer does. Without one, a timed-out conditional write
+        can still commit after HEAD returns 404. Never delete the marker and
+        rerun a potentially non-idempotent setup. Rebuild while the supervisor
+        holds the writer freeze, then retry only the exact immutable bytes
+        named by the marker. Either racing conditional writer may win; the
+        other can reconcile its 412 only when the same metadata is present.
+        """
+        spool = self._initial_uploads
+        entry = (
+            None
+            if spool is None
+            else spool.find(
+                spool.entry_id(
+                    namespace_sha256=self._namespace_sha256,
+                    sandbox_id=spec.sandbox_id,
+                    generation=spec.generation,
+                ),
+                payload,
+            )
+        )
+        if entry is not None:
+            assert spool is not None
+            receipt = self._upload_spooled(spool, entry, marker, deadline=deadline)
+            if receipt is not None:
+                return receipt
+            # The background upload stored it while this waited, or the bundle
+            # lost its bytes; only S3 can say which.
+            if self._initial_stored(spec, marker, deadline=deadline):
+                return {"enabled": True, "stored": True, "already_exists": True}
+        archive = self._rebuild_initial(
+            spec,
+            inspection,
+            marker,
+            members=members,
+            deadline=deadline,
+        )
+        try:
+            return self._upload_initial(
+                sandbox_id=spec.sandbox_id,
+                generation=spec.generation,
+                archive=archive,
+                deadline=deadline,
+            )
+        finally:
+            archive.close()
 
     def queue_final(
         self,
@@ -980,7 +1088,7 @@ class SandboxArchiveService:
             generation=spec.generation,
         )
 
-    def _acquire_capture_slot(self, deadline: float, *, urgent: bool = False) -> _CaptureWaiter:
+    def _acquire_capture_slot(self, deadline: float, *, urgent: bool = False) -> CaptureWaiter:
         """Backpressure before Docker copy, then fence a concurrent close."""
         self._require_accepting()
         # At peak a build holds its input streams and its bundle, each up to
@@ -1032,6 +1140,7 @@ class SandboxArchiveService:
         base_sha: str | None,
         compression_level: int,
         deadline: float,
+        stream: BinaryIO | None = None,
     ) -> _BuiltArchive:
         with self._spool(
             spec,
@@ -1046,6 +1155,7 @@ class SandboxArchiveService:
                 phase=phase,
                 compression_level=compression_level,
                 deadline=deadline,
+                stream=stream,
             )
 
     def _rebuild_initial(
@@ -1161,19 +1271,21 @@ class SandboxArchiveService:
         compression_level: int,
         deadline: float,
         rebuild: bool = False,
+        stream: BinaryIO | None = None,
     ) -> _BuiltArchive:
-        """Write one bundle from ``spooled`` to new scratch space.
+        """Write one bundle from ``spooled`` to ``stream`` or new scratch space.
 
         The bundle is bounded by the object ceiling. For a ``rebuild``,
         outgrowing it raises :class:`_RebuildTooLarge` instead.
         """
         self._check_deadline(deadline)
-        stream = cast(
-            "BinaryIO",
-            tempfile.TemporaryFile(  # noqa: SIM115 - ownership passes to queue/uploader.
-                prefix=f"sandbox-{phase}-archive-"
-            ),
-        )
+        if stream is None:
+            stream = cast(
+                "BinaryIO",
+                tempfile.TemporaryFile(  # noqa: SIM115 - ownership passes to queue/uploader.
+                    prefix=f"sandbox-{phase}-archive-"
+                ),
+            )
         maximum = self._config.max_archive_bytes
         writer = _RebuildWriter if rebuild else BoundedDigestWriter
         bounded = writer(
@@ -1360,6 +1472,7 @@ def _validate_preparation_id(value: str) -> None:
 
 __all__ = [
     "DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S",
+    "CaptureGate",
     "SandboxArchiveService",
     "SandboxInitialArchiveMarker",
     "check_marker_identity",

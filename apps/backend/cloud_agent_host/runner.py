@@ -2447,11 +2447,13 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
 
         imported_base: str | None = None
         recovered_initial = False
-        if not has_context:
+        if not has_context and container_action != "create":
             # A previous activation may have committed the immutable S3
             # baseline and then died before returning its receipt. Resolve
             # that durable marker before reset, setup, permissions, or uploads
-            # can alter the exact prepared bytes it names.
+            # can alter the exact prepared bytes it names. A container this
+            # acquire created holds no marker it wrote, so none to resolve: the
+            # capture clears one a checkpoint carried and refuses any other.
             stage = _stage(measurement, "initial_archive_status")
             initial_status = supervisor.initial_archive_status(
                 spec,
@@ -2596,12 +2598,15 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                 expected_container_id=str(lease["container_id"]),
                 preparation_id=job.job_id,
                 base_sha=base_sha,
+                # The bundle durable on the host fixes the bytes; S3 can follow.
+                defer_upload=True,
             )
             archive_enabled = initial_archive.get("enabled")
             archive_stored = initial_archive.get("stored")
+            pending = archive_stored is False and initial_archive.get("upload") == "pending"
             if not (
-                (archive_enabled is False and archive_stored is False)
-                or (archive_enabled is True and archive_stored is True)
+                (archive_enabled is False and archive_stored is False and not pending)
+                or (archive_enabled is True and (archive_stored is True or pending))
             ):
                 raise SandboxError("sandbox manager returned an invalid initial archive receipt")
             control.append_event(
@@ -2611,6 +2616,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                         "phase": "initial_archive",
                         "enabled": archive_enabled,
                         "stored": archive_stored,
+                        **({"upload": "pending"} if pending else {}),
                     },
                 )
             )

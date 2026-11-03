@@ -35,7 +35,6 @@ from cloud_agent_host.sandbox_archives import (
     CaptureGate,
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
-    _CaptureWaiter,
 )
 from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
@@ -43,6 +42,8 @@ from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cloud_agent_host.sandbox_capture_gate import CaptureWaiter
 
 _ACCOUNT = "123456789012"
 _REGION = "us-east-1"
@@ -286,7 +287,7 @@ class _ContendedSlot(CaptureGate):
         *,
         urgent: bool = False,
         spool_bytes: int = 0,
-    ) -> _CaptureWaiter | None:
+    ) -> CaptureWaiter | None:
         self.urgent.append(urgent)
         slot = super().acquire(blocking=False, urgent=urgent, spool_bytes=spool_bytes)
         if slot is not None or not blocking:
