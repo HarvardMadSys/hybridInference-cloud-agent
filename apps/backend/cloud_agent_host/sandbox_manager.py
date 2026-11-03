@@ -89,6 +89,7 @@ from cloud_agent_host.sandbox_deletion_backup import (
     ArchiveIdentity,
     SandboxDeletionBackupService,
 )
+from cloud_agent_host.sandbox_initial_uploads import INITIAL_UPLOAD_DIRNAME
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
@@ -610,6 +611,9 @@ class SharedInitialArchiveRequest(SharedSandboxIdentityRequest):
     token: str = Field(..., min_length=1, max_length=512)
     preparation_id: str = Field(..., min_length=1, max_length=256)
     base_sha: str = Field(..., min_length=7, max_length=64)
+    #: Return once the bundle is durable on this host (``upload: pending``) and
+    #: upload it after. An older runner omits it and waits for the upload.
+    defer_upload: bool = False
 
 
 class SharedInitialArchiveStatusRequest(SharedSandboxIdentityRequest):
@@ -1511,6 +1515,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             retained_manager,
             namespace=retained_manager.backend.sandbox_namespace,
             checkpoint_capture=checkpoint_capture,
+            initial_upload_dir=state_dir / INITIAL_UPLOAD_DIRNAME,
         )
     archive_boundary = archive_service or archive_controller
     if shared_supervisor is None:
@@ -2319,6 +2324,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                     preparation_id=body.preparation_id,
                     base_sha=body.base_sha,
                     members=members,
+                    defer_upload=body.defer_upload,
                 ),
             )
         except (SandboxError, ValueError) as exc:
