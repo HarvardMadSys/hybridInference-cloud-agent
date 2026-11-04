@@ -13,7 +13,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/components/providers';
-import { basePath } from '@/config/env';
 import { safeReturnTo } from '@/lib/auth/signin';
 
 /**
@@ -60,7 +59,7 @@ export function ProtectedRoute({
     // layout, and pushing it would mount the login page inside the shell that
     // is still deciding nobody is signed in.
     const query = new URLSearchParams({ return_to: returnTo });
-    window.location.assign(`${basePath}/login?${query.toString()}`);
+    window.location.assign(`/login?${query.toString()}`);
   }, [state.loading, state.error, state.isAuthenticated, signedOut]);
 
   if (state.error) {

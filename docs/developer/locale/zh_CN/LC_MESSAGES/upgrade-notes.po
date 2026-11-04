@@ -154,6 +154,22 @@ msgid ""
 msgstr ""
 "`ADMIN_TOKEN` 现在是可选的：新部署的第一位管理员用一次性设置码登录。已有的部署可以留着它当后门。`deploy.sh` 现在会为全新安装生成数据库密码和 DSN、账号密钥和设置的根密钥。已经有值的绝不替换，有 `AGENT_SESSION_SECRET` 时绝不再加一把设置密钥；如果部署根目录以前部署过，缺了必填值时它会停下来并列出缺的是哪几项，而不是替你生成。"
 
+#: ../developer/upgrade-notes.md:58
+msgid ""
+"The web app is now served only at the root of its own hostname, with the "
+"API at `/api` on the same origin; mounting it under a path prefix such as"
+" `/agents` inside another site was removed, and releases no longer carry "
+"the `web-agents` image. Delete `AGENT_WEB_BASE_PATH`, `AGENT_WEB_API_URL`"
+" and `AGENT_DEPLOYMENT_SHA` from the control plane's `.env` (`deploy.sh` "
+"exports the commit it deploys). An empty `AGENT_WEB_BASE_PATH` is "
+"harmless; one with a value stops `deploy.sh` and the release deployer, "
+"since it would now be ignored. `AGENT_NETWORK_NAME` can go too unless "
+"another stack's reverse proxy joins the network by a name other than "
+"`cloud-agent`. A distribution that resolves releases must accept one "
+"without the `/agents` web image before deploying it."
+msgstr ""
+"Web 应用现在只挂在自己主机名的根路径下，API 在同源的 `/api`；把它挂在别的网站某个路径前缀（比如 `/agents`）下的做法已经去掉了，发版里也不再带 `web-agents` 镜像。控制平面 `.env` 里的 `AGENT_WEB_BASE_PATH`、`AGENT_WEB_API_URL` 和 `AGENT_DEPLOYMENT_SHA` 可以删掉（`deploy.sh` 会自己导出要部署的提交）。`AGENT_WEB_BASE_PATH` 留空没有影响；如果还有值，`deploy.sh` 和发版部署脚本会停下来，因为这个值现在已经不起作用了。`AGENT_NETWORK_NAME` 也可以删，除非另一套服务的反向代理是用 `cloud-agent` 以外的名字加入这个网络的。负责解析发版的发行版，要先改成接受没有 `/agents` Web 镜像的发版，才能部署它。"
+
 #: ../developer/upgrade-notes.md:48
 msgid "Four values moved into Admin in this release:"
 msgstr "本次发布有四个值搬进了 Admin："

@@ -17,7 +17,6 @@ import {
   type OwnerProof,
 } from '@/lib/api/accountSelf';
 import { announceSession } from '@/lib/auth/sessionSync';
-import { basePath } from '@/config/env';
 import { getErrorMessage } from '@/lib/utils/errors';
 import { AccountField, AccountNotice } from './AccountFrame';
 import { NewPasswordFields } from './NewPasswordFields';
@@ -294,7 +293,7 @@ function DeleteSection({
     void run(async () => {
       await deleteOwnAccount(confirm.trim(), proof);
       announceSession(null);
-      window.location.assign(`${basePath}/login`);
+      window.location.assign('/login');
       return null;
     });
   }

@@ -157,14 +157,14 @@ AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
 On its first start the control plane creates its settings with a random host
 signing key and user and compute credential encryption keys, and logs a
 one-time setup code (`agent_local_setup_pending`). Create the first
-administrator at `<web base path>/setup/administrator` with that code, sign
+administrator at `/setup/administrator` with that code, sign
 in, and complete the remaining required settings in Admin → Settings: the
 public web address and the sandbox manager credential your hosts share. Then
 enroll hosts and run the usual deployment command.
 Optional integrations need setup only when their configuration has been started.
 The shared-live deployment gate continues to require qualified host readiness.
 
-`<web base path>/setup` is the recovery door when no administrator can sign in.
+`/setup` is the recovery door when no administrator can sign in.
 It needs `ADMIN_TOKEN`, which a deployment sets only when it wants that door.
 The route is outside the sign-in guard. It uses the ordinary administrator API
 and audit trail; unauthenticated visitors cannot read or change settings.
@@ -939,9 +939,8 @@ Discovery stores a capability snapshot. Templates prefill the form; they do
 not define a deployment-wide registry or server catalogue.
 
 MCP OAuth uses `AGENT_MCP_PUBLIC_BASE_URL` for the public API callback and
-`AGENT_WEB_BASE_URL` for the browser's return to `/integrations`. For a shared
-hostname deployment these can be `https://example.com/agents/api` and
-`https://example.com/agents` respectively. The page reports the authorization
+`AGENT_WEB_BASE_URL` for the browser's return to `/integrations`, for example
+`https://agents.example.org/api` and `https://agents.example.org`. The page reports the authorization
 result, verifies a stored credential before showing success, and directs the
 user to Test to discover the connection's tools.
 
@@ -1366,8 +1365,7 @@ AGENT_GITHUB_APP_INSTALL_URL=https://github.com/apps/<app-slug>/installations/ne
 ```
 
 Set the callback to the **agent web's own origin**, where the callback page and
-session cookie live. For a web build with a base path, use
-`<origin><basePath>/connected?provider=github`. The authorize link sends no
+session cookie live. The authorize link sends no
 `redirect_uri`, so GitHub uses the App's first Callback URL. Update that setting
 whenever the web origin moves.
 

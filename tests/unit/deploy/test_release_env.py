@@ -38,12 +38,6 @@ def manifest() -> dict[str, Any]:
         "artifacts": [
             {"role": "control", "image": image("control")},
             {"role": "web", "variant": "root", "base_path": "", "image": image("web", "root")},
-            {
-                "role": "web",
-                "variant": "agents",
-                "base_path": "/agents",
-                "image": image("web", "agents"),
-            },
             {"role": "runner", "image": image("runner")},
             {"role": "sandbox", "image": image("sandbox")},
             {"role": "tunnel", "image": image("tunnel")},
@@ -67,13 +61,6 @@ def full_manifest() -> dict[str, Any]:
             "variant": "root",
             "base_path": "",
             "image": image("web", "root"),
-            "platforms": ["linux/arm64"],
-        },
-        {
-            "role": "web",
-            "variant": "agents",
-            "base_path": "/agents",
-            "image": image("web", "agents"),
             "platforms": ["linux/arm64"],
         },
     ]
@@ -182,12 +169,12 @@ def test_the_fragment_reaches_a_child_process_and_a_host_conflict_is_refused(
 
 
 def test_the_control_stack_takes_images_and_the_commit_from_the_release() -> None:
-    environment = re_.environment_for(manifest(), "control-plane", "agents", ambient={})
+    environment = re_.environment_for(manifest(), "control-plane", "root", ambient={})
     assert environment["AGENT_CONTROL_IMAGE"] == image("control")
-    assert environment["AGENT_WEB_IMAGE"] == image("web", "agents")
+    assert environment["AGENT_WEB_IMAGE"] == image("web", "root")
     assert environment["AGENT_DEPLOYMENT_SHA"] == COMMIT
-    assert environment["AGENT_WEB_VARIANT"] == "agents"
-    assert environment["AGENT_WEB_BASE_PATH"] == '"/agents"'
+    assert environment["AGENT_WEB_VARIANT"] == "root"
+    assert "AGENT_WEB_BASE_PATH" not in environment
 
 
 def test_the_host_stack_takes_the_sandbox_image_too() -> None:
@@ -200,10 +187,16 @@ def test_the_host_stack_takes_the_sandbox_image_too() -> None:
     assert "AGENT_WEB_IMAGE" not in environment, "a host stack runs no console"
 
 
-def test_the_variant_decides_which_console_image_is_deployed() -> None:
-    root = re_.environment_for(manifest(), "control-plane", "root", ambient={})
+def test_an_older_release_with_the_agents_image_deploys_its_root_image() -> None:
+    """Releases before sub-path mounting was removed also carry `/agents`."""
+    document = manifest()
+    document["artifacts"].append(
+        {"role": "web", "variant": "agents", "base_path": "/agents", "image": image("web", "agents")}
+    )
+    root = re_.environment_for(document, "control-plane", "root", ambient={})
     assert root["AGENT_WEB_IMAGE"] == image("web", "root")
-    assert root["AGENT_WEB_BASE_PATH"] == '""'
+    with pytest.raises(SystemExit):
+        re_.main(["--manifest", "x", "--stack", "control-plane", "--variant", "agents"])
 
 
 @pytest.mark.parametrize(
@@ -211,7 +204,7 @@ def test_the_variant_decides_which_console_image_is_deployed() -> None:
     [
         ("AGENT_CONTROL_IMAGE", "ghcr.io/harvardmadsys/cloud-agent@sha256:" + "a" * 64),
         ("AGENT_DEPLOYMENT_SHA", "0" * 40),
-        ("AGENT_WEB_BASE_PATH", "/somewhere-else"),
+        ("AGENT_WEB_VARIANT", "agents"),
     ],
 )
 def test_a_host_that_disagrees_with_the_release_is_refused(key: str, value: str) -> None:
@@ -222,7 +215,7 @@ def test_a_host_that_disagrees_with_the_release_is_refused(key: str, value: str)
     reviewed.
     """
     with pytest.raises(re_.ReleaseEnvError) as raised:
-        re_.environment_for(manifest(), "control-plane", "agents", ambient={key: value})
+        re_.environment_for(manifest(), "control-plane", "root", ambient={key: value})
     assert key in str(raised.value)
 
 
@@ -243,7 +236,7 @@ def test_the_resolved_value_answers_the_check_not_the_ambient_one(
         re_.environment_for(
             manifest(),
             "control-plane",
-            "agents",
+            "root",
             ambient={"AGENT_DEPLOYMENT_SHA": COMMIT},
         )["AGENT_DEPLOYMENT_SHA"]
         == COMMIT
@@ -254,16 +247,16 @@ def test_the_resolved_value_answers_the_check_not_the_ambient_one(
         re_.environment_for(
             manifest(),
             "control-plane",
-            "agents",
+            "root",
             ambient={"AGENT_DEPLOYMENT_SHA": "b" * 40},
         )
 
 
 def test_an_agreeing_host_environment_is_fine() -> None:
     """Idempotence matters: a re-run sources the file it wrote last time."""
-    first = re_.environment_for(manifest(), "control-plane", "agents", ambient={})
+    first = re_.environment_for(manifest(), "control-plane", "root", ambient={})
     ambient = {k: v.strip('"') for k, v in first.items()}
-    assert re_.environment_for(manifest(), "control-plane", "agents", ambient=ambient) == first
+    assert re_.environment_for(manifest(), "control-plane", "root", ambient=ambient) == first
 
 
 @pytest.mark.parametrize(
@@ -280,37 +273,37 @@ def test_an_agreeing_host_environment_is_fine() -> None:
         pytest.param(
             lambda m: m["artifacts"][0].update(image="ghcr.io/harvardmadsys/cloud-agent:latest"),
             "control-plane",
-            "agents",
+            "root",
             id="a tag instead of a digest",
         ),
         pytest.param(
             lambda m: m.update(source_commit="cba9a47"),
             "control-plane",
-            "agents",
+            "root",
             id="a short commit",
         ),
         pytest.param(
             lambda m: m.update(source_commit=COMMIT + "\n"),
             "control-plane",
-            "agents",
+            "root",
             id="a commit with a trailing newline",
         ),
         pytest.param(
             lambda m: m["artifacts"][0].update(image=image("control") + "\n"),
             "control-plane",
-            "agents",
+            "root",
             id="an image with a trailing newline",
         ),
         pytest.param(
             lambda m: m["artifacts"].append(dict(m["artifacts"][0])),
             "control-plane",
-            "agents",
+            "root",
             id="a role twice",
         ),
         pytest.param(
-            lambda m: m["artifacts"][2].update(base_path="/elsewhere"),
+            lambda m: m["artifacts"][1].update(base_path="/elsewhere"),
             "control-plane",
-            "agents",
+            "root",
             id="a base path no deployment serves",
         ),
     ],
@@ -340,13 +333,13 @@ def test_a_variant_and_a_base_path_must_agree() -> None:
 
     Caught here because this is the code that acts on it, and stated in the
     manifest schema as well. A helper that checked each half on its own accepted
-    `agents` with an empty base path.
+    `root` with a retired base path.
     """
     document = manifest()
-    agents = next(a for a in document["artifacts"] if a.get("variant") == "agents")
-    agents["base_path"] = ""
+    root = next(a for a in document["artifacts"] if a.get("variant") == "root")
+    root["base_path"] = "/agents"
     with pytest.raises(re_.ReleaseEnvError) as raised:
-        re_.environment_for(document, "control-plane", "agents", ambient={})
+        re_.environment_for(document, "control-plane", "root", ambient={})
     assert "base path" in str(raised.value)
 
 
@@ -362,7 +355,7 @@ def test_the_cli_writes_a_file_and_refuses_a_bad_manifest(tmp_path: Path) -> Non
                 "--stack",
                 "control-plane",
                 "--variant",
-                "agents",
+                "root",
                 "--output",
                 str(output),
             ]
@@ -383,7 +376,7 @@ def test_the_cli_writes_a_file_and_refuses_a_bad_manifest(tmp_path: Path) -> Non
                 "--stack",
                 "control-plane",
                 "--variant",
-                "agents",
+                "root",
                 "--output",
                 str(missing),
             ]

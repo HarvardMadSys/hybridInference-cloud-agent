@@ -1,4 +1,4 @@
-import { basePath, config } from '@/config/env';
+import { config } from '@/config/env';
 import { fetchWithAuth, jsonOrThrow } from './client';
 
 const TEAMS = '/v1/agent/teams';
@@ -251,5 +251,5 @@ export async function listOwnJoinRequests(signal?: AbortSignal): Promise<OwnJoin
  * not send to any server, so it never reaches request logs or a referrer.
  */
 export function invitationLink(token: string, origin = window.location.origin): string {
-  return `${origin}${basePath}/teams/join#token=${encodeURIComponent(token)}`;
+  return `${origin}/teams/join#token=${encodeURIComponent(token)}`;
 }

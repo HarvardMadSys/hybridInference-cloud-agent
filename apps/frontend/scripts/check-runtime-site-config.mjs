@@ -9,21 +9,18 @@
 // see it is to boot the built server. A suite that imported the layout would
 // pass against a build-time read exactly as happily as a runtime one.
 //
-// Two variants are built, because they are two images and the paths differ:
-//
-//   web-root    basePath ""        browser API /api         (own hostname)
-//   web-agents  basePath "/agents" browser API /agents/api  (shared hostname)
+// The web images come from the release catalog; there is one, `web-root`,
+// served at the root of its hostname with the browser API at /api.
 //
 // For each variant, and each of two configured deployments, this checks:
 //
-//   1. the document is served at the variant's own path, and not at a bare
-//      path when the variant is mounted under a prefix;
+//   1. the document is served at the variant's own path;
 //   2. `<title>` and the rendered `<h1>` are the *configured* name — the body,
 //      not only the head, so a document that merely echoes its own <title>
 //      cannot pass;
-//   3. the asset URLs carry the variant's prefix, which is what a wrongly
-//      built variant gets wrong (the sign-in form itself renders in the
-//      browser, so the document carries no link of its own to check);
+//   3. the asset URLs are the build's own `/_next/static/` paths (the sign-in
+//      form itself renders in the browser, so the document carries no link of
+//      its own to check);
 //   4. every configured identity value — name, organisation, organisation
 //      URL, status URL — reaches the document, and the retired Gateway link
 //      and docs-assistant switch reach nothing;
@@ -55,8 +52,8 @@
 //      last valid appearance, with successful edits still visible on recovery.
 //  13. every document carries the security headers, its mount point included,
 //      and every script in it is one its Content-Security-Policy allows: the
-//      policy comes from middleware whose matcher is relative to `basePath`,
-//      so a page the matcher misses is only visible in a served build. A
+//      policy comes from middleware, so a page its matcher misses is only
+//      visible in a served build. A
 //      static script is served with the `next.config.js` headers too, and no
 //      response sends `X-Powered-By`.
 //

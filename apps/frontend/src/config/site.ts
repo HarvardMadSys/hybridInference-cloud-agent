@@ -1,8 +1,8 @@
 // Deployment site identity, resolved from the environment at request time.
 //
-// The build-time half of the configuration stays in `env.ts`: `basePath` and
-// the browser's API prefix are properties of the *image variant*, and Next
-// resolves them while the bundle is compiled. Everything here is the opposite
+// The build-time half of the configuration stays in `env.ts`: the browser's
+// API prefix is a property of the *image*, and Next resolves it while the
+// bundle is compiled. Everything here is the opposite
 // — a name, an organisation, a status page — and those
 // are properties of a *deployment*, not of a build. A deployment that changes
 // its product name must not have to rebuild the same image.

@@ -427,6 +427,11 @@ ensure_first_install_keys() {
 # Abandoning an attempt changes no configuration.
 [ "${PHASE}" = abandon ] || ensure_first_install_keys
 
+# The web app is served at the root of its hostname. A value left from when it
+# could be mounted under a prefix would now be ignored without a word.
+[ -z "$(deployment_value AGENT_WEB_BASE_PATH)" ] \
+  || die "AGENT_WEB_BASE_PATH is set, but mounting the web app under a path prefix was removed; serve it on its own hostname and delete the line from ${DEPLOY_ROOT}/.env"
+
 # Ports come from .env when set; these defaults match the compose file.  The
 # control-plane port is needed before the compatibility fence only on a true
 # cold start, where there is no old API through which the newly deployed host
@@ -675,16 +680,9 @@ fi
 export AGENT_WEB_DEPLOYED_AT
 compose up -d --remove-orphans
 
-# The web app is mounted under a base path, so `/` is a 404 by design and a
-# health check pointed at it fails every deploy of a working app. Checked
-# against the running staging host: `/` → 404, `/agents` → 200, `/agents/` →
-# 308. The un-slashed form is the one to probe.
-WEB_BASE_PATH="$(from_env AGENT_WEB_BASE_PATH)"
-WEB_BASE_PATH="${WEB_BASE_PATH%/}"
-
 wait_for "control plane" "http://127.0.0.1:${CP_PORT}/healthz"
 wait_for "MCP relay"     "http://127.0.0.1:${MCP_PORT}/healthz"
-wait_for "web"           "http://127.0.0.1:${WEB_PORT}${WEB_BASE_PATH:-/}"
+wait_for "web"           "http://127.0.0.1:${WEB_PORT}/"
 if grep -qx edge <<<"${ACTIVE_SERVICES}"; then
   wait_for "edge web route" "http://127.0.0.1:${EDGE_PORT}/"
   wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"

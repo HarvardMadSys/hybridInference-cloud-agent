@@ -203,7 +203,6 @@ def test_the_cells_are_the_ones_the_collector_assembles() -> None:
         == {
             "control",
             "web-root",
-            "web-agents",
             "runner",
             "sandbox",
             "tunnel",
@@ -529,7 +528,7 @@ def test_a_release_is_deployed_before_it_is_published() -> None:
     assert "deploy/release/acceptance.py" in deploy
     assert "--manifest release/release.json" in deploy
     assert "--recipe release/recipe.tar.gz" in deploy
-    assert "--variant agents" in deploy
+    assert "--variant root" in deploy
     assert '--project "${PROJECT}"' in deploy
     assert '--workdir "${WORKDIR}"' in deploy
 

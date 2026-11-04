@@ -802,14 +802,11 @@ msgstr ""
 #: ../developer/development.md:344
 msgid ""
 "The `make ci-frontend` target runs the checks above, including browser "
-"recovery. Hosted CI also builds and smoke-tests both the root and "
-"`/agents` web variants when image changes are selected. See "
-"[CONTRIBUTING.md](../../CONTRIBUTING.md#continuous-integration) for the "
-"wider CI gate."
+"recovery. Hosted CI also builds and smoke-tests the web image when image "
+"changes are selected. See [CONTRIBUTING.md](../../CONTRIBUTING.md"
+"#continuous-integration) for the wider CI gate."
 msgstr ""
-"`make ci-frontend` 会跑上面所有检查，浏览器恢复测试也在内。如果改动涉及镜像，托管 CI 还会构建根路径和 `/agents` "
-"两个 Web 变体并做冒烟测试。完整的 CI 检查见 [CONTRIBUTING.md](../../CONTRIBUTING.md"
-"#continuous-integration)。"
+"`make ci-frontend` 会跑上面所有检查，浏览器恢复测试也在内。如果改动涉及镜像，托管 CI 还会构建 Web 镜像并做冒烟测试。完整的 CI 检查见 [CONTRIBUTING.md](../../CONTRIBUTING.md#continuous-integration)。"
 
 #: ../developer/development.md:350
 msgid "Changing an API"

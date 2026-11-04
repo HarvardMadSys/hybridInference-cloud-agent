@@ -382,13 +382,10 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "deployment",
-        "The web image's build-time routing (substituted at next build) and the web "
-        "server's control-plane address.",
+        "The web image's browser API path (substituted at next build; the image sets "
+        "/api) and the web server's control-plane address.",
         names=(
-            "AGENT_WEB_API_URL",
-            "AGENT_WEB_BASE_PATH",
             "NEXT_PUBLIC_AGENT_API_URL",
-            "NEXT_PUBLIC_BASE_PATH",
             "AGENT_CONTROL_PLANE_URL",
         ),
     ),
@@ -668,6 +665,12 @@ FAMILIES: tuple[Family, ...] = (
         "No longer read: sandbox_host.sh only warns that AGENT_RUNNER_REPLICAS is set and "
         "should be removed from .env.",
         names=("AGENT_RUNNER_REPLICAS",),
+    ),
+    Family(
+        "retired",
+        "Mounting the web app under a path prefix was removed. Named only so deploy.sh and "
+        "the release deployer refuse a deployment that still sets it.",
+        names=("AGENT_WEB_BASE_PATH",),
     ),
     Family(
         "retired",

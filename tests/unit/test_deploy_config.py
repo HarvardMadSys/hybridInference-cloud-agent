@@ -486,11 +486,6 @@ def test_the_standalone_edge_is_probed_before_a_deploy_succeeds():
     [
         ("deploy/control-plane/edge.nginx.conf", "/api", "http://cloud_agent_api"),
         ("deploy/local/nginx.conf", "/api", "http://cloud_agent_api"),
-        (
-            "deploy/reverse-proxy/agents-under-parent-site.conf",
-            "/agents/api",
-            "http://127.0.0.1:8000",
-        ),
     ],
 )
 def test_edge_allows_the_largest_supported_attachment_json(file, prefix, upstream):
@@ -517,10 +512,7 @@ def test_edge_allows_the_largest_supported_attachment_json(file, prefix, upstrea
     assert config.count("client_max_body_size") == 1, "other routes retain the default"
 
 
-@pytest.mark.parametrize(
-    "file",
-    ["deploy/control-plane/edge.nginx.conf", "deploy/reverse-proxy/agents-under-parent-site.conf"],
-)
+@pytest.mark.parametrize("file", ["deploy/control-plane/edge.nginx.conf"])
 def test_shipped_proxies_overwrite_the_forwarded_address(file):
     """The audit trail must not record an address the caller wrote.
 
@@ -551,12 +543,14 @@ def test_control_and_runner_install_locked_production_dependencies():
     assert "uv sync --frozen --no-dev --no-editable" in control
 
 
-def test_root_mounted_web_build_accepts_an_explicit_empty_base_path():
-    """Compose must distinguish unset from explicitly empty for root hosting."""
+def test_the_web_build_is_served_at_the_root_with_the_api_beside_it():
+    """Sub-path mounting was removed: the deployment no longer chooses a mount."""
     text = _CONTROL_PLANE_COMPOSE.read_text()
 
-    assert "${AGENT_WEB_BASE_PATH?" in text
-    assert "${AGENT_WEB_BASE_PATH:?" not in text
+    assert "AGENT_WEB_BASE_PATH" not in text
+    assert "AGENT_WEB_API_URL" not in text
+    assert "NEXT_PUBLIC_BASE_PATH" not in text
+    assert "NEXT_PUBLIC_AGENT_API_URL: /api" in text
 
 
 def test_docker_build_context_excludes_local_dependency_trees():

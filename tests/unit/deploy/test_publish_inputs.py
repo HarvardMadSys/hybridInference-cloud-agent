@@ -4,7 +4,7 @@ A cell knows one thing the generator cannot: which matrix entry it was, on which
 machine, and what the image it pulled back says about itself. The refusals here
 are the ones only that point of view can make — a record from another commit, a
 cell that ran on the wrong pool, a file copied under another cell's name — and
-the one positive property that matters: six honest records assemble into an
+the one positive property that matters: five honest records assemble into an
 input the generator turns into a valid manifest.
 """
 
@@ -84,12 +84,10 @@ def test_the_cells_are_the_roles_the_smoke_starts_once_per_variant() -> None:
     assert set(cells) == {
         "control",
         "web-root",
-        "web-agents",
         "runner",
         "sandbox",
         "tunnel",
     }
-    assert cells["web-agents"] == pi.Cell("web", "agents", "/agents", "linux/arm64")
     assert cells["web-root"] == pi.Cell("web", "root", "", "linux/arm64")
     for name, cell in cells.items():
         assert cell.platform == smoke.ROLES[cell.role].arch, name
@@ -114,7 +112,7 @@ def test_a_record_carries_what_the_manifest_needs() -> None:
         ("control", {"labels": {}}, "carries no labels"),
         ("control", {"labels": {pi.ROLE_LABEL: "control", pi.REVISION_LABEL: 1}}, "strings"),
         ("runner", {"labels": labels("runner", **{pi.ROLE_LABEL: "sandbox"})}, "declares role"),
-        ("web-agents", {"labels": labels("web-agents", **{pi.BASE_PATH_LABEL: ""})}, "base path"),
+        ("web-root", {"labels": labels("web-root", **{pi.BASE_PATH_LABEL: "/agents"})}, "base path"),
         ("tunnel", {"labels": labels("tunnel", **{pi.REVISION_LABEL: OTHER_COMMIT})}, "revision"),
     ],
 )
@@ -133,14 +131,14 @@ def test_a_record_is_checked_against_a_full_commit() -> None:
 # --------------------------------------------------------------- assemble
 
 
-def test_six_honest_records_assemble_into_a_manifest_the_schema_accepts() -> None:
+def test_honest_records_assemble_into_a_manifest_the_schema_accepts() -> None:
     inputs = pi.assemble(records(), COMMIT)
 
     assert inputs["source_commit"] == COMMIT
     assert inputs["runtime_labels"] == labels("sandbox")
     assert {entry["role"] for entry in inputs["artifacts"]} == set(rm.EXPECTED_PLATFORMS)
     web = sorted(entry["base_path"] for entry in inputs["artifacts"] if entry["role"] == "web")
-    assert web == ["", "/agents"]
+    assert web == [""]
     assert all("base_path" not in e for e in inputs["artifacts"] if e["role"] != "web")
 
     manifest = rm.build_manifest(
@@ -153,7 +151,7 @@ def test_six_honest_records_assemble_into_a_manifest_the_schema_accepts() -> Non
         protocol=rm.deploy_protocol(),
         revision="0001_schema_baseline",
     )
-    assert len(manifest["artifacts"]) == 6
+    assert len(manifest["artifacts"]) == 5
     assert sorted(manifest["runtime_catalog"]) == sorted(RUNTIMES)
 
 
@@ -233,7 +231,7 @@ def test_the_notes_lead_with_the_number_a_distribution_pins() -> None:
     assert f"agent-{COMMIT}" in text
     for artifact in manifest()["artifacts"]:
         assert artifact["image"] in text
-    assert "web (agents)" in text and "web (root)" in text
+    assert "web (root)" in text and "web (agents)" not in text
     assert "claude-code 1.0.0" in text
     assert "actions/runs/7" in text
 

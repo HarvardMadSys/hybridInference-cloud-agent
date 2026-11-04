@@ -37,7 +37,6 @@ def manifest() -> dict:
     for role, variant in (
         ("control", None),
         ("web", "root"),
-        ("web", "agents"),
         ("runner", None),
         ("sandbox", None),
         ("tunnel", None),
@@ -49,7 +48,7 @@ def manifest() -> dict:
             "platforms": ["linux/arm64" if role in {"control", "web"} else "linux/amd64"],
         }
         if variant:
-            entry.update(variant=variant, base_path="/agents" if variant == "agents" else "")
+            entry.update(variant=variant, base_path="")
         artifacts.append(entry)
     return {
         "schema_version": 1,
@@ -188,7 +187,7 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
     release.write_text(json.dumps(manifest()))
     config = {
         "COMPOSE_PROJECT": "artifact-test",
-        "AGENT_WEB_VARIANT": "agents",
+        "AGENT_WEB_VARIANT": "root",
         "AGENT_HOST_STATE_ROOT": str(host_state),
         "AGENT_HOST_SLOTS": "3",
         "AGENT_SANDBOX_BACKEND": "kata",
@@ -365,7 +364,7 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         assert "--expected-deployment-sha" in calls[readiness]["args"]
         assert COMMIT in calls[readiness]["args"]
         assert "--draining-host" not in calls[readiness]["args"]
-        assert "/agents" in Path(env["TEST_CURL_LOG"]).read_text()
+        assert "http://127.0.0.1:3002/" in Path(env["TEST_CURL_LOG"]).read_text()
 
 
 @pytest.mark.parametrize("source", ["environment", "dotenv"])
@@ -487,7 +486,7 @@ def test_real_compose_precedence_reaches_the_deployer(tmp_path: Path, exported: 
     dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
     with dotenv.open("a") as file:
         file.write(f"AGENT_DEPLOYMENT_SHA={'c' * 40 if exported == COMMIT else COMMIT}\n")
-        file.write("PREFIX=/agents\nAGENT_WEB_BASE_PATH=$PREFIX\n")
+        file.write("PREFIX=Cloud\nAGENT_WEB_APP_NAME=$PREFIX\n")
     env["AGENT_DEPLOYMENT_SHA"] = exported
     result, calls = run(script, env)
     assert (result.returncode == 0) == (exported == COMMIT), result.stdout + result.stderr
@@ -562,10 +561,6 @@ def test_real_compose_keeps_persistent_mounts_outside_the_recipe(tmp_path: Path,
 
 def test_root_web_variant_controls_both_image_and_health_path(tmp_path: Path):
     script, env = deployment(tmp_path, "control-plane")
-    dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
-    dotenv.write_text(
-        dotenv.read_text().replace("AGENT_WEB_VARIANT=agents", "AGENT_WEB_VARIANT=root")
-    )
     result, _ = run(script, env)
     assert result.returncode == 0, result.stdout + result.stderr
     generated = next((Path(env["DEPLOY_ROOT"]) / "deploy/control-plane").glob(".release-*.yml"))
@@ -574,6 +569,24 @@ def test_root_web_variant_controls_both_image_and_health_path(tmp_path: Path):
     probes = Path(env["TEST_CURL_LOG"]).read_text()
     assert "http://127.0.0.1:3002/" in probes
     assert "/agents" not in probes
+
+
+@pytest.mark.parametrize(
+    "line,named",
+    [
+        ("AGENT_WEB_VARIANT=agents", "AGENT_WEB_VARIANT=agents"),
+        ("AGENT_WEB_BASE_PATH=/agents", "AGENT_WEB_BASE_PATH=/agents"),
+    ],
+)
+def test_a_sub_path_mount_is_refused_before_anything_starts(tmp_path: Path, line: str, named: str):
+    """Sub-path mounting was removed; a leftover value is named, not ignored."""
+    script, env = deployment(tmp_path, "control-plane")
+    dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
+    dotenv.write_text(dotenv.read_text().replace("AGENT_WEB_VARIANT=root\n", "") + line + "\n")
+    result, calls = run(script, env)
+    assert result.returncode != 0
+    assert named in result.stderr
+    assert all("pull" not in c["args"] and "up" not in c["args"] for c in calls)
 
 
 def test_manifest_validation_and_rendering_use_the_same_bytes(tmp_path: Path):
