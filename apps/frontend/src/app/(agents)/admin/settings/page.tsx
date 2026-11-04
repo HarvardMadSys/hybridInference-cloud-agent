@@ -9,6 +9,7 @@ import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type { AgentRunnerHostPool } from '@/lib/api/admin';
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
 import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
+import type { AgentAdminSettings } from '@/lib/api/adminSettings';
 import {
   getSandboxArchiveSettings,
   updateSandboxArchiveSettings,
@@ -55,6 +56,11 @@ export default function AdminSettingsPage() {
       <SettingsView key={state.user?.id ?? 'admin'} />
     </Suspense>
   );
+}
+
+/** The saved agent package registry, which the version menus are read from. */
+function savedRegistry(settings: AgentAdminSettings | null): string {
+  return String(settings?.values.runtime_registry_url ?? '');
 }
 
 function AccessDenied() {
@@ -223,6 +229,7 @@ function SettingsView() {
     runtimes: updates.items?.map((item) => item.runtime) ?? [],
     enabled: !denied && selectedTab === 'versions',
     onAccessDenied: fail,
+    registry: savedRegistry(applicationSettings.snapshot),
   });
 
   useEffect(() => {
