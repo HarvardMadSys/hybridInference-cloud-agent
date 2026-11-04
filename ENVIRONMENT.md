@@ -325,7 +325,7 @@ encrypted and never shown again. See [accounts](docs/developer/local-accounts.md
 | `AGENT_TENCENT_SMS_REGION` / `AGENT_TENCENT_SMS_SDK_APP_ID` / `AGENT_TENCENT_SMS_SIGN_NAME` / `AGENT_TENCENT_SMS_TEMPLATE_ID` | NEW. The Tencent SMS application, its approved signature and its approved template, which takes the code and its lifetime in minutes. Region defaults to `ap-guangzhou`. |
 | `AGENT_TURNSTILE_SITE_KEY` / `AGENT_TURNSTILE_SECRET_KEY` | NEW. Cloudflare Turnstile for sign-up and phone codes. With no secret key nothing is checked; with one, a missing or rejected token, or no answer from Cloudflare, refuses. |
 | `AGENT_LOCAL_ADMIN_EMAILS` | NEW. Comma-separated, as HybridInference's `ADMIN_EMAILS`: an account whose **proven** email is listed is approved and made an administrator when it signs in. Proven means a link sent to the address was followed (verification, address change or password reset) or the operator created the account, never an address accepted while verification is off. The list stays in charge: withdrawing a listed account's administration or access is refused until the address is removed from it. |
-| `AGENT_LOCAL_TERMS_TEXT` | NEW. Plain-text Terms of Service shown at `/terms` and in the sign-up consent when `AGENT_LOCAL_TERMS_URL` is empty. |
+| `AGENT_LOCAL_TERMS_TEXT` | NEW. Plain-text Terms of Service shown at `/terms` and in the sign-up consent when `AGENT_LOCAL_TERMS_URL` is empty. Deployment Terms [site content files](#site-content-files) replace both settings, which Admin then shows read-only. |
 | `AGENT_LOCAL_SESSION_TTL_DAYS` | NEW. Lifetime of a new sign-in, default 30 days, never extended by use. |
 | `AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_15MIN` / `AGENT_LOCAL_LOGIN_ACCOUNT_RATE_LIMIT_PER_15MIN` / `AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_HOUR_PER_IP` | NEW. Sign-in windows: per account per address (5, also a recognized browser's own window), per account from every address (50, counting only attempts the per-address windows let through) and per address (20 an hour). |
 | `AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_HOUR` / `AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_DAY` | NEW. Sign-ups per client address, 5 an hour and 10 a day. |
@@ -362,6 +362,7 @@ permissions, retention and verification requirements.
 | `AGENT_MCP_RELAY_BIND` / `AGENT_MCP_RELAY_PORT` | Compose MCP-only listener binding, defaults `127.0.0.1` / `8001`. Keep sandbox tools on this listener. |
 | `AGENT_WEB_BIND` / `AGENT_WEB_PORT` | Compose web-server binding, defaults `127.0.0.1` / `3002`. |
 | `AGENT_EDGE_CONFIG_FILE` | Host-side nginx configuration mounted read-only by the edge service. Default `./edge.nginx.conf`, relative to the Compose file. |
+| `AGENT_SITE_CONTENT_DIR` | Host-side directory of [site content files](#site-content-files) mounted read-only by the control plane at `/etc/cloud-agent/site`. Default `./site-content`, relative to the Compose file: the recipe's empty directory, which configures none of them. |
 | `AGENT_NETWORK_NAME` | Control-plane Compose network name, default `cloud-agent`. Use distinct names for independent stacks. |
 | `AGENT_SESSION_COOKIE_SECURE` | Defaults to on. Set to `false` **only** for a developer running the whole stack on plain `http://localhost`; a session cookie without `Secure` is one anyone on the path can take. On, the session cookie is `__Host-cloud_agent_session` and a sign-in in progress is parked in `__Host-cloud_agent_login`, names another host on the same site cannot set. Cookies under the plain names are not read: a browser that still holds only a `cloud_agent_session` cookie from before that rename signs in once more, and sign-in and sign-out remove it. Off, both keep the plain names, because browsers refuse the prefix without `Secure`. |
 | `AGENT_API_DOCS` | *Initial import.* Saved as **Serve API documentation** in Admin → Settings → Operations and read on every request, so turning it on or off needs no restart. Defaults to off; turn it on only on a development stack. On, the main API serves `/docs`, `/redoc` and `/openapi.json`; off, none of the three is served: the schema is unauthenticated, and the two pages load scripts from a CDN at a floating version. The MCP-only listener never serves them. An unusable value imports as off. |
@@ -886,6 +887,41 @@ build date.
 Saved URLs and booleans are validated before an admin update is committed.
 The standalone environment fallback validates them when rendering.
 Public saved appearance comes from this service's own endpoint.
+
+### Site content files
+
+A deployment's Terms of Service, Team page and source link are files in the
+deployment's own repository, not environment variables or Admin settings, so a
+change is reviewed there and goes live with the next deployment. Copy the
+directory to the control-plane host and point `AGENT_SITE_CONTENT_DIR` at it.
+The control plane picks up a changed file on the next request, without a
+restart. Every file is optional:
+
+| File | Contents |
+|---|---|
+| `terms.en.txt` | Terms of Service in English, plain UTF-8 text; blank lines separate paragraphs. |
+| `terms.zh-CN.txt` | The same in Simplified Chinese. `/terms` shows the reader's language, else English. |
+| `site.yaml` | `source_url`, the GitHub link in the footer, and `members`, the Team page. |
+
+Any Terms file replaces the `AGENT_LOCAL_TERMS_URL` and `AGENT_LOCAL_TERMS_TEXT`
+settings, which Admin then shows read-only. Without `site.yaml` the footer
+hides the Team and GitHub links.
+
+```yaml
+source_url: https://github.com/example/cloud-agent
+members:
+  - name: Ada Lovelace
+    website: https://ada.example.org/   # optional
+    badge: {en: Lead, zh-CN: 负责人}      # optional
+    roles:                               # optional, at most 10
+      - {en: Professor, zh-CN: 教授}
+      - Visiting scholar                 # one text for every language
+```
+
+A label is either text or a mapping of `en` and `zh-CN` to text. URLs must be
+absolute http(s). An unknown key, an invalid value or a file over 256 KiB is
+logged as `site_content_ignored` and the file is treated as absent, so check
+the files before deploying them.
 
 ## Infrastructure (not environment variables)
 

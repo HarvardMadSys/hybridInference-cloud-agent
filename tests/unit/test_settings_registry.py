@@ -570,7 +570,9 @@ async def test_public_site_settings_expose_only_display_allowlist():
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
     view = response.json()
-    assert set(view) == {"branding"}
+    assert set(view) == {"branding", "content"}
+    # The deployment's site files, not settings; none are mounted here.
+    assert view["content"] == {"sourceUrl": "", "team": []}
     assert set(view["branding"]) == {
         "appName",
         "orgName",

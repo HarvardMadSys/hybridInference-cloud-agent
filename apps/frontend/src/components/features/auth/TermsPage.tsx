@@ -1,14 +1,21 @@
 'use client';
 // The deployment's Terms of Service, as HybridInference's /terms page shows
 // its own: the operator's text, or a link to where they published it.
-import { useT } from '@/components/providers/LocaleProvider';
+import { useLocale } from '@/components/providers/LocaleProvider';
+import { localizedText } from '@/config/site';
 import { AccountFrame, BackToLogin } from './AccountFrame';
 import { useAuthOptions } from './useAuthOptions';
 
 export function TermsPage() {
-  const t = useT();
+  const { locale, t } = useLocale();
   const options = useAuthOptions();
-  const paragraphs = (options?.terms_text ?? '').split(/\n\s*\n/).filter((part) => part.trim());
+  // The deployment's Terms files come in the reader's language when it wrote one.
+  const text = options?.terms_by_locale
+    ? localizedText(options.terms_by_locale, locale)
+    : options?.terms_text;
+  const paragraphs = (text || options?.terms_text || '')
+    .split(/\n\s*\n/)
+    .filter((part) => part.trim());
   return (
     <AccountFrame title={t('terms.title')}>
       {!options ? (

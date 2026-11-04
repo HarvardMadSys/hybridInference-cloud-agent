@@ -65,6 +65,7 @@ RECIPE_FILES: tuple[str, ...] = (
     "deploy/control-plane/.env.example",
     "deploy/control-plane/pgadmin-servers.json",
     "deploy/control-plane/pgadmin-entrypoint.py",
+    "deploy/control-plane/site-content/README.md",
     "deploy/host/deploy.sh",
     "deploy/host/sandbox_host.sh",
     "deploy/host/storage_attestation.py",

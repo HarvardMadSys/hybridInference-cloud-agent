@@ -369,6 +369,7 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_EDGE_BIND",
             "AGENT_EDGE_PORT",
             "AGENT_EDGE_CONFIG_FILE",
+            "AGENT_SITE_CONTENT_DIR",
             "AGENT_MCP_RELAY_BIND",
             "AGENT_MCP_RELAY_PORT",
             "AGENT_WEB_BIND",

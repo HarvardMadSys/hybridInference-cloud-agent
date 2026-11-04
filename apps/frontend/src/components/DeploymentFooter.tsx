@@ -5,7 +5,6 @@ import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { useT } from '@/components/providers/LocaleProvider';
 
 // Eastern time (America/New_York) so the shown time tracks daylight saving (EST/EDT).
-const REPOSITORY_URL = 'https://github.com/HarvardMadSys/hybridInference-cloud-agent';
 const LINK_CLASS = 'hover:underline focus-visible:underline';
 
 const easternTime = new Intl.DateTimeFormat('en-US', {
@@ -16,7 +15,7 @@ const easternTime = new Intl.DateTimeFormat('en-US', {
 });
 
 export function DeploymentFooter({ className = '' }: { className?: string }) {
-  const { deployment } = useSiteConfig();
+  const { deployment, content } = useSiteConfig();
   const t = useT();
   const version = deployment?.version ?? '';
   const shortVersion = /^[a-f\d]{40}$/i.test(version) ? version.slice(0, 7) : version;
@@ -47,12 +46,22 @@ export function DeploymentFooter({ className = '' }: { className?: string }) {
       <Link href="/terms" className={LINK_CLASS}>
         {t('footer.terms')}
       </Link>
-      <Link href="/team" className={LINK_CLASS}>
-        {t('footer.team')}
-      </Link>
-      <a href={REPOSITORY_URL} target="_blank" rel="noopener noreferrer" className={LINK_CLASS}>
-        GitHub
-      </a>
+      {/* The deployment's own site files declare these; none hides them. */}
+      {content?.team.length ? (
+        <Link href="/team" className={LINK_CLASS}>
+          {t('footer.team')}
+        </Link>
+      ) : null}
+      {content?.sourceUrl ? (
+        <a
+          href={content.sourceUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={LINK_CLASS}
+        >
+          GitHub
+        </a>
+      ) : null}
       <span>
         {t('deployment.version')}:{' '}
         <span title={version || undefined}>{shortVersion || t('deployment.unavailable')}</span>

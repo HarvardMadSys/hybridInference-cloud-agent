@@ -57,6 +57,9 @@ class AuthOptionsResponse(BaseModel):
     turnstile_site_key: str = ""
     terms_url: str = ""
     terms_text: str = ""
+    #: The deployment's own Terms files by locale. When given, they replace
+    #: ``terms_url`` and the Admin text, and ``terms_text`` is the English one.
+    terms_by_locale: dict[str, str] = Field(default_factory=dict)
     #: True while the first administrator has not been created.
     setup_required: bool = False
     max_accounts_per_browser: int = 5
