@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 22:23-0400\n"
+"POT-Creation-Date: 2026-11-04 03:59-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -608,19 +608,18 @@ msgid ""
 "and `.shared-live-ready` describe the persistent deployment, while each "
 "extracted recipe can live elsewhere. For a new installation, create that "
 "root and fill its `.env` using the appropriate recipe's control-plane or "
-"host `.env.example`. For an existing installation, retain its "
-"configuration, Compose project name, host enrollment root, and Docker "
-"data root. Generated Compose files stay under `DEPLOY_ROOT` so relative "
-"mounts preserve their data paths; the edge proxy configuration comes from"
-" the selected recipe."
+"host `.env.example`. On the control plane, leave the database, account "
+"and settings keys empty: the first `prepare` phase generates them into "
+"that `.env`, as described in [the new-installation "
+"steps](../../docs/developer/operations.md#admin-settings). For an "
+"existing installation, retain its configuration, Compose project name, "
+"host enrollment root, and Docker data root. Generated Compose files stay "
+"under `DEPLOY_ROOT` so relative mounts preserve their data paths; the "
+"edge proxy configuration comes from the selected recipe."
 msgstr ""
-"`DEPLOY_ROOT` 在不同的发布之间不要变。它下面的 `.env`、`.deployed-sha` 和 `.shared-live-"
-"ready` 描述的是这套长期存在的部署，而每次解压出来的 recipe 可以放在别的地方。全新安装时，创建这个根目录，参照对应 recipe "
-"里控制平面或主机的 `.env.example` 填好 `.env`。已有的安装，则保留原来的配置、Compose 项目名、主机注册根目录和 "
-"Docker 数据目录。生成的 Compose 文件放在 `DEPLOY_ROOT` 下，这样相对路径的挂载还能指向原来的数据；edge "
-"代理的配置则来自所选的 recipe。"
+"`DEPLOY_ROOT` 在不同的发布之间不要变。它下面的 `.env`、`.deployed-sha` 和 `.shared-live-ready` 描述的是这套长期存在的部署，而每次解压出来的 recipe 可以放在别的地方。全新安装时，创建这个根目录，参照对应 recipe 里控制平面或主机的 `.env.example` 填好 `.env`。控制平面上，数据库、账号和设置的密钥都留空：第一次 `prepare` 阶段会把它们生成到这个 `.env` 里，具体见[全新安装步骤](../../docs/developer/operations.md#admin-settings)。已有的安装，则保留原来的配置、Compose 项目名、主机注册根目录和 Docker 数据目录。生成的 Compose 文件放在 `DEPLOY_ROOT` 下，这样相对路径的挂载还能指向原来的数据；edge 代理的配置则来自所选的 recipe。"
 
-#: ../../deploy/release/README.md:240
+#: ../../deploy/release/README.md:243
 msgid ""
 "Select `AGENT_WEB_VARIANT=root` or `agents` in the control-plane "
 "configuration. If omitted, `AGENT_WEB_BASE_PATH` selects the variant: "
@@ -629,17 +628,17 @@ msgstr ""
 "在控制平面配置里，用 `AGENT_WEB_VARIANT=root` 或 `agents` 选择 Web 变体。不设置的话，就看 "
 "`AGENT_WEB_BASE_PATH`：为空或没设置时用 `root`，设为 `/agents` 时用 `agents`。"
 
-#: ../../deploy/release/README.md:244
+#: ../../deploy/release/README.md:247
 msgid "Set the artifact environment on the control-plane machine:"
 msgstr "在控制平面机器上设置产物模式的环境变量："
 
-#: ../../deploy/release/README.md:253
+#: ../../deploy/release/README.md:256
 msgid ""
 "Set the same release and interpreter on the execution host, with its own "
 "root:"
 msgstr "在执行主机上设置同一个发布和同一个解释器，但用它自己的根目录："
 
-#: ../../deploy/release/README.md:262
+#: ../../deploy/release/README.md:265
 msgid ""
 "The manifest supplies the commit and owned image references. Remove old "
 "image and commit overrides when moving to artifact mode; any conflicting "
@@ -650,23 +649,23 @@ msgstr ""
 "commit 和自有镜像的引用都由清单提供。切换到产物模式时，要把以前覆盖镜像和 commit 的设置删掉；最终生效的 Compose "
 "值只要有冲突，在拉取镜像或替换服务之前就会被拒绝。默认的 `source` 模式仍然可以用于基于源码仓库的部署。"
 
-#: ../../deploy/release/README.md:267
+#: ../../deploy/release/README.md:270
 msgid "Deploying the two in the order the design specifies"
 msgstr "按设计规定的顺序部署两台机器"
 
-#: ../../deploy/release/README.md:269
+#: ../../deploy/release/README.md:272
 msgid ""
 "Use phases to coordinate the machines. With the environment above set in "
 "each machine's shell, run these commands in order:"
 msgstr "用阶段（phase）来协调两台机器。在每台机器的 shell 里设好上面的环境变量，然后按顺序执行："
 
-#: ../../deploy/release/README.md:272
+#: ../../deploy/release/README.md:275
 msgid ""
 "Prepare both sides; these commands may run in parallel on their "
 "respective machines and replace no serving services."
 msgstr "两边各自做准备。这两条命令可以在各自的机器上同时跑，不会替换任何正在服务的服务。"
 
-#: ../../deploy/release/README.md:282
+#: ../../deploy/release/README.md:285
 msgid ""
 "Prepare the database on the control-plane machine. This migrates and "
 "checks the identity namespace. On a cold machine it also starts the API "
@@ -676,19 +675,19 @@ msgstr ""
 "在控制平面机器上准备数据库：执行迁移，并检查身份命名空间。如果是从零开始的机器，还会启动主机就绪探测要用到的 API 和 MCP "
 "监听器；已有的监听器保持不动。"
 
-#: ../../deploy/release/README.md:290
+#: ../../deploy/release/README.md:293
 msgid ""
 "Activate the execution host. It drains and replaces runners, checks the "
 "replacement, records the deployment, and publishes its generation."
 msgstr "激活执行主机：排空并替换 runner，检查新 runner，记录这次部署，并发布这台主机的新代次。"
 
-#: ../../deploy/release/README.md:297
+#: ../../deploy/release/README.md:300
 msgid ""
 "Activate the control plane. The readiness fence must pass before public "
 "services switch."
 msgstr "激活控制平面：必须先通过就绪栅栏，对外的服务才会切换过去。"
 
-#: ../../deploy/release/README.md:304
+#: ../../deploy/release/README.md:307
 msgid ""
 "Omitting `--phase` runs all phases for that side. Use the phased sequence"
 " for a coordinated rollout; two whole-script invocations cannot express "
@@ -700,14 +699,14 @@ msgstr ""
 "不加 `--phase` "
 "会把这一边的所有阶段一口气跑完。要协调两台机器上线，就得按阶段执行；整段脚本各跑一次，是没办法保证上面这个顺序的。每个阶段都可以重试。数据库准备阶段会一直掌管它自己启动的监听器；激活阶段会把上次失败时停掉的监听器重新启动，好让它们能收到就绪栅栏需要的心跳。"
 
-#: ../../deploy/release/README.md:310
+#: ../../deploy/release/README.md:313
 msgid ""
 "If the other machine fails and activation is abandoned, clean up "
 "listeners started solely for this cold deployment on the control-plane "
 "machine:"
 msgstr "如果另一台机器失败了、决定放弃这次激活，就在控制平面机器上，把只为这次从零部署而启动的监听器清理掉："
 
-#: ../../deploy/release/README.md:317
+#: ../../deploy/release/README.md:320
 msgid ""
 "This leaves previously serving listeners alone. Image pulls and host Kata"
 " checks precede runner drain. Migrations, identity-namespace "
@@ -720,7 +719,7 @@ msgstr ""
 "的就绪判断、反向 sandbox manager "
 "探测，以及延后发布的主机就绪状态，都按原定的部署顺序进行。只要就绪检查失败，新的控制平面服务就不会被激活。"
 
-#: ../../deploy/release/README.md:323
+#: ../../deploy/release/README.md:326
 msgid ""
 "Script tests run extracted recipes with Docker calls recorded and "
 "failures injected, and use the real Compose environment parser when "
@@ -732,23 +731,23 @@ msgstr ""
 "环境变量解析器，也会用上。但这些测试证明不了某台具体的 Linux 主机、真实运行的 "
 "Kata，或者镜像仓库里的某个发布已经就绪；这些要在实际切换环境时逐一确认。"
 
-#: ../../deploy/release/README.md:328
+#: ../../deploy/release/README.md:331
 msgid "What a downstream deployment still owns"
 msgstr "下游部署仍要自己负责的事"
 
-#: ../../deploy/release/README.md:330
+#: ../../deploy/release/README.md:333
 msgid ""
 "The upstream publication workflow does not deploy a named environment. A "
 "consuming distribution must:"
 msgstr "上游的发布工作流不会部署到任何具体的环境。使用它的发行版必须："
 
-#: ../../deploy/release/README.md:333
+#: ../../deploy/release/README.md:336
 msgid ""
 "pin the exact manifest bytes in a reviewed lock and verify the schema, "
 "recipe hash, registry digests, image labels, and platforms;"
 msgstr "在评审过的锁定文件里固定清单的原始字节，并核对 schema、recipe 哈希、镜像仓库摘要、镜像标签和平台；"
 
-#: ../../deploy/release/README.md:335
+#: ../../deploy/release/README.md:338
 msgid ""
 "check protocol compatibility and the manifest's `verified_upgrade_from` "
 "and `verified_rollback_to` records; an empty list means that path was not"
@@ -757,19 +756,19 @@ msgstr ""
 "检查协议是否兼容，并查看清单里的 `verified_upgrade_from` 和 `verified_rollback_to` "
 "记录；列表为空，说明这条升级或回滚路径没有验证过；"
 
-#: ../../deploy/release/README.md:337
+#: ../../deploy/release/README.md:340
 msgid ""
 "run preparation, Kata checks, and environment acceptance on the actual "
 "hosts;"
 msgstr "在实际的主机上执行准备阶段、Kata 检查和环境验收；"
 
-#: ../../deploy/release/README.md:338
+#: ../../deploy/release/README.md:341
 msgid ""
 "keep environment configuration, deployment records, and recovery material"
 " outside this upstream repository."
 msgstr "环境配置、部署记录和恢复材料都放在这个上游仓库之外。"
 
-#: ../../deploy/release/README.md:341
+#: ../../deploy/release/README.md:344
 msgid ""
 "Retain previous verified manifests, recipes, reviewed hashes and digest-"
 "addressed images separately from the persistent deployment roots. "
@@ -785,3 +784,5 @@ msgstr ""
 "/disaster-recovery.md#recover-a-previous-artifact-"
 "release)检查数据库和部署协议是否兼容，然后用上一个验证过的 "
 "recipe，走同样的分阶段就绪流程。注意，上一个发布并不一定兼容已经装上的、更新的迁移。"
+
+
