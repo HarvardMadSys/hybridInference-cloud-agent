@@ -123,11 +123,30 @@ shows the value in effect; save a valid value or confirm **Restore default**
 to clear the warning. Undecryptable or unencrypted stored credentials still
 stop the listener.
 
-For a new installation, provision the database, a stable
-`AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate random
-`ADMIN_TOKEN`, plus the infrastructure/build fields in the minimal
-`deploy/control-plane/.env.example`. Bootstrap the setup UI before enrolling
-execution hosts or running the normal deployment readiness gate:
+For a new installation, copy `deploy/control-plane/.env.example` to `.env` and
+adjust only the web path and network lines if the defaults do not fit. Nothing
+secret is filled in by hand. Run the deployer's preparation phase once; on a
+root that has never deployed, with the bundled database and no Docker volume
+or container of the Compose project yet, it writes a random database password
+and matching `AGENT_DATABASE_URL`, `AGENT_LOCAL_SESSION_SECRET` and
+`AGENT_SETTINGS_ENCRYPTION_KEY` into `.env`. From the deployment checkout:
+
+```bash
+SOURCE_REPO="$PWD" DEPLOY_ROOT="$PWD" \
+  deploy/control-plane/deploy.sh --phase prepare "$(git rev-parse HEAD)"
+```
+
+An artifact deployment's `prepare` phase does the same
+([release artifacts](../../deploy/release/README.md)).
+
+To use another database, set `AGENT_DATABASE_URL` and `AGENT_POSTGRES_PASSWORD`
+yourself first; the deployer then cannot prove the database is new and asks for
+the account key and settings root key as well. It never replaces a value that
+is set. Back up `.env` with the database from now on: the settings root key in
+it decrypts every saved secret.
+
+Bootstrap the web application before enrolling execution hosts or running the
+normal deployment readiness gate:
 
 ```bash
 AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
@@ -135,15 +154,21 @@ AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
   up -d --build control-plane mcp-relay web
 ```
 
-Open `<web base path>/setup` and enter the recovery token. This route is outside
-the sign-in guard. It uses the ordinary administrator API and audit trail;
-unauthenticated visitors cannot read or change settings. Reloading or locking
-the page clears its in-memory token. Complete the account, execution and user
-credential fields, create the first administrator at `/setup/administrator`
-with the setup code the control plane logs, then enroll hosts and run the
-usual deployment command.
+On its first start the control plane creates its settings with a random host
+signing key and user and compute credential encryption keys, and logs a
+one-time setup code (`agent_local_setup_pending`). Create the first
+administrator at `<web base path>/setup/administrator` with that code, sign
+in, and complete the remaining required settings in Admin → Settings: the
+public web address and the sandbox manager credential your hosts share. Then
+enroll hosts and run the usual deployment command.
 Optional integrations need setup only when their configuration has been started.
 The shared-live deployment gate continues to require qualified host readiness.
+
+`<web base path>/setup` is the recovery door when no administrator can sign in.
+It needs `ADMIN_TOKEN`, which a deployment sets only when it wants that door.
+The route is outside the sign-in guard. It uses the ordinary administrator API
+and audit trail; unauthenticated visitors cannot read or change settings.
+Reloading or locking the page clears its in-memory token.
 
 Existing installations can retain the environment `AGENT_SESSION_SECRET`
 fallback for the settings root. Before removing that legacy environment entry,

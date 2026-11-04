@@ -40,10 +40,20 @@ from then on the database wins and the line is ignored. After the control plane
 
 `AGENT_COMPUTE_SECRET_KEY` is imported the same way: once stored, saved compute
 credentials decrypt with the stored key and a different value in `.env` is
-ignored. `deploy.sh` writes a new random value whenever the line is missing, so
-deleting it only brings back an unused one; leave it. Keep
-`AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own copy of the
-credential.
+ignored, so the line can be deleted too. `deploy.sh` no longer writes one: a new
+deployment's control plane generates the key into its settings on first start.
+What must be backed up with the database is the settings root key
+(`AGENT_SETTINGS_ENCRYPTION_KEY`, or `AGENT_SESSION_SECRET` where that is the
+root). Keep `AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own
+copy of the credential.
+
+`ADMIN_TOKEN` is optional: the first administrator of a new deployment signs in
+with the one-time setup code. An existing deployment can keep it as its
+recovery door. `deploy.sh` now generates a new installation's database
+password and DSN, account key and settings root key. It never replaces a set
+value, never adds a settings key beside `AGENT_SESSION_SECRET`, and on a
+deployment root that has deployed before it stops with the names of any
+missing required value rather than generate one.
 
 Four values moved into Admin in this release:
 

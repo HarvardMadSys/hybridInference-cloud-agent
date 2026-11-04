@@ -185,3 +185,21 @@ def test_an_upgraded_local_env_gains_its_account_keys_and_keeps_every_other(
     # Run again: what was generated is kept, never rotated.
     assert _local_config(script, fake_bin).returncode == 0
     assert _env_values(dotenv) == after
+
+
+def test_an_upgraded_local_env_on_the_legacy_settings_root_gets_no_settings_key(
+    tmp_path: Path,
+) -> None:
+    """Its settings were saved under AGENT_SESSION_SECRET; a new key would orphan them."""
+    script, fake_bin = _local_checkout(tmp_path)
+    dotenv = script.parent / ".env.local"
+    dotenv.write_text(_RETAINED_LOCAL_ENV + "AGENT_SESSION_SECRET=legacy-local-settings-root\n")
+    dotenv.chmod(0o600)
+
+    result = _local_config(script, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    after = _env_values(dotenv)
+    assert "AGENT_SETTINGS_ENCRYPTION_KEY" not in after
+    assert after["AGENT_SESSION_SECRET"] == "legacy-local-settings-root"
+    assert re.fullmatch(r"[0-9a-f]{64}", after["AGENT_LOCAL_SESSION_SECRET"])

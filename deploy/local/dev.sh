@@ -215,7 +215,11 @@ upgrade_existing_env() {
   append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
   append_dns_server_if_missing
   append_env_if_missing AGENT_LOCAL_SESSION_SECRET "$(random_hex)"
-  append_env_if_missing AGENT_SETTINGS_ENCRYPTION_KEY "$(random_hex)"
+  # A stack whose settings were saved under AGENT_SESSION_SECRET keeps that
+  # root: a new settings key beside it would make every saved secret unreadable.
+  if ! grep -q '^AGENT_SESSION_SECRET=.' "$ENV_FILE"; then
+    append_env_if_missing AGENT_SETTINGS_ENCRYPTION_KEY "$(random_hex)"
+  fi
   append_env_if_missing AGENT_WEB_BASE_URL "http://127.0.0.1:${edge_port}"
   append_env_if_missing AGENT_PUBLIC_API_URL "http://127.0.0.1:${edge_port}/api"
 }
