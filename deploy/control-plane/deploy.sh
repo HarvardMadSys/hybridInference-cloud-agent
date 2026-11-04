@@ -427,9 +427,30 @@ ensure_first_install_keys() {
 # Abandoning an attempt changes no configuration.
 [ "${PHASE}" = abandon ] || ensure_first_install_keys
 
+# The value Compose resolves for one variable: this process's environment, then
+# .env with its interpolation applied, so `NAME=${OTHER:-}` reads as empty. An
+# artifact deployment resolved its environment with Compose already.
+resolved_value() {
+  local line resolved
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    from_env "$1"
+    return 0
+  fi
+  # Through the same Compose files as every other call, the private override
+  # last, so this reads what the deployment itself would.
+  resolved="$(compose config --environment)" \
+    || die "Compose could not resolve ${DEPLOY_ROOT}/.env"
+  while IFS= read -r line; do
+    if [[ "${line%%=*}" == "$1" ]]; then
+      printf '%s' "${line#*=}"
+      return 0
+    fi
+  done <<< "${resolved}"
+}
+
 # The web app is served at the root of its hostname. A value left from when it
 # could be mounted under a prefix would now be ignored without a word.
-[ -z "$(deployment_value AGENT_WEB_BASE_PATH)" ] \
+[ -z "$(resolved_value AGENT_WEB_BASE_PATH)" ] \
   || die "AGENT_WEB_BASE_PATH is set, but mounting the web app under a path prefix was removed; serve it on its own hostname and delete the line from ${DEPLOY_ROOT}/.env"
 
 # Ports come from .env when set; these defaults match the compose file.  The

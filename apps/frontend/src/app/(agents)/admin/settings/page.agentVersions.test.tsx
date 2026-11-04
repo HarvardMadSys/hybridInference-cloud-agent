@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSyncExternalStore } from 'react';
 
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
-import { getRuntimeUpgrades } from '@/lib/api/adminRuntimeUpgrades';
+import { getRuntimeUpgrades, getRuntimeVersions } from '@/lib/api/adminRuntimeUpgrades';
 import { UpdateControls } from './AgentVersions';
 import AdminSettingsPage from './page';
 import { applicationSnapshot } from './settingsTestFixtures';
@@ -59,6 +59,12 @@ vi.mock('@/lib/api/adminArchiveSettings', async (original) => ({
 vi.mock('@/lib/api/adminRuntimeUpgrades', async (original) => ({
   ...(await original<typeof import('@/lib/api/adminRuntimeUpgrades')>()),
   getRuntimeUpgrades: vi.fn(async () => ({ runtimes: [] })),
+  getRuntimeVersions: vi.fn(async (runtime: string) => ({
+    runtime,
+    versions: ['0.150.0'],
+    deprecated: null,
+    error: null,
+  })),
 }));
 
 const REGISTRY = 'Agent package registry';
@@ -143,6 +149,40 @@ describe('the agent package registry', () => {
     );
     // Whom an update waits for changes with the registry, so it is read again now.
     await waitFor(() => expect(getRuntimeUpgrades).toHaveBeenCalledTimes(2));
+  });
+
+  it('lists every agent release again from a newly saved registry', async () => {
+    const current = registrySnapshot();
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(current);
+    vi.mocked(setAgentAdminSettings).mockResolvedValue({
+      ...current,
+      revision: 2,
+      values: { runtime_registry_url: 'http://verdaccio:4873' },
+    });
+    vi.mocked(getRuntimeUpgrades).mockResolvedValue({
+      runtimes: [
+        {
+          runtime: 'codex',
+          current_version: '0.145.0',
+          default_version: '0.145.0',
+          latest_version: '0.150.0',
+          latest_error: null,
+          update_available: true,
+          upgrade: null,
+        },
+      ],
+    });
+    window.history.replaceState(null, '', '/admin/settings?tab=versions');
+    render(<AdminSettingsPage />);
+
+    await waitFor(() => expect(getRuntimeVersions).toHaveBeenCalledTimes(1));
+    const input = await registryField();
+    fireEvent.change(input, { target: { value: 'http://verdaccio:4873' } });
+    fireEvent.submit(input.closest('form')!);
+    const review = screen.queryByRole('dialog', { name: 'Review changes' });
+    const apply = review && within(review).queryByRole('button', { name: 'Apply changes' });
+    if (apply) fireEvent.click(apply);
+    await waitFor(() => expect(getRuntimeVersions).toHaveBeenCalledTimes(2));
   });
 
   it('names the servers an update waits for before Update is pressed', async () => {
