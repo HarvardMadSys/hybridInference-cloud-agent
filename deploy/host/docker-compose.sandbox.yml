@@ -311,9 +311,6 @@ services:
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
 
-      AGENT_GIT_AUTHOR_NAME: ${AGENT_GIT_AUTHOR_NAME:-}
-      AGENT_GIT_AUTHOR_EMAIL: ${AGENT_GIT_AUTHOR_EMAIL:-}
-
       # --- The sandbox network (one, with nothing to select) ---
       # Where lifecycle finds the MCP relay. Sandboxes never join it; each
       # group's own bridge gets the relay attached under its alias.

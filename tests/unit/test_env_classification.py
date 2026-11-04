@@ -21,6 +21,9 @@ on. These tests hold the code to it:
   child says where.
 * **Imported.** A new registration with an environment name joins
   ``MIGRATED_SETTINGS``, the only list an existing database imports from.
+* **Out of the examples.** The ``.env.example`` an operator copies for a
+  production stack offers nothing Admin manages: such a line would only be an
+  initial import, and the file is meant to hold what Admin cannot.
 
 The scan (``tests/support/env_scan.py``) follows the spellings this repository
 uses; what it cannot see is listed in its docstring and in the P1 spec. The
@@ -60,6 +63,16 @@ REPO = Path(__file__).resolve().parents[2]
 BACKEND = "apps/backend/"
 #: Where a variable an operator sets for a production stack is named.
 PRODUCTION_TEMPLATES = ("deploy/control-plane/", "deploy/host/")
+#: The example env files an operator copies for a production stack.
+PRODUCTION_EXAMPLES = ("deploy/control-plane/.env.example", "deploy/host/.env.example")
+#: Admin-managed names an example still offers, by (file, variable), and why.
+EXAMPLE_ADMIN_NAMES: dict[tuple[str, str], str] = {
+    ("deploy/host/.env.example", "AGENT_SANDBOX_MANAGER_TOKEN"): (
+        "the host's own copy: its sandbox manager checks the control plane's saved "
+        "value against it, so it must exist on the machine before the first heartbeat"
+    ),
+}
+_EXAMPLE_LINE = re.compile(r"\s*#?\s*([A-Z][A-Z0-9_]*)=")
 #: The one ``host_admin`` variable that is not in HOST_SETTINGS.
 HOST_ADMIN_OUTSIDE_REGISTRY = frozenset({"AGENT_HOST_SLOTS"})
 #: Retired names that are not former Sandbox Manager spellings: a warning in
@@ -397,6 +410,26 @@ def misplaced(scan: Scan, families: Iterable[inventory.Family] = inventory.FAMIL
     return problems
 
 
+def admin_names_offered(
+    examples: dict[str, str], families: Iterable[inventory.Family] = inventory.FAMILIES
+) -> list[str]:
+    """Admin-managed variables an example env file offers, commented out or not."""
+    families = tuple(families)
+    problems = []
+    for path, text in examples.items():
+        for line in text.splitlines():
+            match = _EXAMPLE_LINE.match(line)
+            if not match or (path, match[1]) in EXAMPLE_ADMIN_NAMES:
+                continue
+            covering = _covering(match[1], families)
+            if covering and covering[0].disposition in ("admin", "host_admin"):
+                problems.append(
+                    f"{path} offers {match[1]}, which Admin manages: remove the line and "
+                    "list it in the upgrade notes as one an upgraded deployment can delete"
+                )
+    return problems
+
+
 # -- the repository --------------------------------------------------------
 
 
@@ -432,6 +465,27 @@ def test_every_read_names_its_variable(scan: Scan) -> None:
 
 def test_new_environment_imports_are_migrated() -> None:
     assert unmigrated_registrations(SETTINGS, MIGRATED_SETTINGS) == []
+
+
+def test_production_examples_offer_nothing_admin_manages() -> None:
+    examples = {path: (REPO / path).read_text() for path in PRODUCTION_EXAMPLES}
+    assert admin_names_offered(examples) == []
+    offered = {
+        (path, match[1])
+        for path, text in examples.items()
+        for line in text.splitlines()
+        if (match := _EXAMPLE_LINE.match(line))
+    }
+    assert set(EXAMPLE_ADMIN_NAMES) <= offered, "an EXAMPLE_ADMIN_NAMES entry is no longer offered"
+
+
+def test_an_example_offering_a_setting_fails() -> None:
+    example = "AGENT_DATABASE_URL=\n# AGENT_SMTP_HOST=smtp.example.org\nAGENT_HOST_SLOTS=3\n"
+    problems = admin_names_offered({"deploy/control-plane/.env.example": example})
+    assert [problem.split(",")[0] for problem in problems] == [
+        "deploy/control-plane/.env.example offers AGENT_SMTP_HOST",
+        "deploy/control-plane/.env.example offers AGENT_HOST_SLOTS",
+    ]
 
 
 def test_every_exception_is_still_needed(scan: Scan) -> None:
