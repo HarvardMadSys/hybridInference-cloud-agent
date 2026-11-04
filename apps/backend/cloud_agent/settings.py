@@ -27,6 +27,7 @@ from cloud_agent.setting_definition import (
     _github_install_url,
     _gitlab_redirect_uri,
     _numeric,
+    _package_registry_url,
     _s3_bucket,
     _s3_prefix,
     _s3_region,
@@ -569,7 +570,7 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     _numeric("task_titles.max_chars", "Maximum task title length", "Task titles", 36, 8, 36),
 )
-MIGRATED_SETTINGS: tuple[Setting, ...] = (
+_MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
     Setting(
         "public_api_url",
         "Public API URL",
@@ -736,11 +737,87 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_MCP_ALLOW_PLAIN_HTTP",
         description="Allow unencrypted HTTP MCP connections. Takes effect for new MCP transports after restarting the MCP listener.",
     ),
+    _numeric(
+        "streams.max_per_user",
+        "Live streams per account",
+        "Operations",
+        24,
+        1,
+        1_000_000,
+        env="AGENT_MAX_STREAMS_PER_USER",
+        description=(
+            "How many live-update streams (the change stream and job event streams) one "
+            "account may hold open on one control-plane process; one more answers 429 with "
+            "Retry-After, which the web app backs off on. A browser tab holds one change "
+            "stream and one stream per conversation it is watching."
+        ),
+        apply_mode="next_operation",
+        apply_description="Checked each time a stream opens; open streams are not closed.",
+        invalid_env_uses_default=True,
+    ),
+    Setting(
+        "runtime_registry_url",
+        "Agent package registry",
+        "Agent versions",
+        "",
+        env="AGENT_RUNTIME_REGISTRY_URL",
+        check=_package_registry_url,
+        hint="Use an https:// address, or http:// to this machine or a private service name.",
+        description=(
+            "The npm registry agent versions are listed from here and downloaded from on "
+            "every server. Empty is the public registry (https://registry.npmjs.org). "
+            "Servers receive it on their next heartbeat; updates are refused until every "
+            "online server reports using it."
+        ),
+        apply_mode="next_operation",
+        apply_description=(
+            "Version lists use it at once; each server uses it for downloads it starts "
+            "after its next heartbeat."
+        ),
+    ),
+    Setting(
+        "api_docs",
+        "Serve API documentation",
+        "Operations",
+        False,
+        kind="boolean",
+        env="AGENT_API_DOCS",
+        description=(
+            "Serves /docs, /redoc and /openapi.json on the main API. Keep off in production: "
+            "the schema is unauthenticated, and the two pages load scripts from a CDN at a "
+            "floating version. The MCP-only listener never serves them."
+        ),
+        apply_mode="next_operation",
+        apply_description="Checked on each documentation request; no restart.",
+        invalid_env_uses_default=True,
+    ),
 )
-# Imported from the environment on first sight in an existing deployment, as
-# the settings above were: an upgraded deployment keeps its AGENT_SMTP_* mail.
-MIGRATED_SETTINGS += ACCOUNT_SETTINGS
-SETTINGS += MIGRATED_SETTINGS
+#: Registered after settings rows existed, but only in SETTINGS, so a database
+#: created before their registration never imported their environment value
+#: (P1 section 5.1). Listed here, an existing row missing them imports them once.
+_IMPORTED_AFTER_REGISTRATION = frozenset(
+    {
+        "web_search_provider",
+        "serper_api_key",
+        "brave_search_api_key",
+        "parallel_api_key",
+        "mcp_github_client_id",
+        "mcp_github_client_secret",
+        "site.docs_url",
+        "site.contact_url",
+    }
+)
+SETTINGS += _MIGRATED_DEFINITIONS
+#: Settings an existing database imports from the environment when its row
+#: lacks them. Every registration with an environment name belongs here.
+#: Account settings are imported the same way, so an upgraded deployment keeps
+#: its AGENT_SMTP_* mail.
+MIGRATED_SETTINGS: tuple[Setting, ...] = (
+    _MIGRATED_DEFINITIONS
+    + tuple(setting for setting in SETTINGS if setting.key in _IMPORTED_AFTER_REGISTRATION)
+    + ACCOUNT_SETTINGS
+)
+SETTINGS += ACCOUNT_SETTINGS
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 SETTINGS_BY_STORAGE_KEY = {setting.storage_key: setting for setting in SETTINGS}
 _SETTINGS_BY_ENV = {setting.env: setting for setting in SETTINGS if setting.env}
@@ -882,8 +959,18 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
             )
 
 
-def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
-    """Import only registered environment variables into the initial settings row."""
+def initial_settings(  # noqa: C901, PLR0912 complexity baseline, #771
+    *, keys: set[str] | None = None, problems: list[str] | None = None
+) -> dict[str, Any]:
+    """Import only registered environment variables into the initial settings row.
+
+    The first row refuses an invalid value, so a new deployment learns about
+    it before anything is stored. ``keys`` imports into an existing row on
+    upgrade: there an invalid value would stop a running deployment, so it
+    imports the default and ``problems`` names the variable, never its value.
+    A setting marked ``invalid_env_uses_default`` does that on the first row
+    too, as the reader it replaced did.
+    """
     result: dict[str, Any] = {}
     values: dict[str, SettingValue] = {setting.key: setting.default for setting in SETTINGS}
     imported: dict[str, SettingValue] = {}
@@ -926,13 +1013,19 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:  # noqa
                     normalized = raw.strip().lower()
                     value = normalized if normalized in {"text", "json"} else "text"
                 value = setting.validate(value, saved=True)
-            except SettingTooShort:
-                raise ValueError(
-                    f"Invalid initial configuration for {setting.label} ({setting.env}): "
-                    f"use at least {setting.minimum_bytes} bytes"
-                ) from None
-            except (ValueError, OverflowError):
-                raise ValueError(f"Invalid initial configuration for {setting.label}") from None
+            except (ValueError, OverflowError) as exc:
+                if keys is None and not setting.invalid_env_uses_default:
+                    if isinstance(exc, SettingTooShort):
+                        raise ValueError(
+                            f"Invalid initial configuration for {setting.label} "
+                            f"({setting.env}): use at least {setting.minimum_bytes} bytes"
+                        ) from None
+                    raise ValueError(f"Invalid initial configuration for {setting.label}") from None
+                value = imported.get(setting.key, setting.default)
+                if problems is not None:
+                    problems.append(
+                        f"{setting.env} is not a valid {setting.label}; imported the default"
+                    )
         values[setting.key] = value
         result[setting.storage_key] = _encode(setting, value)
     _validate_relations(values)
@@ -1189,9 +1282,14 @@ async def initialize_settings(repository: SettingsRepository, *, seed: bool = Tr
     missing = {setting.storage_key for setting in MIGRATED_SETTINGS} - encoded.keys()
     if revision < 0 or missing:
         if seed:
+            problems: list[str] = []
             revision, encoded = await repository.seed_settings(
-                initial_settings(keys=missing if revision >= 0 else None)
+                initial_settings(keys=missing if revision >= 0 else None, problems=problems)
             )
+            from cloud_agent.logging_utils import get_logger
+
+            for problem in problems:
+                get_logger(__name__).warning("settings import: %s", problem)
         else:
             # Only the main listener has the complete legacy environment.
             # A relay racing it must never seed blank integration credentials.

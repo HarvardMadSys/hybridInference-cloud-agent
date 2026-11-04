@@ -15,14 +15,14 @@ The downgrade refuses while a sandbox connection exists: it would leave rows
 the old constraint forbids, and silently deleting a user's connection is not a
 downgrade.
 
-Revision ID: 0110_mcp_sandbox_location
-Revises: 0109_local_account_parity
+Revision ID: 0111_mcp_sandbox_location
+Revises: 0110_host_late_settings
 """
 
 from alembic import op
 
-revision = "0110_mcp_sandbox_location"
-down_revision = "0109_local_account_parity"
+revision = "0111_mcp_sandbox_location"
+down_revision = "0110_host_late_settings"
 branch_labels = None
 depends_on = None
 

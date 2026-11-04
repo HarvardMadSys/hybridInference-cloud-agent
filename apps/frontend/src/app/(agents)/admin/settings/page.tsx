@@ -29,12 +29,15 @@ import { SettingsSearch } from './SettingsSearchPanel';
 import { useRuntimeUpgrades } from './useRuntimeUpgrades';
 import { useRuntimeVersions } from './useRuntimeVersions';
 import { isLegacyDeploymentHash, legacyDeploymentSetting } from './legacyDeploymentLinks';
-import { applicationCategoryName } from './settingsOrganization';
+import { HOSTED_CATEGORIES, applicationCategoryName } from './settingsOrganization';
 import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearchIndex';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
+
+/** The application settings category shown on the Agent versions tab. */
+const AGENT_VERSIONS_CATEGORY = 'Agent versions';
 
 const OTHER_SETTINGS_TABS = [
   { id: 'versions', label: 'Agent versions' },
@@ -96,7 +99,7 @@ function SettingsView() {
   }, []);
   const revealCategory = useCallback(
     (category: string) =>
-      selectUrlTab(category === 'Sandbox archives' ? 'sandbox' : categoryTabId(category)),
+      selectUrlTab(HOSTED_CATEGORIES.get(category)?.tab ?? categoryTabId(category)),
     [selectUrlTab],
   );
 
@@ -121,7 +124,7 @@ function SettingsView() {
     enabled: !denied,
   });
   const applicationCategories = [...applicationSettings.groups.keys()].filter(
-    (category) => category !== 'Sandbox archives',
+    (category) => !HOSTED_CATEGORIES.has(category),
   );
   const settingsTabs = [
     ...(applicationCategories.length
@@ -135,7 +138,7 @@ function SettingsView() {
   if (queryTab?.startsWith('application-')) {
     try {
       const category = applicationCategoryName(decodeURIComponent(queryTab.slice(12)));
-      requestedTab = category === 'Sandbox archives' ? 'sandbox' : categoryTabId(category);
+      requestedTab = HOSTED_CATEGORIES.get(category)?.tab ?? categoryTabId(category);
     } catch {
       // A malformed category link falls back to the first available page.
     }
@@ -203,6 +206,19 @@ function SettingsView() {
     // Finishing switches new chats over, which the version menu shows.
     onUpdated: () => void load(),
   });
+  // Saving the package registry changes whom an update waits for: read that
+  // now rather than at the next poll. The first revision is the page loading.
+  const settingsRevision = applicationSettings.snapshot?.revision;
+  const seenRevision = useRef(settingsRevision);
+  const reloadUpdates = updates.reload;
+  useEffect(() => {
+    if (seenRevision.current === undefined || seenRevision.current === settingsRevision) {
+      seenRevision.current = settingsRevision;
+      return;
+    }
+    seenRevision.current = settingsRevision;
+    if (selectedTab === 'versions') void reloadUpdates();
+  }, [settingsRevision, selectedTab, reloadUpdates]);
   const releases = useRuntimeVersions({
     runtimes: updates.items?.map((item) => item.runtime) ?? [],
     enabled: !denied && selectedTab === 'versions',
@@ -473,6 +489,24 @@ function SettingsView() {
             hidden={selectedTab !== 'versions'}
             tabIndex={0}
           >
+            {applicationSettings.groups.has(AGENT_VERSIONS_CATEGORY) && (
+              <section
+                className="ui-card mt-6 p-4 sm:p-6"
+                aria-label="Where agent versions come from"
+              >
+                <ApplicationSettingsHeader
+                  settings={applicationSettings}
+                  title="Where agent versions come from"
+                />
+                <ApplicationSettingsFeedback settings={applicationSettings} />
+                <ApplicationSettingsCategory
+                  settings={applicationSettings}
+                  category={AGENT_VERSIONS_CATEGORY}
+                  active={selectedTab === 'versions'}
+                  showHeading={false}
+                />
+              </section>
+            )}
             {pool && (
               <AgentVersions
                 menu={versionMenu}
@@ -493,6 +527,7 @@ function SettingsView() {
                   )
                 }
                 updates={updates.items}
+                registryWaitingOn={updates.waitingOn}
                 updateBusy={updates.busy}
                 updateError={updates.error}
                 onUpdate={(runtime, version) => void updates.update(runtime, version)}

@@ -1,7 +1,7 @@
 """MCP connections that run in the sandbox, against a real database.
 
 What only Postgres settles: the location check constraint admits ``sandbox``
-(``0110_mcp_sandbox_location``) and refuses a downgrade that would orphan one,
+(``0111_mcp_sandbox_location``) and refuses a downgrade that would orphan one,
 and the relay's fenced identity read never names a sandbox binding, which the
 relay could not dial.
 """
@@ -92,10 +92,10 @@ async def test_a_downgrade_refuses_to_orphan_a_sandbox_connection(store: Storage
     created = await _connection(store, "sandbox", "browser")
     try:
         with pytest.raises(Exception, match="sandbox MCP connections exist"):
-            downgrade_to(config, "0109_local_account_parity")
+            downgrade_to(config, "0110_host_late_settings")
         async with db.acquire() as conn:
             await conn.execute("DELETE FROM agent_mcp_connections WHERE id = $1", created["id"])
-        downgrade_to(config, "0109_local_account_parity")
+        downgrade_to(config, "0110_host_late_settings")
         with pytest.raises(asyncpg.CheckViolationError):
             await _connection(store, "sandbox", "after-downgrade")
     finally:

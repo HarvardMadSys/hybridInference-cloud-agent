@@ -131,4 +131,38 @@ test.describe('on a phone', () => {
     expect(overflow.workspace).toBeLessThanOrEqual(0);
     expect(overflow.table).toBeGreaterThan(0);
   });
+  test('an open account fits the phone, however far the table is scrolled', async ({ page }) => {
+    await asAdministrator(page, []);
+    await page.goto('/admin/users');
+    const scroller = page.locator('table').locator('..');
+    await scroller.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth;
+    });
+    // The chevron is a real button: the keyboard opens the row as a click does.
+    const toggle = page.getByRole('button', { name: 'Details for applicant@example.test' });
+    await toggle.focus();
+    await page.keyboard.press('Enter');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const panel = page.locator('#account-detail-01APPLICANT > td > div');
+    await expect(panel.getByRole('combobox', { name: 'Action' })).toBeVisible();
+
+    const fit = await page.evaluate(() => {
+      const box = document
+        .querySelector('#account-detail-01APPLICANT > td > div')!
+        .getBoundingClientRect();
+      const action = document.getElementById('account-action')!.getBoundingClientRect();
+      const scroller = document.querySelector('table')!.parentElement!.getBoundingClientRect();
+      return {
+        page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        panelLeft: box.left - scroller.left,
+        panelRight: scroller.right - box.right,
+        actionInside: action.left >= scroller.left && action.right <= scroller.right,
+      };
+    });
+    expect(fit.page).toBeLessThanOrEqual(0);
+    expect(Math.abs(fit.panelLeft)).toBeLessThanOrEqual(1);
+    expect(Math.abs(fit.panelRight)).toBeLessThanOrEqual(1);
+    expect(fit.actionInside).toBe(true);
+    await expect(panel.getByText('Coursework for a systems class', { exact: false })).toBeVisible();
+  });
 });

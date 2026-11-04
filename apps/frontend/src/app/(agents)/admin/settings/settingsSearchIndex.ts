@@ -2,7 +2,12 @@ import type { HostSettingDefinition } from '@/lib/api/admin';
 import type { AgentAdminSettings } from '@/lib/api/adminSettings';
 
 import { agentName } from './AgentVersions';
-import { applicationCategory, applicationSettingGroup } from './settingsOrganization';
+import {
+  HOSTED_CATEGORIES,
+  applicationCategory,
+  applicationCategoryTab,
+  applicationSettingGroup,
+} from './settingsOrganization';
 
 export interface SettingsSearchItem {
   id: string;
@@ -151,13 +156,12 @@ export function buildSettingsSearchItems({
   return [
     ...(snapshot?.definitions ?? []).map((definition) => {
       const category = applicationCategory(definition);
-      const tab =
-        category === 'Sandbox archives' ? 'sandbox' : `application-${encodeURIComponent(category)}`;
+      const tab = applicationCategoryTab(category);
       return {
         id: `application:${definition.key}`,
         label: definition.label,
         description: definition.description,
-        section: category === 'Sandbox archives' ? 'Sandbox' : category,
+        section: HOSTED_CATEGORIES.get(category)?.section ?? category,
         tab,
         targetId: `application-setting-${definition.key}`,
         applicationKey: definition.key,

@@ -81,7 +81,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0110_mcp_sandbox_location`) before
+Run `alembic upgrade head` (through `0111_mcp_sandbox_location`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -349,10 +349,10 @@ permissions, retention and verification requirements.
 | `AGENT_EDGE_CONFIG_FILE` | Host-side nginx configuration mounted read-only by the edge service. Default `./edge.nginx.conf`, relative to the Compose file. |
 | `AGENT_NETWORK_NAME` | Control-plane Compose network name, default `cloud-agent`. Use distinct names for independent stacks. |
 | `AGENT_SESSION_COOKIE_SECURE` | Defaults to on. Set to `false` **only** for a developer running the whole stack on plain `http://localhost`; a session cookie without `Secure` is one anyone on the path can take. On, the session cookie is `__Host-cloud_agent_session` and a sign-in in progress is parked in `__Host-cloud_agent_login`, names another host on the same site cannot set. Cookies under the plain names are not read: a browser that still holds only a `cloud_agent_session` cookie from before that rename signs in once more, and sign-in and sign-out remove it. Off, both keep the plain names, because browsers refuse the prefix without `Secure`. |
-| `AGENT_API_DOCS` | Defaults to off. Set to `true` on a development stack to serve `/docs`, `/redoc` and `/openapi.json` on the main API. Off, none of the three is served: the schema is unauthenticated, and the two pages load scripts from a CDN at a floating version. The MCP-only listener never serves them. |
-| `AGENT_MAX_STREAMS_PER_USER` | Default `24`. How many live-update streams (the change stream and job event streams) one account may hold open on one control-plane process; one more answers 429 with `Retry-After`, which the web app backs off on. A browser tab holds one change stream and one stream per conversation it is watching. A missing, non-numeric or non-positive value uses the default. |
+| `AGENT_API_DOCS` | *Initial import.* Saved as **Serve API documentation** in Admin → Settings → Operations and read on every request, so turning it on or off needs no restart. Defaults to off; turn it on only on a development stack. On, the main API serves `/docs`, `/redoc` and `/openapi.json`; off, none of the three is served: the schema is unauthenticated, and the two pages load scripts from a CDN at a floating version. The MCP-only listener never serves them. An unusable value imports as off. |
+| `AGENT_MAX_STREAMS_PER_USER` | *Initial import.* Saved as **Live streams per account** in Admin → Settings → Operations (default `24`) and read each time a stream opens. How many live-update streams (the change stream and job event streams) one account may hold open on one control-plane process; one more answers 429 with `Retry-After`, which the web app backs off on. A browser tab holds one change stream and one stream per conversation it is watching. A missing, non-numeric or non-positive value imports the default. |
 | `AGENT_TRUST_PROXY_HEADERS` | Defaults to off. Set to `true` only when a proxy this deployment controls sits directly in front of the control plane and writes `X-Forwarded-For`; both shipped nginx configurations overwrite it with the peer address. Only the rightmost entry, the one that proxy wrote, is recorded in the admin audit trail, so a proxy that appends instead works too; entries to its left are the caller's own and are ignored. Behind a further proxy, such as a tunnel or load balancer in front of the edge, the recorded address is that hop's unless the edge uses nginx's realip module as its configuration describes. |
-| `AGENT_RUNTIME_REGISTRY_URL` | The npm registry the admin Settings page asks for each agent's latest release, and checks a requested version against. Default `https://registry.npmjs.org`. Set the same value on the hosts, which download from it. An unreachable registry shows on the page and blocks updating; nothing else depends on it. |
+| `AGENT_RUNTIME_REGISTRY_URL` | *Initial import.* Saved as **Agent package registry** in Admin → Settings → Agent versions; empty is the public registry `https://registry.npmjs.org`. The Settings page lists versions from the saved value, and every heartbeat answer tells each host to download from it; each host reports the registry its next download uses. Until every online host reports the saved registry, the Agent versions tab names the hosts still missing it and an update is refused. On a host, this variable is only the registry used before its first heartbeat answer. An unreachable registry shows on the page and blocks updating; nothing else depends on it. |
 | `AGENT_DEPLOYMENT_SHA` | Exact commit this API serves. Required by the production control-plane Compose stack and exported by `deploy/control-plane/deploy.sh`; do not hand-edit it during a rollout. New retained-group claims require the polling replica to advertise the matching completed host marker, so a pending or failed host deployment cannot claim through a cold-start API. The local stack generates its own stack-scoped marker. |
 
 ### Source control
@@ -404,6 +404,13 @@ relay reachability and connection target policy.
 | `AGENT_MCP_SERVERS` | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
 | `AGENT_MCP_TOKEN` | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the relay credential the runner injects at launch: the chat process's residency credential. A value put here by hand would be a static tool credential shared by every job, which is the thing these scoped credentials exist to avoid. |
 | `AGENT_COMPAT_CLIENT` / `AGENT_COMPAT_UPSTREAM_URL` / `AGENT_COMPAT_UPSTREAM_KEY` / `AGENT_COMPAT_MODEL` / `AGENT_COMPAT_TOKEN` | **Not operator-set — listed so nobody provisions it.** NEW. What a host hands the model protocol compatibility launcher when Codex or Claude Code runs on an owner's Chat Completions connection: the CLI's protocol, the connection's URL and key, the model it is locked to, and the member's loopback token, which the control plane issues with the claim. The launcher reads and removes all five before it becomes the CLI, so the CLI never holds the provider key. Set by hand they would start nothing: the launcher only runs in front of a translated member. |
+
+### Web search
+
+| Variable | Value / who provisions |
+|---|---|
+| `WEB_SEARCH_PROVIDER` | *Optional initial import.* Provider behind the built-in `web_search` tool: `auto` (default), `serper`, `brave` or `parallel`. Saved in Admin → Settings → Web search; an existing deployment imports it once on upgrade if it was never saved. The supported control-plane Compose file does not pass it: set it in Admin Settings, or pass it through an override for the import. |
+| `SERPER_API_KEY` / `BRAVE_SEARCH_API_KEY` / `PARALLEL_API_KEY` | *Optional initial import.* Provider keys for the built-in `web_search` tool, stored encrypted in Admin → Settings → Web search and never sent to a sandbox. Imported once, as above. |
 
 ### Sandbox settings from the admin pages
 
@@ -529,7 +536,7 @@ compose, because they name the stack rather than configure it.
 | Variable | Notes |
 |---|---|
 | `AGENT_HOST_CREDENTIAL` | What `/v1/agent/host/register` hands back. Authenticates this machine's heartbeats and claims and names it; there is no shared claim credential or request-body host fallback. Revoked by removing the host. The runner normally reads the persisted file instead of setting this variable. |
-| `AGENT_LEASE_TTL` | Attempt lease horizon, default 120 seconds. See [lease troubleshooting](docs/developer/runner-lease-troubleshooting.md). |
+| `AGENT_LEASE_TTL` | Attempt lease horizon, default 120 seconds. *Host bootstrap.* Set as **Turn lease** for all servers or one server from the admin pages (41–900 seconds), which win over this value from the next heartbeat; each claim asks for the value in effect and the turn renews with the lease it was claimed with. A host imports this value once into its own server setting on the first heartbeat that reports it. Inference grant TTL is independent: `grants.GRANT_TTL_S = RENEWAL_INTERVAL_S × RENEWAL_HEADROOM_PASSES = 30 × 4 = 120 seconds`. Changing the lease horizon does not change grant lifetime. See [lease troubleshooting](docs/developer/runner-lease-troubleshooting.md). |
 | `AGENT_TIMEOUT_S` | Hard watchdog for one actively executing Agent CLI turn (default 3600 seconds). Hitting it fails/fences that turn; it does not mean the chat was idle and is not an alternate sandbox lifecycle timeout. Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |
 | `AGENT_RUNNER_HOST` | Execution environment name redeemed by `AGENT_ENROLL_TOKEN` on first registration and shared by every turn the machine runs. After enrollment, the credential is authoritative; changing this value does not rename the environment. Use `AGENT_PHYSICAL_HOST` to group environments for display without changing existing identities. |
 
@@ -750,7 +757,7 @@ patch. The defaults above stay what a host without a selection runs. See the
 
 | Variable | Notes |
 |---|---|
-| `AGENT_RUNTIME_REGISTRY_URL` | Host side of the control-plane row above: the npm registry a host downloads updated agents from. Default `https://registry.npmjs.org`. |
+| `AGENT_RUNTIME_REGISTRY_URL` | Host side of the control-plane row above. A host downloads updated agents from the registry its heartbeat answer names; this value is only the registry it uses before its first answer. Default `https://registry.npmjs.org`. |
 | `AGENT_RUNTIME_DOWNLOAD_NETWORK` | The Docker network the download step runs on. Default `bridge`. Only npm runs there, with install scripts disabled; the packages' own scripts and the check run later with no network. Name another network only when the host's default bridge cannot reach the registry. |
 
 Each runtime takes a `*_EXTRA_VERSIONS` deployment setting — comma-separated,

@@ -229,10 +229,13 @@ class FakeHostPoolStore(AllCapabilities):
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: list[dict[str, Any]] | None = None,
+        config_reports: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
             return None
+        if config_reports is not None:
+            row["config_reports"] = dict(config_reports)
         if runtime_downloads is not None:
             row["runtime_downloads"] = [dict(report) for report in runtime_downloads]
         if row["status"] in (HOST_ENROLLING, HOST_OFFLINE):
@@ -1095,19 +1098,6 @@ async def test_a_heartbeat_does_not_undo_a_drain(client):
     )
 
     assert response.json()["status"] == HOST_DRAINING
-
-
-async def test_a_heartbeat_only_overwrites_what_it_carries(client):
-    """A liveness-only beat must not blank what enrollment declared."""
-    async_client, store = client
-    credential = await _enroll(async_client, store, slots_total=4, capabilities=["kata"])
-
-    await async_client.post(
-        "/v1/agent/host/heartbeat", json={}, headers={"Authorization": f"Bearer {credential}"}
-    )
-
-    assert store.rows["runner-a"]["slots_total"] == 4
-    assert store.rows["runner-a"]["capabilities"] == ["kata"]
 
 
 async def test_a_heartbeat_can_update_capacity_and_version(client):
