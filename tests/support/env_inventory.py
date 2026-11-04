@@ -72,9 +72,10 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "admin",
-        "Signing and encryption keys stored as settings. Replacing the control key "
-        "invalidates host and worker credentials (hosts re-enroll); the two encryption "
-        "keys lock once set and need re-encryption.",
+        "Signing and encryption keys stored as settings, generated into the first settings "
+        "row when the environment supplies none. Replacing the control key invalidates "
+        "host and worker credentials (hosts re-enroll); the two encryption keys lock once "
+        "set and need re-encryption.",
         names=(
             "AGENT_CONTROL_TOKEN_SECRET",
             "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
@@ -308,8 +309,9 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "deployment",
         "Control-plane bootstrap: needed before the settings row can be read, the "
-        "recovery door when sign-in is broken, and the key every account credential is "
-        "hashed under (a deployment decision, not a setting).",
+        "optional recovery door when sign-in is broken, and the key every account "
+        "credential is hashed under (a deployment decision, not a setting). deploy.sh "
+        "generates the bundled DSN and the account key on a provably new installation.",
         names=("AGENT_DATABASE_URL", "ADMIN_TOKEN", "AGENT_LOCAL_SESSION_SECRET"),
     ),
     Family(
@@ -539,7 +541,8 @@ FAMILIES: tuple[Family, ...] = (
         "operation",
         "The settings root key: needed to decrypt the settings row itself. Without it, "
         "the environment's AGENT_SESSION_SECRET (once the Gateway session key) is the "
-        "fallback root; changing the root in use is a re-encryption procedure.",
+        "fallback root; changing the root in use is a re-encryption procedure. deploy.sh "
+        "generates it only on a provably new installation with no fallback.",
         names=("AGENT_SETTINGS_ENCRYPTION_KEY", "AGENT_SESSION_SECRET"),
     ),
     # -- internal ---------------------------------------------------------
