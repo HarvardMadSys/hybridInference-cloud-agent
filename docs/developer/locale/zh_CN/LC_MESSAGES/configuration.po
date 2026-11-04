@@ -4605,3 +4605,74 @@ msgid ""
 "stop."
 msgstr "PR 检查清单会检查这一点；新增了变量却没有对应的一行，评审就不会通过。"
 
+#: ../../ENVIRONMENT.md:892
+msgid "Site content files"
+msgstr "站点内容文件"
+
+#: ../../ENVIRONMENT.md:894
+msgid ""
+"A deployment's Terms of Service, Team page and source link are files in "
+"the deployment's own repository, not environment variables or Admin "
+"settings, so a change is reviewed there and goes live with the next "
+"deployment. Copy the directory to the control-plane host and point "
+"`AGENT_SITE_CONTENT_DIR` at it. The control plane picks up a changed file"
+" on the next request, without a restart. Every file is optional:"
+msgstr ""
+"部署的服务条款、Team 页和源码链接是放在部署自己仓库里的文件，不是环境变量，也不是 Admin "
+"设置，所以改动在那个仓库里审查，随下一次部署上线。把这个目录复制到控制平面所在的主机，再让 `AGENT_SITE_CONTENT_DIR` "
+"指向它。文件改动后，控制平面在下一个请求时就会读到，不需要重启。每个文件都是可选的："
+
+#: ../developer/configuration.md:1
+msgid "File"
+msgstr "文件"
+
+#: ../developer/configuration.md:1
+msgid "Contents"
+msgstr "内容"
+
+#: ../developer/configuration.md:1
+msgid "`terms.en.txt`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"Terms of Service in English, plain UTF-8 text; blank lines separate "
+"paragraphs."
+msgstr "英文服务条款，UTF-8 纯文本；空行分段。"
+
+#: ../developer/configuration.md:1
+msgid "`terms.zh-CN.txt`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"The same in Simplified Chinese. `/terms` shows the reader's language, "
+"else English."
+msgstr "简体中文版。`/terms` 按读者的语言显示，没有对应语言时显示英文。"
+
+#: ../developer/configuration.md:1
+msgid "`site.yaml`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid "`source_url`, the GitHub link in the footer, and `members`, the Team page."
+msgstr "`source_url` 是页脚的 GitHub 链接，`members` 是 Team 页的成员。"
+
+#: ../../ENVIRONMENT.md:907
+msgid ""
+"Any Terms file replaces the `AGENT_LOCAL_TERMS_URL` and "
+"`AGENT_LOCAL_TERMS_TEXT` settings, which Admin then shows read-only. "
+"Without `site.yaml` the footer hides the Team and GitHub links."
+msgstr ""
+"只要有任何一个条款文件，`AGENT_LOCAL_TERMS_URL` 和 `AGENT_LOCAL_TERMS_TEXT` "
+"这两项设置就以文件为准，Admin 里显示为只读。没有 `site.yaml` 时，页脚不显示 Team 和 GitHub 链接。"
+
+#: ../../ENVIRONMENT.md:922
+msgid ""
+"A label is either text or a mapping of `en` and `zh-CN` to text. URLs "
+"must be absolute http(s). An unknown key, an invalid value or a file over"
+" 256 KiB is logged as `site_content_ignored` and the file is treated as "
+"absent, so check the files before deploying them."
+msgstr ""
+"标签可以是一段文本，也可以是 `en`、`zh-CN` 到文本的映射。URL 必须是绝对的 http(s) 地址。遇到未知的键、无效的值或超过 "
+"256 KiB 的文件，会记一条 `site_content_ignored` 日志，并把这个文件当作不存在，所以部署前要先检查这些文件。"
