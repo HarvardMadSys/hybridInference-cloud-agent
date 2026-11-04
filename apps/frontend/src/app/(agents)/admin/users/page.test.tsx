@@ -52,7 +52,7 @@ describe('independent account review', () => {
     });
     render(<AccountsPage />);
     await screen.findByText('Research project');
-    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review user@example.test' }));
     fireEvent.click(screen.getByRole('button', { name: 'Approve access' }));
     await waitFor(() => expect(api.updateAccount).toHaveBeenCalledWith(account, 'approve', ''));
     expect(api.listAccounts).toHaveBeenCalledTimes(2);
@@ -63,7 +63,7 @@ describe('independent account review', () => {
       new APIError('version_conflict', 'Changed', 409),
     );
     render(<AccountsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Review' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review user@example.test' }));
     fireEvent.click(screen.getByRole('button', { name: 'Approve access' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('changed while you were reviewing');
     expect(screen.getByRole('button', { name: 'Approve access' })).toBeDisabled();
@@ -73,7 +73,7 @@ describe('independent account review', () => {
   it('decline reason is explicitly identified as visible to the applicant', async () => {
     vi.mocked(api.updateAccount).mockResolvedValue(account);
     render(<AccountsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Review' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review user@example.test' }));
     fireEvent.click(screen.getByRole('combobox', { name: 'Action' }));
     fireEvent.click(screen.getByRole('option', { name: 'Decline application' }));
     fireEvent.change(screen.getByLabelText('Reason shown to the applicant (optional)'), {
@@ -90,7 +90,7 @@ describe('independent account review', () => {
       total: 1,
     });
     render(<AccountsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Review' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review user@example.test' }));
     fireEvent.click(screen.getByRole('combobox', { name: 'Action' }));
     expect(within(screen.getByRole('listbox')).queryByText('Approve access')).toBeNull();
   });
@@ -170,6 +170,59 @@ describe('the people table', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show everyone' }));
     await waitFor(() => expect(window.location.search).toBe('?q=lead'));
     expect(screen.queryByText('Members of Lab')).not.toBeInTheDocument();
+  });
+  it('opens an account under its row with what the row leaves out, and closes it again', async () => {
+    const reviewed: AccountEntry = {
+      ...lead,
+      waitlist: { ...lead.waitlist, purpose: 'Compiler coursework' },
+      reviewed_by: 'admin@example.test',
+      identity: {
+        locale: null,
+        email: 'lead@example.test',
+        email_verified: true,
+        login_name: 'lead',
+        phone: '+1 555 0100',
+        has_password: true,
+        identity_verified: true,
+        user_name: 'Lead Person',
+        label: 'lead@example.test',
+      },
+    };
+    vi.mocked(api.listAccounts).mockResolvedValue({ accounts: [reviewed], total: 1 });
+    render(<AccountsPage />);
+    const toggle = await screen.findByRole('button', { name: 'Details for lead@example.test' });
+    expect(screen.getByText('Lead Person')).toBeInTheDocument();
+    expect(screen.queryByText('Compiler coursework')).toBeNull();
+    expect(screen.queryByText(/admin@example\.test/)).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Compiler coursework')).toBeInTheDocument();
+    expect(screen.getByText(/admin@example\.test/)).toBeInTheDocument();
+    expect(screen.getByText('+1 555 0100')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Review lead@example.test' })).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Compiler coursework')).toBeNull();
+  });
+  it('offers other pages only when the view has them', async () => {
+    render(<AccountsPage />);
+    await screen.findByRole('button', { name: 'Review user@example.test' });
+    expect(screen.queryByRole('button', { name: 'Next' })).toBeNull();
+    cleanup();
+    vi.mocked(api.listAccounts).mockResolvedValue({ accounts: [account], total: 120 });
+    render(<AccountsPage />);
+    expect(await screen.findByText('1–50 of 120')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() =>
+      expect(api.listAccounts).toHaveBeenLastCalledWith(
+        '',
+        50,
+        expect.any(AbortSignal),
+        expect.objectContaining({ q: '' }),
+      ),
+    );
+    expect(await screen.findByText('51–100 of 120')).toBeInTheDocument();
   });
   it('writes a search to the address bar once typing pauses', async () => {
     vi.mocked(api.listAccounts).mockResolvedValue({ accounts: [account], total: 1 });

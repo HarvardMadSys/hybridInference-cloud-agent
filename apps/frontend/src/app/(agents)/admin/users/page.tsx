@@ -1,9 +1,9 @@
 'use client';
 // Admin → Users → People: every account in one table, with its access, its
-// state and the teams it is in. The counts above it are its quick views, and
-// the filters stay in the address bar.
+// state and the teams it is in. The counts heading the list are its quick
+// views, and the filters stay in the address bar.
 import Link from 'next/link';
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useAuth } from '@/components/providers/AuthProvider';
 import { useT } from '@/components/providers/LocaleProvider';
 import { Select } from '@/components/ui/Select';
@@ -13,18 +13,22 @@ import type { ErasureResult } from '@/lib/api/accountAdmin';
 import { getErrorMessage } from '@/lib/utils/errors';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
+import { CARD } from '../runs/shared';
 import { ActionEditor, ErasureSummary, SUMMARY } from './AccountActions';
 import { AccountNotes, SignInHistory } from './AccountDetails';
 import { queryFromFilters, useUserFilters, type FilterChange, type UserFilters } from './filters';
 import { COUNT_VIEWS, FILTERS, SORTS, STATES, translated } from './options';
-import { UserTable } from './UserTable';
-import { UsersTabs } from './UsersTabs';
+import { AccountFacts, UserTable } from './UserTable';
+import { USERS_TOOL, UsersTabs } from './UsersTabs';
 
 const PAGE_SIZE = 50;
 /** How long typing pauses before it searches, as HybridInference's filter bar. */
 const SEARCH_DELAY_MS = 300;
+/** A filter's select: sharing the row on a phone, its own width beside the search. */
+const SELECT = 'ui-input min-w-[8.5rem] flex-1 sm:flex-none';
 
-function Counts({
+/** The quick views, each with the accounts it counts; one may be the view shown. */
+function StatusFilters({
   counts,
   filters,
   onPick,
@@ -34,27 +38,37 @@ function Counts({
   onPick: (view: (typeof COUNT_VIEWS)[number]) => void;
 }) {
   const t = useT();
-  if (!counts) return null;
   return (
-    <div role="group" aria-label={t('adminAccounts.counts')} className="flex flex-wrap gap-2">
+    <div role="group" aria-label={t('adminAccounts.counts')} className="flex flex-wrap gap-1">
       {COUNT_VIEWS.map((view) => {
         const active = filters.status === view.status && filters.state === view.state;
+        const count = counts ? (counts[view.key] ?? 0) : undefined;
+        // Applications waiting are the one count that asks for something.
+        const waiting = view.key === 'admission:pending' && !!count;
         return (
           <button
             key={view.key}
             type="button"
             aria-pressed={active}
             onClick={() => onPick(view)}
-            className={`ui-focus-ring min-w-[7rem] rounded-xl border px-3 py-2 text-left transition-colors ${
+            className={`ui-focus-ring inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 py-1 text-[13px] font-medium transition-colors ${
               active
-                ? 'border-accent bg-surface text-foreground'
-                : 'border-border bg-surface text-muted hover:bg-surface-hover hover:text-foreground'
+                ? 'border-border-strong bg-surface text-foreground shadow-subtle'
+                : 'border-transparent text-muted hover:bg-surface-hover hover:text-foreground'
             }`}
           >
-            <span className="block text-xs">{t(view.label)}</span>
-            <span className="block text-lg font-semibold tabular-nums text-foreground">
-              {counts[view.key] ?? 0}
-            </span>
+            {t(view.label)}
+            {count !== undefined && (
+              <span
+                className={`rounded-full px-1.5 text-xs tabular-nums ${
+                  waiting
+                    ? 'bg-status-warning/15 text-status-warning'
+                    : 'bg-surface-hover text-muted'
+                }`}
+              >
+                {count}
+              </span>
+            )}
           </button>
         );
       })}
@@ -132,9 +146,9 @@ function FilterBar({
     setSearch((current) => (current.trim() === filters.q ? current : filters.q));
   }, [filters.q]);
   return (
-    <div className="flex flex-wrap items-center gap-3">
+    <div className="flex flex-wrap items-center gap-2">
       <input
-        className="ui-input min-w-[14rem] flex-1"
+        className="ui-input w-full sm:w-80"
         type="search"
         aria-label={t('adminAccounts.search')}
         placeholder={t('adminAccounts.searchPlaceholder')}
@@ -142,30 +156,112 @@ function FilterBar({
         value={search}
         onChange={(e) => type(e.target.value)}
       />
-      <Select
-        aria-label={t('adminAccounts.applicationStatus')}
-        value={filters.status}
-        onValueChange={(status) => onChange((current) => ({ ...current, status }))}
-        options={translated(FILTERS, t)}
-      />
-      <Select
-        aria-label={t('adminAccounts.accountState')}
-        value={filters.state}
-        onValueChange={(state) => onChange((current) => ({ ...current, state }))}
-        options={translated(STATES, t)}
-      />
-      <Select
-        aria-label={t('adminAccounts.sortLabel')}
-        value={filters.sort}
-        onValueChange={(sort) => onChange((current) => ({ ...current, sort }))}
-        options={translated(SORTS, t)}
-      />
-      <button className="ui-button ui-button-secondary" disabled={loading} onClick={onRefresh}>
-        {t('adminAccounts.refresh')}
-      </button>
-      <span className="text-xs text-muted">{t('adminAccounts.total', { count: total })}</span>
+      <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+        <Select
+          className={SELECT}
+          aria-label={t('adminAccounts.applicationStatus')}
+          value={filters.status}
+          onValueChange={(status) => onChange((current) => ({ ...current, status }))}
+          options={translated(FILTERS, t)}
+        />
+        <Select
+          className={SELECT}
+          aria-label={t('adminAccounts.accountState')}
+          value={filters.state}
+          onValueChange={(state) => onChange((current) => ({ ...current, state }))}
+          options={translated(STATES, t)}
+        />
+        <Select
+          className={SELECT}
+          aria-label={t('adminAccounts.sortLabel')}
+          value={filters.sort}
+          onValueChange={(sort) => onChange((current) => ({ ...current, sort }))}
+          options={translated(SORTS, t)}
+        />
+      </div>
+      <div className="ml-auto flex items-center gap-2">
+        <span className="text-xs tabular-nums text-muted">
+          {t('adminAccounts.total', { count: total })}
+        </span>
+        <button className="ui-button ui-button-secondary" disabled={loading} onClick={onRefresh}>
+          {t('adminAccounts.refresh')}
+        </button>
+      </div>
     </div>
   );
+}
+
+/** Previous and Next, once the view runs past one page. */
+function Pages({
+  offset,
+  total,
+  loading,
+  onMove,
+}: {
+  offset: number;
+  total: number;
+  loading: boolean;
+  onMove: (offset: number) => void;
+}) {
+  const t = useT();
+  if (offset === 0 && total <= PAGE_SIZE) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-2.5">
+      <span className="text-xs tabular-nums text-muted">
+        {t('adminAccounts.page', {
+          from: Math.min(offset + 1, total),
+          to: Math.min(offset + PAGE_SIZE, total),
+          total,
+        })}
+      </span>
+      <div className="flex gap-2">
+        <button
+          className="ui-button ui-button-secondary"
+          disabled={loading || offset === 0}
+          onClick={() => onMove(Math.max(0, offset - PAGE_SIZE))}
+        >
+          {t('adminAccounts.previous')}
+        </button>
+        <button
+          className="ui-button ui-button-secondary"
+          disabled={loading || offset + PAGE_SIZE >= total}
+          onClick={() => onMove(offset + PAGE_SIZE)}
+        >
+          {t('adminAccounts.next')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** What the list holds now: the rows, or why there are none. */
+function Rows({
+  accounts,
+  error,
+  loading,
+  table,
+}: {
+  accounts: AccountEntry[];
+  error: string | null;
+  loading: boolean;
+  table: ReactNode;
+}) {
+  const t = useT();
+  if (error)
+    return (
+      <div className="p-4">
+        <AccountNotice error>{error}</AccountNotice>
+      </div>
+    );
+  if (loading)
+    return (
+      <p role="status" className="px-4 py-10 text-center text-sm text-muted">
+        {t('adminAccounts.loading')}
+      </p>
+    );
+  if (accounts.length === 0)
+    return <p className="px-4 py-10 text-center text-sm text-muted">{t('adminAccounts.empty')}</p>;
+  return table;
 }
 
 function PeopleView() {
@@ -194,25 +290,25 @@ function PeopleView() {
     setReload((v) => v + 1);
   }, []);
   const detail = (account: AccountEntry) => (
-    <div className="space-y-3">
-      {account.waitlist.review_reason && (
-        <p className="mt-3 whitespace-pre-wrap break-words text-sm text-muted">
-          {t('adminAccounts.reviewReason', { reason: account.waitlist.review_reason })}
-        </p>
-      )}
-      <ActionEditor
-        key={`${account.id}:${account.waitlist.version}`}
-        account={account}
-        onCancel={() => setOpenId(null)}
-        onErased={(result) =>
-          setErasure({ label: account.identity?.label ?? account.email ?? account.id, result })
-        }
-        onDone={() => {
-          refresh();
-          if (account.id === state.user?.id) void refreshUser();
-        }}
-      />
-      <div className="space-y-3 rounded-lg border border-border bg-surface p-4">
+    <div className="grid gap-4 lg:grid-cols-2">
+      <div className="min-w-0 space-y-4">
+        <div className="rounded-lg border border-border bg-surface p-4">
+          <AccountFacts account={account} />
+        </div>
+        <ActionEditor
+          key={`${account.id}:${account.waitlist.version}`}
+          account={account}
+          onCancel={() => setOpenId(null)}
+          onErased={(result) =>
+            setErasure({ label: account.identity?.label ?? account.email ?? account.id, result })
+          }
+          onDone={() => {
+            refresh();
+            if (account.id === state.user?.id) void refreshUser();
+          }}
+        />
+      </div>
+      <div className="min-w-0 space-y-3 self-start rounded-lg border border-border bg-surface p-4">
         <AccountNotes account={account} onSaved={refresh} />
         <SignInHistory accountId={account.id} />
       </div>
@@ -226,86 +322,72 @@ function PeopleView() {
           description={t('adminAccounts.description')}
         />
         <AdminNavigation current="users" />
-        <UsersTabs current="people" />
-        <div className="mt-5 space-y-4">
-          <nav className="flex flex-wrap gap-3 text-sm" aria-label={t('adminAccounts.navigation')}>
-            <Link className="text-accent underline" href="/admin/users/policy">
+        <UsersTabs current="people">
+          <nav className="flex flex-wrap gap-1" aria-label={t('adminAccounts.navigation')}>
+            <Link className={USERS_TOOL} href="/admin/users/policy">
               {t('adminAccounts.policyLink')}
             </Link>
-            <Link className="text-accent underline" href="/admin/users/mail">
+            <Link className={USERS_TOOL} href="/admin/users/mail">
               {t('adminAccounts.mailLink')}
             </Link>
           </nav>
-          {erasure && (
-            <div role="status" className={SUMMARY}>
-              <p className="font-medium break-all">{erasure.label}</p>
-              <ErasureSummary result={erasure.result} />
-              <button className="ui-button ui-button-ghost mt-2" onClick={() => setErasure(null)}>
-                {t('adminAccounts.dismiss')}
-              </button>
-            </div>
-          )}
-          <Counts
-            counts={counts}
-            filters={filters}
-            onPick={(view) =>
-              setFilters((current) => ({ ...current, status: view.status, state: view.state }))
-            }
-          />
-          <FilterBar
-            filters={filters}
-            onChange={setFilters}
-            loading={loading}
-            total={total}
-            onRefresh={refresh}
-          />
-          {filters.team && (
-            <p className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="rounded-full border border-border bg-surface px-3 py-1">
-                {t('adminAccounts.teamFilter', { team: teamName(accounts, filters.team) })}
-              </span>
-              <button
-                type="button"
-                className="text-accent underline"
-                onClick={() => setFilters((current) => ({ ...current, team: '' }))}
-              >
-                {t('adminAccounts.clearTeamFilter')}
-              </button>
-            </p>
-          )}
-          {error && <AccountNotice error>{error}</AccountNotice>}
-          {loading ? (
-            <p role="status" className="text-sm text-muted">
-              {t('adminAccounts.loading')}
-            </p>
-          ) : accounts.length === 0 ? (
-            <p className="text-sm text-muted">{t('adminAccounts.empty')}</p>
-          ) : (
-            <UserTable
-              accounts={accounts}
-              openId={openId}
-              onToggle={(account) =>
-                setOpenId((current) => (current === account.id ? null : account.id))
-              }
-              detail={detail}
-            />
-          )}
-          <div className="flex gap-2">
-            <button
-              className="ui-button ui-button-secondary"
-              disabled={loading || offset === 0}
-              onClick={() => setOffset((v) => Math.max(0, v - PAGE_SIZE))}
-            >
-              {t('adminAccounts.previous')}
-            </button>
-            <button
-              className="ui-button ui-button-secondary"
-              disabled={loading || offset + PAGE_SIZE >= total}
-              onClick={() => setOffset((v) => v + PAGE_SIZE)}
-            >
-              {t('adminAccounts.next')}
+        </UsersTabs>
+        {erasure && (
+          <div role="status" className={`${SUMMARY} mt-4`}>
+            <p className="font-medium break-all">{erasure.label}</p>
+            <ErasureSummary result={erasure.result} />
+            <button className="ui-button ui-button-ghost mt-2" onClick={() => setErasure(null)}>
+              {t('adminAccounts.dismiss')}
             </button>
           </div>
+        )}
+        <div className={`${CARD} mt-4 overflow-hidden`}>
+          <div className="space-y-2.5 border-b border-border px-3 py-3 sm:px-4">
+            <StatusFilters
+              counts={counts}
+              filters={filters}
+              onPick={(view) =>
+                setFilters((current) => ({ ...current, status: view.status, state: view.state }))
+              }
+            />
+            <FilterBar
+              filters={filters}
+              onChange={setFilters}
+              loading={loading}
+              total={total}
+              onRefresh={refresh}
+            />
+            {filters.team && (
+              <p className="flex flex-wrap items-center gap-2 text-[13px]">
+                <span className="rounded-md border border-border bg-surface-muted px-2 py-0.5 text-foreground">
+                  {t('adminAccounts.teamFilter', { team: teamName(accounts, filters.team) })}
+                </span>
+                <button
+                  type="button"
+                  className="ui-focus-ring rounded font-medium text-accent hover:underline"
+                  onClick={() => setFilters((current) => ({ ...current, team: '' }))}
+                >
+                  {t('adminAccounts.clearTeamFilter')}
+                </button>
+              </p>
+            )}
+          </div>
+          <Rows
+            accounts={accounts}
+            error={error}
+            loading={loading}
+            table={
+              <UserTable
+                accounts={accounts}
+                openId={openId}
+                onToggle={(account) =>
+                  setOpenId((current) => (current === account.id ? null : account.id))
+                }
+                detail={detail}
+              />
+            }
+          />
+          <Pages offset={offset} total={total} loading={loading} onMove={setOffset} />
         </div>
       </section>
     </div>
