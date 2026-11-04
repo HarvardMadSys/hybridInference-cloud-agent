@@ -65,7 +65,7 @@ TEST_BASELINE = {
     "tests/unit/test_mcp_connections_api.py": 3043,
     "tests/unit/test_retained_deploy.py": 2231,
     "tests/unit/test_runner_host_service.py": 2863,
-    "tests/unit/test_shared_session_supervisor.py": 5302,
+    "tests/unit/test_shared_session_supervisor.py": 5265,
 }
 
 

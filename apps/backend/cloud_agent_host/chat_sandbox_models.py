@@ -57,6 +57,8 @@ MEMBER_UID_LIMIT = 128
 #: Private tmpfs mounts: the sandbox UID's activation state, and one per member slot.
 ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
+#: The user the sandbox's shared browser service runs as (cloud_agent_host.sandbox_browser).
+BROWSER_SERVICE_UID = 10002
 
 
 class ChatSandboxStatus(StrEnum):

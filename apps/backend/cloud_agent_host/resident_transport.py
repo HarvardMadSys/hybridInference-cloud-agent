@@ -47,6 +47,7 @@ from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
+from cloud_agent_host.sandbox_browser import ensure_browser_service
 from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
@@ -800,6 +801,9 @@ class ResidentTransportFactory:
     def _prepare_runtime_helpers(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
         """Install the selected runtime and trusted adapters before its first spawn."""
         runtime_id = launch.runtime_id
+        # Every runtime: a member's tools reach the sandbox's shared browser
+        # through its service, which no member's own exec may start.
+        ensure_browser_service(self._manager, spec)
         # HTTP dialects always use the trusted live bridge, and pi its
         # wrapper and MCP bridge, including turns without MCP. Refresh
         # them from the host when resuming a retained container so new
