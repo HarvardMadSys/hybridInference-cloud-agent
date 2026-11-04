@@ -1,9 +1,13 @@
 'use client';
 
+import Link from 'next/link';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { useT } from '@/components/providers/LocaleProvider';
 
 // Eastern time (America/New_York) so the shown time tracks daylight saving (EST/EDT).
+const REPOSITORY_URL = 'https://github.com/HarvardMadSys/hybridInference-cloud-agent';
+const LINK_CLASS = 'hover:underline focus-visible:underline';
+
 const easternTime = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/New_York',
   hour: 'numeric',
@@ -39,6 +43,15 @@ export function DeploymentFooter({ className = '' }: { className?: string }) {
         className="hover:underline focus-visible:underline"
       >
         MadSys Group
+      </a>
+      <Link href="/terms" className={LINK_CLASS}>
+        {t('footer.terms')}
+      </Link>
+      <Link href="/team" className={LINK_CLASS}>
+        {t('footer.team')}
+      </Link>
+      <a href={REPOSITORY_URL} target="_blank" rel="noopener noreferrer" className={LINK_CLASS}>
+        GitHub
       </a>
       <span>
         {t('deployment.version')}:{' '}

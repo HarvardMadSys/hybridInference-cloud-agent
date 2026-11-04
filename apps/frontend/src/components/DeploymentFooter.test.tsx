@@ -37,3 +37,13 @@ it('shows missing metadata honestly rather than inventing a deployment date', ()
   expect(screen.getByRole('contentinfo')).toHaveTextContent('Version: Not available');
   expect(screen.getByRole('contentinfo')).toHaveTextContent('Deployed: Not available');
 });
+
+it('links the terms, the team page and the source repository', () => {
+  render(<DeploymentFooter />);
+  expect(screen.getByRole('link', { name: 'Terms' })).toHaveAttribute('href', '/terms');
+  expect(screen.getByRole('link', { name: 'Team' })).toHaveAttribute('href', '/team');
+  expect(screen.getByRole('link', { name: 'GitHub' })).toHaveAttribute(
+    'href',
+    'https://github.com/HarvardMadSys/hybridInference-cloud-agent',
+  );
+});
