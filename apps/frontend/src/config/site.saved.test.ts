@@ -22,6 +22,20 @@ describe('saved public site settings', () => {
     expect(site.branding.contactUrl).toBe('');
   });
 
+  it("keeps the deployment's site content, and none from an older control plane", () => {
+    expect(parseSavedSiteConfig(saved).content).toBeUndefined();
+    const content = {
+      sourceUrl: 'https://github.com/acme/agent',
+      team: [{ name: 'Ada', website: '', badge: { en: 'Lead' }, roles: [] }],
+    };
+    expect(parseSavedSiteConfig({ ...saved, content }).content).toEqual(content);
+    expect(parseSavedPublicAppearance({ ...saved, content })?.content).toEqual(content);
+    // Malformed content is dropped without discarding the saved appearance.
+    const odd = parseSavedSiteConfig({ ...saved, content: { sourceUrl: 'ftp://x', team: 'Ada' } });
+    expect(odd.content).toBeUndefined();
+    expect(odd.branding.appName).toBe('Admin configured app');
+  });
+
   it('reads a contact link that is a page or one mail address', () => {
     for (const contactUrl of ['https://example.com/support', 'mailto:help@example.com']) {
       const site = parseSavedSiteConfig({ ...saved, branding: { ...saved.branding, contactUrl } });

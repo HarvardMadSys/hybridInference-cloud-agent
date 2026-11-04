@@ -282,6 +282,11 @@ services:
       # at the first publish. Points at /dev/null when unconfigured so the
       # stack still renders without a key.
       - ${AGENT_GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/etc/cloud-agent/github-app.pem:ro
+      # The deployment's own public content, read-only: Terms of Service, the
+      # Team page and the source link, kept in the deployment's repository
+      # (apps/backend/cloud_agent/site_content.py lists the files). The
+      # recipe's default directory holds none, which configures none of them.
+      - ${AGENT_SITE_CONTENT_DIR:-./site-content}:/etc/cloud-agent/site:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

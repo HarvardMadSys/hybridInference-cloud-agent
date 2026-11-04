@@ -29,8 +29,31 @@ export interface SiteBranding {
   contactUrl: string;
 }
 
+/** A label by UI locale (`en`, `zh-CN`), as the deployment wrote it. */
+export type LocalizedText = Readonly<Record<string, string>>;
+
+export interface TeamMember {
+  name: string;
+  /** An absolute http(s) URL, or empty. */
+  website: string;
+  badge: LocalizedText;
+  roles: LocalizedText[];
+}
+
+/**
+ * The deployment's own public content, from the site files it mounts on the
+ * control plane rather than from Admin. Absent when it declared none.
+ */
+export interface SiteContent {
+  /** The footer's GitHub link; empty hides it. */
+  sourceUrl: string;
+  /** The Team page; empty hides its footer link. */
+  team: TeamMember[];
+}
+
 export interface RuntimeSiteConfig {
   branding: SiteBranding;
+  content?: SiteContent;
   deployment?: {
     version: string;
     deployedAt: string;
@@ -184,6 +207,56 @@ export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
   return site;
 }
 
+/** A label in the reader's locale, else English, else whichever was written. */
+export function localizedText(label: LocalizedText, locale: string): string {
+  return label[locale] || label['en'] || Object.values(label).find(Boolean) || '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseLabel(value: unknown): LocalizedText | null {
+  if (!isRecord(value)) return null;
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim() !== '',
+  );
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
+function optionalHttpUrl(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    return parseUrl('url', value.trim()).toString();
+  } catch {
+    return '';
+  }
+}
+
+function parseMember(value: unknown): TeamMember[] {
+  if (!isRecord(value) || typeof value.name !== 'string' || !value.name.trim()) return [];
+  const roles = Array.isArray(value.roles) ? value.roles.map(parseLabel) : [];
+  return [
+    {
+      name: value.name.trim(),
+      website: optionalHttpUrl(value.website),
+      badge: parseLabel(value.badge) ?? {},
+      roles: roles.filter((role): role is LocalizedText => role !== null),
+    },
+  ];
+}
+
+/**
+ * The control plane validated these files already; anything malformed here is
+ * dropped rather than thrown, so it can never discard the saved appearance.
+ */
+function parseSiteContent(value: unknown): SiteContent | undefined {
+  if (!isRecord(value)) return undefined;
+  const sourceUrl = optionalHttpUrl(value.sourceUrl);
+  const team = Array.isArray(value.team) ? value.team.flatMap(parseMember) : [];
+  return sourceUrl || team.length ? { sourceUrl, team } : undefined;
+}
+
 function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSiteConfig {
   if (!value || typeof value !== 'object')
     throw new SiteConfigError('Invalid application settings.');
@@ -208,16 +281,20 @@ function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSit
       throw new SiteConfigError('Invalid application settings.');
     env[SITE_CONFIG_ENV[key]] = (branding[key] as string | undefined) ?? '';
   }
-  return parseRuntimeSiteConfig(env);
+  const site = parseRuntimeSiteConfig(env);
+  // Added later still; a control plane that predates it sends none.
+  const content = parseSiteContent(saved.content);
+  if (content) site.content = content;
+  return site;
 }
 
 /** Only validated public appearance can become the server's outage fallback. */
 export function parseSavedPublicAppearance(
   value: unknown,
-): Pick<RuntimeSiteConfig, 'branding'> | null {
+): Pick<RuntimeSiteConfig, 'branding' | 'content'> | null {
   try {
-    const { branding } = checkedSavedSiteConfig(value, {});
-    return { branding };
+    const { branding, content } = checkedSavedSiteConfig(value, {});
+    return content ? { branding, content } : { branding };
   } catch {
     return null;
   }

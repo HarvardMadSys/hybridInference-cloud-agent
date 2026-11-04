@@ -76,6 +76,7 @@ from cloud_agent.schemas.accounts import (
 )
 from cloud_agent.schemas.session import SessionUserResponse
 from cloud_agent.settings import boolean_setting, integer_setting, text_setting
+from cloud_agent.site_content import site_content, terms_text_for
 
 if TYPE_CHECKING:
     from cloud_agent.api._local_auth import RateRule
@@ -199,6 +200,14 @@ async def auth_config(request: Request) -> AuthConfigResponse:
     return AuthConfigResponse(signup_enabled=signup_enabled(request))
 
 
+def _terms() -> dict[str, Any]:
+    """The deployment's Terms files when it has them, else the Admin settings."""
+    files = site_content().terms
+    if files:
+        return {"terms_url": "", "terms_text": terms_text_for(files), "terms_by_locale": files}
+    return {"terms_url": terms_url(), "terms_text": text_setting("accounts.terms_text").strip()}
+
+
 @router.get("/options", response_model=AuthOptionsResponse)
 async def auth_options(request: Request) -> AuthOptionsResponse:
     """What the sign-in, sign-up and account pages offer. Public; carries no secret."""
@@ -221,8 +230,7 @@ async def auth_options(request: Request) -> AuthOptionsResponse:
             allowed_prefixes=prefixes if phone_on else [],
         ),
         turnstile_site_key=site_key(),
-        terms_url=terms_url(),
-        terms_text=text_setting("accounts.terms_text").strip(),
+        **_terms(),
         setup_required=await _setup_pending(request),
         max_accounts_per_browser=MAX_ACCOUNTS_PER_BROWSER,
     )

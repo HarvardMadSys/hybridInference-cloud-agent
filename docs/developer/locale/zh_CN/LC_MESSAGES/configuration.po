@@ -1214,8 +1214,13 @@ msgstr "`AGENT_LOCAL_TERMS_TEXT`"
 #: ../developer/configuration.md:1
 msgid ""
 "NEW. Plain-text Terms of Service shown at `/terms` and in the sign-up "
-"consent when `AGENT_LOCAL_TERMS_URL` is empty."
-msgstr "新增。`AGENT_LOCAL_TERMS_URL` 为空时，在 `/terms` 和注册同意步骤中显示的纯文本服务条款。"
+"consent when `AGENT_LOCAL_TERMS_URL` is empty. Deployment Terms [site "
+"content files](#site-content-files) replace both settings, which Admin "
+"then shows read-only."
+msgstr ""
+"新增。`AGENT_LOCAL_TERMS_URL` 为空时，在 `/terms` "
+"和注册同意步骤中显示的纯文本服务条款。部署提供了条款[站点内容文件](#site-content-"
+"files)时，这两项设置都以文件为准，Admin 里显示为只读。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_LOCAL_SESSION_TTL_DAYS`"
@@ -1517,6 +1522,20 @@ msgid ""
 "Host-side nginx configuration mounted read-only by the edge service. "
 "Default `./edge.nginx.conf`, relative to the Compose file."
 msgstr "edge 服务以只读方式挂载的、主机上的 nginx 配置文件。默认 `./edge.nginx.conf`，路径相对于 Compose 文件。"
+
+#: ../developer/configuration.md:1
+msgid "`AGENT_SITE_CONTENT_DIR`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"Host-side directory of [site content files](#site-content-files) mounted "
+"read-only by the control plane at `/etc/cloud-agent/site`. Default "
+"`./site-content`, relative to the Compose file: the recipe's empty "
+"directory, which configures none of them."
+msgstr ""
+"主机上存放[站点内容文件](#site-content-files)的目录，由控制平面以只读方式挂载到 `/etc/cloud-"
+"agent/site`。默认是 `./site-content`，相对于 Compose 文件，也就是 recipe 自带的空目录，什么都不配置。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_NETWORK_NAME`"

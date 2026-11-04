@@ -5,7 +5,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, expect, it } from 'vitest';
 
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
-import { parseRuntimeSiteConfig } from '@/config/site';
+import { parseRuntimeSiteConfig, parseSavedSiteConfig } from '@/config/site';
 import { DeploymentFooter } from './DeploymentFooter';
 
 afterEach(cleanup);
@@ -36,4 +36,30 @@ it('shows missing metadata honestly rather than inventing a deployment date', ()
   render(<DeploymentFooter />);
   expect(screen.getByRole('contentinfo')).toHaveTextContent('Version: Not available');
   expect(screen.getByRole('contentinfo')).toHaveTextContent('Deployed: Not available');
+});
+
+it('links the Team page and the source only when the deployment declares them', () => {
+  const { rerender } = render(<DeploymentFooter />);
+  expect(screen.getByRole('link', { name: 'Terms' })).toHaveAttribute('href', '/terms');
+  expect(screen.queryByRole('link', { name: 'Team' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'GitHub' })).toBeNull();
+
+  rerender(
+    <SiteConfigProvider
+      config={parseSavedSiteConfig({
+        branding: { appName: 'Acme', orgName: '', orgUrl: '', statusUrl: '' },
+        content: {
+          sourceUrl: 'https://github.com/acme/agent',
+          team: [{ name: 'Ada', website: '', badge: {}, roles: [] }],
+        },
+      })}
+    >
+      <DeploymentFooter />
+    </SiteConfigProvider>,
+  );
+  expect(screen.getByRole('link', { name: 'Team' })).toHaveAttribute('href', '/team');
+  expect(screen.getByRole('link', { name: 'GitHub' })).toHaveAttribute(
+    'href',
+    'https://github.com/acme/agent',
+  );
 });
