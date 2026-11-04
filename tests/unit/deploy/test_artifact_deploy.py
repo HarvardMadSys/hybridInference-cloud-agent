@@ -494,6 +494,25 @@ def test_real_compose_precedence_reaches_the_deployer(tmp_path: Path, exported: 
         assert all("up" not in c["args"] and "pull" not in c["args"] for c in calls)
 
 
+@pytest.mark.parametrize(
+    "lines,refused",
+    [
+        ("BASE=\nAGENT_WEB_BASE_PATH=${BASE:-}\n", False),
+        ("PREFIX=/agents\nAGENT_WEB_BASE_PATH=$PREFIX\n", True),
+    ],
+)
+def test_the_web_base_path_is_checked_as_compose_resolves_it(
+    tmp_path: Path, lines: str, refused: bool
+):
+    """`${BASE:-}` is empty to Compose, so a root deployment must not be refused."""
+    script, env = deployment(tmp_path, "control-plane", real_compose=True)
+    with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as file:
+        file.write(lines)
+    result, _ = run(script, env)
+    assert (result.returncode != 0) == refused, result.stdout + result.stderr
+    assert ("AGENT_WEB_BASE_PATH" in result.stderr) == refused
+
+
 @pytest.mark.parametrize("stack", ["control-plane", "host"])
 def test_real_compose_keeps_persistent_mounts_outside_the_recipe(tmp_path: Path, stack: str):
     script, env = deployment(tmp_path, stack, real_compose=True)
