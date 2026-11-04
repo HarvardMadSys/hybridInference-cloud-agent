@@ -1134,6 +1134,44 @@ The repository server loads without a prompt or approval step under that
 permission mode. Keep the flag unconditional, including for jobs with no MCP
 bindings.
 
+## Sandbox browser
+
+The sandbox image ships a headless Chromium (Debian's `chromium` package) and
+`cloud-agent-browser`, a root-owned launcher that runs one browser per chat
+member. An agent runs `cloud-agent-browser start` and gets a CDP WebSocket URL
+that Playwright (`connectOverCDP`, Playwright MCP `--cdp-endpoint`), Puppeteer
+(`browserWSEndpoint`) and Chrome DevTools MCP (`--wsEndpoint`) connect to. The
+[design](../agents/specs/2026-11-02-computer-use-base-capability.md) records
+why it is built this way and what comes next.
+
+- **Isolation.** Chromium speaks CDP only over a pipe to the launcher, never on
+  a TCP port. The launcher serves it on loopback behind a random token, written
+  to the member's private tmpfs (`/run/agent-members/<slot>/browser`). Each
+  client gets its own CDP sessions and cannot reach another client's.
+- **Chromium's own sandbox is off.** Docker's default seccomp profile refuses
+  the unprivileged user namespaces it needs, under runc and Kata alike, so the
+  launcher starts Chromium with `--no-sandbox`. The Kata VM and the member UID
+  stay the boundary. `cloud-agent-browser status` reports `chromium_sandbox`.
+- **Profiles.** Each chat has its own profile under the member's home; a Fork
+  starts with an empty one. Profiles stay in the retained container until it
+  is removed.
+- **Lifecycle.** The browser starts on demand and stops after 15 minutes
+  without a client (`CLOUD_AGENT_BROWSER_IDLE_S`), when Chromium exits, or with
+  the member's processes at cleanup.
+- **Resources.** Measured with the sandbox's limits: about 174 MiB and 140
+  threads idle, 321 MiB and 213 threads with four pages open. Both count
+  against the group's memory limit and its 512-process limit, which counts
+  threads. The launcher allows at most four renderer processes.
+- **Screenshots.** Tools write them to `/workspace/.cloud-agent-artifacts`
+  (`CLOUD_AGENT_ARTIFACTS_DIR`). It shows in the workspace files and is added to
+  `.git/info/exclude`, so it never reaches a diff or a published branch.
+
+The image build runs `cloud-agent-browser self-test` as the unprivileged user:
+two clients connect, one loads and screenshots a page, and the other must fail
+to reach its session. Run the same command in a sandbox to check a host. A
+retained container created from an image without the browser has none until
+it is recreated.
+
 ## Before a job can run for real
 
 Complete host provisioning, network checks, enrollment, and credentials before

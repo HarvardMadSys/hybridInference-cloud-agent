@@ -1,0 +1,1121 @@
+#!/usr/bin/python3 -I
+"""Managed headless Chromium for one sandbox member (browser contract v1).
+
+``cloud-agent-browser start`` makes sure this member's browser runs and prints
+a WebSocket URL that any CDP client (Playwright's ``connectOverCDP``,
+Playwright MCP ``--cdp-endpoint``, Chrome DevTools MCP ``--wsEndpoint``,
+Puppeteer ``browserWSEndpoint``) can connect to. There is deliberately no HTTP
+discovery endpoint (``/json/version``): clients resolve it against the
+server's root, which would drop the token from the path. ``status``,
+``stop`` and ``self-test`` do what they say.
+
+Why a daemon in front of Chromium instead of ``--remote-debugging-port``:
+every member UID of a group shares the container's loopback, and Chromium's
+own debug port has no authentication. So Chromium speaks CDP only over
+``--remote-debugging-pipe`` to this process. This process serves it on
+loopback behind a random path token, written to a 0600 file in the member's
+private directory, the same loopback-plus-secret shape as the OpenCode/Kilo
+bridge.
+
+A pipe is a single CDP connection, but several tools may want the browser at
+once. Each client therefore gets its own browser-level session
+(``Target.attachToBrowserTarget``); its commands are sent on that session with
+ids rewritten into one space, and every reply and event is routed back to the
+client that owns the session it came from. A client never sees another
+client's sessions. ``Browser.close`` from a client ends only that client's
+connection: the browser belongs to the member, not to one tool.
+
+The browser stops when no client has been connected for the idle timeout,
+when Chromium exits, or on ``stop``. Its profile (cookies, storage) stays on
+disk for the next start.
+
+It runs isolated (``-I``), like the other helpers in this image, and uses the
+standard library only.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import ctypes
+import errno
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import signal
+import stat
+import struct
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+CONTRACT_VERSION = "1"
+CHROMIUM = "/usr/bin/chromium"
+WORKSPACE = "/workspace"
+
+#: How long the browser waits with no client before it stops. A member that
+#: comes back later gets a fresh process on the same profile.
+DEFAULT_IDLE_S = 900.0
+#: Chromium must answer its first command within this, or start fails.
+READY_TIMEOUT_S = 30.0
+#: One CDP message, in either direction. Full-page screenshots of long pages
+#: run to tens of megabytes; nothing legitimate comes near this.
+MAX_MESSAGE_BYTES = 128 * 1024 * 1024
+MAX_CLIENTS = 32
+MAX_REQUEST_HEAD = 16 * 1024
+
+#: Whether the managed browser may run without Chromium's own sandbox when the
+#: guest refuses unprivileged user namespaces (Docker's default seccomp profile
+#: does, under runc and Kata alike). Decided at the Phase 0 review
+#: (docs/agents/specs/2026-11-02-computer-use-base-capability.md): the member
+#: UID already runs unvetted repository code, the Kata VM and the member UID
+#: are the boundary, and the same member could start this binary with
+#: ``--no-sandbox`` itself. ``status`` reports which mode is in effect.
+ALLOW_UNSANDBOXED = True
+
+WEBSOCKET_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+PR_SET_PDEATHSIG = 1
+
+# Flags every managed launch uses. Background networking, component updates,
+# crash upload and metrics are off for the same reason the agent CLIs'
+# telemetry is: nothing in a sandbox should phone home on its own.
+CHROMIUM_FLAGS = (
+    "--headless=new",
+    "--remote-debugging-pipe",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-dev-shm-usage",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-breakpad",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--no-pings",
+    "--password-store=basic",
+    "--renderer-process-limit=4",
+)
+
+
+class BrowserError(Exception):
+    """A failure this command reports on stderr with exit status 1."""
+
+
+# --------------------------------------------------------------------------
+# Paths
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Paths:
+    state: str
+    profile: str
+    artifacts: str
+
+    @property
+    def endpoint(self) -> str:
+        return os.path.join(self.state, "endpoint")
+
+    @property
+    def record(self) -> str:
+        return os.path.join(self.state, "daemon.json")
+
+    @property
+    def lock(self) -> str:
+        return os.path.join(self.state, "daemon.lock")
+
+    @property
+    def log(self) -> str:
+        return os.path.join(self.state, "daemon.log")
+
+
+def resolve_paths(environ: dict[str, str] | None = None) -> Paths:
+    """The member's directories, from the host's environment or the home."""
+    env = os.environ if environ is None else environ
+    home = env.get("HOME") or os.path.expanduser("~")
+    base = os.path.join(home, ".cloud-agent-browser")
+    return Paths(
+        state=env.get("CLOUD_AGENT_BROWSER_STATE_DIR") or os.path.join(base, "run"),
+        profile=env.get("CLOUD_AGENT_BROWSER_PROFILE") or os.path.join(base, "profile"),
+        artifacts=env.get("CLOUD_AGENT_ARTIFACTS_DIR")
+        or os.path.join(WORKSPACE, ".cloud-agent-artifacts"),
+    )
+
+
+def ensure_private_dir(path: str) -> None:
+    """Create ``path`` 0700, and refuse one this UID does not solely own."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise BrowserError(f"{path} is not a directory owned by this user")
+    if info.st_mode & 0o077:
+        os.chmod(path, 0o700)
+
+
+def write_private(path: str, data: str) -> None:
+    """Replace ``path`` atomically with a 0600 file."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, data.encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def ensure_artifacts(path: str) -> None:
+    """Create the shared artifacts directory and keep it out of Git.
+
+    Best effort: a workspace without Git, or one this member cannot write,
+    leaves the browser usable and the directory to the tool.
+    """
+    old = os.umask(0o002)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        return
+    finally:
+        os.umask(old)
+    with contextlib.suppress(OSError):
+        if os.stat(path).st_uid == os.getuid():
+            os.chmod(path, 0o2770)
+    parent, name = os.path.split(os.path.normpath(path))
+    git_dir = os.path.join(parent, ".git")
+    if not os.path.isdir(git_dir):
+        return
+    entry = f"/{name}/"
+    exclude = os.path.join(git_dir, "info", "exclude")
+    with contextlib.suppress(OSError):
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        try:
+            with open(exclude, encoding="utf-8") as handle:
+                if entry in handle.read().splitlines():
+                    return
+        except FileNotFoundError:
+            pass
+        with open(exclude, "a", encoding="utf-8") as handle:
+            handle.write(f"\n{entry}\n")
+
+
+# --------------------------------------------------------------------------
+# WebSocket framing (RFC 6455, the subset CDP clients use)
+# --------------------------------------------------------------------------
+
+OP_CONTINUATION, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
+
+
+def websocket_accept(key: str) -> str:
+    digest = hashlib.sha1(key.encode("ascii") + WEBSOCKET_GUID).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def encode_frame(opcode: int, payload: bytes, *, mask: bool = False) -> bytes:
+    """One final frame. Servers send unmasked frames; clients must mask."""
+    head = bytearray([0x80 | opcode])
+    length = len(payload)
+    mask_bit = 0x80 if mask else 0
+    if length < 126:
+        head.append(mask_bit | length)
+    elif length < 1 << 16:
+        head.append(mask_bit | 126)
+        head += struct.pack("!H", length)
+    else:
+        head.append(mask_bit | 127)
+        head += struct.pack("!Q", length)
+    if not mask:
+        return bytes(head) + payload
+    key = secrets.token_bytes(4)
+    return bytes(head) + key + _unmask(payload, key)
+
+
+def _unmask(payload: bytes, key: bytes) -> bytes:
+    if not payload:
+        return payload
+    repeated = (key * (len(payload) // 4 + 1))[: len(payload)]
+    return (int.from_bytes(payload, "big") ^ int.from_bytes(repeated, "big")).to_bytes(
+        len(payload), "big"
+    )
+
+
+class FrameError(Exception):
+    """The peer broke the protocol; the connection is closed."""
+
+
+async def read_frame(
+    reader: asyncio.StreamReader, *, require_mask: bool
+) -> tuple[bool, int, bytes]:
+    """Return ``(fin, opcode, payload)`` of the next frame."""
+    first, second = await reader.readexactly(2)
+    if first & 0x70:
+        raise FrameError("reserved bits set")
+    fin, opcode = bool(first & 0x80), first & 0x0F
+    masked, length = bool(second & 0x80), second & 0x7F
+    if require_mask and not masked:
+        raise FrameError("client frame is not masked")
+    if length == 126:
+        (length,) = struct.unpack("!H", await reader.readexactly(2))
+    elif length == 127:
+        (length,) = struct.unpack("!Q", await reader.readexactly(8))
+    if length > MAX_MESSAGE_BYTES:
+        raise FrameError("frame too large")
+    if opcode >= OP_CLOSE and (length > 125 or not fin):
+        raise FrameError("bad control frame")
+    key = await reader.readexactly(4) if masked else b""
+    payload = await reader.readexactly(length)
+    return fin, opcode, _unmask(payload, key) if masked else payload
+
+
+class WebSocket:
+    """One framed connection: whole text messages in, whole messages out."""
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        *,
+        is_client: bool = False,
+    ) -> None:
+        self.reader = reader
+        self.writer = writer
+        self.is_client = is_client
+        self.closed = False
+
+    async def receive(self) -> bytes | None:
+        """The next data message, or None once the peer closed."""
+        parts: list[bytes] = []
+        size = 0
+        while True:
+            fin, opcode, payload = await read_frame(self.reader, require_mask=not self.is_client)
+            if opcode == OP_CLOSE:
+                await self.close()
+                return None
+            if opcode == OP_PING:
+                await self._send(OP_PONG, payload)
+                continue
+            if opcode == OP_PONG:
+                continue
+            if opcode not in (OP_CONTINUATION, OP_TEXT, OP_BINARY):
+                raise FrameError("unknown opcode")
+            if (opcode == OP_CONTINUATION) != bool(parts):
+                raise FrameError("unexpected continuation")
+            size += len(payload)
+            if size > MAX_MESSAGE_BYTES:
+                raise FrameError("message too large")
+            parts.append(payload)
+            if fin:
+                return b"".join(parts)
+
+    async def send(self, message: bytes) -> None:
+        await self._send(OP_TEXT, message)
+
+    async def _send(self, opcode: int, payload: bytes) -> None:
+        if self.closed:
+            return
+        self.writer.write(encode_frame(opcode, payload, mask=self.is_client))
+        await self.writer.drain()
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        with contextlib.suppress(Exception):
+            self.writer.write(encode_frame(OP_CLOSE, b"\x03\xe8", mask=self.is_client))
+            await self.writer.drain()
+        self.closed = True
+        with contextlib.suppress(Exception):
+            self.writer.close()
+
+
+# --------------------------------------------------------------------------
+# CDP multiplexing
+# --------------------------------------------------------------------------
+
+SESSION_NOT_FOUND = -32001
+
+
+@dataclass(eq=False)
+class Client:
+    """One connected tool. ``root`` is its browser-level session on the pipe."""
+
+    name: str
+    root: str | None = None
+    sessions: set[str] = field(default_factory=set)
+    #: Messages for the browser that arrived before ``root`` existed.
+    held: list[dict[str, Any]] = field(default_factory=list)
+    #: Set when the client asked for ``Browser.close``: it is disconnected.
+    hang_up: bool = False
+
+
+@dataclass
+class _Pending:
+    client: Client | None
+    client_id: Any
+    method: str
+    at_root: bool
+
+
+class Multiplexer:
+    """Route one CDP pipe between many clients, each in its own sessions.
+
+    Pure routing: ``to_browser`` and ``to_client`` are callbacks, so the rules
+    are testable without Chromium or sockets.
+    """
+
+    def __init__(self, to_browser, to_client, on_internal=None) -> None:
+        self._to_browser = to_browser
+        self._to_client = to_client
+        self._on_internal = on_internal or (lambda message: None)
+        self._next_id = 1
+        self._pending: dict[int, _Pending] = {}
+        self._owners: dict[str, Client] = {}
+        self.clients: list[Client] = []
+
+    def _send(self, message: dict[str, Any], pending: _Pending) -> int:
+        browser_id = self._next_id
+        self._next_id += 1
+        self._pending[browser_id] = pending
+        self._to_browser({**message, "id": browser_id})
+        return browser_id
+
+    def internal(self, method: str, params: dict[str, Any] | None = None) -> int:
+        """Send a command of the daemon's own on the pipe's connection."""
+        message: dict[str, Any] = {"method": method}
+        if params:
+            message["params"] = params
+        return self._send(message, _Pending(None, None, method, at_root=False))
+
+    def connect(self, client: Client) -> None:
+        self.clients.append(client)
+        self._send(
+            {"method": "Target.attachToBrowserTarget"},
+            _Pending(client, None, "Target.attachToBrowserTarget", at_root=False),
+        )
+
+    def disconnect(self, client: Client) -> None:
+        if client in self.clients:
+            self.clients.remove(client)
+        for session in client.sessions:
+            self._owners.pop(session, None)
+        client.sessions.clear()
+        for pending in self._pending.values():
+            if pending.client is client:
+                pending.client = None
+        if client.root is not None:
+            # Detaching the browser session ends the sessions it created.
+            # Pages it opened stay open: the browser is the member's.
+            self.internal("Target.detachFromTarget", {"sessionId": client.root})
+
+    def from_client(self, client: Client, message: dict[str, Any]) -> None:
+        client_id = message.get("id")
+        method = message.get("method")
+        if not isinstance(client_id, int) or not isinstance(method, str):
+            raise FrameError("a CDP command needs an integer id and a method")
+        if client.root is None:
+            client.held.append(message)
+            return
+        session = message.get("sessionId")
+        if session is None:
+            if method == "Browser.close":
+                # One tool closing must not take the browser from the others.
+                client.hang_up = True
+                self._to_client(client, {"id": client_id, "result": {}})
+                return
+            outgoing = {**message, "sessionId": client.root}
+            self._send(outgoing, _Pending(client, client_id, method, at_root=True))
+            return
+        if self._owners.get(session) is not client or session == client.root:
+            self._to_client(
+                client,
+                {
+                    "id": client_id,
+                    "sessionId": session,
+                    "error": {
+                        "code": SESSION_NOT_FOUND,
+                        "message": f"Session with given id not found: {session}",
+                    },
+                },
+            )
+            return
+        self._send(message, _Pending(client, client_id, method, at_root=False))
+
+    def from_browser(self, message: dict[str, Any]) -> None:
+        if "id" in message:
+            self._reply(message)
+        else:
+            self._event(message)
+
+    def _claim(self, client: Client, session: Any) -> None:
+        if isinstance(session, str) and session not in self._owners:
+            self._owners[session] = client
+            client.sessions.add(session)
+
+    def _release(self, session: Any) -> None:
+        owner = self._owners.pop(session, None) if isinstance(session, str) else None
+        if owner is not None:
+            owner.sessions.discard(session)
+
+    def _reply(self, message: dict[str, Any]) -> None:
+        pending = self._pending.pop(message["id"], None)
+        if pending is None:
+            return
+        client = pending.client
+        result = message.get("result")
+        if pending.method == "Target.attachToBrowserTarget" and pending.client_id is None:
+            self._attach_root(pending, message)
+            return
+        if client is None:
+            self._on_internal(message)
+            return
+        if pending.method == "Target.attachToTarget" and isinstance(result, dict):
+            self._claim(client, result.get("sessionId"))
+        reply = {**message, "id": pending.client_id}
+        if pending.at_root:
+            reply.pop("sessionId", None)
+        self._to_client(client, reply)
+
+    def _attach_root(self, pending: _Pending, message: dict[str, Any]) -> None:
+        client = pending.client
+        result = message.get("result")
+        session = result.get("sessionId") if isinstance(result, dict) else None
+        if client is None:
+            # The client left before its session existed: give it back.
+            if isinstance(session, str):
+                self.internal("Target.detachFromTarget", {"sessionId": session})
+            return
+        if not isinstance(session, str):
+            client.hang_up = True
+            self._to_client(client, {"method": "Inspector.detached", "params": {}})
+            return
+        client.root = session
+        self._owners[session] = client
+        client.sessions.add(session)
+        held, client.held = client.held, []
+        for queued in held:
+            self.from_client(client, queued)
+
+    def _event(self, message: dict[str, Any]) -> None:
+        session = message.get("sessionId")
+        owner = self._owners.get(session) if isinstance(session, str) else None
+        if owner is None:
+            return
+        method = message.get("method")
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        if method == "Target.attachedToTarget":
+            self._claim(owner, params.get("sessionId"))
+        elif method == "Target.detachedFromTarget":
+            self._release(params.get("sessionId"))
+        if session == owner.root:
+            message = {key: value for key, value in message.items() if key != "sessionId"}
+        self._to_client(owner, message)
+
+
+# --------------------------------------------------------------------------
+# The daemon
+# --------------------------------------------------------------------------
+
+
+def probe_user_namespaces() -> bool:
+    """Whether this guest lets an unprivileged process create a user namespace."""
+    try:
+        result = subprocess.run(
+            ["unshare", "--user", "true"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def chromium_argv(profile: str, *, sandboxed: bool) -> list[str]:
+    argv = [CHROMIUM, *CHROMIUM_FLAGS, f"--user-data-dir={profile}"]
+    if not sandboxed:
+        argv.append("--no-sandbox")
+    argv.append("about:blank")
+    return argv
+
+
+def _child_setup(read_fd: int, write_fd: int) -> None:
+    """In the forked child: CDP pipe on fds 3/4, die with the daemon.
+
+    The launch uses ``close_fds=False``: every descriptor Python opened is
+    close-on-exec already (PEP 446), so only these two and stdio survive the
+    exec. Both ends are first moved above 9, so placing one cannot overwrite
+    the other when either already sits on 3 or 4.
+    """
+    with contextlib.suppress(Exception):
+        ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+    high_read = fcntl.fcntl(read_fd, fcntl.F_DUPFD_CLOEXEC, 10)
+    high_write = fcntl.fcntl(write_fd, fcntl.F_DUPFD_CLOEXEC, 10)
+    os.dup2(high_read, 3)
+    os.dup2(high_write, 4)
+
+
+class Daemon:
+    def __init__(self, paths: Paths, *, idle_s: float, ready_fd: int | None) -> None:
+        self.paths = paths
+        self.idle_s = idle_s
+        self.ready_fd = ready_fd
+        self.token = secrets.token_urlsafe(32)
+        self.port = 0
+        self.version: dict[str, Any] = {}
+        self.sandboxed = False
+        self.chromium: subprocess.Popen[bytes] | None = None
+        self.sockets: dict[Client, WebSocket] = {}
+        self.last_active = time.monotonic()
+        self.stopping: asyncio.Event | None = None
+        self.browser_writer: asyncio.StreamWriter | None = None
+        self.mux = Multiplexer(self._to_browser, self._to_client, self._on_internal)
+        self._version_id: int | None = None
+        self._version_ready: asyncio.Future[dict[str, Any]] | None = None
+
+    # -- urls -------------------------------------------------------------
+
+    @property
+    def ws_url(self) -> str:
+        return f"ws://127.0.0.1:{self.port}/{self.token}/devtools/browser"
+
+    # -- browser side -----------------------------------------------------
+
+    def _to_browser(self, message: dict[str, Any]) -> None:
+        if self.browser_writer is not None:
+            self.browser_writer.write(json.dumps(message).encode() + b"\0")
+
+    def _to_client(self, client: Client, message: dict[str, Any]) -> None:
+        socket = self.sockets.get(client)
+        if socket is None:
+            return
+        socket.writer.write(encode_frame(OP_TEXT, json.dumps(message).encode()))
+        if client.hang_up:
+            asyncio.get_running_loop().create_task(socket.close())
+
+    def _on_internal(self, message: dict[str, Any]) -> None:
+        if message.get("id") == self._version_id and self._version_ready is not None:
+            if not self._version_ready.done():
+                self._version_ready.set_result(message)
+
+    async def _start_chromium(self, loop: asyncio.AbstractEventLoop) -> asyncio.StreamReader:
+        self.sandboxed = probe_user_namespaces()
+        if not self.sandboxed and not ALLOW_UNSANDBOXED:
+            raise BrowserError("Chromium's sandbox needs user namespaces, which this guest refuses")
+        ensure_private_dir(self.paths.profile)
+        to_chrome_r, to_chrome_w = os.pipe()
+        from_chrome_r, from_chrome_w = os.pipe()
+        log = os.open(self.paths.log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            self.chromium = subprocess.Popen(  # noqa: S603 - fixed binary, fixed flags
+                chromium_argv(self.paths.profile, sandboxed=self.sandboxed),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                preexec_fn=lambda: _child_setup(to_chrome_r, from_chrome_w),
+                close_fds=False,
+            )
+        except OSError as exc:
+            raise BrowserError(f"cannot start {CHROMIUM}: {exc}") from exc
+        finally:
+            os.close(log)
+            os.close(to_chrome_r)
+            os.close(from_chrome_w)
+        reader = asyncio.StreamReader(limit=MAX_MESSAGE_BYTES)
+        await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader), os.fdopen(from_chrome_r, "rb", 0)
+        )
+        transport, protocol = await loop.connect_write_pipe(
+            asyncio.streams.FlowControlMixin, os.fdopen(to_chrome_w, "wb", 0)
+        )
+        self.browser_writer = asyncio.StreamWriter(transport, protocol, None, loop)
+        return reader
+
+    async def _pump_browser(self, reader: asyncio.StreamReader) -> None:
+        try:
+            while True:
+                raw = await reader.readuntil(b"\0")
+                try:
+                    message = json.loads(raw[:-1])
+                except ValueError:
+                    continue
+                if isinstance(message, dict):
+                    self.mux.from_browser(message)
+                    for socket in list(self.sockets.values()):
+                        if not socket.closed:
+                            with contextlib.suppress(ConnectionError):
+                                await socket.writer.drain()
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
+            pass
+        finally:
+            self._stop("chromium exited")
+
+    # -- client side ------------------------------------------------------
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
+            writer.close()
+            return
+        request = parse_request(head)
+        route = self._route(request)
+        if route != "socket" or len(self.sockets) >= MAX_CLIENTS:
+            status = b"404 Not Found" if route != "socket" else b"503 Service Unavailable"
+            writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            with contextlib.suppress(ConnectionError):
+                await writer.drain()
+            writer.close()
+            return
+        key = request["headers"].get("sec-websocket-key", "")
+        writer.write(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            + f"Sec-WebSocket-Accept: {websocket_accept(key)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        await self._serve_client(WebSocket(reader, writer))
+
+    def _route(self, request: dict[str, Any] | None) -> str:
+        if request is None or request["method"] != "GET":
+            return "none"
+        path = request["path"].split("?", 1)[0]
+        parts = path.strip("/").split("/")
+        if not parts or not hmac.compare_digest(parts[0].encode(), self.token.encode()):
+            return "none"
+        host = request["headers"].get("host", "")
+        if host not in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+            return "none"
+        rest = parts[1:]
+        headers = request["headers"]
+        if (
+            rest == ["devtools", "browser"]
+            and headers.get("upgrade", "").lower() == "websocket"
+            and "upgrade" in headers.get("connection", "").lower()
+            and headers.get("sec-websocket-version") == "13"
+            and headers.get("sec-websocket-key")
+        ):
+            return "socket"
+        return "none"
+
+    async def _serve_client(self, socket: WebSocket) -> None:
+        client = Client(name=f"client-{secrets.token_hex(4)}")
+        self.sockets[client] = socket
+        self.mux.connect(client)
+        self.last_active = time.monotonic()
+        try:
+            while not client.hang_up:
+                raw = await socket.receive()
+                if raw is None:
+                    break
+                try:
+                    message = json.loads(raw)
+                except ValueError:
+                    break
+                if not isinstance(message, dict):
+                    break
+                self.mux.from_client(client, message)
+                if self.browser_writer is not None:
+                    await self.browser_writer.drain()
+                await socket.writer.drain()
+        except (FrameError, asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            self.mux.disconnect(client)
+            self.sockets.pop(client, None)
+            await socket.close()
+            self.last_active = time.monotonic()
+
+    # -- lifecycle --------------------------------------------------------
+
+    def _stop(self, reason: str) -> None:
+        if self.stopping is not None and not self.stopping.is_set():
+            print(f"cloud-agent-browser: stopping: {reason}", file=sys.stderr, flush=True)
+            self.stopping.set()
+
+    async def _watch_idle(self) -> None:
+        while True:
+            await asyncio.sleep(min(30.0, max(1.0, self.idle_s / 4)))
+            if not self.sockets and time.monotonic() - self.last_active > self.idle_s:
+                self._stop("idle")
+                return
+
+    def _report_ready(self, line: str) -> None:
+        if self.ready_fd is None:
+            return
+        with contextlib.suppress(OSError):
+            os.write(self.ready_fd, line.encode())
+            os.close(self.ready_fd)
+        self.ready_fd = None
+
+    async def run(self) -> int:
+        loop = asyncio.get_running_loop()
+        self.stopping = asyncio.Event()
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            loop.add_signal_handler(signum, self._stop, signal.Signals(signum).name)
+        tasks: list[asyncio.Task[Any]] = []
+        server = None
+        try:
+            reader = await self._start_chromium(loop)
+            tasks.append(loop.create_task(self._pump_browser(reader)))
+            self._version_ready = loop.create_future()
+            self._version_id = self.mux.internal("Browser.getVersion")
+            stopped = loop.create_task(self.stopping.wait())
+            done, _ = await asyncio.wait(
+                {self._version_ready, stopped},
+                timeout=READY_TIMEOUT_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            stopped.cancel()
+            if self._version_ready not in done or "result" not in self._version_ready.result():
+                raise BrowserError("Chromium did not answer; see " + self.paths.log)
+            result = self._version_ready.result()["result"]
+            self.version = {
+                "Browser": result.get("product", ""),
+                "Protocol-Version": result.get("protocolVersion", ""),
+                "User-Agent": result.get("userAgent", ""),
+                "V8-Version": result.get("jsVersion", ""),
+            }
+            server = await asyncio.start_server(
+                self._handle, "127.0.0.1", 0, limit=MAX_REQUEST_HEAD
+            )
+            self.port = server.sockets[0].getsockname()[1]
+            self._publish()
+            tasks.append(loop.create_task(self._watch_idle()))
+            self._report_ready(f"ok {self.ws_url}\n")
+            await self.stopping.wait()
+            return 0
+        except BrowserError as exc:
+            self._report_ready(f"error {exc}\n")
+            print(f"cloud-agent-browser: {exc}", file=sys.stderr, flush=True)
+            return 1
+        finally:
+            self._unpublish()
+            if server is not None:
+                server.close()
+            for socket in list(self.sockets.values()):
+                await socket.close()
+            for task in tasks:
+                task.cancel()
+            self._stop_chromium()
+
+    def _publish(self) -> None:
+        record = {
+            "contract": CONTRACT_VERSION,
+            "pid": os.getpid(),
+            "chromium_pid": self.chromium.pid if self.chromium else None,
+            "profile": self.paths.profile,
+            "endpoint": self.ws_url,
+            "browser": self.version.get("Browser", ""),
+            "chromium_sandbox": self.sandboxed,
+            "started_at": int(time.time()),
+        }
+        write_private(self.paths.record, json.dumps(record))
+        write_private(self.paths.endpoint, self.ws_url + "\n")
+
+    def _unpublish(self) -> None:
+        record = read_record(self.paths)
+        if record is not None and record.get("pid") == os.getpid():
+            for path in (self.paths.endpoint, self.paths.record):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)
+
+    def _stop_chromium(self) -> None:
+        process = self.chromium
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def parse_request(head: bytes) -> dict[str, Any] | None:
+    try:
+        text = head.decode("latin-1")
+        line, *rest = text.split("\r\n")
+        method, path, version = line.split(" ")
+    except ValueError:
+        return None
+    if not version.startswith("HTTP/1."):
+        return None
+    headers: dict[str, str] = {}
+    for header in rest:
+        if ":" in header:
+            name, value = header.split(":", 1)
+            headers[name.strip().lower()] = value.strip()
+    return {"method": method, "path": path, "headers": headers}
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+
+def read_record(paths: Paths) -> dict[str, Any] | None:
+    try:
+        with open(paths.record, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _is_our_daemon(pid: Any) -> bool:
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            return False
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            argv = handle.read().split(b"\0")
+    except OSError:
+        return False
+    return b"_serve" in argv and any(arg.endswith(b"cloud-agent-browser") for arg in argv)
+
+
+def running_record(paths: Paths) -> dict[str, Any] | None:
+    record = read_record(paths)
+    if record is None or not _is_our_daemon(record.get("pid")):
+        return None
+    return record
+
+
+def _stop_daemon(record: dict[str, Any], timeout_s: float = 10.0) -> None:
+    pid = record["pid"]
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and _is_our_daemon(pid):
+        time.sleep(0.1)
+    if _is_our_daemon(pid):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def start(paths: Paths, *, idle_s: float) -> dict[str, Any]:
+    ensure_private_dir(paths.state)
+    ensure_artifacts(paths.artifacts)
+    lock = os.open(paths.lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        record = running_record(paths)
+        if record is not None and record.get("profile") == paths.profile:
+            return record
+        if record is not None:
+            # Another chat's browser on this slot: never hand its profile over.
+            _stop_daemon(record)
+        return _spawn(paths, idle_s=idle_s)
+    finally:
+        os.close(lock)
+
+
+def _spawn(paths: Paths, *, idle_s: float) -> dict[str, Any]:
+    ready_r, ready_w = os.pipe()
+    log = os.open(paths.log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        subprocess.Popen(  # noqa: S603 - this script, re-executed isolated
+            [
+                sys.executable,
+                "-I",
+                os.path.abspath(__file__),
+                "_serve",
+                str(ready_w),
+                str(idle_s),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            pass_fds=(ready_w,),
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        os.close(log)
+        os.close(ready_w)
+    with os.fdopen(ready_r, "rb") as ready:
+        line = ready.readline().decode(errors="replace").strip()
+    if not line.startswith("ok "):
+        detail = line.removeprefix("error ") or f"the browser exited; see {paths.log}"
+        raise BrowserError(detail)
+    record = read_record(paths)
+    if record is None:
+        raise BrowserError("the browser started but left no record")
+    return record
+
+
+def status(paths: Paths) -> dict[str, Any]:
+    record = running_record(paths) or {}
+    return {
+        "contract": CONTRACT_VERSION,
+        "running": bool(record),
+        "endpoint": record.get("endpoint"),
+        "browser": record.get("browser"),
+        "chromium_sandbox": record.get("chromium_sandbox"),
+        "pid": record.get("pid"),
+        "profile": paths.profile,
+        "artifacts_dir": paths.artifacts,
+    }
+
+
+def stop(paths: Paths) -> bool:
+    record = running_record(paths)
+    if record is None:
+        return False
+    _stop_daemon(record)
+    return True
+
+
+# -- self-test: a minimal CDP client ------------------------------------------
+
+
+class CdpClient:
+    def __init__(self, socket: WebSocket) -> None:
+        self.socket = socket
+        self.next_id = 0
+        self.events: list[dict[str, Any]] = []
+
+    @classmethod
+    async def connect(cls, url: str) -> CdpClient:
+        rest = url.removeprefix("ws://")
+        hostport, _, path = rest.partition("/")
+        host, _, port = hostport.partition(":")
+        reader, writer = await asyncio.open_connection(host, int(port), limit=MAX_MESSAGE_BYTES)
+        key = base64.b64encode(secrets.token_bytes(16)).decode()
+        writer.write(
+            (
+                f"GET /{path} HTTP/1.1\r\nHost: {hostport}\r\nUpgrade: websocket\r\n"
+                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        await writer.drain()
+        head = await reader.readuntil(b"\r\n\r\n")
+        if not head.startswith(b"HTTP/1.1 101") or websocket_accept(key).encode() not in head:
+            raise BrowserError(f"handshake refused: {head.splitlines()[0]!r}")
+        return cls(WebSocket(reader, writer, is_client=True))
+
+    async def call(self, method: str, params: dict | None = None, session: str | None = None):
+        self.next_id += 1
+        message: dict[str, Any] = {"id": self.next_id, "method": method, "params": params or {}}
+        if session:
+            message["sessionId"] = session
+        await self.socket.send(json.dumps(message).encode())
+        while True:
+            raw = await asyncio.wait_for(self.socket.receive(), timeout=30)
+            if raw is None:
+                raise BrowserError("connection closed")
+            reply = json.loads(raw)
+            if reply.get("id") == self.next_id:
+                if "error" in reply:
+                    raise BrowserError(f"{method}: {reply['error']}")
+                return reply.get("result", {})
+            self.events.append(reply)
+
+
+async def _self_test(url: str) -> None:
+    first = await CdpClient.connect(url)
+    second = await CdpClient.connect(url)
+    version = await first.call("Browser.getVersion")
+    target = await first.call("Target.createTarget", {"url": "about:blank"})
+    attached = await first.call(
+        "Target.attachToTarget", {"targetId": target["targetId"], "flatten": True}
+    )
+    session = attached["sessionId"]
+    await first.call(
+        "Page.navigate", {"url": "data:text/html,<title>ok</title><p>cloud-agent-browser</p>"}, session
+    )
+    for _ in range(50):
+        value = await first.call(
+            "Runtime.evaluate", {"expression": "document.title", "returnByValue": True}, session
+        )
+        if value.get("result", {}).get("value") == "ok":
+            break
+        await asyncio.sleep(0.1)
+    else:
+        raise BrowserError("the page did not load")
+    shot = await first.call("Page.captureScreenshot", {"format": "png"}, session)
+    if not base64.b64decode(shot["data"]).startswith(b"\x89PNG"):
+        raise BrowserError("the screenshot is not a PNG")
+    # The second client sees the browser, but not the first client's session.
+    try:
+        await second.call("Runtime.evaluate", {"expression": "1"}, session)
+    except BrowserError:
+        pass
+    else:
+        raise BrowserError("a client reached another client's session")
+    targets = await second.call("Target.getTargets")
+    if not any(info["targetId"] == target["targetId"] for info in targets["targetInfos"]):
+        raise BrowserError("the second client does not see the shared page")
+    await first.call("Target.closeTarget", {"targetId": target["targetId"]})
+    await first.call("Browser.close")
+    await second.socket.close()
+    print(f"self-test ok: {version.get('product', '')}")
+
+
+# -- entry point --------------------------------------------------------------
+
+USAGE = """usage: cloud-agent-browser <command>
+
+  start [--json]         start this member's browser if needed; print its CDP
+                         WebSocket URL (--json: the full status instead)
+  status                 print the browser's state as JSON
+  stop                   stop the browser (its profile is kept)
+  self-test              start the browser and check it end to end
+"""
+
+
+def _idle_s() -> float:
+    try:
+        value = float(os.environ.get("CLOUD_AGENT_BROWSER_IDLE_S", DEFAULT_IDLE_S))
+    except ValueError:
+        return DEFAULT_IDLE_S
+    return value if value > 0 else DEFAULT_IDLE_S
+
+
+def main(argv: list[str]) -> int:
+    command = argv[1] if len(argv) > 1 else ""
+    paths = resolve_paths()
+    try:
+        if command == "_serve":
+            ready_fd = int(argv[2])
+            # Chromium must not hold the start command's pipe open: a daemon
+            # that died before answering has to read as EOF there.
+            os.set_inheritable(ready_fd, False)
+            daemon = Daemon(paths, idle_s=float(argv[3]), ready_fd=ready_fd)
+            return asyncio.run(daemon.run())
+        if command == "start":
+            record = start(paths, idle_s=_idle_s())
+            if argv[2:] == ["--json"]:
+                print(json.dumps(status(paths), indent=2))
+            else:
+                print(record["endpoint"])
+            return 0
+        if command == "status":
+            print(json.dumps(status(paths), indent=2))
+            return 0
+        if command == "stop":
+            print("stopped" if stop(paths) else "not running")
+            return 0
+        if command == "self-test":
+            record = start(paths, idle_s=_idle_s())
+            asyncio.run(_self_test(record["endpoint"]))
+            return 0
+    except BrowserError as exc:
+        print(f"cloud-agent-browser: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            print("cloud-agent-browser: no space left on device", file=sys.stderr)
+            return 1
+        raise
+    print(USAGE, file=sys.stderr, end="")
+    return 64 if command not in ("-h", "--help", "help") else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

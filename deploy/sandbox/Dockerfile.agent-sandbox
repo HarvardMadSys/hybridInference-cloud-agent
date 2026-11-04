@@ -193,6 +193,22 @@ RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
+# A headless browser, so an agent can open, operate and screenshot the pages
+# its own task serves (docs/agents/specs/2026-11-02-computer-use-base-capability.md).
+# Debian's build rather than a pinned upstream download: it exists for amd64
+# and arm64, takes Debian's security updates with every rebuild, and its
+# dependencies are exactly the shared libraries a browser a tool downloads for
+# itself (Playwright's, Puppeteer's) needs, which a member without root could
+# never install. The fonts make text and emoji render as they do for users.
+# Its own layer, so changing the list above does not re-download it.
+RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=locked \
+    apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        chromium \
+        fonts-liberation \
+        fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/*
+
 # Go, Rust and uv from their upstream releases: Debian's are years behind what
 # current repositories declare. Each download is pinned by version and checked
 # against its published SHA-256, so a build cannot quietly pick up another
@@ -332,6 +348,7 @@ LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.helper.claude-session-fork.version="2" \
       org.freeinference.helper.member-window.version="1" \
       org.freeinference.helper.tool-mark.version="1" \
+      org.freeinference.helper.cloud-agent-browser.version="1" \
       org.freeinference.runtime.codex.version="${CODEX_VERSION}" \
       org.freeinference.runtime.pi.version="${PI_VERSION}" \
       org.freeinference.runtime.opencode.version="${OPENCODE_VERSION}" \
@@ -363,6 +380,9 @@ COPY deploy/sandbox/pi-mcp-bridge.ts /usr/local/libexec/pi-mcp-bridge.ts
 COPY deploy/sandbox/http-agent-live-bridge /usr/local/bin/http-agent-live-bridge
 COPY deploy/sandbox/claude-session-fork /usr/local/bin/claude-session-fork
 COPY deploy/sandbox/member-process-reaper /usr/local/bin/member-process-reaper
+# The managed browser's launcher. Root-owned and read-only like the reaper: it
+# holds each member's CDP token, so a member must not be able to rewrite it.
+COPY deploy/sandbox/cloud-agent-browser /usr/local/bin/cloud-agent-browser
 COPY --from=guest-observer-build /src/freeinference-guest-observer \
      /usr/local/libexec/freeinference-guest-observer
 COPY --from=guest-observer-build /src/freeinference-guest-observer.bpf.o \
@@ -377,7 +397,7 @@ RUN chmod 0755 /usr/local/bin/pi-freeinference /usr/local/bin/opencode-freeinfer
         /usr/local/libexec/freeinference-guest-observer \
         /usr/local/libexec/freeinference-tool-mark \
         /usr/local/libexec/freeinference-member-window \
-    && chmod 0555 /usr/local/bin/member-process-reaper \
+    && chmod 0555 /usr/local/bin/member-process-reaper /usr/local/bin/cloud-agent-browser \
     && chmod 0644 /usr/local/libexec/freeinference-guest-observer.bpf.o \
     && chmod 0444 /usr/local/libexec/pi-mcp-bridge.ts
 
@@ -430,6 +450,16 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     npm_config_update_notifier=false \
     CI=1 \
     PI_OFFLINE=1
+
+# The image-wide half of the browser contract (v1). The host adds each
+# member's own profile and state directory at launch
+# (cloud_agent_host/sandbox_browser.py). CHROME_PATH is what tools that look
+# for an installed Chrome (chrome-launcher, Karma, Lighthouse) read; nothing
+# here stops a tool or a repository from downloading a browser of its own.
+ENV CLOUD_AGENT_BROWSER_CONTRACT=1 \
+    CLOUD_AGENT_BROWSER_BIN=/usr/bin/chromium \
+    CLOUD_AGENT_ARTIFACTS_DIR=/workspace/.cloud-agent-artifacts \
+    CHROME_PATH=/usr/bin/chromium
 
 # Fail loudly at build time if a runtime did not land, rather than at 3am when
 # a job claims it and dies — and prove each one *is* the version this image
@@ -498,6 +528,18 @@ RUN set -eu; \
     fd --version; \
     git lfs version; \
     gh --version
+
+# The managed browser, end to end, as the unprivileged user: Chromium starts
+# behind the launcher, two CDP clients connect, one loads and screenshots a
+# page, and the other cannot reach its session. Everything it writes goes to
+# /tmp and is removed, so no profile or artifact lands in the image.
+RUN set -eu; \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; \
+    export HOME=/tmp/cloud-agent-browser-check \
+        CLOUD_AGENT_ARTIFACTS_DIR=/tmp/cloud-agent-browser-check/artifacts; \
+    cloud-agent-browser self-test; \
+    cloud-agent-browser stop; \
+    rm -rf /tmp/cloud-agent-browser-check
 
 # What this image is, in the two places a deployment looks: OCI's own labels,
 # and one of ours naming the artifact's role. A resolver reads both out of the

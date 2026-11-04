@@ -47,6 +47,7 @@ from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
+from cloud_agent_host.sandbox_browser import member_browser_env
 from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
@@ -851,6 +852,7 @@ class ResidentTransportFactory:
                 "GIT_CONFIG_COUNT": "1",
                 "GIT_CONFIG_KEY_0": "safe.directory",
                 "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
+                **member_browser_env(launch.slot_id, launch.thread_id),
             }
         )
         base_env.update(compat_token_env(launch.inference_local_token))
