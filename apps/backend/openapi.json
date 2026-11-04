@@ -9353,6 +9353,11 @@
             ],
             "title": "Error"
           },
+          "location": {
+            "default": "remote",
+            "title": "Location",
+            "type": "string"
+          },
           "policy_revision": {
             "default": 1,
             "title": "Policy Revision",
@@ -20603,6 +20608,14 @@
             },
             "maxProperties": 64,
             "title": "Env",
+            "type": "object"
+          },
+          "secret_env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 64,
+            "title": "Secret Env",
             "type": "object"
           }
         },

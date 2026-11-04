@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
-import { Select } from '@/components/ui/Select';
 import {
   previewMcpImport,
   saveMcpImport,
@@ -249,36 +248,23 @@ export function McpImportStep({
               <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{draft.label}</p>
               <DraftBody draft={draft} />
               {draft.transport === 'stdio' ? (
-                <div className="mt-3">
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400">
-                    Run this command on
-                    <Select<McpLocation>
-                      aria-label={`Run location for ${draft.label}`}
-                      value={locations[draft.label] ?? draft.location}
-                      disabled={saving}
-                      onValueChange={(next) =>
-                        setLocations((current) => ({ ...current, [draft.label]: next }))
-                      }
-                      className={`mt-1 ${FIELD}`}
-                      options={[
-                        {
-                          value: 'user-connector',
-                          label: 'Your computer (requires a connected MCP connector)',
-                        },
-                        { value: 'managed-worker', label: 'Cloud worker' },
-                        {
-                          value: 'sandbox',
-                          label: 'Each chat’s sandbox (pinned npx or uvx package, no secrets)',
-                        },
-                      ]}
-                    />
-                  </label>
-                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    Commands run where you choose. Files and packages on your computer are not
-                    automatically available in the cloud. In the sandbox, a server sees the task’s
-                    files, its localhost and the sandbox browser, and its tools need no approval.
-                  </p>
-                </div>
+                // A command runs with each chat. Running it on the owner's own
+                // computer, through a connector, is the one exception they choose.
+                <label className="mt-3 flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
+                  <input
+                    type="checkbox"
+                    aria-label={`Run ${draft.label} on my computer`}
+                    checked={(locations[draft.label] ?? draft.location) === 'user-connector'}
+                    disabled={saving}
+                    onChange={(event) =>
+                      setLocations((current) => ({
+                        ...current,
+                        [draft.label]: event.target.checked ? 'user-connector' : 'sandbox',
+                      }))
+                    }
+                  />
+                  Run on my computer instead (needs a connected MCP connector)
+                </label>
               ) : null}
               {draft.warnings.map((warning) => (
                 <p key={warning} className="mt-2 text-xs text-amber-800 dark:text-amber-300">

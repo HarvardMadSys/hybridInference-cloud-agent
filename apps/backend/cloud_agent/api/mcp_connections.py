@@ -574,9 +574,7 @@ async def create_connection(
         transport=transport, location=location, url=body.url, launch=body.launch
     )
     auth_kind, auth_config = _build_auth(body.auth_kind, body.header_name, body.header_scheme)
-    if refusal := sandbox.refusal(
-        location, auth_kind, secret=bool(body.secret or body.env_secrets)
-    ):
+    if refusal := sandbox.refusal(location, auth_kind):
         raise _bad_request(refusal)
     template = body.template if body.template else None
     if template is not None and template not in {
@@ -754,7 +752,7 @@ async def update_connection(
     auth_kind = body.auth_kind
     if auth_kind is not None:
         auth_kind = _parse_auth_kind(auth_kind).value
-        if refusal := sandbox.refusal(location, auth_kind, secret=False):
+        if refusal := sandbox.refusal(location, auth_kind):
             raise _bad_request(refusal)
 
     updated = await job_store.mcp.update_mcp_connection(
@@ -2104,7 +2102,7 @@ def _prepare_import_draft(
             else "",
         }
     secrets = _import_secrets(draft, body)
-    if refusal := sandbox.refusal(parsed_location, draft.auth_kind, secret=bool(secrets)):
+    if refusal := sandbox.refusal(parsed_location, draft.auth_kind):
         raise _bad_request(f"{draft.label}: {refusal}")
     access_token_ciphertext = None
     auth_config_patch = None

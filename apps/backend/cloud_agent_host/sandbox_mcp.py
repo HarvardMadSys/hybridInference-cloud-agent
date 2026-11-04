@@ -40,6 +40,8 @@ from cloud_agent_host.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVIC
 from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 
@@ -57,15 +59,40 @@ _known_clean: set[tuple[str, int]] = set()
 _known_clean_lock = threading.Lock()
 
 
-def admission(credential: str, servers: tuple[SandboxMcpServer, ...]) -> bytes:
-    """The gateway's admission document for one member."""
+def admission(
+    credential: str, servers: tuple[SandboxMcpServer, ...], report_url: str = ""
+) -> bytes:
+    """The gateway's admission document for one member: names, never secret values.
+
+    ``report_url`` is the relay, where the gateway reports the tools a server
+    lists, with the member's own MCP credential, so settings can show them.
+    """
+    document: dict[str, object] = {
+        "token_sha256": hashlib.sha256(credential.encode()).hexdigest(),
+        "servers": [server.admission() for server in servers],
+    }
+    if servers and report_url:
+        document["report_url"] = report_url
+    return json.dumps(document, separators=(",", ":")).encode()
+
+
+def runner_secrets(servers: tuple[SandboxMcpServer, ...], environment: Mapping[str, str]) -> bytes:
+    """What only the slot's runner gets, by server: its keys and referenced environment."""
     return json.dumps(
-        {
-            "token_sha256": hashlib.sha256(credential.encode()).hexdigest(),
-            "servers": [server.wire() for server in servers],
-        },
+        {"secrets": {server.alias: server.runner_secrets(environment) for server in servers}},
         separators=(",", ":"),
     ).encode()
+
+
+def report_url(mcp_base_url: str) -> str:
+    """Where the gateway reports the tools a server lists: the relay's own endpoint.
+
+    The report is a JSON-RPC method there (``cloud_agent.mcp.sandbox_tools``),
+    since the relay listener serves the relay and nothing beneath it.
+    """
+    if not mcp_base_url:
+        return ""
+    return mcp_base_url.rstrip("/").removesuffix("/v1") + "/v1/agent/mcp"
 
 
 class _StepFailed(Exception):
@@ -108,6 +135,8 @@ def admit_sandbox_mcp(
     slot_id: int,
     credential: str,
     servers: tuple[SandboxMcpServer, ...],
+    environment: Mapping[str, str] | None = None,
+    mcp_base_url: str = "",
 ) -> bool:
     """Replace one member's admission; whether its servers are now served. Never raises."""
     if servers and not credential:
@@ -122,7 +151,7 @@ def admit_sandbox_mcp(
         if not servers and key in _known_clean:
             return False
         _known_clean.discard(key)
-    document = admission(credential, servers)
+    document = admission(credential, servers, report_url(mcp_base_url))
     try:
         _step(manager, spec, "admission", ["admit", str(slot_id)], ROOT_UID, document)
         if not servers:
@@ -133,7 +162,9 @@ def admit_sandbox_mcp(
         # runner starts can take that address and stand in for it.
         _step(manager, spec, "gateway", ["service", "start"], MCP_SERVICE_UID)
         uid = MCP_RUNNER_UID_BASE + slot_id
-        _step(manager, spec, "server runner", ["runner", "start", str(slot_id)], uid)
+        # The runner's private directory is the only place a secret value goes.
+        secrets = runner_secrets(servers, environment or {})
+        _step(manager, spec, "server runner", ["runner", "start", str(slot_id)], uid, secrets)
     except _StepFailed as exc:
         if exc.status in _NO_GATEWAY:
             # An image older than the gateway: nothing there to admit or revoke.

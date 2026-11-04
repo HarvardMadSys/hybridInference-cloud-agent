@@ -314,7 +314,7 @@ def _draft(
         paths = _paths(args)
         if paths:
             warnings.append(
-                "this server's arguments name local paths; choose where it runs before saving"
+                "this server's arguments name paths on your computer, which a chat cannot reach"
             )
         runner = command.rsplit("/", 1)[-1].lower()
         ecosystem = _PACKAGE_RUNNERS.get(runner)
@@ -325,12 +325,13 @@ def _draft(
         return ImportDraft(
             label=name,
             transport=Transport.STDIO,
-            # Never inferred as the control plane's own host: an imported
-            # command is the user's, so it starts on their connector until
-            # they say otherwise.
-            location="user-connector",
+            # A command runs where the agent runs: in each chat's sandbox. The
+            # user's own computer (a connector) is an explicit choice.
+            location="sandbox",
             launch=LaunchSpec(command=command, args=args, env=env),
-            auth_kind=AuthKind.STATIC if env_secrets else AuthKind.NONE,
+            # Its keys are environment values, sealed with the launch, not a
+            # header the platform sends: there is nothing to sign in to.
+            auth_kind=AuthKind.NONE,
             secrets=env_secrets,
             paths=paths,
             package_runner=runner if ecosystem else None,

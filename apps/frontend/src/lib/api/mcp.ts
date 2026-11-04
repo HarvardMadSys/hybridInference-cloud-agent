@@ -257,6 +257,8 @@ export function validateMcpAuthorizationUrl(value: string): string {
 /** One session's selection for one connection. */
 export interface McpBindingApi {
   connection_id: number;
+  /** `sandbox`: a program that runs with the agent; its calls are not held for approval. */
+  location?: McpLocation;
   connection_label: string;
   alias: string;
   enabled: boolean;

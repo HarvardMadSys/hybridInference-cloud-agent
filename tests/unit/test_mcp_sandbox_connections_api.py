@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from tests.unit.test_mcp_connections_api import _OWNER, FakeStore, _client, _seed
+import pytest
+from tests.unit.test_mcp_connections_api import (
+    _ENCRYPTION_KEY,
+    _OWNER,
+    FakeStore,
+    _client,
+    _seed,
+)
 
 from cloud_agent.mcp import sandbox_servers
 
@@ -18,6 +25,12 @@ _PLAYWRIGHT = {
         "args": ["-y", "@playwright/mcp@0.0.83", "--cdp-endpoint", "${CLOUD_AGENT_BROWSER_CDP}"],
     },
 }
+
+
+@pytest.fixture(autouse=True)
+def _key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the deployment a key, so a program's key can be sealed at all."""
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _ENCRYPTION_KEY)
 
 
 def _message(response: Any) -> str:
@@ -51,20 +64,33 @@ def test_a_sandbox_connection_runs_only_a_package_runner() -> None:
     assert "npx or uvx" in _message(response)
 
 
-def test_nothing_secret_is_accepted_for_the_sandbox() -> None:
-    """The sandbox also runs the repository's code, which could read it."""
-    attempts = [
-        {**_PLAYWRIGHT, "auth_kind": "static", "secret": "token-value"},
-        {**_PLAYWRIGHT, "env_secrets": {"API_KEY": "value"}},
-        {**_PLAYWRIGHT, "launch": {**_PLAYWRIGHT["launch"], "env": {"K": "secret://K"}}},
-    ]
+def test_a_program_keeps_its_keys_sealed() -> None:
+    """A program may use an API key, as any command the agent runs may; it is stored sealed."""
+    launch = {**_PLAYWRIGHT["launch"], "env": {"API_KEY": "secret://API_KEY"}}
+    body = {**_PLAYWRIGHT, "launch": launch, "env_secrets": {"API_KEY": "key-value"}}
     store = FakeStore()
     with _client(store) as client:
-        for body in attempts:
-            response = client.post("/v1/agent/mcp/connections", json=body)
-            assert response.status_code == 400, body
-            assert "secret" in _message(response) or "credential" in _message(response)
-    assert not any(row.get("location") == "sandbox" for row in store.connections.values())
+        response = client.post("/v1/agent/mcp/connections", json=body)
+
+    assert response.status_code == 201, response.text
+    assert "key-value" not in response.text
+    (row,) = store.connections.values()
+    assert row["location"] == "sandbox"
+    sealed = row["launch_spec"]["env_secrets"]["API_KEY"]
+    assert sealed and sealed != "key-value"
+
+
+def test_a_program_takes_keys_as_environment_values_not_a_sign_in() -> None:
+    """A command has no sign-in to run; its keys are environment values."""
+    store = FakeStore()
+    with _client(store) as client:
+        response = client.post(
+            "/v1/agent/mcp/connections",
+            json={**_PLAYWRIGHT, "auth_kind": "static", "secret": "token-value"},
+        )
+    assert response.status_code == 400
+    assert "environment values" in _message(response)
+    assert not store.connections
 
 
 def test_testing_a_sandbox_connection_explains_instead_of_failing_it() -> None:
@@ -119,3 +145,42 @@ def test_a_sandbox_connection_keeps_its_owner() -> None:
     with _client(store, user_id="someone-else") as client:
         assert client.get(f"/v1/agent/mcp/connections/{created['id']}").status_code == 404
     assert store.connections[int(created["id"])]["user_id"] == _OWNER
+
+
+_SELECTED = {
+    "thread_id": "thread-1",
+    "enabled": True,
+    "selection_pending": False,
+    "config_revision": 1,
+    "authorization_epoch": 1,
+    "capability_revision": 1,
+    "policy_revision": 1,
+    "rules": {},
+}
+
+
+def test_a_chats_bindings_say_which_are_programs() -> None:
+    """A program has no per-tool approval, so the composer must tell it from a service."""
+    store = FakeStore()
+    service = _seed(store)
+    program = _seed(
+        store,
+        transport="stdio",
+        location="sandbox",
+        url=None,
+        launch_spec=dict(_PLAYWRIGHT["launch"]),
+        auth_kind="none",
+        auth_config={},
+        access_token_ciphertext=None,
+    )
+    store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+    store.bindings["thread-1"] = [
+        {**_SELECTED, "connection_id": service, "alias": "docs"},
+        {**_SELECTED, "connection_id": program, "alias": "browser"},
+    ]
+    with _client(store) as client:
+        response = client.get("/v1/agent/mcp/threads/thread-1/bindings")
+
+    assert response.status_code == 200, response.text
+    locations = {item["alias"]: item["location"] for item in response.json()["bindings"]}
+    assert locations == {"docs": "remote", "browser": "sandbox"}

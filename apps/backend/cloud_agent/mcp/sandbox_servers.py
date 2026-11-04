@@ -5,6 +5,10 @@ for the member that runs the claimed turn (cloud_agent_shared.sandbox_mcp).
 Its launch was checked when it was saved; it is checked again here, against
 the same policy, because a row is only as current as the rules it was saved
 under, and the gateway refuses anything the policy would.
+
+Its keys (``secret://NAME`` values, stored sealed) are opened here, for this
+claim only, and travel with it to the host, which hands them to the slot's
+runner alone.
 """
 
 from __future__ import annotations
@@ -13,23 +17,27 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.launch import LaunchPlanError, build_launch_plan
 from cloud_agent.mcp.models import AuthKind, ConnectionStatus, ExecutionLocation, Transport
-from cloud_agent_shared.sandbox_mcp import ARTIFACTS_DIR, BROWSER_CDP_PLACEHOLDER, SandboxMcpServer
+from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent_shared.sandbox_mcp import (
+    ARTIFACTS_DIR,
+    BROWSER_CDP_PLACEHOLDER,
+    SECRET_PREFIX,
+    SandboxMcpServer,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from cloud_agent.mcp.models import McpConnection, ThreadBinding
     from cloud_agent.mcp.registry import ResolvedConnection
 
 logger = get_logger(__name__)
 
-_SANDBOX_NOTE = (
-    "Runs inside each chat's sandbox with the agent's own access, so its tools are "
-    "available without approval. It drives the browser the chat and its Forks share."
-)
+_SANDBOX_NOTE = "It drives the browser the chat and its Forks share."
 
 #: Presets for the sandbox browser, offered beside the remote templates. Each
 #: binds a browser MCP server to the managed browser through the placeholder
@@ -83,10 +91,7 @@ TEMPLATES: tuple[dict[str, Any], ...] = (
 
 #: What testing a sandbox connection says: it starts in a chat's sandbox, so
 #: it is checked there, when a chat first lists its tools.
-TEST_MESSAGE = (
-    "This server runs inside each chat's sandbox. It starts, and is checked, when a chat "
-    "first lists its tools; it cannot be reached from here."
-)
+TEST_MESSAGE = "This server starts with a chat. Its tools appear here once a chat has used it."
 
 
 def sandbox_mcp_server(connection: McpConnection, alias: str) -> SandboxMcpServer | None:
@@ -110,9 +115,10 @@ def sandbox_mcp_server(connection: McpConnection, alias: str) -> SandboxMcpServe
                 "command": launch.command,
                 "args": launch.args,
                 "env": dict(launch.env),
+                "secret_env": _opened(launch.env, launch.sealed_env),
             }
         )
-    except (LaunchPlanError, ValidationError, ValueError) as exc:
+    except (LaunchPlanError, ValidationError, ValueError, CredentialCipherError) as exc:
         logger.warning(
             "agent_mcp_sandbox_server_refused",
             extra={
@@ -122,6 +128,22 @@ def sandbox_mcp_server(connection: McpConnection, alias: str) -> SandboxMcpServe
             },
         )
         return None
+
+
+def _opened(env: Mapping[str, str], sealed: Mapping[str, str]) -> dict[str, str]:
+    """The values of ``env``'s ``secret://NAME`` entries, decrypted for this claim."""
+    names = {
+        value.removeprefix(SECRET_PREFIX)
+        for value in env.values()
+        if value.startswith(SECRET_PREFIX)
+    }
+    if not names:
+        return {}
+    missing = sorted(names - set(sealed))
+    if missing:
+        raise LaunchPlanError(f"no stored value for {', '.join(missing)}")
+    cipher = mcp_cipher()
+    return {name: cipher.decrypt(sealed[name]) for name in sorted(names)}
 
 
 def split_bindings(
@@ -151,17 +173,14 @@ def split_bindings(
     return aliases, servers
 
 
-def refusal(location: ExecutionLocation, auth_kind: AuthKind | str, *, secret: bool) -> str | None:
+def refusal(location: ExecutionLocation, auth_kind: AuthKind | str) -> str | None:
     """Why a connection cannot be saved for the sandbox, or ``None``.
 
-    The sandbox also runs repository code, so nothing secret goes there: no
-    credential for the server to send, and no secret environment value.
+    A program's keys are environment values (sealed with its launch); a
+    sign-in, a header the platform sends, has nothing to send to.
     """
     if location is not ExecutionLocation.SANDBOX:
         return None
-    if AuthKind(auth_kind) is not AuthKind.NONE or secret:
-        return (
-            "a server that runs in the sandbox cannot be given a credential, because the "
-            "sandbox also runs the repository's code; add a server that needs one as remote"
-        )
+    if AuthKind(auth_kind) is not AuthKind.NONE:
+        return "a command takes its keys as environment values, not a sign-in"
     return None

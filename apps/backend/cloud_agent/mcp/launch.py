@@ -93,7 +93,10 @@ MANAGED_ALLOWED_COMMANDS: frozenset[str] = frozenset(
 #: ``name==1.2.3``, ``name>=1,<2``. Compared as text; the installer decides
 #: what it means, and this only decides whether a version is present at all.
 _PINNED_NPM = re.compile(r"^(?P<name>(?:@[^/@]+/)?[^@/][^@]*)@(?P<version>[^@]+)$")
-_PINNED_PYPI = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)\s*(?:==|>=|~=)\s*(?P<version>.+)$")
+#: ``name[extra,...]`` is one package with optional parts: ``browser-use[cli]==0.7.10``.
+_PINNED_PYPI = re.compile(
+    r"^(?P<name>[A-Za-z0-9._-]+(?:\[[A-Za-z0-9._,-]+\])?)\s*(?:==|>=|~=)\s*(?P<version>.+)$"
+)
 #: An exact release: what a sandbox server must name, since the sandbox installs
 #: it at run time. ``latest``, ``^1.2`` or ``>=1`` would change under the user.
 _EXACT_VERSION = re.compile(
@@ -303,8 +306,10 @@ def _check_sandbox(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep:
 
     It runs next to repository code, behind the sandbox's MCP gateway, which
     starts only a package runner with one exactly pinned package. So: ``npx``
-    or ``uvx`` by name, an exact version, no mounts or working directory (it
-    already has the workspace), and no secret, which the repository could read.
+    or ``uvx`` by name, an exact version, and no mounts or working directory (it
+    already has the workspace). It may use credentials, as the agent's own
+    commands use the owner's environment: ``secret://NAME`` values sealed with
+    the connection, and ``${NAME}`` filled from the chat's environment.
     """
     if spec.command not in SANDBOX_MCP_COMMANDS:
         raise LaunchPlanError(
@@ -312,13 +317,6 @@ def _check_sandbox(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep:
         )
     if spec.mounts or spec.cwd:
         raise LaunchPlanError("a sandbox server runs in the workspace; it takes no mounts or cwd")
-    for name, value in spec.env.items():
-        if value.startswith("secret://"):
-            raise LaunchPlanError(
-                f"{name}: a sandbox server cannot be given a secret, because the sandbox also "
-                "runs the repository's code. Run a server that needs one as a remote connection.",
-                kind="sandbox_secret",
-            )
     install = _install_for(spec, argv)
     if install is None:  # pragma: no cover - npx and uvx are package runners
         raise LaunchPlanError("a sandbox server needs a package to run")

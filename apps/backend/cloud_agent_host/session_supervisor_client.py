@@ -487,7 +487,11 @@ class SessionSupervisorClient:
                     "environment": launch.environment.model_dump(mode="json")
                     if launch.environment
                     else None,
-                    "sandbox_mcp_servers": [server.wire() for server in launch.sandbox_mcp_servers],
+                    "sandbox_mcp_servers": [
+                        # Their keys too: the supervisor admits them for this member.
+                        server.model_dump(mode="json")
+                        for server in launch.sandbox_mcp_servers
+                    ],
                 },
                 "profiling": profiling,
             },

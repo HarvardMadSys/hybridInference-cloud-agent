@@ -186,6 +186,11 @@ def _parse_launch(row: Mapping[str, Any]) -> LaunchSpec | None:
         ),
         pinned_package=_optional(raw.get("pinned_package")),
         pinned_version=_optional(raw.get("pinned_version")),
+        sealed_env={
+            str(name): str(value)
+            for name, value in (raw.get("env_secrets") or {}).items()
+            if isinstance(raw.get("env_secrets"), Mapping)
+        },
     )
 
 

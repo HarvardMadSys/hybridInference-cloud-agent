@@ -217,7 +217,7 @@ def test_package_is_pinned_and_uses_existing_location_and_secret_flow():
         )
     )
     draft = parse_import(entry["configurations"][0]["json"]).drafts[0]
-    assert draft.location == "user-connector"
+    assert draft.location == "sandbox"
     assert draft.launch.args == ("-y", "@example/docs@1.2.3")
     assert draft.secrets[0].name == "API_KEY"
     assert draft.secrets[0].value is None
