@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useT } from '@/components/providers';
 import type { AgentConfigApi } from '@/lib/api/agents';
+import { SETTINGS_PATHS } from '@/components/features/settings/navigation';
 
 /** Local accounts have no shared inference: setup is actionable only when enabled. */
 export function ModelConnectionNotice({ config }: { config: AgentConfigApi | null }) {
@@ -19,7 +20,7 @@ export function ModelConnectionNotice({ config }: { config: AgentConfigApi | nul
       </p>
       {enabled ? (
         <Link
-          href="/settings/my-settings#settings-connections"
+          href={SETTINGS_PATHS.models}
           className="ui-button ui-button-secondary inline-flex min-h-11 max-w-full items-center whitespace-normal"
         >
           {t('modelSource.setupAction')}

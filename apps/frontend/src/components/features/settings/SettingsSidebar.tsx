@@ -21,6 +21,11 @@ const ITEMS = [
     icon: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6.6 18.2a6 6 0 0 1 10.8 0',
   },
   {
+    href: SETTINGS_PATHS.models,
+    label: 'settings.models.title',
+    icon: 'M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM9.5 9.5h5v5h-5zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3',
+  },
+  {
     href: SETTINGS_PATHS.memory,
     label: 'settings.memory.title',
     icon: 'M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18ZM12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18ZM15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4',

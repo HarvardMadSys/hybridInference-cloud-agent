@@ -45,7 +45,7 @@ for (const viewport of [
       saved = { ...saved!, ...submitted, updated_at: '2026-10-28' };
       await route.fulfill({ json: saved });
     });
-    await page.goto('/settings/my-settings');
+    await page.goto('/settings/models');
     await page.getByRole('button', { name: 'Add connection', exact: true }).click();
     await page.getByLabel('Connection name', { exact: true }).fill('Personal inference');
     await page.getByLabel('Base URL', { exact: true }).fill('https://api.example.com/custom/v1');
