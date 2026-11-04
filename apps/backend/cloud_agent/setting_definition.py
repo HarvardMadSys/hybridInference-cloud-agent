@@ -6,6 +6,7 @@ setting and owns the stored snapshot, and re-exported from it.
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
 from dataclasses import dataclass
@@ -225,6 +226,36 @@ def _s3_prefix(value: str) -> bool:
         and bool(re.fullmatch(r"[a-zA-Z0-9_./-]+", value))
         and all(part and part not in {".", ".."} for part in value.split("/"))
     )
+
+
+def _package_registry_url(value: str) -> bool:
+    """Empty, or an HTTPS registry; plain HTTP only to this machine or a private name.
+
+    Agent packages are verified against the registry's integrity hash, but the
+    hash comes from the same registry, so a registry reached over the public
+    internet must be reached over TLS.
+    """
+    if not value:
+        return True
+    parsed = _web_url(value)
+    if parsed is None or parsed.query:
+        return False
+    return parsed.scheme == "https" or _private_host(parsed.hostname or "")
+
+
+def _private_host(host: str) -> bool:
+    """Whether plain HTTP to ``host`` stays on this machine or a private network.
+
+    Loopback addresses and ``localhost`` names, and a single-label name such as
+    a Compose service (``verdaccio``), which public DNS cannot answer.
+    """
+    host = host.lower().rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return bool(host) and "." not in host
 
 
 # The code that uses these two refuses anything else, so the editor asks it

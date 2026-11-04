@@ -138,6 +138,12 @@ class _NoRuntimeDownloads:
     def targets(self) -> frozenset[tuple[str, str]]:
         return frozenset()
 
+    def registry_report(self) -> dict[str, str]:
+        return {"runtime_registry_url": ""}
+
+    def set_registry(self, _registry: str | None) -> bool:
+        return False
+
 
 def _no_wait_endpoint(**_kwargs: Any) -> str:
     raise runner_mod.WorkWaitUnsupported("404")

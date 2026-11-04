@@ -27,6 +27,7 @@ from cloud_agent.setting_definition import (
     _github_install_url,
     _gitlab_redirect_uri,
     _numeric,
+    _package_registry_url,
     _s3_bucket,
     _s3_prefix,
     _s3_region,
@@ -760,8 +761,8 @@ _MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
         "Agent versions",
         "",
         env="AGENT_RUNTIME_REGISTRY_URL",
-        url=True,
-        https_unless_private=True,
+        check=_package_registry_url,
+        hint="Use an https:// address, or http:// to this machine or a private service name.",
         description=(
             "The npm registry agent versions are listed from here and downloaded from on "
             "every server. Empty is the public registry (https://registry.npmjs.org). "
