@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSyncExternalStore } from 'react';
 
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
+import { getRuntimeUpgrades } from '@/lib/api/adminRuntimeUpgrades';
+import { UpdateControls } from './AgentVersions';
 import AdminSettingsPage from './page';
 import { applicationSnapshot } from './settingsTestFixtures';
 
@@ -139,6 +141,38 @@ describe('the agent package registry', () => {
         expect.any(AbortSignal),
       ),
     );
+    // Whom an update waits for changes with the registry, so it is read again now.
+    await waitFor(() => expect(getRuntimeUpgrades).toHaveBeenCalledTimes(2));
+  });
+
+  it('names the servers an update waits for before Update is pressed', async () => {
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(registrySnapshot());
+    vi.mocked(getRuntimeUpgrades).mockResolvedValue({
+      runtimes: [],
+      registry_waiting_on: ['runner-a'],
+    });
+    window.history.replaceState(null, '', '/admin/settings?tab=versions');
+    render(<AdminSettingsPage />);
+
+    expect(
+      await screen.findByText(
+        'Updates wait until every online server downloads from the saved agent package registry. Not yet: runner-a.',
+      ),
+    ).toBeInTheDocument();
+
+    const item = {
+      runtime: 'codex',
+      current_version: '0.145.0',
+      default_version: '0.145.0',
+      latest_version: '0.150.0',
+      latest_error: null,
+      update_available: true,
+      upgrade: null,
+    };
+    render(
+      <UpdateControls item={item} busy={false} waiting onUpdate={vi.fn()} onRollback={vi.fn()} />,
+    );
+    expect(screen.getByRole('button', { name: 'Update to 0.150.0' })).toBeDisabled();
   });
 
   it('opens on the Agent versions tab from a link to its old category tab', async () => {

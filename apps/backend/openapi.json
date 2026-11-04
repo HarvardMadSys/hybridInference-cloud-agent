@@ -20145,6 +20145,14 @@
       "RuntimeUpgradesResponse": {
         "description": "Every agent the Settings page can update.",
         "properties": {
+          "registry_waiting_on": {
+            "description": "Online servers, by host name, that do not yet report downloading from the saved agent package registry. No update starts until this is empty.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Registry Waiting On",
+            "type": "array"
+          },
           "runtimes": {
             "items": {
               "$ref": "#/components/schemas/RuntimeUpgradeItem"

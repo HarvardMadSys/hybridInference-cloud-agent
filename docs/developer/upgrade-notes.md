@@ -36,6 +36,7 @@ from then on the database wins and the line is ignored. After the control plane
 |---|---|
 | Control plane | `AGENT_WEB_BASE_URL`, `AGENT_SMTP_*`, `AGENT_LOCAL_ADMIN_EMAILS`, `AGENT_SANDBOX_ARCHIVE_S3_*`, `AGENT_MAX_STREAMS_PER_USER`, `AGENT_API_DOCS`, `AGENT_RUNTIME_REGISTRY_URL` |
 | Each host | `AGENT_HOST_SLOTS`, `AGENT_SHARED_RESIDENT_CAPACITY`, `AGENT_SANDBOX_CPU_MILLICORES`, `AGENT_SANDBOX_MEMORY_MIB`, `AGENT_SANDBOX_DISK_MIB`, `AGENT_CHAT_IDLE_TIMEOUT_S`, `AGENT_SOURCE_IMPORT_MAX_MIB`, `AGENT_LEASE_TTL`, `AGENT_RUNTIME_REGISTRY_URL`, `AGENT_GIT_AUTHOR_NAME`, `AGENT_GIT_AUTHOR_EMAIL` |
+| A managed host's environment file in a deployment profile | `AGENT_HOST_SLOTS`, `AGENT_SHARED_RESIDENT_CAPACITY` |
 
 Keep `AGENT_COMPUTE_SECRET_KEY` on the control plane: `deploy.sh` manages that
 line, and without it the next deployment writes a new key there. Keep
@@ -48,8 +49,9 @@ Four values moved into Admin in this release:
   documentation** (`AGENT_API_DOCS`), in Admin → Settings → Operations. Both
   apply without a restart.
 - **Agent package registry** (`AGENT_RUNTIME_REGISTRY_URL`), in Admin →
-  Settings → Agent versions. Hosts receive it on every heartbeat, and an agent
-  update is refused while an online host does not report it.
+  Settings → Agent versions. Hosts receive it on every heartbeat. Until every
+  online host reports it, the same tab names the hosts still missing it and
+  agent updates stay disabled.
 - **Turn lease** (`AGENT_LEASE_TTL`), for every server or one, from the admin
   pages. Each host imports its own value once from its next heartbeat.
 

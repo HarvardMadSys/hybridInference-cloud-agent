@@ -1785,7 +1785,8 @@ class PostgresHostPoolRepository:
             rows = await conn.fetch(
                 """
                 SELECT host, status, (credential_hash IS NOT NULL) AS enrolled,
-                       runtime_versions, runtime_versions_available, runtime_downloads
+                       runtime_versions, runtime_versions_available, runtime_downloads,
+                       config_reports
                 FROM agent_runner_hosts
                 ORDER BY host
                 """
@@ -1800,6 +1801,7 @@ class PostgresHostPoolRepository:
                 "runtime_versions": load_json(row["runtime_versions"]) or {},
                 "runtime_versions_available": load_json(row["runtime_versions_available"]) or {},
                 "runtime_downloads": load_json(row["runtime_downloads"]) or [],
+                "config_reports": load_json(row["config_reports"]) or {},
             }
             for row in rows
         ]

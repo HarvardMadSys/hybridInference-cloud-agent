@@ -370,6 +370,9 @@ async def test_no_update_starts_while_an_online_server_uses_another_registry(api
         store.host_pool.hosts[0]["config_reports"] = {
             "runtime_registry_url": "https://registry.npmjs.org"
         }
+        # The page names whom an update waits for before anyone presses Update.
+        listed = await client.get("/admin/agent/runtime-upgrades")
+        assert listed.json()["registry_waiting_on"] == ["runner-a"]
         refused = await client.post(
             "/admin/agent/runtime-upgrades", json={"runtime": "claude-code", "version": "2.1.300"}
         )
@@ -381,6 +384,8 @@ async def test_no_update_starts_while_an_online_server_uses_another_registry(api
         store.host_pool.hosts[0]["config_reports"] = {
             "runtime_registry_url": "https://npm.example.org"
         }
+        listed = await client.get("/admin/agent/runtime-upgrades")
+        assert listed.json()["registry_waiting_on"] == []
         accepted = await client.post(
             "/admin/agent/runtime-upgrades", json={"runtime": "claude-code", "version": "2.1.300"}
         )

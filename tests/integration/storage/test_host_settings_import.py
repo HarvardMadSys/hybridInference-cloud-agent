@@ -288,3 +288,6 @@ async def test_a_host_reports_the_registry_it_downloads_from(store):
     assert listed["runner-a"]["config_reports"]["runtime_registry_url"] == (
         "https://npm.example.org"
     )
+    # The Agent versions page reads it from its own snapshot.
+    _, _, snapshot = await hosts.runtime_upgrade_snapshot()
+    assert snapshot[0]["config_reports"] == {"runtime_registry_url": "https://npm.example.org"}

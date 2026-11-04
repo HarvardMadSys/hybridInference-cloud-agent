@@ -206,6 +206,19 @@ function SettingsView() {
     // Finishing switches new chats over, which the version menu shows.
     onUpdated: () => void load(),
   });
+  // Saving the package registry changes whom an update waits for: read that
+  // now rather than at the next poll. The first revision is the page loading.
+  const settingsRevision = applicationSettings.snapshot?.revision;
+  const seenRevision = useRef(settingsRevision);
+  const reloadUpdates = updates.reload;
+  useEffect(() => {
+    if (seenRevision.current === undefined || seenRevision.current === settingsRevision) {
+      seenRevision.current = settingsRevision;
+      return;
+    }
+    seenRevision.current = settingsRevision;
+    if (selectedTab === 'versions') void reloadUpdates();
+  }, [settingsRevision, selectedTab, reloadUpdates]);
   const releases = useRuntimeVersions({
     runtimes: updates.items?.map((item) => item.runtime) ?? [],
     enabled: !denied && selectedTab === 'versions',
@@ -514,6 +527,7 @@ function SettingsView() {
                   )
                 }
                 updates={updates.items}
+                registryWaitingOn={updates.waitingOn}
                 updateBusy={updates.busy}
                 updateError={updates.error}
                 onUpdate={(runtime, version) => void updates.update(runtime, version)}

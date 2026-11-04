@@ -103,7 +103,10 @@ async def _snapshot(store: _UpgradeStorage, registry: RegistryClient) -> Runtime
                 ),
             )
         )
-    return RuntimeUpgradesResponse(runtimes=items)
+    # Shown before anyone presses Update, which the same check would refuse.
+    return RuntimeUpgradesResponse(
+        runtimes=items, registry_waiting_on=registry_lagging_hosts(hosts)
+    )
 
 
 @router.get("/agent/runtime-upgrades", response_model=RuntimeUpgradesResponse)
