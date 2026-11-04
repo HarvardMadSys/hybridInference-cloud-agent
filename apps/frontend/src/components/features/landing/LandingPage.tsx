@@ -6,11 +6,12 @@
 // before there is an account.
 
 import Link from 'next/link';
-import { useAuthOptions } from '@/components/features/auth/useAuthOptions';
+import { useAuthOptionsState } from '@/components/features/auth/useAuthOptions';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { useT } from '@/components/providers/LocaleProvider';
 import { BrandMark } from '@/components/BrandMark';
 import { DeploymentFooter } from '@/components/DeploymentFooter';
+import { SignedOutControls } from '@/components/SignedOutControls';
 import { LandingHero } from './LandingHero';
 import {
   AgentStrip,
@@ -26,11 +27,29 @@ const SECONDARY =
   'ui-focus-ring inline-flex h-[46px] items-center justify-center rounded-lg border px-[22px] text-[15px] font-medium transition-colors';
 
 /** The way in: sign up when this deployment takes sign-ups, sign in always. */
-function AccountActions({ signupOpen, onDark = false }: { signupOpen: boolean; onDark?: boolean }) {
+function AccountActions({
+  signupOpen,
+  loading = false,
+  onDark = false,
+}: {
+  signupOpen: boolean;
+  loading?: boolean;
+  onDark?: boolean;
+}) {
   const t = useT();
   const secondary = onDark
     ? `${SECONDARY} border-white/25 text-white hover:bg-white/10 dark:hover:bg-surface-hover`
     : `${SECONDARY} border-border-strong/60 bg-surface text-foreground hover:bg-surface-hover`;
+  if (loading) {
+    return (
+      <span
+        aria-hidden="true"
+        className={`inline-flex h-[46px] w-[108px] rounded-lg ${
+          onDark ? 'bg-white/10' : 'bg-surface-hover'
+        }`}
+      />
+    );
+  }
   if (!signupOpen)
     return (
       <Link href="/login" className={PRIMARY}>
@@ -54,7 +73,7 @@ function AccountActions({ signupOpen, onDark = false }: { signupOpen: boolean; o
 export function LandingPage() {
   const t = useT();
   const { branding } = useSiteConfig();
-  const options = useAuthOptions();
+  const { options, loading } = useAuthOptionsState();
   const signupOpen = Boolean(options?.signup_enabled || options?.phone_signup_enabled);
   return (
     <div className="flex min-h-screen flex-col overflow-x-clip bg-surface text-foreground">
@@ -66,32 +85,36 @@ export function LandingPage() {
           <BrandMark />
           <span className="truncate">{branding.appName}</span>
         </Link>
-        <nav aria-label={t('landing.nav')} className="flex shrink-0 items-center gap-1.5">
-          <Link
-            href="/login"
-            className="ui-focus-ring rounded-md px-2 py-2 text-sm text-muted transition-colors hover:text-foreground sm:px-3"
-          >
-            {t('landing.signIn')}
-          </Link>
-          {signupOpen && (
+        <div className="flex shrink-0 items-center gap-2">
+          <SignedOutControls />
+          <span aria-hidden="true" className="h-4 w-px bg-border" />
+          <nav aria-label={t('landing.nav')} className="flex shrink-0 items-center gap-1.5">
             <Link
-              href="/signup"
-              className="ui-focus-ring inline-flex h-9 items-center rounded-lg bg-accent px-3.5 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent-hover"
+              href="/login"
+              className="ui-focus-ring rounded-md px-2 py-2 text-sm text-muted transition-colors hover:text-foreground sm:px-3"
             >
-              {t('landing.signUp')}
+              {t('landing.signIn')}
             </Link>
-          )}
-        </nav>
+            {!loading && signupOpen && (
+              <Link
+                href="/signup"
+                className="ui-focus-ring inline-flex h-9 items-center rounded-lg bg-accent px-3.5 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent-hover"
+              >
+                {t('landing.signUp')}
+              </Link>
+            )}
+          </nav>
+        </div>
       </header>
       <main className="flex-1">
-        <LandingHero actions={<AccountActions signupOpen={signupOpen} />} />
+        <LandingHero actions={<AccountActions signupOpen={signupOpen} loading={loading} />} />
         <AgentStrip />
         <ContinuitySection />
         <StackSection />
         <ReviewSection />
         <ClosingSection
           signupOpen={signupOpen}
-          actions={<AccountActions signupOpen={signupOpen} onDark />}
+          actions={<AccountActions signupOpen={signupOpen} loading={loading} onDark />}
         />
       </main>
       <DeploymentFooter />

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useT } from '@/components/providers/LocaleProvider';
+import type { Translator } from '@/lib/i18n/translate';
 import { AgentMark } from './AgentMarks';
 import {
   AGENT_IDS,
@@ -15,6 +16,37 @@ import {
   type TermTone,
 } from './demoScript';
 import styles from './ProductDemo.module.css';
+
+function localizeStep(step: DemoStep, t: Translator): DemoStep {
+  const path = step.path === '3 callers' ? t('landing.demo.callers', { count: 3 }) : step.path;
+  let result = step.result;
+  if (result) {
+    const failed = /^(\d+) failed$/.exec(result);
+    const passed = /^(\d+) passed$/.exec(result);
+    if (failed) result = t('landing.demo.stepFailed', { count: Number(failed[1]) });
+    else if (passed) result = t('landing.demo.stepPassed', { count: Number(passed[1]) });
+  }
+  return { ...step, path, result };
+}
+
+function localizeExample(example: DemoExample, t: Translator): DemoExample {
+  const key =
+    example.agent === 'claude' ? 'example1' : example.agent === 'codex' ? 'example2' : 'example3';
+  return {
+    ...example,
+    title: t(`landing.demo.${key}.title`),
+    prompt: t(`landing.demo.${key}.prompt`),
+    answer: t(`landing.demo.${key}.answer`),
+    steps: example.steps.map((step) => localizeStep(step, t)),
+  };
+}
+
+function localizeTyped(rawPrompt: string, localizedPrompt: string, typed: string): string {
+  if (!typed) return '';
+  if (localizedPrompt === rawPrompt || !rawPrompt.length) return typed;
+  const count = Math.max(1, Math.round((typed.length / rawPrompt.length) * localizedPrompt.length));
+  return localizedPrompt.slice(0, count);
+}
 
 /** Show `value`, fading the old one out first when it changes. */
 function useCrossfade<T>(value: T, instant: boolean): [T, boolean] {
@@ -107,19 +139,19 @@ function Sidebar({ frame, example, instant }: WindowProps) {
         <span className={styles.dot} data-state={frame.dot} />
       </span>
       <span className={styles.task}>
-        <span>Fix flaky login spec</span>
+        <span>{t('landing.demo.sidebarTask1')}</span>
         <span className={styles.dot} data-state="review" />
       </span>
       <span className={styles.task}>
-        <span>Upgrade to Next 15</span>
+        <span>{t('landing.demo.sidebarTask2')}</span>
       </span>
       <span className={styles.project}>lab/simulator</span>
       <span className={styles.task}>
-        <span>Profile the solver loop</span>
+        <span>{t('landing.demo.sidebarTask3')}</span>
         <span className={styles.dot} data-state="ask" />
       </span>
       <span className={styles.task}>
-        <span>Port configs to TOML</span>
+        <span>{t('landing.demo.sidebarTask4')}</span>
       </span>
     </aside>
   );
@@ -199,6 +231,7 @@ function Thread({ frame, example }: WindowProps) {
 
 function Composer({ frame, instant }: WindowProps) {
   const t = useT();
+  const modelName = AGENT_MODELS[frame.agent].split(' · ')[0] ?? AGENT_MODELS[frame.agent];
   return (
     <div className={styles.composer} data-focus={frame.focus}>
       <p className={styles.composerText}>
@@ -219,7 +252,7 @@ function Composer({ frame, instant }: WindowProps) {
           <AgentPill agent={frame.agent} instant={instant} />
         </span>
         <span className={styles.pill}>
-          <Crossfade value={AGENT_MODELS[frame.agent]} instant={instant} />
+          <Crossfade value={t('landing.demo.myKey', { model: modelName })} instant={instant} />
         </span>
         <span
           className={styles.send}
@@ -244,8 +277,19 @@ function AgentPill({ agent, instant }: { agent: AgentId; instant: boolean }) {
 }
 
 const PANE_TAB = { files: 1, terminal: 2, changes: 0 } as const;
+const INDEX_PANE: Partial<Record<number, DemoFrame['pane']>> = {
+  0: 'changes',
+  1: 'files',
+  2: 'terminal',
+};
 
-function Tabs({ pane }: { pane: DemoFrame['pane'] }) {
+function Tabs({
+  pane,
+  onSelect,
+}: {
+  pane: DemoFrame['pane'];
+  onSelect: (pane: DemoFrame['pane']) => void;
+}) {
   const t = useT();
   const tabs = useRef<HTMLDivElement>(null);
   const [line, setLine] = useState({ left: 0, width: 0 });
@@ -262,11 +306,19 @@ function Tabs({ pane }: { pane: DemoFrame['pane'] }) {
   }, [pane, first]);
   return (
     <div className={styles.tabs} ref={tabs}>
-      {labels.map((label, index) => (
-        <span key={index} data-on={index === PANE_TAB[pane]}>
-          {label}
-        </span>
-      ))}
+      {labels.map((label, index) => {
+        const target = INDEX_PANE[index];
+        return (
+          <span
+            key={index}
+            data-on={index === PANE_TAB[pane]}
+            className={target ? 'cursor-pointer select-none' : 'select-none'}
+            onClick={target ? () => onSelect(target) : undefined}
+          >
+            {label}
+          </span>
+        );
+      })}
       <i
         className={styles.tabLine}
         style={{ width: line.width, transform: `translateX(${line.left}px)` }}
@@ -276,12 +328,17 @@ function Tabs({ pane }: { pane: DemoFrame['pane'] }) {
 }
 
 function Workspace({ frame, example }: WindowProps) {
+  const [manualPane, setManualPane] = useState<DemoFrame['pane'] | null>(null);
+  useEffect(() => {
+    setManualPane(null);
+  }, [frame.pane, example.agent]);
+  const activePane = manualPane ?? frame.pane;
   let index = 0;
   return (
     <aside className={styles.workspace}>
-      <Tabs pane={frame.pane} />
+      <Tabs pane={activePane} onSelect={setManualPane} />
       <div className={styles.panes}>
-        <div className={styles.pane} data-on={frame.pane === 'files'}>
+        <div className={styles.pane} data-on={activePane === 'files'}>
           <div className={`${styles.tree} ${styles.mono}`}>
             {example.tree.map((entry) => (
               <div
@@ -294,7 +351,7 @@ function Workspace({ frame, example }: WindowProps) {
             ))}
           </div>
         </div>
-        <div className={styles.pane} data-on={frame.pane === 'terminal'}>
+        <div className={styles.pane} data-on={activePane === 'terminal'}>
           <div className={`${styles.terminal} ${styles.mono}`}>
             {visibleTerminal(example, frame).map((line, key) => (
               <div key={key} className={TERM_TONE[line.tone]}>
@@ -303,7 +360,7 @@ function Workspace({ frame, example }: WindowProps) {
             ))}
           </div>
         </div>
-        <div className={`${styles.pane} ${styles.mono}`} data-on={frame.pane === 'changes'}>
+        <div className={`${styles.pane} ${styles.mono}`} data-on={activePane === 'changes'}>
           {example.files.map((file) => (
             <div key={file.path}>
               <div className={styles.file} style={{ '--i': index++ } as React.CSSProperties}>
@@ -438,8 +495,13 @@ interface WindowProps {
 /** The app, drawn at one frame of the demo. Decorative: the page around it says the same. */
 export function ProductWindow({ example, frame, instant }: WindowProps) {
   const t = useT();
-  const props = { example, frame, instant };
-  const title = frame.sent ? example.title : t('landing.demo.newTask');
+  const localized = localizeExample(example, t);
+  const localizedFrame: DemoFrame = {
+    ...frame,
+    typed: localizeTyped(example.prompt, localized.prompt, frame.typed),
+  };
+  const props = { example: localized, frame: localizedFrame, instant };
+  const title = localizedFrame.sent ? localized.title : t('landing.demo.newTask');
   return (
     <>
       <div className={styles.shadow} />

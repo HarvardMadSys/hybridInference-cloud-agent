@@ -8,6 +8,7 @@ export function useAuthConfig(initial: AuthConfig | null = null) {
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
+    if (initial && attempt === 0) return;
     const controller = new AbortController();
     setError(null);
     void getAuthConfig(controller.signal)
@@ -18,6 +19,6 @@ export function useAuthConfig(initial: AuthConfig | null = null) {
         if (!controller.signal.aborted) setError(getErrorMessage(cause));
       });
     return () => controller.abort();
-  }, [attempt]);
+  }, [initial, attempt]);
   return { config, error, retry: () => setAttempt((value) => value + 1) };
 }

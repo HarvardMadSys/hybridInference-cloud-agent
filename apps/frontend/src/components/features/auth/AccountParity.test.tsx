@@ -111,8 +111,11 @@ describe('sign-up', () => {
     vi.mocked(api.sendPhoneCode).mockResolvedValue({ ok: true, retry_after: 60 });
     vi.mocked(api.signupPhone).mockResolvedValue({ ok: true, requires_approval: true });
     render(<SignupPage />);
-    fireEvent.click(await screen.findByRole('checkbox'));
-    fireEvent.click(screen.getByRole('tab', { name: 'Phone number' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Phone number' }));
+    // Phone fields stay visible before the Terms checkbox is checked.
+    expect(screen.getByLabelText('Phone number')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox'));
     fill('Phone number', '13800138000');
     fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
     await waitFor(() =>

@@ -92,6 +92,40 @@ describe('the signed-out home page', () => {
 
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('你的 Agent，在云端开工。');
     expect(screen.getAllByRole('link', { name: '注册' })[0]).toHaveAttribute('href', '/signup');
+    expect(message()).toHaveTextContent('给 CSV 导出补上测试，包括空文件的情况。');
+  });
+
+  it('switches language from the signed-out header without signing in', async () => {
+    render(
+      <LocaleProvider>
+        <LandingPage />
+      </LocaleProvider>,
+    );
+    await advance(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Language: 简体中文' }));
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('你的 Agent，在云端开工。');
+    expect(localStorage.getItem('agents.locale')).toBe('zh-CN');
+  });
+
+  it('does not flash a Sign in hero CTA while account options are still loading', async () => {
+    let resolveOptions!: (value: AuthOptions) => void;
+    vi.mocked(getAuthOptions).mockReturnValue(
+      new Promise((resolve) => {
+        resolveOptions = resolve;
+      }),
+    );
+    render(<LandingPage />);
+
+    // Only the header's Sign in link is present while options are in flight;
+    // the hero and closing CTAs wait rather than flashing Sign in and flipping to Sign up.
+    expect(screen.getAllByRole('link', { name: 'Sign in' })).toHaveLength(1);
+    expect(screen.queryByRole('link', { name: 'Sign up' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveOptions(options({ signup_enabled: true }));
+    });
+    expect(screen.getAllByRole('link', { name: 'Sign up' }).length).toBeGreaterThanOrEqual(2);
   });
 
   it('plays a task through to an opened draft pull request, then moves to the next example', async () => {

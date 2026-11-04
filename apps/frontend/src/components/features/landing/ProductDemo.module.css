@@ -1103,9 +1103,28 @@
   }
 
   .floor,
-  .shadow,
-  .float {
+  .shadow {
     display: none;
+  }
+
+  .float {
+    transform: translateY(10px);
+  }
+
+  .float[data-show='true'] {
+    transform: none;
+  }
+
+  .picker {
+    left: 214px;
+    bottom: 58px;
+  }
+
+  .status {
+    top: -18px;
+    right: 14px;
+    width: 268px;
+    padding: 12px 14px;
   }
 
   .app {
@@ -1123,8 +1142,17 @@
 
 @media (max-width: 640px) {
   .grid {
-    height: 560px;
+    height: 440px;
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .picker {
+    left: 16px;
+    bottom: 58px;
+  }
+
+  .status {
+    display: none;
   }
 
   .sidebar,
