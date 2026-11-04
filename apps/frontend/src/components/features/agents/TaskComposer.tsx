@@ -745,7 +745,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           onStatusChange={setEnvironmentStatus}
           onSummaryChange={setEnvironmentSummary}
         />
-        <div className="flex min-w-0 flex-nowrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
           <ComposerPlusMenu
             disabled={busy}
             onOpen={goalCommand.dismiss}
@@ -767,9 +767,11 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
             environmentSummary={environmentSummary}
           />
           <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
-          {/* Leave the scroller unpositioned so the repository menu anchors
-                  to the composer and can extend outside the scroll area. */}
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>label]:shrink-0 [&>label]:whitespace-nowrap">
+          {/* Wraps instead of scrolling: a control pushed past the edge was
+                  invisible rather than merely crowded, and Model was the first
+                  to go. Leave this group unpositioned so the repository menu
+                  anchors to the composer and can extend outside it. */}
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1 [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>label]:shrink-0 [&>label]:whitespace-nowrap">
             <RepositoryPicker
               repos={selectableRepos(config)}
               value={repo}

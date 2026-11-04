@@ -420,6 +420,24 @@ describe('local account model onboarding', () => {
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
   });
 
+  it('wraps the control row rather than pushing a control out of sight', async () => {
+    // The box is `max-w-3xl`, so the row has the same width at every viewport
+    // and five pickers do not always fit. A horizontal scroller kept the row
+    // one line tall by hiding what passed the right edge — Model first, then
+    // Reasoning — behind the Run button, with no scrollbar to find them.
+    // Crowding may wrap; it may not hide a setting.
+    render(<TaskComposer />);
+    await chooseRepository();
+
+    const controls = screen.getByLabelText('Model').parentElement!;
+    expect(controls).toHaveClass('flex-wrap');
+    expect(controls.className).not.toMatch(/overflow-x|flex-nowrap/);
+    expect(controls.parentElement).toHaveClass('flex-wrap');
+    for (const label of ['Branch', 'Agent', 'Model']) {
+      expect(screen.getByLabelText(label)).toBeInTheDocument();
+    }
+  });
+
   it('refreshes setup after a verified save, then holds a disabled same-name source without fallback', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({
