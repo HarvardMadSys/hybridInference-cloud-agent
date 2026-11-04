@@ -19,6 +19,8 @@ def _context(runtime_id="claude-code", **changes):
     manager = SimpleNamespace(
         backend=SimpleNamespace(gid=10001, base_env=lambda: inherited),
         reap_member_processes=lambda *_args, **_kwargs: None,
+        # The sandbox's shared browser service, started before every CLI.
+        exec_capture=lambda _spec, argv, **_kwargs: subprocess.CompletedProcess(argv, 0, b"", b""),
         ensure_mcp_helpers=lambda *_args: None,
         ensure_kilo_mcp_runtime=lambda *_args: None,
         spawn=lambda spec, argv, **kwargs: calls.append(kwargs),

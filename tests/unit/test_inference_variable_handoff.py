@@ -22,6 +22,7 @@ from cloud_agent_host.chat_sandbox import (
     member_inference_env_path,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
+from cloud_agent_host.sandbox_browser import LAUNCHER
 from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorClient,
     SessionSupervisorError,
@@ -142,6 +143,8 @@ def _launch_context(environment: BoundEnvironment | None):
     manager = SimpleNamespace(
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         reap_member_processes=lambda spec, **kwargs: None,
+        # The sandbox's shared browser service, started before every CLI.
+        exec_capture=lambda spec, argv, **kwargs: subprocess.CompletedProcess(argv, 0, b"", b""),
         write_member_inference_env=lambda spec, script, **kwargs: events.append(
             ("write", script, kwargs)
         ),
@@ -241,6 +244,8 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
     reaper.write_text("")
 
     def exec_capture(spec, argv, *, input_bytes=None, **kwargs):
+        if argv[0] == LAUNCHER:  # the shared browser service: not this test's
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
         # The member tmpfs, here a directory: run the container command locally.
         # A member's preparation reaches its one exec as input, and the reap
         # itself is the reaper's own tests' to exercise.

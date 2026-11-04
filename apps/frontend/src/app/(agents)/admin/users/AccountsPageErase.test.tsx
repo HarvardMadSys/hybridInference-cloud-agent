@@ -67,7 +67,7 @@ describe('erasing from the accounts page', () => {
       handed_environments: [],
     });
     render(<AccountsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Review' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Details for gone@example.edu' }));
     fireEvent.change(screen.getByLabelText('Type the account id to confirm'), {
       target: { value: deleted.id },
     });
