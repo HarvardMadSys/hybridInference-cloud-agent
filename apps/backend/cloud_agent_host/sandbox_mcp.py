@@ -1,24 +1,31 @@
 """Admit a member's sandbox MCP servers to the sandbox's MCP gateway.
 
 The gateway (``deploy/sandbox/cloud-agent-mcp``) runs the servers a user chose
-to run inside the sandbox, as its own user, ``agent-mcp``: a member's turn-end
-reap does not stop them, and a member cannot switch to that UID, so the host
-admits them. It does so before each member launch, with the servers that
-launch names and a digest of the member's MCP credential, which the CLI then
-sends to the gateway as it does to the relay
-(cloud_agent_shared.sandbox_mcp).
+to run inside the sandbox. Three identities keep an unreviewed server inside
+its own member's slot:
+
+- the admission, which the host writes as root, so no server can change it;
+- the gateway, ``agent-mcp``, which serves the fixed address and runs nothing;
+- the slot's runner, ``agent-mcp-<slot>``, which runs that slot's servers and
+  answers only the gateway.
+
+None is a member's UID, so a member's turn-end reap stops none of them, and a
+member cannot switch to them: the host does all three, before each member
+launch that names sandbox servers. The admission carries the digest of the
+member's MCP credential, which the CLI sends to the gateway as it does to the
+relay (cloud_agent_shared.sandbox_mcp).
 
 An admission that fails leaves the member without its sandbox servers, not
 without its chat: the CLI is still told of the ``sandbox`` server, finds it
 refusing, and reports that server as failed, and the host logs why.
 
-A launch that names no sandbox servers removes the slot's earlier admission,
-so a server the user turned off is not left reachable by the next CLI in the
-slot. Only a slot this host admitted needs that exec, so a chat that never
-chose a sandbox server costs none. The gateway forgets every admission when
-it starts, which covers a stopped container; a host restarted while its
-containers kept running keeps the admissions it made before until each slot's
-next launch with servers, or the container's next stop.
+A launch that names no sandbox servers removes the slot's admission, so a
+server the user turned off is not reachable by any CLI in the slot, even with
+the credential an earlier launch was admitted with. The host skips that exec
+only for a slot it has itself seen without an admission since it started; a
+restarted host knows no slot, and revokes once per slot before it trusts that.
+The gateway and the runner also ignore an admission written before the
+container last started.
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import MCP_SERVICE_UID
+from cloud_agent_host.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
 from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
@@ -39,13 +46,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 GATEWAY = "/usr/local/bin/cloud-agent-mcp"
-#: The admission writes a file and, at most, starts the gateway's listener.
-ADMIT_TIMEOUT_S = 30
+#: Each step writes a file or, at most, starts a listener.
+STEP_TIMEOUT_S = 30
 _NO_GATEWAY = frozenset({126, 127})
+ROOT_UID = 0
 
-#: (container, slot) pairs this host admitted servers for and has not revoked.
-_admitted: set[tuple[str, int]] = set()
-_admitted_lock = threading.Lock()
+#: (container, slot) pairs this host saw left with no admission, by its own
+#: revoke or by finding no gateway. Anything else is revoked before trusted.
+_known_clean: set[tuple[str, int]] = set()
+_known_clean_lock = threading.Lock()
 
 
 def admission(credential: str, servers: tuple[SandboxMcpServer, ...]) -> bytes:
@@ -57,6 +66,39 @@ def admission(credential: str, servers: tuple[SandboxMcpServer, ...]) -> bytes:
         },
         separators=(",", ":"),
     ).encode()
+
+
+class _StepFailed(Exception):
+    def __init__(self, step: str, status: int | None, detail: str) -> None:
+        super().__init__(
+            f"{step} failed" + (f" (status {status})" if status else "") + f": {detail}"
+        )
+        self.status = status
+
+
+def _step(
+    manager: ChatSandboxManager,
+    spec: ChatSandboxSpec,
+    step: str,
+    argv: list[str],
+    uid: int,
+    input_bytes: bytes | None = None,
+) -> None:
+    try:
+        result = manager.exec_capture(
+            spec,
+            [GATEWAY, *argv],
+            workdir="/",
+            timeout_s=STEP_TIMEOUT_S,
+            input_bytes=input_bytes,
+            user_uid=uid,
+            user_gid=0 if uid == ROOT_UID else manager.backend.gid,
+        )
+    except SandboxError as exc:
+        raise _StepFailed(step, None, str(exc)) from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace")[-300:].strip()
+        raise _StepFailed(step, result.returncode, detail)
 
 
 def admit_sandbox_mcp(
@@ -76,43 +118,32 @@ def admit_sandbox_mcp(
         )
         servers = ()
     key = (spec.container_name, slot_id)
-    if not servers:
-        with _admitted_lock:
-            if key not in _admitted:
-                return False
+    with _known_clean_lock:
+        if not servers and key in _known_clean:
+            return False
+        _known_clean.discard(key)
+    document = admission(credential, servers)
     try:
-        result = manager.exec_capture(
-            spec,
-            [GATEWAY, "admit", str(slot_id)],
-            workdir="/",
-            timeout_s=ADMIT_TIMEOUT_S,
-            input_bytes=admission(credential, servers),
-            user_uid=MCP_SERVICE_UID,
-            user_gid=manager.backend.gid,
-        )
-    except SandboxError as exc:
-        logger.warning(
-            "sandbox MCP admission for %s slot %s failed: %s", spec.container_name, slot_id, exc
-        )
-        return False
-    if result.returncode == 0:
-        with _admitted_lock:
+        _step(manager, spec, "admission", ["admit", str(slot_id)], ROOT_UID, document)
+        if not servers:
+            with _known_clean_lock:
+                _known_clean.add(key)
+            return False
+        # The gateway first: once it holds the fixed address, no server the
+        # runner starts can take that address and stand in for it.
+        _step(manager, spec, "gateway", ["service", "start"], MCP_SERVICE_UID)
+        uid = MCP_RUNNER_UID_BASE + slot_id
+        _step(manager, spec, "server runner", ["runner", "start", str(slot_id)], uid)
+    except _StepFailed as exc:
+        if exc.status in _NO_GATEWAY:
+            # An image older than the gateway: nothing there to admit or revoke.
+            with _known_clean_lock:
+                _known_clean.add(key)
             if servers:
-                _admitted.add(key)
-            else:
-                _admitted.discard(key)
-        return bool(servers)
-    if result.returncode in _NO_GATEWAY:
-        if servers:
-            logger.warning(
-                "sandbox MCP servers for %s: its image has no MCP gateway", spec.container_name
-            )
+                logger.warning(
+                    "sandbox MCP servers for %s: its image has no MCP gateway", spec.container_name
+                )
+            return False
+        logger.warning("sandbox MCP for %s slot %s: %s", spec.container_name, slot_id, exc)
         return False
-    logger.warning(
-        "sandbox MCP admission for %s slot %s failed (status %s): %s",
-        spec.container_name,
-        slot_id,
-        result.returncode,
-        result.stderr.decode("utf-8", "replace")[-300:].strip(),
-    )
-    return False
+    return True

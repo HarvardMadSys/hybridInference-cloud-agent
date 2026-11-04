@@ -27,7 +27,7 @@ from cloud_agent.mcp.models import (
 from cloud_agent.mcp.registry import ResolvedConnection
 from cloud_agent.schemas.workers import WorkerClaimResponse
 from cloud_agent_host import sandbox_mcp
-from cloud_agent_host.chat_sandbox_models import MCP_SERVICE_UID
+from cloud_agent_host.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig, resident_launch
 from cloud_agent_host.resident_transport import (
@@ -193,69 +193,115 @@ def test_a_shared_launch_carries_the_servers_only_with_mcp():
 
 
 class _Manager:
-    def __init__(self, status=0, error=None):
+    def __init__(self, fail_at=None, status=1, error=None):
         self.backend = SimpleNamespace(gid=10001)
+        self.fail_at = fail_at
         self.status = status
         self.error = error
         self.calls = []
 
     def exec_capture(self, spec, argv, **kwargs):
-        self.calls.append((argv, kwargs))
-        if self.error is not None:
-            raise self.error
-        return subprocess.CompletedProcess(argv, self.status, b"", b"refused")
+        self.calls.append((argv[1:], kwargs))
+        if self.fail_at is not None and argv[1] == self.fail_at:
+            if self.error is not None:
+                raise self.error
+            return subprocess.CompletedProcess(argv, self.status, b"", b"refused")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
 
 
 @pytest.fixture(autouse=True)
-def _fresh_admissions(monkeypatch):
-    monkeypatch.setattr(sandbox_mcp, "_admitted", set())
+def _fresh_host(monkeypatch):
+    """A host that has just started: it knows no slot to be clean."""
+    monkeypatch.setattr(sandbox_mcp, "_known_clean", set())
 
 
 def _spec(name="chat-1"):
     return SimpleNamespace(container_name=name)
 
 
-def test_the_host_admits_a_digest_of_the_credential_as_the_gateway_user():
+def _steps(manager):
+    return [(argv, kwargs["user_uid"]) for argv, kwargs in manager.calls]
+
+
+def test_the_host_admits_as_root_then_starts_the_gateway_then_the_slots_runner():
     manager = _Manager()
 
     assert sandbox_mcp.admit_sandbox_mcp(
         manager, _spec(), slot_id=2, credential="cred", servers=(PLAYWRIGHT,)
     )
 
-    [(argv, kwargs)] = manager.calls
-    assert argv == [sandbox_mcp.GATEWAY, "admit", "2"]
-    assert (kwargs["user_uid"], kwargs["user_gid"]) == (MCP_SERVICE_UID, 10001)
-    document = json.loads(kwargs["input_bytes"])
-    assert document == {
+    assert _steps(manager) == [
+        (["admit", "2"], 0),
+        # The gateway holds the fixed address before any server can start.
+        (["service", "start"], MCP_SERVICE_UID),
+        (["runner", "start", "2"], MCP_RUNNER_UID_BASE + 2),
+    ]
+    admit_kwargs = manager.calls[0][1]
+    assert admit_kwargs["user_gid"] == 0
+    assert json.loads(admit_kwargs["input_bytes"]) == {
         "token_sha256": hashlib.sha256(b"cred").hexdigest(),
         "servers": [PLAYWRIGHT.wire()],
     }
-    assert b"cred" not in kwargs["input_bytes"]
+    assert b"cred" not in admit_kwargs["input_bytes"]
 
 
-def test_a_chat_with_no_sandbox_server_costs_no_exec_until_one_was_admitted():
+def test_turning_servers_off_revokes_even_after_the_host_restarts(monkeypatch):
+    """Codex's P2: a restarted host forgot what it admitted and skipped the revoke."""
     manager = _Manager()
+    sandbox_mcp.admit_sandbox_mcp(
+        manager, _spec(), slot_id=0, credential="c", servers=(PLAYWRIGHT,)
+    )
+    monkeypatch.setattr(sandbox_mcp, "_known_clean", set())  # the host restarts
+    manager.calls.clear()
+
     assert not sandbox_mcp.admit_sandbox_mcp(
         manager, _spec(), slot_id=0, credential="c", servers=()
     )
-    assert manager.calls == []
+
+    [(argv, uid)] = _steps(manager)
+    assert (argv, uid) == (["admit", "0"], 0)
+    assert json.loads(manager.calls[0][1]["input_bytes"])["servers"] == []
+
+
+def test_a_slot_known_clean_costs_no_exec_until_it_is_admitted_again():
+    manager = _Manager()
+    sandbox_mcp.admit_sandbox_mcp(manager, _spec(), slot_id=0, credential="c", servers=())
+    sandbox_mcp.admit_sandbox_mcp(manager, _spec(), slot_id=0, credential="c", servers=())
+    assert len(manager.calls) == 1  # revoked once, then known clean
 
     sandbox_mcp.admit_sandbox_mcp(
         manager, _spec(), slot_id=0, credential="c", servers=(PLAYWRIGHT,)
     )
-    # Turned off: the next launch in the slot revokes the admission.
+    manager.calls.clear()
     sandbox_mcp.admit_sandbox_mcp(manager, _spec(), slot_id=0, credential="c", servers=())
-    assert json.loads(manager.calls[-1][1]["input_bytes"])["servers"] == []
+    assert _steps(manager) == [(["admit", "0"], 0)]
+
+
+def test_a_failed_revoke_is_tried_again_at_the_next_launch():
+    manager = _Manager(fail_at="admit")
+    sandbox_mcp.admit_sandbox_mcp(manager, _spec(), slot_id=0, credential="c", servers=())
     sandbox_mcp.admit_sandbox_mcp(manager, _spec(), slot_id=0, credential="c", servers=())
     assert len(manager.calls) == 2
+
+
+def test_an_image_without_the_gateway_is_left_alone_once_found(caplog):
+    manager = _Manager(fail_at="admit", status=127)
+    with caplog.at_level(logging.WARNING):
+        assert not sandbox_mcp.admit_sandbox_mcp(
+            manager, _spec(), slot_id=0, credential="c", servers=(PLAYWRIGHT,)
+        )
+    assert "has no MCP gateway" in caplog.text
+    sandbox_mcp.admit_sandbox_mcp(manager, _spec(), slot_id=0, credential="c", servers=())
+    assert len(manager.calls) == 1
 
 
 @pytest.mark.parametrize(
     ("manager", "logged"),
     [
-        (_Manager(status=127), "has no MCP gateway"),
-        (_Manager(status=1), "failed (status 1): refused"),
-        (_Manager(error=SandboxError("exec failed")), "exec failed"),
+        (_Manager(fail_at="admit"), "admission failed (status 1): refused"),
+        (_Manager(fail_at="service"), "gateway failed (status 1): refused"),
+        (_Manager(fail_at="runner"), "server runner failed (status 1): refused"),
+        (_Manager(fail_at="admit", error=SandboxError("exec failed")), "exec failed"),
     ],
 )
 def test_an_admission_that_fails_never_blocks_the_member(manager, logged, caplog):
@@ -266,13 +312,15 @@ def test_an_admission_that_fails_never_blocks_the_member(manager, logged, caplog
     assert logged in caplog.text
 
 
-def test_servers_without_an_mcp_credential_are_not_admitted(caplog):
+def test_servers_without_an_mcp_credential_are_revoked_not_admitted(caplog):
     manager = _Manager()
     with caplog.at_level(logging.WARNING):
         assert not sandbox_mcp.admit_sandbox_mcp(
             manager, _spec(), slot_id=0, credential="", servers=(PLAYWRIGHT,)
         )
-    assert manager.calls == [] and "need an MCP credential" in caplog.text
+    assert "need an MCP credential" in caplog.text
+    assert _steps(manager) == [(["admit", "0"], 0)]
+    assert json.loads(manager.calls[0][1]["input_bytes"])["servers"] == []
 
 
 # -- the member's CLI -----------------------------------------------------------------------

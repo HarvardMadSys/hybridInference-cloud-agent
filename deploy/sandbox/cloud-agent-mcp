@@ -4,42 +4,46 @@
 A user can choose to run an MCP server *in the sandbox* (location ``sandbox``)
 instead of behind the platform relay: it then sees the task's ``localhost``,
 its files and the sandbox's browser. The trusted host decides which servers a
-member may use; this gateway runs them and presents them to the member's
-agent CLI as one Streamable HTTP MCP server, ``sandbox``, the way the relay
-presents the remote ones as ``session``.
+member may use; this program runs them and presents them to the member's agent
+CLI as one Streamable HTTP MCP server, ``sandbox``, the way the relay presents
+the remote ones as ``session``.
 
-Why a gateway, and not a stdio entry in each CLI's config:
+Three identities, so that a server, which is code the user chose but nobody
+reviewed, can affect only its own member:
 
-- It runs as its own user (``agent-mcp``), which no member's turn-end reap
-  scans. A server a CLI spawned as the member would be killed at the end of
-  any turn in which it started.
-- Every runtime already speaks HTTP MCP to the relay, so each needs one more
-  URL, not a stdio client of its own (pi's bridge has none).
-- The URL is fixed (``http://127.0.0.1:47801/mcp``), so Codex's root-owned
-  allowlist names it once for every member.
+- **The admission** says which servers a member's slot may use. The host writes
+  it as root (``admit``), into a root-owned directory; nothing below can change
+  it. It names the SHA-256 of the member's MCP credential, the token the
+  member's CLI already sends to the relay, so one header reaches both servers;
+  the credential itself is never written here.
+- **The gateway** (``agent-mcp``, uid 10003) serves the fixed address
+  ``http://127.0.0.1:47801/mcp``, so Codex's root-owned allowlist names it
+  once. It runs no server. For each request it finds the admission that
+  matches the bearer token and forwards the call to that slot's runner.
+- **A slot's runner** (``agent-mcp-<slot>``, uid 12001 + slot) runs that
+  slot's admitted servers as stdio children and nothing else, and answers only
+  the gateway, as the kernel reports the peer (``SO_PEERCRED``). A server can
+  reach its own runner and its sibling servers, which are its member's; it
+  cannot write an admission, signal the gateway or reach another slot.
 
-The host admits a member's servers before it launches the member's CLI::
+None of them is a member's UID, so no member's turn-end reap stops them. The
+host starts the runner and the gateway, which are idempotent, after writing an
+admission. An admission written before the container last started is ignored:
+whoever held its token is gone with that container.
 
-    cloud-agent-mcp admit <slot> < {"token_sha256": ..., "servers": [...]}
-
-The token is the member's MCP credential, the one its CLI already sends to the
-relay, so every runtime reaches both servers with one header. The gateway
-keeps only its SHA-256: a server it runs, as the same user, cannot read a
-member's credential back. A request is served for the member whose admission
-matches its bearer token, and only with that member's servers. Each
-admitted server starts on first use, one process per member and server, and
-stops after the idle timeout. Tools are presented as ``<alias>__<tool>``, as
-the relay names them. Only tools are forwarded; the gateway offers the
-servers no client capabilities (roots, sampling, elicitation), so they never
-ask the agent anything.
+Tools are presented as ``<alias>__<tool>``, as the relay names them. Only tools
+are forwarded; the runner offers the servers no client capabilities (roots,
+sampling, elicitation), so they never ask the agent anything. A server starts
+when it is admitted, so the CLI's first tool list does not wait for an
+install; it stops when it has served no call for the idle timeout and has none
+running, or when its admission is withdrawn.
 
 A server's arguments and environment may name ``${CLOUD_AGENT_BROWSER_CDP}``,
 replaced at start with the sandbox browser's CDP URL (``cloud-agent-browser
-start``): a template can bind Playwright MCP to the managed browser without
-knowing its token.
+start``, which also starts the runner's download courier).
 
-Installs run with npm's ``ignore-scripts`` on, so a package's install hooks do
-not run. The host has already refused a package without an exact version.
+Installs run with npm's ``ignore-scripts`` on. The host has already refused a
+package without an exact version.
 
 It runs isolated (``-I``), like the other helpers in this image, and uses the
 standard library only.
@@ -57,7 +61,9 @@ import os
 import re
 import secrets
 import signal
+import socket as socketlib
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -68,6 +74,11 @@ PORT = 47801
 HOST = "127.0.0.1"
 ENDPOINT = f"http://{HOST}:{PORT}/mcp"
 SERVER_NAME = "sandbox"
+#: Who may write an admission (root, through the host's exec), who serves
+#: the address, and the first slot runner's UID.
+ADMISSION_OWNER_UID = 0
+GATEWAY_UID = 10003
+RUNNER_UID_BASE = 12001
 NAMESPACE_SEPARATOR = "__"
 #: The relay's limit for a presented name (cloud_agent.mcp.protocol): a CLI
 #: prefixes ``mcp__<server>__``, and ``sandbox`` is as long as ``session``.
@@ -77,7 +88,7 @@ MAX_SERVERS = 16
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 MAX_HEAD_BYTES = 16 * 1024
-#: A server that has served no call for this long is stopped; the next call starts it.
+#: A server that has served no call for this long, and runs none, is stopped.
 DEFAULT_IDLE_S = 900.0
 #: How long a server may take to install and answer ``initialize``.
 START_TIMEOUT_S = 180.0
@@ -87,8 +98,8 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 BROWSER_PLACEHOLDER = "${CLOUD_AGENT_BROWSER_CDP}"
 BROWSER_LAUNCHER = "/usr/local/bin/cloud-agent-browser"
 #: The commands a sandbox server may start with, as the host's launch policy
-#: allows them (cloud_agent.mcp.launch). Checked again here: the gateway runs
-#: nothing else, whatever an admission says.
+#: allows them (cloud_agent.mcp.launch). Checked again here: nothing else
+#: runs, whatever an admission says.
 ALLOWED_COMMANDS = frozenset({"npx", "uvx"})
 #: As the relay's alias pattern (cloud_agent_shared.sandbox_mcp.ALIAS_PATTERN).
 _ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
@@ -102,22 +113,23 @@ class GatewayError(Exception):
     """A failure this command reports on stderr with exit status 1."""
 
 
+def _log(line: str) -> None:
+    print(f"cloud-agent-mcp: {line}", file=sys.stderr, flush=True)
+
+
 # --------------------------------------------------------------------------
-# Paths and admissions
+# Paths
 # --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Paths:
+    #: The gateway's own state: its record, lock and log.
     state: str
-
-    @property
-    def admissions(self) -> str:
-        return os.path.join(self.state, "admissions")
-
-    @property
-    def logs(self) -> str:
-        return os.path.join(self.state, "logs")
+    #: Root-owned: one admission per slot.
+    admissions: str
+    #: One directory per slot, its runner's: socket, record, lock, logs.
+    slots: str
 
     @property
     def record(self) -> str:
@@ -134,33 +146,71 @@ class Paths:
     def admission(self, slot: int) -> str:
         return os.path.join(self.admissions, f"{slot}.json")
 
+    def slot_dir(self, slot: int) -> str:
+        return os.path.join(self.slots, str(slot))
+
+    def runner_socket(self, slot: int) -> str:
+        return os.path.join(self.slot_dir(slot), "runner.sock")
+
+    def runner_record(self, slot: int) -> str:
+        return os.path.join(self.slot_dir(slot), "runner.json")
+
+    def runner_lock(self, slot: int) -> str:
+        return os.path.join(self.slot_dir(slot), "runner.lock")
+
+    def runner_log(self, slot: int) -> str:
+        return os.path.join(self.slot_dir(slot), "runner.log")
+
+    def server_log(self, slot: int, alias: str) -> str:
+        return os.path.join(self.slot_dir(slot), f"{alias}.log")
+
 
 def resolve_paths(environ: dict[str, str] | None = None) -> Paths:
     env = os.environ if environ is None else environ
     home = env.get("HOME") or os.path.expanduser("~")
     return Paths(
-        state=env.get("CLOUD_AGENT_MCP_STATE_DIR") or os.path.join(home, ".cloud-agent-mcp")
+        state=env.get("CLOUD_AGENT_MCP_STATE_DIR") or os.path.join(home, ".cloud-agent-mcp"),
+        admissions=env.get("CLOUD_AGENT_MCP_ADMISSIONS_DIR") or "/run/agent-mcp-admissions",
+        slots=env.get("CLOUD_AGENT_MCP_SLOTS_DIR") or "/run/agent-mcp-slots",
     )
 
 
-def ensure_private_dir(path: str) -> None:
-    """Create ``path`` 0700, and refuse one this UID does not own."""
-    os.makedirs(path, mode=0o700, exist_ok=True)
+def ensure_private_dir(path: str, mode: int = 0o700) -> None:
+    """Create ``path``, and refuse one this UID does not own."""
+    os.makedirs(path, mode=mode, exist_ok=True)
     info = os.lstat(path)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         raise GatewayError(f"{path} is not a directory owned by this user")
-    if stat.S_IMODE(info.st_mode) != 0o700:
-        os.chmod(path, 0o700)
+    if stat.S_IMODE(info.st_mode) != mode:
+        os.chmod(path, mode)
 
 
-def write_private(path: str, data: str) -> None:
+def write_file(path: str, data: str, mode: int = 0o600) -> None:
     tmp = f"{path}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
+        os.fchmod(fd, mode)
         os.write(fd, data.encode())
     finally:
         os.close(fd)
     os.replace(tmp, path)
+
+
+def container_started_at() -> float:
+    """When this container's first process started, in epoch seconds."""
+    try:
+        with open("/proc/1/stat", encoding="ascii") as handle:
+            ticks = int(handle.read().rsplit(")", 1)[1].split()[19])
+        with open("/proc/stat", encoding="ascii") as handle:
+            boot = next(int(line.split()[1]) for line in handle if line.startswith("btime "))
+        return boot + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        return 0.0
+
+
+# --------------------------------------------------------------------------
+# Admissions
+# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -240,46 +290,63 @@ def token_digest(token: str) -> str:
 
 
 class Admissions:
-    """Every member's admission, reread from disk when a file changes."""
+    """Every slot's admission, reread from disk when a file changes.
+
+    An admission counts only when its owner is the admission owner (root, as
+    the host writes it) and no one else can write it, and when it was written
+    after this container started.
+    """
 
     def __init__(self, paths: Paths) -> None:
         self.paths = paths
-        self._cache: dict[int, tuple[float, Admission | None]] = {}
+        self.started_at = container_started_at()
+        self._cache: dict[int, tuple[tuple[int, int, int], Admission | None]] = {}
 
-    def _load(self, slot: int) -> Admission | None:
+    def get(self, slot: int) -> Admission | None:
         path = self.paths.admission(slot)
         try:
             info = os.lstat(path)
         except FileNotFoundError:
             self._cache.pop(slot, None)
             return None
+        key = (info.st_mtime_ns, info.st_ino, info.st_size)
         cached = self._cache.get(slot)
-        if cached is not None and cached[0] == info.st_mtime_ns:
+        if cached is not None and cached[0] == key:
             return cached[1]
         admission = None
-        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+        trusted = (
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == ADMISSION_OWNER_UID
+            and not info.st_mode & 0o022
+            and info.st_mtime >= self.started_at - 1
+        )
+        if trusted:
             with (
                 contextlib.suppress(OSError, ValueError, GatewayError),
                 open(path, encoding="utf-8") as handle,
             ):
                 admission = parse_admission(slot, json.load(handle))
-        self._cache[slot] = (info.st_mtime_ns, admission)
+        self._cache[slot] = (key, admission)
         return admission
+
+    def slots(self) -> list[int]:
+        try:
+            names = os.listdir(self.paths.admissions)
+        except OSError:
+            return []
+        return sorted(
+            int(name.removesuffix(".json"))
+            for name in names
+            if name.endswith(".json") and name.removesuffix(".json").isdigit()
+        )
 
     def for_token(self, token: str) -> Admission | None:
         if not token:
             return None
         digest = token_digest(token)
-        try:
-            names = os.listdir(self.paths.admissions)
-        except OSError:
-            return None
         found = None
-        for name in names:
-            stem = name.removesuffix(".json")
-            if not stem.isdigit() or name == stem:
-                continue
-            admission = self._load(int(stem))
+        for slot in self.slots():
+            admission = self.get(slot)
             # Compare every one, in constant time: which slot matched must not
             # show in how long the answer took.
             if admission is not None and hmac.compare_digest(admission.token_sha256, digest):
@@ -318,6 +385,15 @@ def presented_name(alias: str, capability: str) -> str:
 # --------------------------------------------------------------------------
 # One stdio MCP server
 # --------------------------------------------------------------------------
+
+
+class RemoteError(Exception):
+    """A JSON-RPC error a server returned, passed on to the client as it is."""
+
+    def __init__(self, code: Any, message: str) -> None:
+        super().__init__(message)
+        self.code = code if isinstance(code, int) else -32603
+        self.message = message
 
 
 def browser_endpoint() -> str:
@@ -375,12 +451,18 @@ class Backend:
         self.reader_task: asyncio.Task[None] | None = None
         self.started: asyncio.Future[None] | None = None
         self.last_used = time.monotonic()
+        #: Calls running now. A server with any is never idle.
+        self.active = 0
         self.tools: list[dict[str, Any]] | None = None
         self.lock = asyncio.Lock()
 
     @property
     def alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
+
+    @property
+    def idle_for(self) -> float:
+        return 0.0 if self.active else time.monotonic() - self.last_used
 
     async def ensure(self) -> None:
         async with self.lock:
@@ -393,9 +475,11 @@ class Backend:
         self.stop()
         home = os.environ.get("HOME") or os.path.expanduser("~")
         argv, env = await asyncio.to_thread(server_argv_env, self.spec, home)
-        os.makedirs(self.paths.logs, mode=0o700, exist_ok=True)
-        log_path = os.path.join(self.paths.logs, f"{self.slot}-{self.spec.alias}.log")
-        log = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        log = os.open(
+            self.paths.server_log(self.slot, self.spec.alias),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+            0o600,
+        )
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -455,7 +539,7 @@ class Backend:
                     continue
                 if "method" in message and "id" in message:
                     # A request from the server. Only ping is answered: the
-                    # gateway offered no client capability for anything else.
+                    # runner offered no client capability for anything else.
                     reply: dict[str, Any] = {"jsonrpc": "2.0", "id": message["id"]}
                     if message["method"] == "ping":
                         reply["result"] = {}
@@ -466,7 +550,7 @@ class Backend:
                 future = self.pending.pop(message.get("id"), None) if "id" in message else None
                 if future is not None and not future.done():
                     future.set_result(message)
-        except (ConnectionError, asyncio.LimitOverrunError, ValueError):
+        except (ConnectionError, asyncio.LimitOverrunError, ValueError, GatewayError):
             pass
         finally:
             for future in self.pending.values():
@@ -525,13 +609,16 @@ class Backend:
         return self.tools
 
     async def call_tool(self, name: str, arguments: Any) -> Any:
-        await self.ensure()
-        self.last_used = time.monotonic()
+        # Counted from before the start: a call must not find its server
+        # retired while it waits for it, nor while it runs.
+        self.active += 1
         try:
+            await self.ensure()
             return await self._request(
                 "tools/call", {"name": name, "arguments": arguments or {}}, timeout=CALL_TIMEOUT_S
             )
         finally:
+            self.active -= 1
             self.last_used = time.monotonic()
 
     def stop(self) -> None:
@@ -548,13 +635,231 @@ class Backend:
         self.tools = None
 
 
-class RemoteError(Exception):
-    """A JSON-RPC error a server returned, passed on to the client as it is."""
+# --------------------------------------------------------------------------
+# A slot's runner
+# --------------------------------------------------------------------------
 
-    def __init__(self, code: Any, message: str) -> None:
-        super().__init__(message)
-        self.code = code if isinstance(code, int) else -32603
-        self.message = message
+
+def peer_uid(writer: asyncio.StreamWriter) -> int | None:
+    sock = writer.get_extra_info("socket")
+    try:
+        credentials = sock.getsockopt(
+            socketlib.SOL_SOCKET, socketlib.SO_PEERCRED, struct.calcsize("3i")
+        )
+    except (OSError, AttributeError):
+        return None
+    return struct.unpack("3i", credentials)[1]
+
+
+class Runner:
+    """One slot's servers, as its own UID, answering only the gateway."""
+
+    def __init__(self, paths: Paths, slot: int, *, idle_s: float) -> None:
+        self.paths = paths
+        self.slot = slot
+        self.idle_s = idle_s
+        self.admissions = Admissions(paths)
+        self.backends: dict[tuple[str, str], Backend] = {}
+        #: Presented tool name -> (server key, the server's own name), as last listed.
+        self.routes: dict[str, tuple[tuple[str, str], str]] = {}
+        self.warmed: set[tuple[str, str]] = set()
+        self.stopping: asyncio.Event | None = None
+
+    def specs(self) -> tuple[ServerSpec, ...]:
+        admission = self.admissions.get(self.slot)
+        return admission.servers if admission is not None else ()
+
+    def backend(self, spec: ServerSpec) -> Backend:
+        key = (spec.alias, spec.digest)
+        backend = self.backends.get(key)
+        if backend is None:
+            backend = self.backends[key] = Backend(spec, self.slot, self.paths)
+        return backend
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        async def one(spec: ServerSpec) -> list[tuple[str, dict[str, Any], str]]:
+            try:
+                tools = await self.backend(spec).list_tools()
+            except (GatewayError, RemoteError) as exc:
+                # One broken server must not take the others' tools away.
+                _log(f"tools/list failed: slot {self.slot} {spec.alias}: {exc}")
+                return []
+            listed = []
+            for tool in tools:
+                name = tool.get("name")
+                if isinstance(name, str):
+                    listed.append((presented_name(spec.alias, name), tool, name))
+            return listed
+
+        specs = self.specs()
+        lists = await asyncio.gather(*(one(spec) for spec in specs))
+        routes: dict[str, tuple[tuple[str, str], str]] = {}
+        presented: list[dict[str, Any]] = []
+        for spec, listed in zip(specs, lists, strict=True):
+            for public, tool, own in listed:
+                routes[public] = ((spec.alias, spec.digest), own)
+                presented.append({**tool, "name": public})
+        self.routes = routes
+        return presented
+
+    async def call_tool(self, presented: str, arguments: Any) -> Any:
+        route = self.routes.get(presented)
+        if route is None or route[0] not in {(spec.alias, spec.digest) for spec in self.specs()}:
+            # A name this runner has not listed since a change: list again,
+            # each server on its own, so a broken one cannot answer for another.
+            await self.list_tools()
+            route = self.routes.get(presented)
+        if route is None:
+            raise RemoteError(-32602, f"unknown tool: {presented}")
+        key, own = route
+        spec = next((spec for spec in self.specs() if (spec.alias, spec.digest) == key), None)
+        if spec is None:
+            raise RemoteError(-32602, f"unknown tool: {presented}")
+        return await self.backend(spec).call_tool(own, arguments)
+
+    def warm(self) -> None:
+        """Start each newly admitted server now, so a CLI's first tool list is quick."""
+        for spec in self.specs():
+            key = (spec.alias, spec.digest)
+            if key not in self.warmed:
+                self.warmed.add(key)
+                asyncio.get_running_loop().create_task(self._warm_one(spec))
+
+    async def _warm_one(self, spec: ServerSpec) -> None:
+        try:
+            await self.backend(spec).list_tools()
+        except (GatewayError, RemoteError) as exc:
+            _log(f"warm-up failed: slot {self.slot} {spec.alias}: {exc}")
+
+    def retire(self) -> None:
+        """Stop servers idle past the timeout with no call running, and withdrawn ones."""
+        admitted = {(spec.alias, spec.digest) for spec in self.specs()}
+        for key, backend in list(self.backends.items()):
+            if key not in admitted:
+                backend.stop()
+                del self.backends[key]
+                self.warmed.discard(key)
+            elif backend.alive and backend.idle_for > self.idle_s:
+                backend.stop()
+
+    async def handle(self, request: dict[str, Any]) -> dict[str, Any]:
+        op = request.get("op")
+        try:
+            if op == "list":
+                return {"tools": await self.list_tools()}
+            if op == "call" and isinstance(request.get("name"), str):
+                return {"result": await self.call_tool(request["name"], request.get("arguments"))}
+            return {"error": {"code": -32601, "message": f"unknown runner op: {op}"}}
+        except RemoteError as exc:
+            return {"error": {"code": exc.code, "message": exc.message}}
+        except GatewayError as exc:
+            return {"error": {"code": -32603, "message": str(exc)}}
+
+    async def _serve_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            # The gateway only. A server, a member or another slot's runner
+            # can reach this socket's directory, not this runner's servers.
+            if peer_uid(writer) != GATEWAY_UID:
+                return
+            line = await reader.readline()
+            request = json.loads(line) if line else None
+            reply = await self.handle(request) if isinstance(request, dict) else {}
+            writer.write(json.dumps(reply, separators=(",", ":")).encode() + b"\n")
+            await writer.drain()
+        except (ConnectionError, ValueError, asyncio.LimitOverrunError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    async def _watch(self) -> None:
+        retire_every = min(30.0, max(1.0, self.idle_s / 4))
+        last_retire = time.monotonic()
+        while True:
+            await asyncio.sleep(1.0)
+            self.warm()
+            if time.monotonic() - last_retire >= retire_every:
+                last_retire = time.monotonic()
+                self.retire()
+
+    async def run(self, ready_fd: int | None) -> int:
+        loop = asyncio.get_running_loop()
+        self.stopping = asyncio.Event()
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            loop.add_signal_handler(signum, self.stopping.set)
+        sock_path = self.paths.runner_socket(self.slot)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(sock_path)
+        try:
+            server = await asyncio.start_unix_server(
+                self._serve_connection, sock_path, limit=MAX_MESSAGE_BYTES
+            )
+            # The gateway is in the agent group; the peer check does the rest.
+            os.chmod(sock_path, 0o660)
+        except OSError as exc:
+            _report(ready_fd, f"error cannot listen on {sock_path}: {exc}\n")
+            return 1
+        write_file(
+            self.paths.runner_record(self.slot),
+            json.dumps({"pid": os.getpid(), "slot": self.slot, "started_at": int(time.time())}),
+        )
+        watcher = loop.create_task(self._watch())
+        _report(ready_fd, "ok\n")
+        _log(f"runner serving slot {self.slot}")
+        try:
+            await self.stopping.wait()
+            return 0
+        finally:
+            watcher.cancel()
+            server.close()
+            for backend in self.backends.values():
+                backend.stop()
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(sock_path)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.paths.runner_record(self.slot))
+
+
+async def ask_runner(paths: Paths, slot: int, request: dict[str, Any], timeout: float) -> Any:
+    """Send one request to a slot's runner; its result, or ``RemoteError``."""
+    sock_path = paths.runner_socket(slot)
+    try:
+        info = os.lstat(sock_path)
+    except OSError as exc:
+        raise RemoteError(-32603, f"slot {slot}'s servers are not running") from exc
+    # Only that slot's runner could have made this socket in its directory.
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != RUNNER_UID_BASE + slot:
+        raise RemoteError(-32603, f"slot {slot}'s runner socket is not its runner's")
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock_path, limit=MAX_MESSAGE_BYTES)
+    except OSError as exc:
+        raise RemoteError(-32603, f"slot {slot}'s servers are not running") from exc
+    try:
+        writer.write(json.dumps(request, separators=(",", ":")).encode() + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout)
+    except ConnectionResetError:
+        line = b""  # a refusal: the runner closed before reading the request
+    except (OSError, TimeoutError) as exc:
+        raise RemoteError(-32603, f"slot {slot}'s servers did not answer") from exc
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+    if not line:
+        # How a runner refuses a peer that is not the gateway, or how it exits.
+        raise RemoteError(-32603, f"slot {slot}'s runner closed without answering")
+    try:
+        reply = json.loads(line)
+    except ValueError as exc:
+        raise RemoteError(-32603, f"slot {slot}'s servers did not answer") from exc
+    if not isinstance(reply, dict) or not reply:
+        raise RemoteError(-32603, f"slot {slot}'s servers refused the gateway")
+    if "error" in reply:
+        error = reply["error"] if isinstance(reply["error"], dict) else {}
+        raise RemoteError(error.get("code", -32603), str(error.get("message", "error")))
+    return reply
 
 
 # --------------------------------------------------------------------------
@@ -577,10 +882,6 @@ class HttpResponse:
     headers: dict[str, str] = field(default_factory=dict)
 
 
-def _log(line: str) -> None:
-    print(f"cloud-agent-mcp: {line}", file=sys.stderr, flush=True)
-
-
 def _rpc_result(request_id: Any, result: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
@@ -590,13 +891,11 @@ def _rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
 
 
 class Gateway:
-    def __init__(self, paths: Paths, *, idle_s: float) -> None:
+    """The fixed address: authenticates a member, then asks its slot's runner."""
+
+    def __init__(self, paths: Paths) -> None:
         self.paths = paths
-        self.idle_s = idle_s
         self.admissions = Admissions(paths)
-        self.backends: dict[tuple[int, str, str], Backend] = {}
-        #: Servers already started ahead of their member's first request.
-        self.warmed: set[tuple[int, str, str]] = set()
         self.stopping: asyncio.Event | None = None
 
     # -- HTTP -------------------------------------------------------------
@@ -613,11 +912,9 @@ class Gateway:
             return HttpResponse("401 Unauthorized", headers={"WWW-Authenticate": "Bearer"})
         if request.method == "DELETE":
             return HttpResponse("200 OK")
-        if request.method == "GET":
+        if request.method != "POST":
             # No server-initiated stream: the tool list does not change while
             # a CLI holds it, because a changed admission restarts the CLI.
-            return HttpResponse("405 Method Not Allowed", headers={"Allow": "POST, DELETE"})
-        if request.method != "POST":
             return HttpResponse("405 Method Not Allowed", headers={"Allow": "POST, DELETE"})
         try:
             message = json.loads(request.body)
@@ -629,9 +926,8 @@ class Gateway:
             return HttpResponse("202 Accepted")  # notifications, responses: nothing to do
         method = message.get("method")
         _log(f"slot {admission.slot}: {method if isinstance(method, str) else '?'}")
-        reply = await self.dispatch(admission, message)
-        response = self._json(reply)
-        if message.get("method") == "initialize":
+        response = self._json(await self.dispatch(admission, message))
+        if method == "initialize":
             response.headers["Mcp-Session-Id"] = secrets.token_urlsafe(16)
         return response
 
@@ -667,118 +963,35 @@ class Gateway:
             if method == "ping":
                 return _rpc_result(request_id, {})
             if method == "tools/list":
-                return _rpc_result(request_id, {"tools": await self.list_tools(admission)})
+                if not admission.servers:
+                    return _rpc_result(request_id, {"tools": []})
+                reply = await ask_runner(
+                    self.paths, admission.slot, {"op": "list"}, START_TIMEOUT_S + 30
+                )
+                return _rpc_result(request_id, {"tools": reply.get("tools", [])})
             if method == "tools/call":
                 name = params.get("name")
                 if not isinstance(name, str):
                     return _rpc_error(request_id, -32602, "tools/call needs a name")
-                return _rpc_result(
-                    request_id, await self.call_tool(admission, name, params.get("arguments"))
+                reply = await ask_runner(
+                    self.paths,
+                    admission.slot,
+                    {"op": "call", "name": name, "arguments": params.get("arguments")},
+                    CALL_TIMEOUT_S + START_TIMEOUT_S,
                 )
+                return _rpc_result(request_id, reply.get("result", {}))
             return _rpc_error(request_id, -32601, f"method not found: {method}")
         except RemoteError as exc:
             return _rpc_error(request_id, exc.code, exc.message)
-        except GatewayError as exc:
-            return _rpc_error(request_id, -32603, str(exc))
-
-    def backend(self, admission: Admission, spec: ServerSpec) -> Backend:
-        key = (admission.slot, spec.alias, spec.digest)
-        backend = self.backends.get(key)
-        if backend is None:
-            backend = self.backends[key] = Backend(spec, admission.slot, self.paths)
-        return backend
-
-    async def list_tools(self, admission: Admission) -> list[dict[str, Any]]:
-        async def one(spec: ServerSpec) -> list[dict[str, Any]]:
-            try:
-                tools = await self.backend(admission, spec).list_tools()
-            except (GatewayError, RemoteError) as exc:
-                # One broken server must not take the others' tools away.
-                _log(f"tools/list failed: slot {admission.slot} {spec.alias}: {exc}")
-                return []
-            presented = []
-            for tool in tools:
-                name = tool.get("name")
-                if isinstance(name, str):
-                    presented.append({**tool, "name": presented_name(spec.alias, name)})
-            return presented
-
-        lists = await asyncio.gather(*(one(spec) for spec in admission.servers))
-        return [tool for tools in lists for tool in tools]
-
-    async def call_tool(self, admission: Admission, presented: str, arguments: Any) -> Any:
-        for spec in admission.servers:
-            backend = self.backend(admission, spec)
-            for tool in await backend.list_tools():
-                if presented_name(spec.alias, str(tool.get("name"))) == presented:
-                    return await backend.call_tool(tool["name"], arguments)
-        raise RemoteError(-32602, f"unknown tool: {presented}")
 
     # -- lifecycle --------------------------------------------------------
-
-    def retire(self) -> None:
-        """Stop servers that sat idle, or that their member's admission dropped."""
-        now = time.monotonic()
-        for key, backend in list(self.backends.items()):
-            slot, alias, digest = key
-            admission = self.admissions._load(slot)
-            admitted = admission is not None and any(
-                spec.alias == alias and spec.digest == digest for spec in admission.servers
-            )
-            if not admitted or (backend.alive and now - backend.last_used > self.idle_s):
-                backend.stop()
-                if not admitted:
-                    del self.backends[key]
-                    self.warmed.discard(key)
-
-    def warm(self) -> None:
-        """Start each newly admitted server now, so a CLI's first tool list is quick.
-
-        The first start of a server may install its package; the host admits
-        a member before it starts the member's CLI, and the CLI lists tools as
-        it starts.
-        """
-        try:
-            names = os.listdir(self.paths.admissions)
-        except OSError:
-            return
-        for name in names:
-            stem = name.removesuffix(".json")
-            if name == stem or not stem.isdigit():
-                continue
-            admission = self.admissions._load(int(stem))
-            for spec in admission.servers if admission else ():
-                key = (admission.slot, spec.alias, spec.digest)
-                if key in self.warmed:
-                    continue
-                self.warmed.add(key)
-                asyncio.get_running_loop().create_task(self._warm_one(admission, spec))
-
-    async def _warm_one(self, admission: Admission, spec: ServerSpec) -> None:
-        try:
-            await self.backend(admission, spec).list_tools()
-        except (GatewayError, RemoteError) as exc:
-            _log(f"warm-up failed: slot {admission.slot} {spec.alias}: {exc}")
-
-    async def _watch(self) -> None:
-        retire_every = min(30.0, max(1.0, self.idle_s / 4))
-        last_retire = time.monotonic()
-        while True:
-            await asyncio.sleep(1.0)
-            self.warm()
-            if time.monotonic() - last_retire >= retire_every:
-                last_retire = time.monotonic()
-                self.retire()
 
     async def _serve_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
             request = await read_http_request(reader)
-            if request is None:
-                response = HttpResponse("400 Bad Request")
-            else:
-                response = await self.handle(request)
+            response = await self.handle(request) if request else HttpResponse("400 Bad Request")
             writer.write(encode_http_response(response))
             await writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
@@ -799,21 +1012,17 @@ class Gateway:
         except OSError as exc:
             _report(ready_fd, f"error cannot listen on {HOST}:{PORT}: {exc}\n")
             return 1
-        write_private(
+        write_file(
             self.paths.record,
             json.dumps({"pid": os.getpid(), "endpoint": ENDPOINT, "started_at": int(time.time())}),
         )
-        watcher = loop.create_task(self._watch())
         _report(ready_fd, f"ok {ENDPOINT}\n")
         _log(f"serving {ENDPOINT}")
         try:
             await self.stopping.wait()
             return 0
         finally:
-            watcher.cancel()
             server.close()
-            for backend in self.backends.values():
-                backend.stop()
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(self.paths.record)
 
@@ -889,16 +1098,16 @@ def encode_http_response(response: HttpResponse) -> bytes:
 # --------------------------------------------------------------------------
 
 
-def read_record(paths: Paths) -> dict[str, Any] | None:
+def _read_record(path: str) -> dict[str, Any] | None:
     try:
-        with open(paths.record, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             record = json.load(handle)
     except (OSError, ValueError):
         return None
     return record if isinstance(record, dict) else None
 
 
-def _is_gateway(pid: Any) -> bool:
+def _is_ours(pid: Any, role: bytes) -> bool:
     if not isinstance(pid, int) or pid <= 1:
         return False
     try:
@@ -908,39 +1117,21 @@ def _is_gateway(pid: Any) -> bool:
             argv = handle.read().split(b"\0")
     except OSError:
         return False
-    return b"_serve" in argv and any(arg.endswith(b"cloud-agent-mcp") for arg in argv)
+    return role in argv and any(arg.endswith(b"cloud-agent-mcp") for arg in argv)
 
 
-def running_record(paths: Paths) -> dict[str, Any] | None:
-    record = read_record(paths)
-    return record if record is not None and _is_gateway(record.get("pid")) else None
+def _running(record_path: str, role: bytes) -> dict[str, Any] | None:
+    record = _read_record(record_path)
+    return record if record is not None and _is_ours(record.get("pid"), role) else None
 
 
-def service_start(paths: Paths, *, idle_s: float) -> dict[str, Any]:
-    ensure_private_dir(paths.state)
-    ensure_private_dir(paths.admissions)
-    lock = os.open(paths.lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        record = running_record(paths)
-        if record is not None:
-            return record
-        return _spawn(paths, idle_s=idle_s)
-    finally:
-        os.close(lock)
-
-
-def _spawn(paths: Paths, *, idle_s: float) -> dict[str, Any]:
-    # A gateway that was not running served nobody: the admissions it left
-    # are for CLIs that are gone, whose tokens must not open the new one.
-    for name in os.listdir(paths.admissions):
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(os.path.join(paths.admissions, name))
+def _spawn(argv: list[str], log_path: str) -> str:
+    """Start this script detached, and wait for its ready line."""
     ready_r, ready_w = os.pipe()
-    log = os.open(paths.log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    log = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     try:
         subprocess.Popen(  # this script, re-executed isolated
-            [sys.executable, "-I", os.path.abspath(__file__), "_serve", str(ready_w), str(idle_s)],
+            [sys.executable, "-I", os.path.abspath(__file__), *argv, str(ready_w)],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
@@ -953,65 +1144,98 @@ def _spawn(paths: Paths, *, idle_s: float) -> dict[str, Any]:
         os.close(ready_w)
     with os.fdopen(ready_r, "rb") as ready:
         line = ready.readline().decode(errors="replace").strip()
-    if not line.startswith("ok "):
-        raise GatewayError(line.removeprefix("error ") or f"the gateway exited; see {paths.log}")
-    record = running_record(paths)
-    if record is None:
-        raise GatewayError("the gateway started but left no record")
-    return record
+    if not line.startswith("ok"):
+        raise GatewayError(line.removeprefix("error ") or f"it exited; see {log_path}")
+    return line
 
 
-def service_stop(paths: Paths) -> bool:
-    record = running_record(paths)
+def _stop(record_path: str, role: bytes) -> bool:
+    record = _running(record_path, role)
     if record is None:
         return False
     pid = record["pid"]
     with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and _is_gateway(pid):
+    while time.monotonic() < deadline and _is_ours(pid, role):
         time.sleep(0.1)
-    if _is_gateway(pid):
+    if _is_ours(pid, role):
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
     return True
 
 
-def admit(paths: Paths, slot: int, document: Any, *, idle_s: float) -> Admission:
-    """Replace one member's admission, and make sure the gateway serves it.
+def _locked(lock_path: str):
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
 
-    An empty server list removes the admission instead: the member's CLI is
-    then told of no sandbox server, and must not reach one an earlier launch
-    of the same slot was given.
+
+def service_start(paths: Paths) -> dict[str, Any]:
+    """Start the gateway unless it runs. Idempotent; as agent-mcp."""
+    if os.getuid() != GATEWAY_UID:
+        raise GatewayError(f"the gateway runs as uid {GATEWAY_UID}")
+    ensure_private_dir(paths.state)
+    lock = _locked(paths.lock)
+    try:
+        record = _running(paths.record, b"_serve")
+        if record is None:
+            _spawn(["_serve"], paths.log)
+            record = _running(paths.record, b"_serve")
+        if record is None:
+            raise GatewayError("the gateway started but left no record")
+        return record
+    finally:
+        os.close(lock)
+
+
+def runner_start(paths: Paths, slot: int, *, idle_s: float) -> dict[str, Any]:
+    """Start a slot's runner unless it runs. Idempotent; as that slot's runner user."""
+    if os.getuid() != RUNNER_UID_BASE + slot:
+        raise GatewayError(f"slot {slot}'s runner runs as uid {RUNNER_UID_BASE + slot}")
+    ensure_private_dir(paths.slot_dir(slot), 0o710)
+    lock = _locked(paths.runner_lock(slot))
+    try:
+        record = _running(paths.runner_record(slot), b"_runner")
+        if record is None:
+            _spawn(["_runner", str(slot), str(idle_s)], paths.runner_log(slot))
+            record = _running(paths.runner_record(slot), b"_runner")
+        if record is None:
+            raise GatewayError("the runner started but left no record")
+        return record
+    finally:
+        os.close(lock)
+
+
+def admit(paths: Paths, slot: int, document: Any) -> Admission:
+    """Replace one slot's admission, as its owner; no servers removes it.
+
+    Only the admission owner (root, through the host's exec) writes here.
+    The runner and the gateway read it, and can do nothing else to it.
     """
+    if os.getuid() != ADMISSION_OWNER_UID:
+        raise GatewayError(f"admissions are written as uid {ADMISSION_OWNER_UID}")
     admission = parse_admission(slot, document)
     if not admission.servers:
-        revoke(paths, slot)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(paths.admission(slot))
         return admission
-    # First: a gateway that starts forgets every admission before this one.
-    service_start(paths, idle_s=idle_s)
-    ensure_private_dir(paths.state)
-    ensure_private_dir(paths.admissions)
-    write_private(paths.admission(slot), json.dumps(admission_document(admission)))
+    info = os.lstat(paths.admissions)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise GatewayError(f"{paths.admissions} is not a directory only this user writes")
+    write_file(paths.admission(slot), json.dumps(admission_document(admission)), 0o644)
     return admission
 
 
-def revoke(paths: Paths, slot: int) -> bool:
-    try:
-        os.unlink(paths.admission(slot))
-    except FileNotFoundError:
-        return False
-    return True
+USAGE = """usage: cloud-agent-mcp <command>   (the platform's)
 
-
-USAGE = """usage: cloud-agent-mcp <command>   (the platform's; run as agent-mcp)
-
-  service start|stop     run or end the gateway on http://127.0.0.1:47801/mcp
-  admit <slot>           replace a member's admitted servers, and serve them;
-                         JSON on stdin: {"token_sha256": "...",
-                         "servers": [{alias, command, args, env}]}; no servers
-                         removes the admission
-  revoke <slot>          remove a member's admission
+  admit <slot>           as root: replace a slot's admitted servers; JSON on
+                         stdin: {"token_sha256": "...", "servers": [{alias,
+                         command, args, env}]}; no servers removes it
+  runner start|stop <slot>
+                         as agent-mcp-<slot>: run or end that slot's servers
+  service start|stop     as agent-mcp: run or end the gateway on
+                         http://127.0.0.1:47801/mcp
   status                 print the gateway's state as JSON
 """
 
@@ -1025,8 +1249,8 @@ def _idle_s() -> float:
 
 
 def _slot(raw: str) -> int:
-    if not raw.isdigit():
-        raise GatewayError("a slot is a number")
+    if not raw.isdigit() or not 0 <= int(raw) < MAX_SLOTS:
+        raise GatewayError("a slot is a number below 128")
     return int(raw)
 
 
@@ -1037,29 +1261,39 @@ def main(argv: list[str]) -> int:
         if command == "_serve":
             ready_fd = int(rest[0])
             os.set_inheritable(ready_fd, False)
+            return asyncio.run(Gateway(paths).run(ready_fd))
+        if command == "_runner":
+            slot, idle_s, ready_fd = _slot(rest[0]), float(rest[1]), int(rest[2])
+            os.set_inheritable(ready_fd, False)
             # Servers write into the shared workspace and artifacts directory,
             # where every member reads what they write.
             os.umask(0o007)
-            return asyncio.run(Gateway(paths, idle_s=float(rest[1])).run(ready_fd))
+            return asyncio.run(Runner(paths, slot, idle_s=idle_s).run(ready_fd))
         if command == "service" and rest == ["start"]:
-            print(service_start(paths, idle_s=_idle_s())["endpoint"])
+            service_start(paths)
+            print(ENDPOINT)
             return 0
         if command == "service" and rest == ["stop"]:
-            print("stopped" if service_stop(paths) else "not running")
+            print("stopped" if _stop(paths.record, b"_serve") else "not running")
+            return 0
+        if command == "runner" and len(rest) == 2 and rest[0] in ("start", "stop"):
+            slot = _slot(rest[1])
+            if rest[0] == "start":
+                runner_start(paths, slot, idle_s=_idle_s())
+                print(f"slot {slot} runner running")
+            else:
+                print("stopped" if _stop(paths.runner_record(slot), b"_runner") else "not running")
             return 0
         if command == "admit" and len(rest) == 1:
             try:
                 document = json.loads(sys.stdin.read(1 << 20))
             except ValueError as exc:
                 raise GatewayError("the admission is not JSON") from exc
-            admission = admit(paths, _slot(rest[0]), document, idle_s=_idle_s())
+            admission = admit(paths, _slot(rest[0]), document)
             print(f"admitted {len(admission.servers)} server(s) for slot {admission.slot}")
             return 0
-        if command == "revoke" and len(rest) == 1:
-            print("revoked" if revoke(paths, _slot(rest[0])) else "not admitted")
-            return 0
         if command == "status" and not rest:
-            record = running_record(paths) or {}
+            record = _running(paths.record, b"_serve") or {}
             print(json.dumps({"running": bool(record), "endpoint": ENDPOINT, **record}, indent=2))
             return 0
     except GatewayError as exc:

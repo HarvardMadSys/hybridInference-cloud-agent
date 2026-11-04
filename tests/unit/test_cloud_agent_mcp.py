@@ -1,19 +1,24 @@
-"""The sandbox's MCP gateway: admissions, naming, and serving stdio servers over HTTP."""
+"""The sandbox's MCP gateway: admissions, slot runners, and serving stdio servers over HTTP."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import sys
+import tempfile
+import time
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 import pytest
 
 from cloud_agent.mcp.protocol import presented_name
+from cloud_agent_host.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
 from cloud_agent_shared.sandbox_mcp import (
     ALIAS_PATTERN,
     SANDBOX_MCP_COMMANDS,
@@ -24,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GATEWAY = REPO_ROOT / "deploy" / "sandbox" / "cloud-agent-mcp"
 DOCKERFILE = REPO_ROOT / "deploy" / "sandbox" / "Dockerfile.agent-sandbox"
 TOKEN = "member-mcp-credential-" + "7" * 24
+OTHER = "other-member-credential-" + "9" * 24
 
 
 def _load_gateway():
@@ -50,20 +56,26 @@ def _server(alias="files", *args, command="npx", env=None):
 # -- the image and the shared contract -------------------------------------------
 
 
-def test_the_gateway_is_root_owned_image_code_run_as_its_own_user():
+def test_the_gateway_and_each_slots_runner_have_their_own_users():
     dockerfile = DOCKERFILE.read_text()
 
     assert "COPY deploy/sandbox/cloud-agent-mcp /usr/local/bin/cloud-agent-mcp" in dockerfile
     assert "/usr/local/bin/cloud-agent-mcp \\" in dockerfile.split("chmod 0555", 1)[1]
-    assert (
-        "useradd --uid 10003 --gid 10001 --create-home --shell /usr/sbin/nologin agent-mcp"
-        in dockerfile
+    assert "useradd --uid 10003 --gid 10001 --create-home --shell /usr/sbin/nologin agent-mcp" in (
+        dockerfile
     )
-    assert "install -d -m 0700 -o 10003 -g 10001 /run/agent-mcp" in dockerfile
-    assert "CLOUD_AGENT_MCP_STATE_DIR=/run/agent-mcp" in dockerfile
+    assert "uid=$((12001 + slot))" in dockerfile
+    assert '--home-dir "/home/agent-mcp-$slot" --shell /usr/sbin/nologin "agent-mcp-$slot"' in (
+        dockerfile
+    )
+    assert 'install -d -m 0710 -o "$uid" -g 10001 "/run/agent-mcp-slots/$slot"' in dockerfile
+    # Admissions are root's: no server, runner or gateway can change one.
+    assert "install -d -m 0755 -o 0 -g 0 /run/agent-mcp-admissions" in dockerfile
+    for name in ("STATE_DIR=/run/agent-mcp", "ADMISSIONS_DIR=/run/agent-mcp-admissions"):
+        assert f"CLOUD_AGENT_MCP_{name}" in dockerfile
+    assert "CLOUD_AGENT_MCP_SLOTS_DIR=/run/agent-mcp-slots" in dockerfile
     assert 'org.freeinference.helper.cloud-agent-mcp.version="1"' in dockerfile
-    # The build proves it refuses an unknown token on its fixed address.
-    assert "cloud-agent-mcp service start" in dockerfile
+    assert "cloud-agent-mcp runner start 0" in dockerfile
 
 
 def test_the_gateway_runs_isolated_with_the_standard_library_only():
@@ -82,6 +94,9 @@ def test_the_gateway_and_the_platform_agree_on_its_contract():
     assert gateway.ENDPOINT == SANDBOX_MCP_URL
     assert frozenset(SANDBOX_MCP_COMMANDS) == gateway.ALLOWED_COMMANDS
     assert gateway._ALIAS.pattern == ALIAS_PATTERN
+    assert gateway.GATEWAY_UID == MCP_SERVICE_UID
+    assert gateway.RUNNER_UID_BASE == MCP_RUNNER_UID_BASE
+    assert gateway.ADMISSION_OWNER_UID == 0
 
 
 @pytest.mark.parametrize(
@@ -122,62 +137,91 @@ def test_an_admission_outside_the_contract_is_refused_whole(document):
         gateway.parse_admission(0, document)
 
 
-def test_a_slot_out_of_range_is_refused():
-    with pytest.raises(gateway.GatewayError):
-        gateway.parse_admission(128, _admission())
-
-
-def test_only_the_digest_of_the_credential_is_kept_and_it_selects_the_member(tmp_path):
-    paths = gateway.Paths(str(tmp_path / "state"))
-    gateway.ensure_private_dir(paths.state)
-    gateway.ensure_private_dir(paths.admissions)
-    gateway.write_private(paths.admission(1), json.dumps(_admission(_server("one"))))
-    gateway.write_private(
-        paths.admission(2), json.dumps(_admission(_server("two"), token="other-" + "8" * 30))
+@pytest.fixture
+def paths(monkeypatch):
+    """Short paths (a unix socket's must fit in 108 bytes), owned by this test's user."""
+    root = tempfile.mkdtemp(prefix="cam-")
+    resolved = gateway.Paths(
+        state=os.path.join(root, "state"),
+        admissions=os.path.join(root, "adm"),
+        slots=os.path.join(root, "slots"),
     )
+    os.makedirs(resolved.admissions, mode=0o755)
+    os.makedirs(resolved.slots, mode=0o755)
+    for slot in (0, 1):
+        os.makedirs(resolved.slot_dir(slot), mode=0o710)
+    # This test's user plays root (the admission owner) and the gateway.
+    monkeypatch.setattr(gateway, "ADMISSION_OWNER_UID", os.getuid())
+    monkeypatch.setattr(gateway, "GATEWAY_UID", os.getuid())
+    yield resolved
+    shutil.rmtree(root, ignore_errors=True)
 
-    stored = Path(paths.admission(1)).read_text()
+
+def _admit(paths, slot, *servers, token=TOKEN):
+    gateway.admit(paths, slot, _admission(*servers, token=token))
+
+
+def test_only_the_digest_is_kept_and_it_selects_the_slot(paths):
+    _admit(paths, 0, _server("one"))
+    _admit(paths, 1, _server("two"), token=OTHER)
+
+    stored = Path(paths.admission(0)).read_text()
     assert TOKEN not in stored
-    assert oct(os.stat(paths.admission(1)).st_mode & 0o777) == "0o600"
+    assert oct(os.stat(paths.admission(0)).st_mode & 0o777) == "0o644"
     admissions = gateway.Admissions(paths)
-    assert admissions.for_token(TOKEN).slot == 1
-    assert admissions.for_token("other-" + "8" * 30).slot == 2
+    assert admissions.for_token(TOKEN).slot == 0
+    assert admissions.for_token(OTHER).slot == 1
     assert admissions.for_token("nobody") is None
     assert admissions.for_token("") is None
 
 
-def test_no_servers_removes_the_admission(tmp_path, monkeypatch):
-    monkeypatch.setattr(gateway, "service_start", lambda paths, idle_s: {})
-    paths = gateway.Paths(str(tmp_path / "state"))
+def test_an_admission_is_written_only_as_its_owner(paths, monkeypatch):
+    monkeypatch.setattr(gateway, "ADMISSION_OWNER_UID", os.getuid() + 1)
+    with pytest.raises(gateway.GatewayError, match="written as uid"):
+        gateway.admit(paths, 0, _admission(_server()))
+    assert not os.path.exists(paths.admission(0))
 
-    gateway.admit(paths, 3, _admission(_server()), idle_s=60)
+
+def test_an_admission_anyone_else_could_have_written_is_ignored(paths, monkeypatch):
+    """Codex's P1: a server rewrote another slot's admission. Only root's file counts."""
+    _admit(paths, 0, _server("approved"))
+    assert gateway.Admissions(paths).get(0) is not None
+
+    monkeypatch.setattr(gateway, "ADMISSION_OWNER_UID", os.getuid() + 1)
+    assert gateway.Admissions(paths).get(0) is None  # not root's file
+    monkeypatch.setattr(gateway, "ADMISSION_OWNER_UID", os.getuid())
+    os.chmod(paths.admission(0), 0o666)
+    assert gateway.Admissions(paths).get(0) is None  # writable by others
+
+
+def test_an_admission_from_before_the_container_started_is_ignored(paths, monkeypatch):
+    _admit(paths, 0, _server())
+    monkeypatch.setattr(gateway, "container_started_at", lambda: time.time() + 60)
+    assert gateway.Admissions(paths).get(0) is None
+
+
+def test_no_servers_removes_the_admission(paths):
+    _admit(paths, 3, _server())
     assert os.path.exists(paths.admission(3))
-    gateway.admit(paths, 3, _admission(), idle_s=60)
+    gateway.admit(paths, 3, _admission())
     assert not os.path.exists(paths.admission(3))
+    gateway.admit(paths, 3, _admission())  # idempotent
 
 
-def test_the_gateway_is_started_before_an_admission_is_written(tmp_path, monkeypatch):
-    """A gateway that starts forgets the admissions before it, never the new one."""
-    order = []
-    paths = gateway.Paths(str(tmp_path / "state"))
-    monkeypatch.setattr(
-        gateway, "service_start", lambda paths, idle_s: order.append(os.listdir(paths.admissions))
-    )
-    gateway.ensure_private_dir(paths.state)
-    gateway.ensure_private_dir(paths.admissions)
-
-    gateway.admit(paths, 0, _admission(_server()), idle_s=60)
-
-    assert order == [[]]
-    assert os.listdir(paths.admissions) == ["0.json"]
+def test_each_process_starts_only_as_its_own_user(paths, monkeypatch):
+    monkeypatch.setattr(gateway, "GATEWAY_UID", os.getuid() + 1)
+    with pytest.raises(gateway.GatewayError, match="runs as uid"):
+        gateway.service_start(paths)
+    with pytest.raises(gateway.GatewayError, match="runs as uid"):
+        gateway.runner_start(paths, 0, idle_s=60)
 
 
-# -- serving ----------------------------------------------------------------------
+# -- a slot's runner ----------------------------------------------------------------
 
 FAKE_SERVER = r"""
-import json, os, sys
+import json, os, sys, time
 # A stdio MCP server: newline-delimited JSON-RPC. Asks the client for roots
-# once, which the gateway must refuse without failing.
+# once, which the runner must refuse without failing.
 asked = False
 for line in sys.stdin:
     message = json.loads(line)
@@ -186,7 +230,7 @@ for line in sys.stdin:
         continue
     if method == "initialize":
         result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
-                  "serverInfo": {"name": os.environ.get("FAKE_NAME", "fake"), "version": "1"}}
+                  "serverInfo": {"name": "fake", "version": "1"}}
         if not asked:
             asked = True
             print(json.dumps({"jsonrpc": "2.0", "id": "r1", "method": "roots/list"}), flush=True)
@@ -196,14 +240,13 @@ for line in sys.stdin:
                               "error": {"code": -32000, "message": "broken"}}), flush=True)
             continue
         result = {"tools": [{"name": "echo", "inputSchema": {"type": "object"}},
-                            {"name": "where", "inputSchema": {"type": "object"}}]}
+                            {"name": "slow", "inputSchema": {"type": "object"}}]}
     elif method == "tools/call":
         name = message["params"]["name"]
-        if name == "echo":
-            text = json.dumps({"args": sys.argv[1:], "arguments": message["params"]["arguments"],
-                               "env": os.environ.get("FAKE_VALUE", "")})
-        else:
-            text = os.getcwd()
+        if name == "slow":
+            time.sleep(float(message["params"]["arguments"].get("s", 1)))
+        text = json.dumps({"args": sys.argv[1:], "arguments": message["params"]["arguments"],
+                           "env": os.environ.get("FAKE_VALUE", ""), "tool": name})
         result = {"content": [{"type": "text", "text": text}]}
     else:
         print(json.dumps({"jsonrpc": "2.0", "id": message["id"],
@@ -214,8 +257,8 @@ for line in sys.stdin:
 
 
 @pytest.fixture
-def served(tmp_path, monkeypatch):
-    """A gateway whose ``npx`` is FAKE_SERVER, and a way to send it requests."""
+def served(paths, tmp_path, monkeypatch):
+    """Paths whose ``npx`` and ``uvx`` are FAKE_SERVER."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for command in ("npx", "uvx"):
@@ -225,125 +268,109 @@ def served(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway, "SANDBOX_PATH", str(bin_dir))
     monkeypatch.setattr(gateway, "browser_endpoint", lambda: "ws://127.0.0.1:1/token/devtools")
     monkeypatch.setenv("HOME", str(tmp_path))
-    paths = gateway.Paths(str(tmp_path / "state"))
-    gateway.ensure_private_dir(paths.state)
-    gateway.ensure_private_dir(paths.admissions)
     return paths
 
 
-async def _rpc(gw, method, params=None, *, token=TOKEN, host="127.0.0.1:47801", verb="POST"):
-    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
-    request = gateway.HttpRequest(
-        verb,
-        "/mcp",
-        {"host": host, "authorization": f"Bearer {token}"},
-        body.encode(),
-    )
-    response = await gw.handle(request)
-    return response, json.loads(response.body) if response.body else None
+def _text(result):
+    return json.loads(result["content"][0]["text"])
 
 
-def _admit(paths, slot, *servers, token=TOKEN):
-    gateway.write_private(paths.admission(slot), json.dumps(_admission(*servers, token=token)))
+def _stop_all(runner):
+    for backend in runner.backends.values():
+        backend.stop()
 
 
-def test_requests_need_the_members_token_on_the_loopback_address(served):
-    _admit(served, 0, _server())
-
-    async def scenario():
-        gw = gateway.Gateway(served, idle_s=60)
-        assert (await _rpc(gw, "ping", token="wrong"))[0].status == "401 Unauthorized"
-        assert (await _rpc(gw, "ping", host="evil.example:47801"))[0].status == "403 Forbidden"
-        response, _ = await _rpc(gw, "ping", verb="GET")
-        assert response.status == "405 Method Not Allowed"
-        response, reply = await _rpc(gw, "initialize", {"protocolVersion": "2025-03-26"})
-        assert response.status == "200 OK" and "Mcp-Session-Id" in response.headers
-        assert reply["result"]["protocolVersion"] == "2025-03-26"
-        assert reply["result"]["capabilities"] == {"tools": {"listChanged": False}}
-
-    asyncio.run(scenario())
-
-
-def test_a_members_servers_are_merged_named_and_routed(served):
+def test_a_runner_merges_names_and_routes_its_slots_servers(served):
     _admit(
         served,
         0,
         _server("files", "-y", "pkg@1.0.0", "--cdp", "${CLOUD_AGENT_BROWSER_CDP}"),
         _server("other", "pkg@2.0.0", env={"FAKE_VALUE": "plain"}),
     )
-    _admit(served, 1, _server("someone"), token="other-member-" + "9" * 30)
 
     async def scenario():
-        gw = gateway.Gateway(served, idle_s=60)
+        runner = gateway.Runner(served, 0, idle_s=60)
         try:
-            _, reply = await _rpc(gw, "tools/list")
-            names = sorted(tool["name"] for tool in reply["result"]["tools"])
-            assert names == ["files__echo", "files__where", "other__echo", "other__where"]
-
-            _, reply = await _rpc(gw, "tools/call", {"name": "files__echo", "arguments": {"a": 1}})
-            echoed = json.loads(reply["result"]["content"][0]["text"])
+            names = sorted(tool["name"] for tool in await runner.list_tools())
+            assert names == ["files__echo", "files__slow", "other__echo", "other__slow"]
+            echoed = _text(await runner.call_tool("files__echo", {"a": 1}))
             # The browser placeholder is filled in; the arguments reach the server.
             assert echoed["args"] == ["-y", "pkg@1.0.0", "--cdp", "ws://127.0.0.1:1/token/devtools"]
             assert echoed["arguments"] == {"a": 1}
-
-            _, reply = await _rpc(gw, "tools/call", {"name": "other__echo", "arguments": {}})
-            assert json.loads(reply["result"]["content"][0]["text"])["env"] == "plain"
-
-            _, reply = await _rpc(gw, "tools/call", {"name": "someone__echo", "arguments": {}})
-            assert reply["error"]["code"] == -32602  # another member's server
-            _, reply = await _rpc(gw, "resources/list")
-            assert reply["error"]["code"] == -32601
-            # One process per member and server.
-            assert {key[:2] for key in gw.backends} == {(0, "files"), (0, "other")}
+            assert _text(await runner.call_tool("other__echo", {}))["env"] == "plain"
+            with pytest.raises(gateway.RemoteError):
+                await runner.call_tool("nobody__echo", {})
         finally:
-            for backend in gw.backends.values():
-                backend.stop()
+            _stop_all(runner)
 
     asyncio.run(scenario())
 
 
-def test_one_broken_server_keeps_the_others_tools(served):
-    _admit(served, 0, _server("good", "pkg@1.0.0"), _server("bad", env={"FAKE_BROKEN": "1"}))
+def test_a_broken_server_listed_first_cannot_answer_for_a_good_one(served):
+    """Codex's P2: the call walked servers in order, and the broken one answered."""
+    _admit(served, 0, _server("bad", env={"FAKE_BROKEN": "1"}), _server("good", "pkg@1.0.0"))
 
     async def scenario():
-        gw = gateway.Gateway(served, idle_s=60)
+        runner = gateway.Runner(served, 0, idle_s=60)
         try:
-            _, reply = await _rpc(gw, "tools/list")
-            assert sorted(tool["name"] for tool in reply["result"]["tools"]) == [
+            assert sorted(tool["name"] for tool in await runner.list_tools()) == [
                 "good__echo",
-                "good__where",
+                "good__slow",
             ]
+            assert _text(await runner.call_tool("good__echo", {}))["tool"] == "echo"
+            # Even without a listing first, the call finds its own server.
+            fresh = gateway.Runner(served, 0, idle_s=60)
+            try:
+                assert _text(await fresh.call_tool("good__echo", {}))["tool"] == "echo"
+            finally:
+                _stop_all(fresh)
         finally:
-            for backend in gw.backends.values():
-                backend.stop()
+            _stop_all(runner)
 
     asyncio.run(scenario())
 
 
-def test_servers_are_warmed_stopped_when_idle_and_dropped_when_revoked(served):
+def test_a_running_call_is_never_retired_as_idle(served):
+    """Codex's P2: a 25-minute call was killed after the 15-minute idle timeout."""
     _admit(served, 0, _server("files"))
 
     async def scenario():
-        gw = gateway.Gateway(served, idle_s=0.2)
-        gw.warm()
+        runner = gateway.Runner(served, 0, idle_s=0.2)
+        try:
+            await runner.list_tools()
+            call = asyncio.create_task(runner.call_tool("files__slow", {"s": 1.5}))
+            for _ in range(6):
+                await asyncio.sleep(0.25)
+                runner.retire()  # well past idle_s, with the call still running
+            assert _text(await call)["tool"] == "slow"
+            [backend] = runner.backends.values()
+            assert backend.alive and backend.active == 0
+            await asyncio.sleep(0.3)
+            runner.retire()
+            assert not backend.alive  # idle now, and stopped
+        finally:
+            _stop_all(runner)
+
+    asyncio.run(scenario())
+
+
+def test_servers_are_warmed_and_dropped_when_withdrawn(served):
+    _admit(served, 0, _server("files"))
+
+    async def scenario():
+        runner = gateway.Runner(served, 0, idle_s=60)
+        runner.warm()
         for _ in range(100):
-            if any(backend.tools for backend in gw.backends.values()):
+            if any(backend.tools for backend in runner.backends.values()):
                 break
             await asyncio.sleep(0.05)
-        [backend] = gw.backends.values()
+        [backend] = runner.backends.values()
         assert backend.alive and backend.tools
 
-        await asyncio.sleep(0.3)
-        gw.retire()
-        assert not backend.alive  # idle: stopped, still admitted
-        _, reply = await _rpc(gw, "tools/call", {"name": "files__where", "arguments": {}})
-        assert "result" in reply and backend.alive  # the next call starts it again
-
-        gateway.revoke(served, 0)
-        gw.retire()
-        assert not backend.alive and not gw.backends
-        _, reply = await _rpc(gw, "tools/list")
-        assert reply is None or reply.get("error") or reply["result"]["tools"] == []
+        gateway.admit(served, 0, _admission())
+        runner.retire()
+        assert not backend.alive and not runner.backends
+        assert await runner.list_tools() == []
 
     asyncio.run(scenario())
 
@@ -353,25 +380,109 @@ def test_a_server_that_cannot_start_reports_an_error_not_a_hang(served):
     os.unlink(Path(gateway.SANDBOX_PATH) / "uvx")
 
     async def scenario():
-        gw = gateway.Gateway(served, idle_s=60)
-        _, reply = await _rpc(gw, "tools/call", {"name": "missing__echo", "arguments": {}})
-        assert reply["error"]["code"] in (-32602, -32603)
-        _, reply = await _rpc(gw, "tools/list")
-        assert reply["result"]["tools"] == []
+        runner = gateway.Runner(served, 0, idle_s=60)
+        assert await runner.list_tools() == []
+        with pytest.raises(gateway.RemoteError):
+            await runner.call_tool("missing__echo", {})
 
     asyncio.run(asyncio.wait_for(scenario(), 30))
 
 
-def test_a_new_gateway_forgets_the_admissions_before_it(served, monkeypatch):
+# -- the gateway, through real sockets ------------------------------------------------
+
+
+async def _rpc(gw, method, params=None, *, token=TOKEN, host="127.0.0.1:47801", verb="POST"):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
+    request = gateway.HttpRequest(
+        verb, "/mcp", {"host": host, "authorization": f"Bearer {token}"}, body.encode()
+    )
+    response = await gw.handle(request)
+    return response, json.loads(response.body) if response.body else None
+
+
+@contextlib.asynccontextmanager
+async def _runners(paths, monkeypatch, *slots):
+    """Each slot's runner listening, as if this user were that slot's runner user."""
+    tasks = []
+    for slot in slots:
+        runner = gateway.Runner(paths, slot, idle_s=60)
+        tasks.append((runner, asyncio.create_task(runner.run(None))))
+    for _ in range(100):
+        if all(os.path.exists(paths.runner_socket(slot)) for slot in slots):
+            break
+        await asyncio.sleep(0.02)
+    # The gateway checks a socket is its slot's runner's; here that is us.
+    monkeypatch.setattr(gateway, "RUNNER_UID_BASE", os.getuid() - slots[0])
+    try:
+        yield
+    finally:
+        for runner, task in tasks:
+            runner.stopping.set()
+            await asyncio.wait_for(task, 10)
+
+
+def test_requests_need_a_members_token_on_the_loopback_address(served):
     _admit(served, 0, _server())
-    started = []
 
-    class Popen:
-        def __init__(self, argv, **kwargs):
-            started.append(argv)
-            os.write(kwargs["pass_fds"][0], b"error stop here\n")
+    async def scenario():
+        gw = gateway.Gateway(served)
+        assert (await _rpc(gw, "ping", token="wrong"))[0].status == "401 Unauthorized"
+        assert (await _rpc(gw, "ping", host="evil.example:47801"))[0].status == "403 Forbidden"
+        assert (await _rpc(gw, "ping", verb="GET"))[0].status == "405 Method Not Allowed"
+        response, reply = await _rpc(gw, "initialize", {"protocolVersion": "2025-03-26"})
+        assert response.status == "200 OK" and "Mcp-Session-Id" in response.headers
+        assert reply["result"]["protocolVersion"] == "2025-03-26"
+        assert reply["result"]["capabilities"] == {"tools": {"listChanged": False}}
 
-    monkeypatch.setattr(gateway.subprocess, "Popen", Popen)
-    with pytest.raises(gateway.GatewayError, match="stop here"):
-        gateway._spawn(served, idle_s=60)
-    assert started and os.listdir(served.admissions) == []
+    asyncio.run(scenario())
+
+
+def test_the_gateway_reaches_only_the_tokens_slot(served, monkeypatch):
+    _admit(served, 0, _server("files", "pkg@1.0.0"))
+    _admit(served, 1, _server("theirs", "pkg@2.0.0"), token=OTHER)
+    # Both runners are this test's user; only slot 0's socket is checked as owned.
+    monkeypatch.setattr(gateway, "RUNNER_UID_BASE", os.getuid())
+
+    async def scenario():
+        async with _runners(served, monkeypatch, 0):
+            gw = gateway.Gateway(served)
+            _, reply = await _rpc(gw, "tools/list")
+            assert sorted(tool["name"] for tool in reply["result"]["tools"]) == [
+                "files__echo",
+                "files__slow",
+            ]
+            _, reply = await _rpc(gw, "tools/call", {"name": "files__echo", "arguments": {"x": 1}})
+            assert _text(reply["result"])["arguments"] == {"x": 1}
+            _, reply = await _rpc(gw, "tools/call", {"name": "theirs__echo", "arguments": {}})
+            assert reply["error"]["code"] == -32602  # another member's server
+            # Slot 1's token: its runner is not running, so nothing is served.
+            _, reply = await _rpc(gw, "tools/list", token=OTHER)
+            assert "not running" in reply["error"]["message"]
+            _, reply = await _rpc(gw, "resources/list")
+            assert reply["error"]["code"] == -32601
+
+    asyncio.run(scenario())
+
+
+def test_a_runner_answers_only_the_gateway(served, monkeypatch):
+    _admit(served, 0, _server("files"))
+
+    async def scenario():
+        async with _runners(served, monkeypatch, 0):
+            monkeypatch.setattr(gateway, "GATEWAY_UID", os.getuid() + 1)
+            with pytest.raises(gateway.RemoteError, match="closed without answering"):
+                await gateway.ask_runner(served, 0, {"op": "list"}, 10)
+
+    asyncio.run(scenario())
+
+
+def test_the_gateway_trusts_only_the_slots_own_runner_socket(served, monkeypatch):
+    _admit(served, 0, _server("files"))
+
+    async def scenario():
+        async with _runners(served, monkeypatch, 0):
+            monkeypatch.setattr(gateway, "RUNNER_UID_BASE", os.getuid() + 1)
+            with pytest.raises(gateway.RemoteError, match="not its runner's"):
+                await gateway.ask_runner(served, 0, {"op": "list"}, 10)
+
+    asyncio.run(scenario())

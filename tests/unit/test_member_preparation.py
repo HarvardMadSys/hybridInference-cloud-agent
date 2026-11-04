@@ -42,6 +42,7 @@ from cloud_agent_host.member_preparation import (
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.sandbox_browser import LAUNCHER
+from cloud_agent_host.sandbox_mcp import GATEWAY
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
 _SPEC = ChatSandboxSpec(
@@ -403,8 +404,10 @@ def _name(argv: list[str]) -> str:
     return argv[0]
 
 
-#: The sandbox's shared browser service, started as its own user before each CLI.
+#: The sandbox's shared browser service, started as its own user before each CLI,
+#: and the first launch's revoke of any sandbox MCP admission the slot held.
 _BROWSER = ("exec", LAUNCHER, BROWSER_SERVICE_UID)
+_MCP_REVOKE = ("exec", GATEWAY, 0)
 
 
 class _Guest:
@@ -520,7 +523,12 @@ def test_a_launch_runs_its_member_steps_in_one_exec_in_their_order(driver, runti
 
     factory.open(_SPEC, _launch(runtime_id))
 
-    assert guest.events == [("runner", queue, MEMBER_UID_BASE + 1), _BROWSER, ("spawn", None, None)]
+    assert guest.events == [
+        ("runner", queue, MEMBER_UID_BASE + 1),
+        _BROWSER,
+        _MCP_REVOKE,
+        ("spawn", None, None),
+    ]
 
 
 @pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi"])
@@ -531,10 +539,10 @@ def test_owner_credentials_are_written_by_their_own_exec_after_the_reap(driver, 
 
     factory.open(_SPEC, _launch(runtime_id, environment=_OWNER_SECRET))
 
-    (runner, write, browser, spawn) = guest.events
+    (runner, write, browser, revoke, spawn) = guest.events
     assert runner[0] == "runner" and "reap" in runner[1]
     assert write == ("exec", "inference-env", MEMBER_UID_BASE + 1)
-    assert browser == _BROWSER
+    assert (browser, revoke) == (_BROWSER, _MCP_REVOKE)
     assert spawn[0] == "spawn"
 
 
@@ -573,6 +581,7 @@ def test_plugin_installers_find_their_slot_reaped_and_home_prepared(
         *hooks,
         ("exec", "inference-env", MEMBER_UID_BASE + 1),
         _BROWSER,
+        _MCP_REVOKE,
         ("spawn", None, None),
     ]
 
@@ -608,6 +617,7 @@ def test_an_untrusted_collection_is_secured_and_the_queue_resumed_from_the_home(
         ("exec", "collections", None),  # as the sandbox user, never a member
         ("runner", ["home", "reap", "stale"], MEMBER_UID_BASE + 1),
         _BROWSER,
+        _MCP_REVOKE,
         ("spawn", None, None),
     ]
 
@@ -645,7 +655,7 @@ def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         reap_member_processes=lambda *_args, **_kwargs: events.append("reap"),
         exec_capture=lambda _spec, argv, **_kwargs: (
-            events.append("browser" if argv[0] == LAUNCHER else argv[0])
+            events.append({LAUNCHER: "browser", GATEWAY: "mcp"}.get(argv[0], argv[0]))
             or subprocess.CompletedProcess(argv, 0, b"", b"")
         ),
         spawn=lambda *_args, **_kwargs: events.append("spawn"),
@@ -668,5 +678,5 @@ def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
 
     factory.open(_SPEC, _launch("claude-code", native_session_id=None, thread_id="athr_new"))
 
-    assert events == ["reap", "prepare", "browser", "spawn"]
+    assert events == ["reap", "prepare", "browser", "mcp", "spawn"]
     assert contexts[0].claude_config_dir == claude_member_config_dir(1, "athr_new")

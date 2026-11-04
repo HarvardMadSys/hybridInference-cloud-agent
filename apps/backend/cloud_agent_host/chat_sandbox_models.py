@@ -59,8 +59,10 @@ ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
 #: The user the sandbox's shared browser service runs as (cloud_agent_host.sandbox_browser).
 BROWSER_SERVICE_UID = 10002
-#: The user the sandbox's MCP gateway and its servers run as (cloud_agent_host.sandbox_mcp).
+#: The sandbox MCP gateway's user, and the first slot's server runner's: slot N's
+#: sandbox MCP servers run as MCP_RUNNER_UID_BASE + N (cloud_agent_host.sandbox_mcp).
 MCP_SERVICE_UID = 10003
+MCP_RUNNER_UID_BASE = 12001
 
 
 class ChatSandboxStatus(StrEnum):
