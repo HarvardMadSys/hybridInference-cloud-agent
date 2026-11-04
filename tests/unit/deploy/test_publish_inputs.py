@@ -112,7 +112,11 @@ def test_a_record_carries_what_the_manifest_needs() -> None:
         ("control", {"labels": {}}, "carries no labels"),
         ("control", {"labels": {pi.ROLE_LABEL: "control", pi.REVISION_LABEL: 1}}, "strings"),
         ("runner", {"labels": labels("runner", **{pi.ROLE_LABEL: "sandbox"})}, "declares role"),
-        ("web-root", {"labels": labels("web-root", **{pi.BASE_PATH_LABEL: "/agents"})}, "base path"),
+        (
+            "web-root",
+            {"labels": labels("web-root", **{pi.BASE_PATH_LABEL: "/agents"})},
+            "base path",
+        ),
         ("tunnel", {"labels": labels("tunnel", **{pi.REVISION_LABEL: OTHER_COMMIT})}, "revision"),
     ],
 )

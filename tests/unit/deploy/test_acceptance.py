@@ -235,9 +235,7 @@ def test_acceptance_cleans_up_and_reallocates_ports_after_a_conflict(
     monkeypatch.setattr(ac.aa, "expected_services", lambda *a: {})
     monkeypatch.setattr(ac.aa, "check_running", lambda *a: ["running images verified"])
 
-    evidence = ac.accept(
-        manifest, tmp_path / "recipe.tar.gz", "root", tmp_path, "acceptance-test"
-    )
+    evidence = ac.accept(manifest, tmp_path / "recipe.tar.gz", "root", tmp_path, "acceptance-test")
 
     assert evidence[-1] == "running images verified"
     expected = ["deploy", "cleanup", "deploy", "web"]

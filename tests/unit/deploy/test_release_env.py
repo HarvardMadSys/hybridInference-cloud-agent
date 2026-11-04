@@ -191,7 +191,12 @@ def test_an_older_release_with_the_agents_image_deploys_its_root_image() -> None
     """Releases before sub-path mounting was removed also carry `/agents`."""
     document = manifest()
     document["artifacts"].append(
-        {"role": "web", "variant": "agents", "base_path": "/agents", "image": image("web", "agents")}
+        {
+            "role": "web",
+            "variant": "agents",
+            "base_path": "/agents",
+            "image": image("web", "agents"),
+        }
     )
     root = re_.environment_for(document, "control-plane", "root", ambient={})
     assert root["AGENT_WEB_IMAGE"] == image("web", "root")
