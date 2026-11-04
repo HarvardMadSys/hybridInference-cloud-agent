@@ -2,7 +2,7 @@
 
 // Admin → Users holds two views of the same people: one row per account, and
 // one row per team. Each is its own address, so a link opens either directly.
-// A view's own tools (People's sign-up policy and mail) sit on the same row.
+// A view's own tools (People's account tools menu) sit on the same row.
 
 import Link from 'next/link';
 import type { ReactNode } from 'react';
@@ -13,10 +13,6 @@ const VIEWS: { key: 'people' | 'teams'; label: TranslationKey; href: string }[] 
   { key: 'people', label: 'adminAccounts.view.people', href: '/admin/users' },
   { key: 'teams', label: 'adminAccounts.view.teams', href: '/admin/users/teams' },
 ];
-
-/** A quiet link to a view's own tool, for the row beside the views. */
-export const USERS_TOOL =
-  'ui-focus-ring inline-flex min-h-8 items-center rounded-md border border-border bg-surface px-2.5 py-1 text-[13px] font-medium text-muted transition-colors hover:bg-surface-hover hover:text-foreground';
 
 export function UsersTabs({
   current,

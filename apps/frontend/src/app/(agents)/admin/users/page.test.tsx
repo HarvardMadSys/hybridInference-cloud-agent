@@ -40,6 +40,7 @@ const account: AccountEntry = {
 beforeEach(() => {
   vi.resetAllMocks();
   window.history.replaceState(null, '', '/admin/users');
+  window.localStorage.clear();
   vi.mocked(api.listAccounts).mockResolvedValue({ accounts: [account], total: 1 });
   auth.refreshUser.mockResolvedValue(undefined);
 });
@@ -51,8 +52,8 @@ describe('independent account review', () => {
       waitlist: { ...account.waitlist, status: 'approved', version: 5 },
     });
     render(<AccountsPage />);
-    await screen.findByText('Research project');
-    fireEvent.click(screen.getByRole('button', { name: 'Review user@example.test' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review user@example.test' }));
+    expect(screen.getByText('Research project')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Approve access' }));
     await waitFor(() => expect(api.updateAccount).toHaveBeenCalledWith(account, 'approve', ''));
     expect(api.listAccounts).toHaveBeenCalledTimes(2);
@@ -239,6 +240,116 @@ describe('the people table', () => {
         expect.any(AbortSignal),
         expect.objectContaining({ q: 'user@' }),
       ),
+    );
+  });
+  it('clears every filter, a search still settling included', async () => {
+    window.history.replaceState(null, '', '/admin/users?status=pending&team=team-lab&q=lead');
+    render(<AccountsPage />);
+    fireEvent.change(await screen.findByRole('searchbox', { name: 'Search accounts' }), {
+      target: { value: 'leader' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    await waitFor(() => expect(window.location.search).toBe(''));
+    expect(screen.getByRole('searchbox', { name: 'Search accounts' })).toHaveValue('');
+    await waitFor(() =>
+      expect(api.listAccounts).toHaveBeenLastCalledWith('', 0, expect.any(AbortSignal), {
+        accountStatus: '',
+        q: '',
+        sort: 'created',
+        team: '',
+      }),
+    );
+    // The search typed before the clear does not land after it.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(window.location.search).toBe('');
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull();
+  });
+});
+describe('rows', () => {
+  const named: AccountEntry = {
+    ...account,
+    id: 'named',
+    email: 'named@example.test',
+    waitlist: { ...account.waitlist, status: 'approved' },
+    teams: [{ id: 'team-lab', name: 'Lab', role: 'member' }],
+    identity: {
+      locale: null,
+      email: 'named@example.test',
+      email_verified: true,
+      login_name: null,
+      phone: null,
+      has_password: true,
+      identity_verified: true,
+      user_name: 'Named Person',
+      label: 'named@example.test',
+    },
+  };
+  beforeEach(() => {
+    vi.mocked(api.listAccounts).mockResolvedValue({ accounts: [named], total: 1 });
+  });
+  it('keeps the chosen density in this browser, compact unless chosen', async () => {
+    render(<AccountsPage />);
+    const density = await screen.findByRole('group', { name: 'Density' });
+    expect(within(density).getByRole('button', { name: 'Compact' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    // Compact rows hold one line: the name, with the address in full detail.
+    await screen.findByText('Named Person');
+    expect(screen.queryByText('named@example.test')).toBeNull();
+    fireEvent.click(within(density).getByRole('button', { name: 'Comfortable' }));
+    expect(screen.getByText('named@example.test')).toBeInTheDocument();
+    expect(window.localStorage.getItem('agents.admin.users.density')).toBe('comfortable');
+    cleanup();
+    render(<AccountsPage />);
+    expect(
+      await within(await screen.findByRole('group', { name: 'Density' })).findByRole('button', {
+        name: 'Comfortable',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    cleanup();
+    window.localStorage.setItem('agents.admin.users.density', 'roomy');
+    render(<AccountsPage />);
+    expect(
+      within(await screen.findByRole('group', { name: 'Density' })).getByRole('button', {
+        name: 'Compact',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+  it('opens from its chevron or a click on the row, but not from a team link or a selection', async () => {
+    render(<AccountsPage />);
+    const chevron = await screen.findByRole('button', { name: 'Details for named@example.test' });
+    expect(chevron).toHaveAttribute('aria-expanded', 'false');
+    const lab = screen.getByRole('link', { name: 'Lab' });
+    lab.addEventListener('click', (event) => event.preventDefault());
+    fireEvent.click(lab);
+    expect(chevron).toHaveAttribute('aria-expanded', 'false');
+    const selection = vi.spyOn(window, 'getSelection').mockReturnValue({
+      toString: () => 'Named',
+    } as Selection);
+    fireEvent.click(screen.getByText('Named Person'));
+    expect(chevron).toHaveAttribute('aria-expanded', 'false');
+    selection.mockRestore();
+    fireEvent.click(screen.getByText('Named Person'));
+    expect(chevron).toHaveAttribute('aria-expanded', 'true');
+    expect(chevron).toHaveAttribute('aria-controls', 'account-detail-named');
+    expect(document.getElementById('account-detail-named')).toHaveTextContent('Lab');
+    fireEvent.click(chevron);
+    expect(chevron).toHaveAttribute('aria-expanded', 'false');
+    expect(document.getElementById('account-detail-named')).toBeNull();
+  });
+  it('offers the account tools by what they do', async () => {
+    render(<AccountsPage />);
+    const tools = await screen.findByRole('button', { name: 'Account tools' });
+    fireEvent.click(tools);
+    const menu = screen.getByRole('menu', { name: 'Account tools' });
+    expect(within(menu).getByRole('menuitem', { name: /Sign-up rules/ })).toHaveAttribute(
+      'href',
+      '/admin/users/policy',
+    );
+    expect(within(menu).getByRole('menuitem', { name: /Email announcements/ })).toHaveAttribute(
+      'href',
+      '/admin/users/mail',
     );
   });
 });
