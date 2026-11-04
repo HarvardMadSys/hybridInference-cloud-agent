@@ -62,32 +62,20 @@ FAMILIES: tuple[Family, ...] = (
     # -- admin: cloud_agent.settings.SETTINGS ------------------------------
     Family(
         "admin",
-        "Gateway sign-in and grant dispatch. GATEWAY_ISSUER locks once the database is "
-        "bound to an identity namespace; the dispatch token must be re-entered when the "
-        "Gateway URL changes (validate_settings_update).",
+        "Public addresses and browser session security.",
         names=(
-            "GATEWAY_BASE_URL",
-            "GATEWAY_GRANT_DISPATCH_TOKEN",
-            "GATEWAY_GRANT_BASE_PATH",
-            "GATEWAY_GRANT_BINDING_ID",
-            "GATEWAY_AUTHORIZE_URL",
-            "GATEWAY_JWKS_URL",
-            "GATEWAY_ISSUER",
-            "AGENT_SESSION_REDIRECT_URI",
             "AGENT_WEB_BASE_URL",
+            "AGENT_PUBLIC_API_URL",
             "AGENT_SESSION_COOKIE_SECURE",
             "AGENT_TRUST_PROXY_HEADERS",
         ),
     ),
     Family(
         "admin",
-        "Signing and encryption keys stored as settings. Replacing the session key signs "
-        "browsers out; replacing the control key invalidates host and worker credentials "
-        "(hosts re-enroll); the two encryption keys lock once set and need re-encryption. "
-        "AGENT_SESSION_SECRET is also read raw as the settings root key's fallback "
-        "(domain_cipher) while AGENT_SETTINGS_ENCRYPTION_KEY is unset.",
+        "Signing and encryption keys stored as settings. Replacing the control key "
+        "invalidates host and worker credentials (hosts re-enroll); the two encryption "
+        "keys lock once set and need re-encryption.",
         names=(
-            "AGENT_SESSION_SECRET",
             "AGENT_CONTROL_TOKEN_SECRET",
             "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
             "AGENT_COMPUTE_SECRET_KEY",
@@ -135,8 +123,6 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_LOG_LEVEL",
             "AGENT_LOG_FORMAT",
             "AGENT_ALERT_WEBHOOK_URL",
-            "AGENT_ONCALL_USER_ID",
-            "AGENT_ONCALL_DISPATCH_TOKEN",
             "AGENT_RESIDENCY_TTL_S",
         ),
     ),
@@ -152,8 +138,6 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_WEB_STATUS_URL",
             "AGENT_WEB_DOCS_URL",
             "AGENT_WEB_CONTACT_URL",
-            "AGENT_WEB_GATEWAY_URL",
-            "AGENT_WEB_FEATURE_RAG",
         ),
     ),
     Family(
@@ -196,7 +180,6 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_SANDBOX_MANAGER_TOKEN",
             "AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS",
             "AGENT_DEFAULT_EXECUTION_PROFILE",
-            "AGENT_DEFAULT_MODEL",
         ),
     ),
     Family(
@@ -268,12 +251,66 @@ FAMILIES: tuple[Family, ...] = (
         "cluster understanding model connections, which nothing records yet.",
         names=("AGENT_MODEL_CONNECTIONS_ENABLED",),
     ),
+    Family(
+        "admin",
+        "Accounts: sign-up and approval, sign-in limits, terms, mail, SMS and captcha "
+        "(cloud_agent.accounts.settings_registry), imported once like MIGRATED_SETTINGS.",
+        names=(
+            "AGENT_LOCAL_ADMIN_EMAILS",
+            "AGENT_LOCAL_EMAIL_PROVIDER",
+            "AGENT_LOCAL_LOGIN_ACCOUNT_RATE_LIMIT_PER_15MIN",
+            "AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_15MIN",
+            "AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_HOUR_PER_IP",
+            "AGENT_LOCAL_SESSION_TTL_DAYS",
+            "AGENT_LOCAL_SIGNUP_ADMIN_NOTIFY",
+            "AGENT_LOCAL_SIGNUP_APPROVAL",
+            "AGENT_LOCAL_SIGNUP_ENABLED",
+            "AGENT_LOCAL_SIGNUP_NOTIFY_EMAILS",
+            "AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_DAY",
+            "AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_HOUR",
+            "AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION",
+            "AGENT_LOCAL_SIGNUP_REQUIRE_RESOLVED_CLIENT_IP",
+            "AGENT_LOCAL_SMS_ALLOWED_PREFIXES",
+            "AGENT_LOCAL_SMS_DEFAULT_COUNTRY_CODE",
+            "AGENT_LOCAL_SMS_ENABLED",
+            "AGENT_LOCAL_SMS_PROVIDER",
+            "AGENT_LOCAL_TERMS_TEXT",
+            "AGENT_LOCAL_TERMS_URL",
+            "AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_DAY",
+            "AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_HOUR",
+            "AGENT_SMTP_FROM",
+            "AGENT_SMTP_HOST",
+            "AGENT_SMTP_PASSWORD",
+            "AGENT_SMTP_PORT",
+            "AGENT_SMTP_SECURITY",
+            "AGENT_SMTP_USERNAME",
+            "AGENT_TENCENT_CLOUD_SECRET_ID",
+            "AGENT_TENCENT_CLOUD_SECRET_KEY",
+            "AGENT_TENCENT_CLOUD_TOKEN",
+            "AGENT_TENCENT_SES_FROM_EMAIL",
+            "AGENT_TENCENT_SES_FROM_NAME",
+            "AGENT_TENCENT_SES_REGION",
+            "AGENT_TENCENT_SES_TEMPLATE_ADMIN_SIGNUP",
+            "AGENT_TENCENT_SES_TEMPLATE_APPROVAL",
+            "AGENT_TENCENT_SES_TEMPLATE_NOTICE",
+            "AGENT_TENCENT_SES_TEMPLATE_PASSWORD_RESET",
+            "AGENT_TENCENT_SES_TEMPLATE_REJECTION",
+            "AGENT_TENCENT_SES_TEMPLATE_VERIFICATION",
+            "AGENT_TENCENT_SMS_REGION",
+            "AGENT_TENCENT_SMS_SDK_APP_ID",
+            "AGENT_TENCENT_SMS_SIGN_NAME",
+            "AGENT_TENCENT_SMS_TEMPLATE_ID",
+            "AGENT_TURNSTILE_SECRET_KEY",
+            "AGENT_TURNSTILE_SITE_KEY",
+        ),
+    ),
     # -- deployment -------------------------------------------------------
     Family(
         "deployment",
-        "Control-plane bootstrap: needed before the settings row can be read, or the "
-        "recovery door when Gateway sign-in is broken.",
-        names=("AGENT_DATABASE_URL", "ADMIN_TOKEN"),
+        "Control-plane bootstrap: needed before the settings row can be read, the "
+        "recovery door when sign-in is broken, and the key every account credential is "
+        "hashed under (a deployment decision, not a setting).",
+        names=("AGENT_DATABASE_URL", "ADMIN_TOKEN", "AGENT_LOCAL_SESSION_SECRET"),
     ),
     Family(
         "deployment",
@@ -318,7 +355,7 @@ FAMILIES: tuple[Family, ...] = (
         "deployment",
         "Machine addresses the deployer knows, used only to prefill the automatic compute "
         "setup form; a saved request wins.",
-        names=("AGENT_GATEWAY_SSH_HOST", "AGENT_CONTROL_PLANE_SSH_HOST"),
+        names=("AGENT_CONTROL_PLANE_SSH_HOST",),
     ),
     Family(
         "deployment",
@@ -383,7 +420,6 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_CONTROL_PLANE_HOSTNAME",
             "AGENT_GATEWAY_HOSTNAME",
             "AGENT_MCP_HOSTNAME",
-            "AGENT_GATEWAY_URL",
             "AGENT_SANDBOX_MCP_URL",
             "AGENT_SHARED_LIVE_READY_FILE",
             "AGENT_RUNTIME_DOWNLOAD_NETWORK",
@@ -494,15 +530,17 @@ FAMILIES: tuple[Family, ...] = (
             "KATA_CONFIG_PATH",
             "KATA_DEBUG_KERNEL_PATH",
             "KATA_SETUP_SCRIPT",
+            "KATA_STATIC_SANDBOX_RESOURCES",
+            "KATA_DEFAULT_MEMORY_MIB",
         ),
     ),
     # -- operation --------------------------------------------------------
     Family(
         "operation",
         "The settings root key: needed to decrypt the settings row itself. Without it, "
-        "the environment's AGENT_SESSION_SECRET is the fallback root; changing the root in "
-        "use is a re-encryption procedure.",
-        names=("AGENT_SETTINGS_ENCRYPTION_KEY",),
+        "the environment's AGENT_SESSION_SECRET (once the Gateway session key) is the "
+        "fallback root; changing the root in use is a re-encryption procedure.",
+        names=("AGENT_SETTINGS_ENCRYPTION_KEY", "AGENT_SESSION_SECRET"),
     ),
     # -- internal ---------------------------------------------------------
     Family(
@@ -628,6 +666,34 @@ FAMILIES: tuple[Family, ...] = (
         "should be removed from .env.",
         names=("AGENT_RUNNER_REPLICAS",),
     ),
+    Family(
+        "retired",
+        "The removed Gateway sign-in, inference relay and on-call dispatch. Named only so "
+        "startup can refuse them (accounts.config.refuse_retired_configuration, the "
+        "host's retired_configuration and deploy.sh): a deployment that still sets one "
+        "was never reviewed for the cutover.",
+        names=(
+            "AGENT_AUTH_MODE",
+            "AGENT_GATEWAY_URL",
+            "AGENT_GATEWAY_SSH_HOST",
+            "AGENT_SESSION_REDIRECT_URI",
+            "AGENT_WEB_GATEWAY_URL",
+            "AGENT_WEB_FEATURE_RAG",
+            "AGENT_ONCALL_DISPATCH_TOKEN",
+            "AGENT_ONCALL_USER_ID",
+            "GATEWAY_AUTHORIZE_URL",
+            "GATEWAY_BASE_URL",
+            "GATEWAY_GRANT_BASE_PATH",
+            "GATEWAY_GRANT_BINDING_ID",
+            "GATEWAY_GRANT_DISPATCH_TOKEN",
+            "GATEWAY_ISSUER",
+            "GATEWAY_JWKS_URL",
+            "IDENTITY_ALLOWED_REDIRECTS",
+            "IDENTITY_ISSUER",
+            "IDENTITY_JWT_PRIVATE_KEY",
+            "IDENTITY_JWT_RETIRING_PUBLIC_KEYS",
+        ),
+    ),
     # -- tooling ----------------------------------------------------------
     Family(
         "tooling",
@@ -690,19 +756,6 @@ RESOLVER_MODULES: dict[str, str] = {
 #: A registered admin setting read straight from the environment instead of
 #: through its resolver, by (module, function, variable), and why.
 RAW_SETTING_READS: dict[tuple[str, str, str], str] = {
-    (
-        "apps/backend/cloud_agent/domain_cipher.py",
-        "settings_root_key",
-        "AGENT_SESSION_SECRET",
-    ): (
-        "the settings root key's fallback while AGENT_SETTINGS_ENCRYPTION_KEY is unset; "
-        "it decrypts the row the saved session key lives in, so it cannot come from it"
-    ),
-    (
-        "apps/backend/cloud_agent/deployment_setup.py",
-        "_root_key_state",
-        "AGENT_SESSION_SECRET",
-    ): "reports whether the root key in use is that fallback",
     **{
         ("apps/backend/cloud_agent/logging_utils.py", "configure_process_logging", name): (
             "process logging starts before the first snapshot; apply_settings replaces it "
@@ -857,24 +910,14 @@ UNMIGRATED_ENV_SETTINGS: frozenset[str] = frozenset(
         "AGENT_LOG_FORMAT",
         "AGENT_LOG_LEVEL",
         "AGENT_MCP_PUBLIC_BASE_URL",
-        "AGENT_ONCALL_DISPATCH_TOKEN",
-        "AGENT_ONCALL_USER_ID",
         "AGENT_PUBLISH_BASE_BRANCH",
         "AGENT_REPO_ALLOWLIST",
         "AGENT_RESIDENCY_TTL_S",
-        "AGENT_SESSION_REDIRECT_URI",
         "AGENT_WEB_APP_NAME",
         "AGENT_WEB_BASE_URL",
-        "AGENT_WEB_FEATURE_RAG",
-        "AGENT_WEB_GATEWAY_URL",
         "AGENT_WEB_ORG_NAME",
         "AGENT_WEB_ORG_URL",
         "AGENT_WEB_STATUS_URL",
-        "GATEWAY_AUTHORIZE_URL",
-        "GATEWAY_BASE_URL",
-        "GATEWAY_GRANT_BASE_PATH",
-        "GATEWAY_GRANT_BINDING_ID",
-        "GATEWAY_GRANT_DISPATCH_TOKEN",
     }
 )
 
@@ -898,6 +941,13 @@ SHELL_NOT_INPUTS: dict[tuple[str, str], str] = {
 }
 
 #: Shell reads whose variable the script computes, by (script, function,
-#: construct), and why. None today: every indirect read resolves to a loop
-#: over literal names or sits inside a helper.
-SHELL_DYNAMIC_READS: dict[tuple[str, str, str], str] = {}
+#: construct), and why.
+SHELL_DYNAMIC_READS: dict[tuple[str, str, str], str] = {
+    **{
+        ("deploy/host/sandbox_host.sh", "require_env", f"env_or_dotenv ${{prefix}}_{suffix}"): (
+            "the loop over TUNNEL_PREFIXES checks each tunnel's key and known_hosts file; "
+            "every name it builds is covered by the AGENT_*_TUNNEL_ prefixes"
+        )
+        for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS")
+    },
+}

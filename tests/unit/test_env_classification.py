@@ -48,6 +48,7 @@ from tests.support.env_scan import (
 )
 from tests.support.env_shell import ShellDynamic, ShellInput, scan_shell, shell_sources
 
+from cloud_agent.accounts.config import RETIRED_GATEWAY_VARIABLES
 from cloud_agent.settings import MIGRATED_SETTINGS, SETTINGS
 from cloud_agent_shared.host_settings import HOST_SETTINGS
 from cloud_agent_shared.sandbox_manager_compat import LEGACY_ENV_NAMES
@@ -61,8 +62,9 @@ BACKEND = "apps/backend/"
 PRODUCTION_TEMPLATES = ("deploy/control-plane/", "deploy/host/")
 #: The one ``host_admin`` variable that is not in HOST_SETTINGS.
 HOST_ADMIN_OUTSIDE_REGISTRY = frozenset({"AGENT_HOST_SLOTS"})
-#: Retired names that are not former Sandbox Manager spellings.
-RETIRED_OUTSIDE_LEGACY = frozenset({"AGENT_RUNNER_REPLICAS"})
+#: Retired names that are not former Sandbox Manager spellings: a warning in
+#: sandbox_host.sh, and the removed Gateway integration startup refuses.
+RETIRED_OUTSIDE_LEGACY = frozenset({"AGENT_RUNNER_REPLICAS", *RETIRED_GATEWAY_VARIABLES})
 
 SETTING_ENVS = frozenset(setting.env for setting in SETTINGS if setting.env)
 HOST_SETTING_ENVS = frozenset(setting.env for setting in HOST_SETTINGS)
@@ -494,14 +496,14 @@ def test_registering_a_deployment_variable_fails() -> None:
         inventory.Family(
             f.disposition,
             f.reason,
-            tuple(n for n in f.names if n != "AGENT_DEFAULT_MODEL"),
+            tuple(n for n in f.names if n != "AGENT_PUBLISH_BASE_BRANCH"),
             f.prefixes,
         )
         for f in inventory.FAMILIES
     ]
-    moved.append(inventory.Family("deployment", "x", names=("AGENT_DEFAULT_MODEL",)))
+    moved.append(inventory.Family("deployment", "x", names=("AGENT_PUBLISH_BASE_BRANCH",)))
     assert registry_mismatches(moved) == [
-        "AGENT_DEFAULT_MODEL is registered but not classified admin"
+        "AGENT_PUBLISH_BASE_BRANCH is registered but not classified admin"
     ]
 
 
@@ -597,10 +599,13 @@ def test_registry_and_exception_entries_must_still_match(scan: Scan) -> None:
     trimmed = [
         read
         for read in scan.reads
-        if not (read.module.endswith("domain_cipher.py") and read.function == "settings_root_key")
+        if not (
+            read.module.endswith("logging_utils.py")
+            and read.function == "configure_process_logging"
+        )
     ]
     assert any(
-        "settings_root_key no longer reads AGENT_SESSION_SECRET" in p
+        "configure_process_logging no longer reads AGENT_LOG_LEVEL" in p
         for p in unused_exceptions(trimmed)
     )
 
@@ -657,9 +662,9 @@ def test_shell_exceptions_cover_only_their_own_read() -> None:
 
 def test_a_shell_exception_nothing_needs_fails(scan: Scan) -> None:
     shell = [read for read in scan.shell if read.name != "SHA"]
-    assert shell_problems(Scan([], [], shell, [], scan.shell_functions)) == [
+    assert shell_problems(Scan([], [], shell, scan.shell_dynamic, scan.shell_functions)) == [
         "SHELL_NOT_INPUTS entry ('deploy/release/artifact_env.sh', 'SHA') matches no read now"
     ]
-    assert shell_problems(Scan([], [], scan.shell, [], frozenset())) == [
+    assert shell_problems(Scan([], [], scan.shell, scan.shell_dynamic, frozenset())) == [
         "SHELL_HELPERS names artifact_env_value, which no script defines now"
     ]
