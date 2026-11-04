@@ -54,6 +54,18 @@ def is_residency_mcp_credential(credential: str) -> bool:
     return credential.startswith(RESIDENCY_MCP_CREDENTIAL_PREFIX)
 
 
+#: The prefix of the GitHub relay credential a chat's resident process holds
+#: (``cloud_agent.tokens.mint_residency_github_token``). It is a placeholder:
+#: GitHub refuses it, and only the GitHub relay exchanges it, on every request,
+#: for the owner's own GitHub token while one of the chat's turns is running.
+RESIDENCY_GITHUB_CREDENTIAL_PREFIX = "agh."
+
+
+def is_residency_github_credential(credential: str) -> bool:
+    """Whether ``credential`` is a residency's GitHub relay placeholder."""
+    return credential.startswith(RESIDENCY_GITHUB_CREDENTIAL_PREFIX)
+
+
 def mid_turn_input_capability(runtime_id: str) -> str:
     """The capability a host advertises when it can steer ``runtime_id``."""
     return f"{MID_TURN_INPUT_CAPABILITY_PREFIX}{runtime_id}"

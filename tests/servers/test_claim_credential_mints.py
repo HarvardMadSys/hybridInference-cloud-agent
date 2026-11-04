@@ -1,18 +1,14 @@
-"""The claim asks GitHub for its two tokens at once.
+"""The claim asks GitHub for one token: the runner's read-only clone token.
 
-A turn's clone token and its sandbox GitHub token used to be minted one after
-the other, though neither needs the other's answer. They overlap now, and these
-cases pin that nothing else moved: whatever each one's outcome, the claim
-answers and releases exactly as when the second waited for the first, because
-the first to fail in that old order decides. And a cancelled request leaves no
-mint running behind it and settles nothing.
+The sandbox's own repository-scoped write token is gone: git and gh there hold
+a residency's GitHub relay placeholder instead (``github_credential`` on the
+residency). These cases pin what is left: an App that does not cover the
+repository is a settled answer, any other GitHub failure hands the claim back,
+and the claim never carries a GitHub token for the sandbox.
 """
 
 from __future__ import annotations
 
-import asyncio
-import itertools
-import time
 from typing import Any
 
 import pytest
@@ -20,7 +16,7 @@ from httpx import ASGITransport, AsyncClient, Response
 from tests.servers.test_worker_claim import _ATTEMPT, _JOB, _app, _ClaimStore
 from tests.support.owners import connection_claim
 
-from cloud_agent.api._claim_credentials import mint_claim_credentials
+from cloud_agent.api._claim_credentials import mint_clone_token
 from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.github_app import AppNotInstalled
 
@@ -40,25 +36,19 @@ def _env(monkeypatch):
 
 
 class _GitHub:
-    """The App's token minter, answering the clone and sandbox scopes as told.
+    """The App's token minter: ``ok`` mints, ``missing`` is no installation, ``error`` fails."""
 
-    ``ok`` mints, ``missing`` is an App that does not cover the repository, and
-    ``error`` is GitHub having a bad minute.
-    """
-
-    def __init__(self, clone: str = "ok", sandbox: str = "ok") -> None:
-        self.answers = {"clone": clone, "sandbox": sandbox}
-        self.asked: list[str] = []
+    def __init__(self, answer: str = "ok") -> None:
+        self.answer = answer
+        self.asked: list[dict[str, Any]] = []
 
     async def token_for(self, repo: str, **kwargs: Any) -> str:
-        scope = "clone" if kwargs["permissions"] == {"contents": "read"} else "sandbox"
-        self.asked.append(scope)
-        answer = self.answers[scope]
-        if answer == "missing":
+        self.asked.append(kwargs)
+        if self.answer == "missing":
             raise AppNotInstalled(f"no App installation covers {repo}", status=404)
-        if answer == "error":
+        if self.answer == "error":
             raise TimeoutError("api.github.com timed out")
-        return f"ghs_{scope}"
+        return "ghs_clone"
 
 
 async def _claim(store: _ClaimStore, github: Any) -> Response:
@@ -70,141 +60,30 @@ async def _claim(store: _ClaimStore, github: Any) -> Response:
         )
 
 
-def _answer(response: Response) -> tuple[int, str]:
-    return response.status_code, response.json()["detail"]["error"]["message"]
-
-
-@pytest.mark.parametrize(
-    ("clone", "sandbox"), list(itertools.product(["ok", "missing", "error"], repeat=2))
-)
-async def test_the_first_failure_in_the_old_order_decides_the_claim(clone, sandbox):
-    """Clone token, then sandbox token: the first to fail is the answer.
-
-    What the mint after it got is dropped, as if it had never been asked, and
-    the claim is released once.
-    """
+@pytest.mark.parametrize("answer", ["ok", "missing", "error"])
+async def test_the_claim_mints_only_a_read_only_clone_token(answer):
     store = _ClaimStore()
-    github = _GitHub(clone, sandbox)
+    github = _GitHub(answer)
 
     response = await _claim(store, github)
 
-    assert sorted(github.asked) == ["clone", "sandbox"], (
-        "every mint is asked, whatever the other says"
-    )
+    assert github.asked == [{"permissions": {"contents": "read"}, "repository_scoped": True}]
     assert store.failed == []
-    decisive = next((outcome for outcome in (clone, sandbox) if outcome != "ok"), None)
-    if decisive == "error":
-        assert _answer(response)[0] == _GITHUB_ERROR[0]
-        assert _answer(response)[1].startswith(_GITHUB_ERROR[1])
+    if answer == "error":
+        body = response.json()["detail"]["error"]["message"]
+        assert response.status_code == _GITHUB_ERROR[0]
+        assert body.startswith(_GITHUB_ERROR[1])
         assert store.released == [(_JOB, _ATTEMPT)]
         assert store.retry_delays == [30]
         return
-    # An App that does not cover the repository is a settled answer: the
-    # token minted before it goes to the runner, and none after it.
     assert response.status_code == 200, response.text
     assert store.released == []
-    assert response.json()["clone_token"] == ("ghs_clone" if clone == "ok" else None)
-    assert response.json()["github_token"] == (
-        "ghs_sandbox" if clone == "ok" and sandbox == "ok" else None
-    )
-
-
-async def test_the_two_mints_overlap():
-    """The claim waits about as long as its slower mint, not their sum."""
-    delay_s = 0.5
-    windows: dict[str, tuple[float, float]] = {}
-
-    class SlowGitHub(_GitHub):
-        async def token_for(self, repo: str, **kwargs: Any) -> str:
-            started = time.monotonic()
-            await asyncio.sleep(delay_s)
-            token = await super().token_for(repo, **kwargs)
-            windows[token] = (started, time.monotonic())
-            return token
-
-    app = _app(_ClaimStore())
-    app.dependency_overrides[get_agent_app_credentials] = SlowGitHub
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
-        )
-        answered = time.monotonic()
-
-    assert response.status_code == 200, response.text
-    assert sorted(windows) == ["ghs_clone", "ghs_sandbox"]
-    # Both mints began before either had finished: neither waited for the other.
-    assert max(start for start, _ in windows.values()) < min(end for _, end in windows.values())
-    # Timed from the first mint, not from the request: the claim's work before
-    # it mints, which a loaded runner slows far more than the mints' overlap
-    # saves, is no part of what is measured. One mint after the other would
-    # still take two delays from here.
-    waited = answered - min(start for start, _ in windows.values())
-    assert waited < 1.75 * delay_s, (
-        f"took {waited:.2f}s from the first mint; one at a time takes {2 * delay_s}s"
-    )
+    assert response.json()["clone_token"] == ("ghs_clone" if answer == "ok" else None)
+    assert "github_token" not in response.json(), "no GitHub token reaches a sandbox"
 
 
 async def test_a_workspace_without_a_repository_asks_github_nothing():
     github = _GitHub()
     claim = {"id": _JOB, "attempt_id": _ATTEMPT, "repo": None, "thread_id": "athr_1"}
-
-    assert await mint_claim_credentials(_ClaimStore(), claim, app_credentials=github) == (
-        None,
-        None,
-    )
+    assert await mint_clone_token(_ClaimStore(), claim, app_credentials=github) is None
     assert github.asked == []
-
-
-class _Held:
-    """Mints that answer nothing until cancelled, and record when each ends.
-
-    Each takes a moment of its own to wind down once cancelled, as a request
-    cut short does. A claim that gave up before every one had ended would leave
-    one running for a request nobody holds any more.
-    """
-
-    def __init__(self, names: list[str]) -> None:
-        self.names = names
-        self.started: list[str] = []
-        self.ended: list[str] = []
-        self.all_started = asyncio.Event()
-
-    async def hold(self, name: str) -> Any:
-        self.started.append(name)
-        if sorted(self.started) == sorted(self.names):
-            self.all_started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            await asyncio.sleep(0.01 * (1 + self.names.index(name)))
-            raise
-        finally:
-            self.ended.append(name)
-
-
-async def test_a_cancelled_claim_waits_for_every_mint_and_settles_nothing():
-    """A cancellation reaches both mints, and the claim is neither released nor ended."""
-    held = _Held(["clone", "sandbox"])
-
-    class HeldGitHub:
-        async def token_for(self, repo: str, **kwargs: Any) -> str:
-            scope = "clone" if kwargs["permissions"] == {"contents": "read"} else "sandbox"
-            return await held.hold(scope)
-
-    store = _ClaimStore()
-    claim = await store.claim_job(
-        worker_id="w1", lease_ttl_seconds=60, host="runner-test", host_credential_hash="hash"
-    )
-    assert claim is not None
-    minting = asyncio.create_task(
-        mint_claim_credentials(store, claim, app_credentials=HeldGitHub())
-    )
-    await asyncio.wait_for(held.all_started.wait(), 5)
-
-    minting.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await minting
-
-    assert sorted(held.ended) == sorted(held.names), "a mint outlived the claim"
-    assert store.released == []
-    assert store.failed == []

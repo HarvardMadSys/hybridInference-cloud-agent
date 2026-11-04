@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0110_host_late_settings`. The supported deployment scripts run "
+"`0111_thread_pull_requests`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0110_host_late_settings`。官方支持的部署脚本会在替换 API "
+"`0111_thread_pull_requests`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)中。"
 
@@ -401,6 +401,20 @@ msgstr "迁移"
 #: ../developer/upgrade-notes.md
 msgid "What it changes"
 msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0111_thread_pull_requests`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds `agent_thread_pull_requests`: the pull requests a conversation's "
+"agent opened through the GitHub relay, one row per conversation and pull "
+"request. Nothing reads it before this release, so the previous release "
+"runs unchanged beside it. A downgrade drops the table."
+msgstr ""
+"新增 `agent_thread_pull_requests` 表：记录对话里的 agent 通过 GitHub "
+"中继开出的 PR，每个对话的每个 PR 一行。这个版本之前没有代码读它，所以上一个版本可以照常并行运行。降级时删除这张表。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0110_host_late_settings`"

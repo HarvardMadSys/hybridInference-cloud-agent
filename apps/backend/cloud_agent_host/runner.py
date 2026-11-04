@@ -81,6 +81,7 @@ from cloud_agent_host.drivers import (
     driver_for,
 )
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
+from cloud_agent_host.github_relay_env import residency_github_launch
 from cloud_agent_host.host_capacity import (
     HostCapacityCollector,
     build_storage_probe,
@@ -807,11 +808,10 @@ def prepare_worktree(
     at this point the worktree is ours, not the agent's, so running git here is
     safe because later Git inspection runs inside the retained container.
 
-    A shallow single-commit fetch, with no remote recorded. Not adding a remote
-    is the point — it is what keeps the credential out of ``.git/config``, and
-    the runner has no reason to offer the agent a push path it must not use.
-    ``depth`` 2 also brings the commit's parent, for a caller that bundles only
-    what the commit adds to it.
+    A shallow fetch by URL with the credential in the environment only, then
+    ``origin`` recorded as the plain HTTPS URL: the agent pushes through it, and
+    the GitHub relay, not this URL, decides what that buys. ``depth`` 2 also
+    brings the commit's parent, for a caller that bundles only what it adds.
 
     ``max_bytes`` is the import limit the checkout is about to be held to. The
     fetch and the checkout are stopped once ``workdir`` holds more than that,
@@ -861,6 +861,8 @@ def prepare_worktree(
     if checkout.returncode != 0:
         raise WorktreeError(f"could not check out {ref}: {checkout.stderr.strip()[:200]}")
 
+    if _run_git(["remote", "add", "origin", url], cwd=workdir, stop=stop).returncode != 0:
+        raise WorktreeError("could not record origin")
     resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir, stop=stop).stdout.strip()
     _assert_no_credential_on_disk(workdir, clone_token, stop=stop)
     return resolved or (base_sha or "")
@@ -2684,7 +2686,6 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             model=job.model,
             reasoning_effort=job.reasoning_effort,
             credential=None,
-            github_token=job.github_token,
             environment=job.environment,
             github_repo=job.repo or "",
             plugins=tuple(job.plugins),
@@ -2730,6 +2731,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                 credential=credential,
                 mcp_credential=mcp_credential,
                 residency_generation=int(residency["generation"]),
+                **residency_github_launch(job.repo, residency),
             )
             resident_call = operation_profiling.expect_fragment(
                 measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"

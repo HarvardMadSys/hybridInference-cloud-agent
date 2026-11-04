@@ -378,7 +378,9 @@ async def _shutdown_lifespan(  # noqa: PLR0912 complexity baseline, #771
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[None]:  # noqa: PLR0915 complexity baseline, #771
+async def lifespan(  # noqa: PLR0915 complexity baseline, #771
+    app: FastAPI, *, background: bool = True, source_control: bool | None = None
+) -> AsyncIterator[None]:
     """Open the store, optionally start the reaper and publisher, tear down.
 
     Args:
@@ -386,6 +388,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         background: Whether this process owns the reaper and the publisher.
             False for a second listener sharing the database — see the comment
             below for why that is not merely wasteful.
+        source_control: Whether this listener loads the GitHub and GitLab
+            credentials. Defaults to ``background``; the GitHub relay needs the
+            App's (to renew an owner's token) without owning any background work.
 
     The database is required. A control plane without one cannot claim, fence
     or record anything, so it refuses to start rather than serving an API that
@@ -464,7 +469,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.http = http
         # Identity and admission are answered from this database.
         attach_owner_directory(app, storage)
-        if background:
+        if background if source_control is None else source_control:
             _build_source_control(app)
         else:
             app.state.source_control = None

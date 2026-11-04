@@ -396,7 +396,6 @@ def _full_claim() -> WorkerClaimResponse:
         },
         mcp_token="t",
         clone_token="c",
-        github_token="g",
         mcp_bindings=["docs"],
         metadata={"source": "test"},
     )

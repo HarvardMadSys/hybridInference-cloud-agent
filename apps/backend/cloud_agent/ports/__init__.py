@@ -30,6 +30,7 @@ from cloud_agent.ports.environments import (
 )
 from cloud_agent.ports.execution_queries import ExecutionQueries
 from cloud_agent.ports.file_activity import FileActivityQueries
+from cloud_agent.ports.github_relay import GitHubRelayRepository
 from cloud_agent.ports.goal_wakeups import GoalWakeupRepository
 from cloud_agent.ports.goals import GoalRepository
 from cloud_agent.ports.host_capacity import HostCapacityRepository
@@ -89,6 +90,7 @@ __all__ = [
     "EnvironmentWorkspaceRepository",
     "ExecutionQueries",
     "FileActivityQueries",
+    "GitHubRelayRepository",
     "GoalRepository",
     "GoalWakeupRepository",
     "HostCapacityRepository",

@@ -35,7 +35,7 @@ from cloud_agent.api._body_limits import (
     payload_too_large,
     read_bounded_body,
 )
-from cloud_agent.api._claim_credentials import mint_claim_credentials
+from cloud_agent.api._claim_credentials import mint_clone_token
 from cloud_agent.api._sensitive_routes import no_store, no_store_exception
 from cloud_agent.api._workspace_access import (
     _workspace_id,
@@ -64,6 +64,7 @@ from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATE
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
 from cloud_agent.execution_profiles import ExecutionProfile
+from cloud_agent.git_identity import residency_github_fields
 from cloud_agent.goals.controller import continue_after_finish
 from cloud_agent.goals.report import (
     GoalReportEnvelope,
@@ -825,9 +826,8 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     token = mint_worker_token(**fence, scope=SCOPE_FULL)
     # The owner's own connection is the turn's only inference source.
     model_connection = await claim_model_connection(job_store, claim, capabilities)
-    # GitHub's two tokens (the runner's read-only clone token and the sandbox's
-    # write token) need nothing from each other, so they are asked at once.
-    clone_token, github_token = await mint_claim_credentials(
+    # Read-only, the runner's. The sandbox's GitHub placeholder comes with its residency.
+    clone_token = await mint_clone_token(
         job_store.attempt_commands, claim, app_credentials=app_credentials
     )
 
@@ -915,7 +915,6 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         worker_token=token,
         mcp_token=mcp_token,  # COMPAT(remove-after=2026-11-30): as at its mint above.
         clone_token=clone_token,
-        github_token=github_token,
         # Aliases, because that is what the runtime config addresses: the relay
         # path segment is the binding alias, and the runner learns nothing about
         # where the connection points.
@@ -1395,6 +1394,7 @@ async def worker_establish_shared_sandbox_residency(
         mcp_credential=mint_residency_mcp_token(
             thread_id=thread_id, residency_generation=int(row["generation"])
         ),
+        **await residency_github_fields(job_store.source_control, thread_id, row),
     )
 
 

@@ -85,8 +85,6 @@ class ClaimedJob:
     # Read-only, single-repo, short-lived: what the runner clones with. Never
     # put in .git/config or the sandbox environment.
     clone_token: str | None = None
-    # A separate repository-scoped contents/PR write token for sandbox gh.
-    github_token: str | None = field(default=None, repr=False)
     parent_job_id: str | None = None
     turn_no: int = 1
     # MCP connection aliases this job was granted. Aliases only: the runner
@@ -152,7 +150,6 @@ class ClaimedJob:
             reasoning_effort=body.get("reasoning_effort"),
             worker_token=body["worker_token"],
             clone_token=body.get("clone_token") or None,
-            github_token=body.get("github_token") or None,
             mcp_bindings=list(body.get("mcp_bindings") or []),
             runtime_version=body.get("runtime_version") or None,
             thread_sandbox=(

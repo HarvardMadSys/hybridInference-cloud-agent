@@ -369,7 +369,7 @@ POST /v1/agent/jobs             owner queues work
       → native Agent CLI        one live process/session per member chat
       → normalized events       streamed to the owner over SSE
       → model calls             the owner's provider, on their own key
-      → optional direct push    member's GH_TOKEN; skips the publisher's checks
+      → push and pull request   git/gh as the owner, through the GitHub relay
   → turn settles                nothing is published
 
 POST /v1/agent/threads/{id}/publish   owner asks (Create PR / Update PR)
@@ -388,19 +388,20 @@ merge without a person.
 
 Keep these credential boundaries intact:
 
-- **No long-lived repository credential enters the sandbox.** The host
-  captures a quiescent group diff; the control-plane publisher holds the
-  GitHub token it publishes with. The runner holds
-  a clone credential, but it is read-only, scoped to the one repository, and
-  deliberately never recorded in `.git/config`: the checkout adds no remote,
-  the credential travels in git's environment rather than its argv, and the
-  runner refuses to start the agent if it finds the token anywhere under
-  `.git/`.
-- **The only repository credential in the sandbox is short-lived.** When the
-  GitHub App is configured, the owning member receives `GH_TOKEN`: an App
-  installation token limited to `contents: write` and `pull_requests: write`
-  on the job's repository, expiring after about one hour. Pushes made with it
-  skip the publisher's patch gate. See [credentials](#2-credentials).
+- **No repository credential enters the sandbox.** The control-plane
+  publisher holds the GitHub token it publishes with. The runner holds a
+  clone credential, but it is read-only, scoped to the one repository, and
+  deliberately never recorded in `.git/config`: `origin` is recorded as the
+  plain HTTPS URL, the credential travels in git's environment rather than
+  its argv, and the runner refuses to start the agent if it finds the token
+  anywhere under `.git/`.
+- **git and `gh` in the sandbox speak as the owner, without the owner's
+  token.** With the GitHub relay configured, a member's `GH_TOKEN` is its
+  residency's placeholder, which GitHub refuses. The control plane's GitHub
+  relay exchanges it for the owner's own token while the residency serves a
+  running turn, for the conversation's repository only, and refuses branch
+  deletion, tags, GraphQL and repository administration. Pushes made through
+  it skip the publisher's patch gate. See [the GitHub relay](#the-github-relay).
 - **The sandbox also holds two narrow, non-interchangeable credentials.** The
   member's CLI runs on its owner's provider key from the model connection the
   turn names, handed over only in that owner's claim and residency (see
@@ -1419,28 +1420,42 @@ holds unless it asks for less, so the clone token is requested as
 `contents: read` on the single repository being worked on. Checkout does not
 inherit the publisher's broader authority.
 
-The claim separately mints a single-repository installation token with
-`contents: write` and `pull_requests: write`, injected as `GH_TOKEN` in the
-owning sandbox member's Agent CLI environment. `GH_REPO` selects the job's
-repository and `GH_HOST` selects `github.com`; `gh` authenticates as the App
-installation, rather than as the user's account. The token is not written to
-Git or GitHub CLI configuration, shared workspace files, or the image. Setup
-scripts and standalone terminal sessions do not receive it. Git uses the
-`gh auth git-credential` helper through invocation-only environment settings,
-so `git push` and `gh pr create` can authenticate without an interactive login.
-The host clone credential stays read-only; user account/refresh tokens and
-the App's private key remain outside the sandbox.
+#### The GitHub relay
 
-Direct sandbox pushes bypass the trusted publisher's patch gate, including
+No GitHub token reaches a sandbox. Each member's residency carries a
+placeholder (`agh.`) that git and `gh` present to GitHub, and the owner as
+the commits' author (`GIT_AUTHOR_*`, from the owner's GitHub noreply
+address) with the deployment's `AGENT_GITHUB_COAUTHOR` as co-author. Every
+group bridge resolves `github.com` and `api.github.com` to the host's
+`github-tunnel`, and each member trusts the deployment's GitHub relay CA
+for its own processes only. The tunnel forwards TLS unopened to the control
+plane's GitHub relay, a listener of its own that holds the certificate.
+
+The relay accepts the placeholder only while its residency is the chat's hot
+one, serving a running, leased, unstopped turn on an enrolled host. It then
+sends the request with the owner's own GitHub App user token if the request
+is about the conversation's repository and on its allowlist, with no
+credential at all if it is about anything else, and refuses repository
+administration, secrets, GraphQL, branch deletion and tags. A pull request it
+sees created is recorded for the conversation. The owner's token is renewed
+in the control plane, so a long turn does not outlive it.
+
+To turn it on:
+
+1. Run `deploy/control-plane/github-relay-certs.sh <dir>`. Keep `ca.key`
+   offline; give `relay.pem` and `relay.key` to the control plane
+   (`AGENT_GITHUB_RELAY_TLS_DIR`) and `ca.pem` to every host
+   (`AGENT_SANDBOX_GITHUB_RELAY_CA_FILE`).
+2. Enable the `github-relay` Compose profile on the control plane and on each
+   host, and give each host's `github-tunnel` its own SSH key restricted with
+   `permitopen` to the relay's port (`AGENT_GITHUB_TUNNEL_*`).
+3. Set `AGENT_GITHUB_COAUTHOR` to the App bot's noreply address.
+
+Pushes through the relay bypass the trusted publisher's patch gate, including
 its workflow-file and secret checks. Repository branch protection and GitHub
-rules still apply. The App installation must grant Contents and Pull requests
-write access; token issuance failures return the claim to the queue.
-
-Each claim obtains a live token from the App's expiry-aware cache. When that
-token changes, the member resumes its native session in a replacement process
-so subsequent commands inherit the new credential. Installation tokens expire
-after about one hour; there is no in-turn renewal, so `gh` calls in a longer
-turn may require a new turn to obtain a fresh token.
+rules still apply, and a push that changes a workflow needs the App's
+Workflows permission. The design is in
+[agent-native pull requests](../agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md).
 
 With no App configured the claim returns no clone token and the runner clones
 anonymously, which is enough for a public repository. A private repository

@@ -429,3 +429,34 @@ def create_mcp_app() -> FastAPI:
         return {"status": "ok"}
 
     return app
+
+
+def create_github_relay_app() -> FastAPI:
+    """Build a listener that serves the GitHub relay and nothing else.
+
+    The third sandbox-reachable listener, separate for the reason the MCP
+    relay is: a sandbox's tunnel ends here, and this application contains the
+    GitHub relay's one catch-all route and no other. A catch-all is exactly
+    what must never sit in front of the control plane's own routes, and an
+    ``agh.`` placeholder is accepted nowhere else.
+
+    It answers for ``github.com`` and ``api.github.com`` (the listener holds a
+    certificate for those two names that only this deployment's CA signs), so
+    it has no health route of its own: every path is GitHub's. Its liveness is
+    the TLS handshake, which is what the tunnel's health check asks.
+    """
+    configure_process_logging()
+
+    from cloud_agent.api import github_relay
+
+    app = FastAPI(
+        title="Cloud Agent — GitHub relay",
+        description="git and gh in a sandbox, as the conversation's owner",
+        version="0.1.0",
+        # No reaper and no publisher, as for the MCP relay; but the GitHub App's
+        # credentials, which renew an owner's GitHub token.
+        lifespan=lambda app: lifespan(app, background=False, source_control=True),
+        **_NO_DOCS,
+    )
+    app.include_router(github_relay.router)
+    return app

@@ -376,6 +376,19 @@ SETTINGS: tuple[Setting, ...] = (
         description="The exact callback registered with GitLab. HTTPS, except http://localhost for development.",
     ),
     Setting(
+        "github_coauthor",
+        "Agent commit co-author",
+        "Source control",
+        "",
+        env="AGENT_GITHUB_COAUTHOR",
+        description=(
+            "The co-author agents name in their commits, as `Name <email>`. Use the "
+            "GitHub App bot's noreply address (`<bot-user-id>+<app-slug>[bot]@users."
+            "noreply.github.com`) so GitHub shows its avatar. Empty: commits name the "
+            "owner only."
+        ),
+    ),
+    Setting(
         "github_publish_token",
         "GitHub publication token",
         "Publication",
@@ -805,6 +818,7 @@ _IMPORTED_AFTER_REGISTRATION = frozenset(
         "mcp_github_client_secret",
         "site.docs_url",
         "site.contact_url",
+        "github_coauthor",
     }
 )
 SETTINGS += _MIGRATED_DEFINITIONS

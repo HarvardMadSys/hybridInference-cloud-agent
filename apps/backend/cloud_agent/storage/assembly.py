@@ -37,6 +37,7 @@ from cloud_agent.storage.repositories import (
     PostgresCredentialQueries,
     PostgresExecutionQueries,
     PostgresFileActivityQueries,
+    PostgresGitHubRelayRepository,
     PostgresGoalRepository,
     PostgresGoalWakeupRepository,
     PostgresHostCapacityRepository,
@@ -89,6 +90,7 @@ if TYPE_CHECKING:
         CredentialQueries,
         ExecutionQueries,
         FileActivityQueries,
+        GitHubRelayRepository,
         GoalRepository,
         GoalWakeupRepository,
         HostCapacityRepository,
@@ -126,7 +128,7 @@ if TYPE_CHECKING:
 class Storage:
     """Every persistence capability this service has, assembled over one pool."""
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(self, pool: asyncpg.Pool) -> None:  # noqa: PLR0915 — one line per capability.
         """Build one implementation per capability against the caller's pool."""
         #: Admin read models. Still concrete: they are bounded projections for
         #: one console, not a capability any other caller asks for, and they
@@ -151,6 +153,7 @@ class Storage:
         self.credential_queries: CredentialQueries = PostgresCredentialQueries(pool)
         self.execution_queries: ExecutionQueries = PostgresExecutionQueries(pool)
         self.file_activity_queries: FileActivityQueries = PostgresFileActivityQueries(pool)
+        self.github_relay: GitHubRelayRepository = PostgresGitHubRelayRepository(pool)
         self.goals: GoalRepository = PostgresGoalRepository(pool)
         self.goal_wakeups: GoalWakeupRepository = PostgresGoalWakeupRepository(pool)
         self.host_capacity: HostCapacityRepository = PostgresHostCapacityRepository(pool)

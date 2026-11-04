@@ -826,32 +826,13 @@ msgstr ""
 msgid "Keep these credential boundaries intact:"
 msgstr "下面这些凭据边界不能被破坏："
 
-#: ../developer/operations.md:391
-msgid ""
-"**No long-lived repository credential enters the sandbox.** The host "
-"captures a quiescent group diff; the control-plane publisher holds the "
-"GitHub token it publishes with. The runner holds a clone credential, but "
-"it is read-only, scoped to the one repository, and deliberately never "
-"recorded in `.git/config`: the checkout adds no remote, the credential "
-"travels in git's environment rather than its argv, and the runner refuses"
-" to start the agent if it finds the token anywhere under `.git/`."
-msgstr ""
-"**长期有效的仓库凭据不会进入沙箱。** 主机在沙箱组静止时取出 diff；用来发布的 GitHub 令牌由控制平面的发布器持有。runner "
-"持有一个克隆用的凭据，但它是只读的，只限这一个仓库，并且刻意不写进 `.git/config`：检出时不添加 remote，凭据通过 git "
-"的环境变量而不是命令行参数传递；如果 runner 在 `.git/` 下的任何地方发现了这个令牌，就拒绝启动 agent。"
+#: ../developer/operations.md
+msgid "**No repository credential enters the sandbox.** The control-plane publisher holds the GitHub token it publishes with. The runner holds a clone credential, but it is read-only, scoped to the one repository, and deliberately never recorded in `.git/config`: `origin` is recorded as the plain HTTPS URL, the credential travels in git's environment rather than its argv, and the runner refuses to start the agent if it finds the token anywhere under `.git/`."
+msgstr "**仓库凭据不会进入沙箱。** 用来发布的 GitHub 令牌由控制平面的发布器持有。runner 持有一个克隆用的凭据，但它是只读的，只限这一个仓库，并且刻意不写进 `.git/config`：`origin` 记录的是不带凭据的 HTTPS 地址，凭据通过 git 的环境变量而不是命令行参数传递；如果 runner 在 `.git/` 下的任何地方发现了这个令牌，就拒绝启动 agent。"
 
-#: ../developer/operations.md:399
-msgid ""
-"**The only repository credential in the sandbox is short-lived.** When "
-"the GitHub App is configured, the owning member receives `GH_TOKEN`: an "
-"App installation token limited to `contents: write` and `pull_requests: "
-"write` on the job's repository, expiring after about one hour. Pushes "
-"made with it skip the publisher's patch gate. See "
-"[credentials](#2-credentials)."
-msgstr ""
-"**沙箱里唯一的仓库凭据是短期的。** 配置了 GitHub App 时，所属成员会拿到 `GH_TOKEN`：这是一个 App "
-"安装令牌，只对任务所在的仓库有 `contents: write` 和 `pull_requests: write` "
-"权限，大约一小时后过期。用它推送的内容不经过发布器的补丁检查。见[凭据](#2-credentials)。"
+#: ../developer/operations.md
+msgid "**git and `gh` in the sandbox speak as the owner, without the owner's token.** With the GitHub relay configured, a member's `GH_TOKEN` is its residency's placeholder, which GitHub refuses. The control plane's GitHub relay exchanges it for the owner's own token while the residency serves a running turn, for the conversation's repository only, and refuses branch deletion, tags, GraphQL and repository administration. Pushes made through it skip the publisher's patch gate. See [the GitHub relay](#the-github-relay)."
+msgstr "**沙箱里的 git 和 `gh` 以所有者的身份行事，但拿不到所有者的令牌。** 配置了 GitHub 中继时，成员的 `GH_TOKEN` 是它所属 residency 的占位凭据，GitHub 本身不接受它。在该 residency 正在服务一个运行中的轮次时，控制平面的 GitHub 中继把它换成所有者自己的令牌，只对对话的仓库有效，并拒绝删除分支、推 tag、GraphQL 和仓库管理操作。经它推送的内容不经过发布器的补丁检查。见 [GitHub 中继](#the-github-relay)。"
 
 #: ../developer/operations.md:404
 msgid ""
@@ -3059,51 +3040,37 @@ msgstr ""
 "拥有的全部权限，除非申请时主动要求更少，所以克隆令牌是按\"只对当前这一个仓库有 `contents: "
 "read`\"来申请的。检出因此不会继承发布器那么大的权限。"
 
-#: ../developer/operations.md:1422
-msgid ""
-"The claim separately mints a single-repository installation token with "
-"`contents: write` and `pull_requests: write`, injected as `GH_TOKEN` in "
-"the owning sandbox member's Agent CLI environment. `GH_REPO` selects the "
-"job's repository and `GH_HOST` selects `github.com`; `gh` authenticates "
-"as the App installation, rather than as the user's account. The token is "
-"not written to Git or GitHub CLI configuration, shared workspace files, "
-"or the image. Setup scripts and standalone terminal sessions do not "
-"receive it. Git uses the `gh auth git-credential` helper through "
-"invocation-only environment settings, so `git push` and `gh pr create` "
-"can authenticate without an interactive login. The host clone credential "
-"stays read-only; user account/refresh tokens and the App's private key "
-"remain outside the sandbox."
-msgstr ""
-"认领时还会另外签发一个只限单个仓库、带 `contents: write` 和 `pull_requests: write` 的安装令牌，作为 "
-"`GH_TOKEN` 注入到所属沙箱成员的 Agent CLI 环境里。`GH_REPO` 指定任务的仓库，`GH_HOST` 指定 "
-"`github.com`；`gh` 以 App 安装的身份认证，而不是用户的账号。这个令牌不会写进 Git 或 GitHub CLI "
-"的配置、共享的工作区文件，也不会写进镜像。setup 脚本和单独打开的终端会话都拿不到它。Git 通过只在调用时生效的环境设置，使用 `gh "
-"auth git-credential` 辅助程序，所以 `git push` 和 `gh pr create` "
-"不需要交互式登录就能认证。主机上的克隆凭据仍然是只读的；用户的账号令牌、刷新令牌和 App 的私钥都留在沙箱之外。"
+#: ../developer/operations.md
+msgid "The GitHub relay"
+msgstr "GitHub 中继"
 
-#: ../developer/operations.md:1434
-msgid ""
-"Direct sandbox pushes bypass the trusted publisher's patch gate, "
-"including its workflow-file and secret checks. Repository branch "
-"protection and GitHub rules still apply. The App installation must grant "
-"Contents and Pull requests write access; token issuance failures return "
-"the claim to the queue."
-msgstr ""
-"从沙箱里直接推送，会绕过受信任发布器的补丁检查，包括对工作流文件和 secret 的检查。仓库的分支保护和 GitHub 规则仍然有效。App "
-"安装必须授予 Contents 和 Pull requests 的写权限；如果令牌签发失败，认领会被退回队列。"
+#: ../developer/operations.md
+msgid "No GitHub token reaches a sandbox. Each member's residency carries a placeholder (`agh.`) that git and `gh` present to GitHub, and the owner as the commits' author (`GIT_AUTHOR_*`, from the owner's GitHub noreply address) with the deployment's `AGENT_GITHUB_COAUTHOR` as co-author. Every group bridge resolves `github.com` and `api.github.com` to the host's `github-tunnel`, and each member trusts the deployment's GitHub relay CA for its own processes only. The tunnel forwards TLS unopened to the control plane's GitHub relay, a listener of its own that holds the certificate."
+msgstr "沙箱里拿不到任何 GitHub 令牌。每个成员的 residency 带着一个占位凭据（`agh.`），git 和 `gh` 把它交给 GitHub；commit 作者是所有者（`GIT_AUTHOR_*`，取自所有者的 GitHub noreply 地址），部署的 `AGENT_GITHUB_COAUTHOR` 作为 co-author。每个组桥都把 `github.com` 和 `api.github.com` 解析到本机的 `github-tunnel`，每个成员只在自己的进程里信任部署的 GitHub 中继 CA。隧道不解开 TLS，原样转发到控制平面的 GitHub 中继；中继是一个单独的监听器，证书在它那里。"
 
-#: ../developer/operations.md:1439
-msgid ""
-"Each claim obtains a live token from the App's expiry-aware cache. When "
-"that token changes, the member resumes its native session in a "
-"replacement process so subsequent commands inherit the new credential. "
-"Installation tokens expire after about one hour; there is no in-turn "
-"renewal, so `gh` calls in a longer turn may require a new turn to obtain "
-"a fresh token."
-msgstr ""
-"每次认领都会从 App "
-"的缓存里取一个有效的令牌，缓存会考虑过期时间。如果令牌换了，成员会在一个新的进程里接上原生会话，这样之后的命令就会用上新的凭据。安装令牌大约一小时后过期，一轮之内不会续期，所以如果某一轮跑得很久，里面的"
-" `gh` 调用可能要等到下一轮才能拿到新令牌。"
+#: ../developer/operations.md
+msgid "The relay accepts the placeholder only while its residency is the chat's hot one, serving a running, leased, unstopped turn on an enrolled host. It then sends the request with the owner's own GitHub App user token if the request is about the conversation's repository and on its allowlist, with no credential at all if it is about anything else, and refuses repository administration, secrets, GraphQL, branch deletion and tags. A pull request it sees created is recorded for the conversation. The owner's token is renewed in the control plane, so a long turn does not outlive it."
+msgstr "只有当占位凭据所属的 residency 是对话当前的 hot residency，并且正在已登记的主机上服务一个运行中、租约有效、未被停止的轮次时，中继才接受它。这时，如果请求针对的是对话的仓库并且在允许列表里，中继就带上所有者自己的 GitHub App 用户令牌转发；针对其他任何东西的请求则不带任何凭据转发；仓库管理、secrets、GraphQL、删除分支和推 tag 一律拒绝。中继看到创建 PR 的请求成功时，会把这个 PR 记到对话上。所有者的令牌在控制平面里续期，所以轮次跑得再久也不会遇到令牌过期。"
+
+#: ../developer/operations.md
+msgid "To turn it on:"
+msgstr "启用步骤："
+
+#: ../developer/operations.md
+msgid "Run `deploy/control-plane/github-relay-certs.sh <dir>`. Keep `ca.key` offline; give `relay.pem` and `relay.key` to the control plane (`AGENT_GITHUB_RELAY_TLS_DIR`) and `ca.pem` to every host (`AGENT_SANDBOX_GITHUB_RELAY_CA_FILE`)."
+msgstr "运行 `deploy/control-plane/github-relay-certs.sh <dir>`。`ca.key` 离线保存；把 `relay.pem` 和 `relay.key` 交给控制平面（`AGENT_GITHUB_RELAY_TLS_DIR`），把 `ca.pem` 交给每台主机（`AGENT_SANDBOX_GITHUB_RELAY_CA_FILE`）。"
+
+#: ../developer/operations.md
+msgid "Enable the `github-relay` Compose profile on the control plane and on each host, and give each host's `github-tunnel` its own SSH key restricted with `permitopen` to the relay's port (`AGENT_GITHUB_TUNNEL_*`)."
+msgstr "在控制平面和每台主机上启用 `github-relay` Compose profile，并给每台主机的 `github-tunnel` 单独一把 SSH 密钥，用 `permitopen` 限制为只能连到中继的端口（`AGENT_GITHUB_TUNNEL_*`）。"
+
+#: ../developer/operations.md
+msgid "Set `AGENT_GITHUB_COAUTHOR` to the App bot's noreply address."
+msgstr "把 `AGENT_GITHUB_COAUTHOR` 设为 App bot 的 noreply 地址。"
+
+#: ../developer/operations.md
+msgid "Pushes through the relay bypass the trusted publisher's patch gate, including its workflow-file and secret checks. Repository branch protection and GitHub rules still apply, and a push that changes a workflow needs the App's Workflows permission. The design is in [agent-native pull requests](../agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md)."
+msgstr "经中继的推送会绕过受信任发布器的补丁检查，包括对工作流文件和 secret 的检查。仓库的分支保护和 GitHub 规则仍然有效；修改工作流的推送需要 App 有 Workflows 权限。设计见 [Agent 自己开 PR](../agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md)。"
 
 #: ../developer/operations.md:1445
 msgid ""

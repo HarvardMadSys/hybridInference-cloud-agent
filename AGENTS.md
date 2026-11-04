@@ -255,12 +255,16 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   included, so code a member plants there — a Git hook or `core.fsmonitor`,
   a build or test script — runs with the credentials of whichever member
   executes it next. Model calls use the owner's own provider key and billing.
-  The runner also injects a separate short-lived GitHub App
-  token as `GH_TOKEN` in the owning member's environment, restricted to
-  `contents: write` and `pull_requests: write` on the job's repository. Account
-  tokens, refresh tokens, and the App's private key remain outside. Direct
-  sandbox publication does not pass through the trusted publisher's patch
-  gate; repository branch protection and GitHub rules still apply.
+  No credential GitHub accepts enters a sandbox. A member's `GH_TOKEN` is its
+  residency's `agh.` placeholder, which only the GitHub relay accepts: while
+  the residency serves a running turn it exchanges it for the owner's own
+  GitHub user token, for the conversation's repository only, and refuses
+  branch deletion, tags, GraphQL and repository administration. A member
+  shares the owner's identity, not their token: commits are authored as the
+  owner, and the owner's token, refresh token and the App's private key stay
+  in the control plane. Pushes through the relay do not pass the trusted
+  publisher's patch gate; repository branch protection and GitHub rules still
+  apply ([design](docs/agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md)).
 - **Owner-provided environment credentials.** An owner may deliberately inject
   personal variables and Secrets through a frozen environment binding. Repository
   code, dependencies and the agent can read them, send them through the existing

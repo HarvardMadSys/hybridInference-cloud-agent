@@ -247,7 +247,7 @@ msgstr ""
 
 #: ../../ENVIRONMENT.md:85
 msgid ""
-"Run `alembic upgrade head` (through `0110_host_late_settings`) before "
+"Run `alembic upgrade head` (through `0111_thread_pull_requests`) before "
 "starting this release; the [upgrade notes](docs/developer/upgrade-"
 "notes.md) say what each recent migration changes. The main control-plane "
 "listener then initializes the settings document once from its existing "
@@ -255,7 +255,7 @@ msgid ""
 "same saved values."
 msgstr ""
 "启动这个版本之前，先运行 `alembic upgrade head`（升级到 "
-"`0110_host_late_settings`）；每个近期迁移改了什么，见[升级说明](docs/developer/upgrade-"
+"`0111_thread_pull_requests`）；每个近期迁移改了什么，见[升级说明](docs/developer/upgrade-"
 "notes.md)。之后，主控制平面监听器会根据现有环境变量，将设置文档初始化一次。MCP 专用监听器会等这份文档准备好，并使用同样的已保存值。"
 
 #: ../../ENVIRONMENT.md:91
@@ -1714,6 +1714,23 @@ msgstr ""
 "凭据和这个地址三样都得配好。"
 
 #: ../developer/configuration.md:1
+msgid "`AGENT_GITHUB_COAUTHOR`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"NEW. The co-author agents name in their commits, as `Name <email>`. Use "
+"the GitHub App bot's noreply address, `<bot-user-id>+<app-"
+"slug>[bot]@users.noreply.github.com`, so GitHub shows its avatar beside "
+"the owner's. Empty: commits name the owner only. Agents author commits as "
+"the conversation's owner (their GitHub noreply address) either way."
+msgstr ""
+"新增。agent 在 commit 里署名的 co-author，格式是 `Name <email>`。用 GitHub App bot 的 noreply "
+"地址 `<bot-user-id>+<app-slug>[bot]@users.noreply.github.com`，GitHub "
+"才会在用户头像旁边显示它的头像。留空则 commit 只署用户本人。无论是否设置，agent 都以对话主人的身份（其 GitHub noreply "
+"地址）作为 commit 作者。"
+
+#: ../developer/configuration.md:1
 msgid "`AGENT_GITHUB_API`"
 msgstr ""
 
@@ -1896,6 +1913,49 @@ msgstr ""
 "`SSH_DESTINATION`、`SSH_KEY`、`SSH_KNOWN_HOSTS`。`SSH_PORT` / `REMOTE_HOST` "
 "/ `REMOTE_PORT` / `LISTEN_PORT` 的默认值分别是 `22` / `127.0.0.1` / `8001` / "
 "`8000`。它的远端目标必须是 MCP 专用监听器，主 API 的 8000 端口不提供任何工具。给它单独用一把严格受限的密钥。"
+
+#: ../developer/configuration.md:1
+msgid "`AGENT_SANDBOX_GITHUB_RELAY_CA_FILE`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"NEW. *Host only.* The GitHub relay CA's certificate on this host "
+"(`deploy/control-plane/github-relay-certs.sh` makes it). Set, with the "
+"`github-relay` Compose profile on this host and the control plane, every "
+"group bridge resolves `github.com` and `api.github.com` to the host's "
+"`github-tunnel`, and each member trusts the CA for its own processes; git "
+"and `gh` then reach GitHub as the conversation's owner through the control"
+" plane's GitHub relay. Unset, sandboxes reach GitHub directly and "
+"anonymously. See the [design](docs/agents/specs/2026-11-04-agent-native-"
+"pull-requests.zh-CN.md)."
+msgstr ""
+"新增。*仅主机。* 本机上 GitHub 中继 CA 的证书（由 `deploy/control-plane/github-relay-certs.sh` "
+"生成）。设置后，并且本机和控制面都启用了 `github-relay` Compose profile，每个组桥都会把 `github.com` 和 "
+"`api.github.com` 解析到本机的 `github-tunnel`，每个成员只在自己的进程里信任这个 CA；git 和 `gh` "
+"于是经控制面的 GitHub 中继，以对话主人的身份访问 GitHub。不设置时，sandbox 直接、匿名地访问 "
+"GitHub。见[设计](docs/agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md)。"
+
+#: ../developer/configuration.md:1
+msgid "`AGENT_GITHUB_TUNNEL_*`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"NEW. The GitHub relay's SSH tunnel, started by the `github-relay` "
+"profile. Required with it: `SSH_DESTINATION`, `SSH_KEY`, "
+"`SSH_KNOWN_HOSTS`. Defaults for `SSH_PORT` / `REMOTE_HOST` / "
+"`REMOTE_PORT`: `22` / `127.0.0.1` / `8443`; it listens on 443 under the "
+"names `github.com` and `api.github.com`. Its remote destination must be "
+"the GitHub relay's listener (`AGENT_GITHUB_RELAY_BIND` / "
+"`AGENT_GITHUB_RELAY_PORT` on the control plane, with its certificate and "
+"key in `AGENT_GITHUB_RELAY_TLS_DIR`). Give it a key of its own."
+msgstr ""
+"新增。GitHub 中继的 SSH 隧道，由 `github-relay` profile 启动。启用时必须设置 "
+"`SSH_DESTINATION`、`SSH_KEY`、`SSH_KNOWN_HOSTS`。`SSH_PORT` / `REMOTE_HOST` / "
+"`REMOTE_PORT` 的默认值分别是 `22` / `127.0.0.1` / `8443`；它以 `github.com` 和 "
+"`api.github.com` 这两个名字监听 443。它的远端目标必须是控制面上 GitHub 中继的监听器（`AGENT_GITHUB_RELAY_BIND` / "
+"`AGENT_GITHUB_RELAY_PORT`，证书和私钥放在 `AGENT_GITHUB_RELAY_TLS_DIR`）。给它单独一把密钥。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_MCP_HOSTNAME`"

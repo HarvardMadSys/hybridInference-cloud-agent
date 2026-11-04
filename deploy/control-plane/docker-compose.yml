@@ -230,6 +230,7 @@ services:
       AGENT_GITHUB_APP_CLIENT_ID: ${AGENT_GITHUB_APP_CLIENT_ID:-}
       AGENT_GITHUB_APP_CLIENT_SECRET: ${AGENT_GITHUB_APP_CLIENT_SECRET:-}
       AGENT_GITHUB_APP_INSTALL_URL: ${AGENT_GITHUB_APP_INSTALL_URL:-}
+      AGENT_GITHUB_COAUTHOR: ${AGENT_GITHUB_COAUTHOR:-}
       # Prefer the path form. A private key in an environment variable is
       # readable by anything that can list the process environment, and lands
       # in `docker inspect`, crash dumps and most log shippers.
@@ -342,6 +343,67 @@ services:
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    networks: [control-plane]
+
+  # The GitHub relay: git and gh in a sandbox reach GitHub as the
+  # conversation's owner, without the owner's token ever entering a sandbox.
+  # Same image, database and lifespan, a third listener holding nothing but the
+  # relay's catch-all route (`create_github_relay_app`).
+  #
+  # It terminates TLS for github.com and api.github.com with a certificate
+  # this deployment's own CA signs (deploy/control-plane/github-relay-certs.sh);
+  # sandboxes trust that CA for those two names only. Behind a profile:
+  # `COMPOSE_PROFILES=github-relay` turns it on, together with the host's
+  # github-tunnel and AGENT_SANDBOX_GITHUB_RELAY_CA_FILE.
+  github-relay:
+    profiles: [github-relay]
+    build:
+      context: ../..
+      dockerfile: deploy/control-plane/Dockerfile
+      args:
+        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    command:
+      - uvicorn
+      - cloud_agent.app:create_github_relay_app
+      - --factory
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8443"
+      - --ssl-certfile
+      - /etc/cloud-agent/github-relay/relay.pem
+      - --ssl-keyfile
+      - /etc/cloud-agent/github-relay/relay.key
+    restart: unless-stopped
+    ports:
+      # Loopback, like the MCP relay: only the hosts' github-tunnel reaches it.
+      - "${AGENT_GITHUB_RELAY_BIND:-127.0.0.1}:${AGENT_GITHUB_RELAY_PORT:-8443}:8443"
+    environment:
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:?the account system key; openssl rand -base64 32}
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
+      # The owner's GitHub user token is stored encrypted under this key, and
+      # renewed with the App's client credentials.
+      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
+      AGENT_GITHUB_API: ${AGENT_GITHUB_API:-https://api.github.com}
+      AGENT_GITHUB_APP_ID: ${AGENT_GITHUB_APP_ID:-}
+      AGENT_GITHUB_APP_CLIENT_ID: ${AGENT_GITHUB_APP_CLIENT_ID:-}
+      AGENT_GITHUB_APP_CLIENT_SECRET: ${AGENT_GITHUB_APP_CLIENT_SECRET:-}
+      AGENT_GITHUB_APP_PRIVATE_KEY_PATH: ${AGENT_GITHUB_APP_PRIVATE_KEY_PATH:-/etc/cloud-agent/github-app.pem}
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+    volumes:
+      - ${AGENT_GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/etc/cloud-agent/github-app.pem:ro
+      # relay.pem (the leaf for github.com and api.github.com) and relay.key.
+      # The CA's own key is not needed here and should not be mounted.
+      - ${AGENT_GITHUB_RELAY_TLS_DIR:-./github-relay-tls}:/etc/cloud-agent/github-relay:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

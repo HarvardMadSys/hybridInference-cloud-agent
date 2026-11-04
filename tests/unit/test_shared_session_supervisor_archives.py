@@ -1083,18 +1083,29 @@ def test_a_per_attempt_mcp_token_still_needs_a_new_process():
     assert not transport.compatible_with(replace(launch, mcp_credential="ajt.turn-2"))
 
 
-def test_github_token_rotation_or_removal_requires_a_new_resident_process():
+def test_github_placeholder_is_kept_by_a_probe_and_replaced_only_by_another_residency():
     launch = replace(
         _launch("athr_source", native_session_id="native-source", slot=0),
-        github_token="first-token",
+        github_credential="agh.first.signature",
         github_repo="owner/repo",
+        git_author_name="octo",
+        git_author_email="7+octo@users.noreply.github.com",
     )
     transport = ResidentTransport(launch=launch, session=SimpleNamespace())
 
     assert transport.compatible_with(replace(launch, credential="renewed-grant"))
-    assert not transport.compatible_with(replace(launch, github_token="renewed-token"))
-    assert not transport.compatible_with(replace(launch, github_token=None))
+    # A probe names no placeholder or identity: the live process keeps its own.
+    assert transport.compatible_with(
+        replace(launch, github_credential="", git_author_name="", git_author_email="")
+    )
+    assert not transport.compatible_with(replace(launch, github_credential="agh.second.signature"))
+    assert not transport.compatible_with(replace(launch, git_author_email="8+other@x"))
     assert not transport.compatible_with(replace(launch, github_repo="owner/other"))
+    # A process holding something other than a residency placeholder is not borrowed.
+    legacy = ResidentTransport(
+        launch=replace(launch, github_credential="ghs_installation"), session=SimpleNamespace()
+    )
+    assert not legacy.compatible_with(replace(launch, github_credential=""))
 
 
 def test_missing_launch_locator_restores_the_known_member_instead_of_starting_fresh():

@@ -24,6 +24,7 @@ from cloud_agent.storage.repositories.conversation_queries import PostgresConver
 from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
 from cloud_agent.storage.repositories.file_activity import PostgresFileActivityQueries
+from cloud_agent.storage.repositories.github_relay import PostgresGitHubRelayRepository
 from cloud_agent.storage.repositories.goal_wakeups import PostgresGoalWakeupRepository
 from cloud_agent.storage.repositories.goals import PostgresGoalRepository
 from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
@@ -77,6 +78,7 @@ __all__ = [
     "PostgresCredentialQueries",
     "PostgresExecutionQueries",
     "PostgresFileActivityQueries",
+    "PostgresGitHubRelayRepository",
     "PostgresGoalRepository",
     "PostgresGoalWakeupRepository",
     "PostgresHostCapacityRepository",

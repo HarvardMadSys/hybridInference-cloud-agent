@@ -23,7 +23,7 @@ TEST_LIMIT = 2000
 #: Line counts of the modules over the limit when it arrived.
 BASELINE = {
     "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5216,
-    "apps/backend/cloud_agent_host/runner.py": 4690,
+    "apps/backend/cloud_agent_host/runner.py": 4685,
     "apps/backend/cloud_agent_host/chat_sandbox.py": 4044,
     "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3815,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 3545,
@@ -53,7 +53,7 @@ TEST_BASELINE = {
     "tests/integration/storage/test_host_pool_store.py": 3212,
     "tests/integration/storage/test_mcp_connection_store.py": 3182,
     "tests/servers/test_admin_compute.py": 2090,
-    "tests/servers/test_agent_jobs_api.py": 6074,
+    "tests/servers/test_agent_jobs_api.py": 6002,
     "tests/unit/test_agent_publish_worker.py": 2009,
     "tests/unit/test_agent_runner.py": 2542,
     "tests/unit/test_agent_sandbox_manager.py": 3936,
