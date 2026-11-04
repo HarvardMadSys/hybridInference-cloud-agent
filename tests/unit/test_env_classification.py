@@ -64,12 +64,19 @@ BACKEND = "apps/backend/"
 #: Where a variable an operator sets for a production stack is named.
 PRODUCTION_TEMPLATES = ("deploy/control-plane/", "deploy/host/")
 #: The example env files an operator copies for a production stack.
-PRODUCTION_EXAMPLES = ("deploy/control-plane/.env.example", "deploy/host/.env.example")
+PRODUCTION_EXAMPLES = (
+    "deploy/control-plane/.env.example",
+    "deploy/host/.env.example",
+    "deploy/control-plane/compute-host.env.example",
+)
 #: Admin-managed names an example still offers, by (file, variable), and why.
 EXAMPLE_ADMIN_NAMES: dict[tuple[str, str], str] = {
     ("deploy/host/.env.example", "AGENT_SANDBOX_MANAGER_TOKEN"): (
         "the host's own copy: its sandbox manager checks the control plane's saved "
         "value against it, so it must exist on the machine before the first heartbeat"
+    ),
+    ("deploy/control-plane/compute-host.env.example", "AGENT_SANDBOX_MANAGER_TOKEN"): (
+        "the same host copy, written into a managed host's .env by its deployment profile"
     ),
 }
 _EXAMPLE_LINE = re.compile(r"\s*#?\s*([A-Z][A-Z0-9_]*)=")
