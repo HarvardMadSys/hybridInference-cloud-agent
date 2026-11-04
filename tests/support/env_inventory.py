@@ -72,9 +72,10 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "admin",
-        "Signing and encryption keys stored as settings. Replacing the control key "
-        "invalidates host and worker credentials (hosts re-enroll); the two encryption "
-        "keys lock once set and need re-encryption.",
+        "Signing and encryption keys stored as settings, generated into the first settings "
+        "row when the environment supplies none. Replacing the control key invalidates "
+        "host and worker credentials (hosts re-enroll); the two encryption keys lock once "
+        "set and need re-encryption.",
         names=(
             "AGENT_CONTROL_TOKEN_SECRET",
             "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
@@ -308,8 +309,9 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "deployment",
         "Control-plane bootstrap: needed before the settings row can be read, the "
-        "recovery door when sign-in is broken, and the key every account credential is "
-        "hashed under (a deployment decision, not a setting).",
+        "optional recovery door when sign-in is broken, and the key every account "
+        "credential is hashed under (a deployment decision, not a setting). deploy.sh "
+        "generates the bundled DSN and the account key on a provably new installation.",
         names=("AGENT_DATABASE_URL", "ADMIN_TOKEN", "AGENT_LOCAL_SESSION_SECRET"),
     ),
     Family(
@@ -380,13 +382,10 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "deployment",
-        "The web image's build-time routing (substituted at next build) and the web "
-        "server's control-plane address.",
+        "The web image's browser API path (substituted at next build; the image sets "
+        "/api) and the web server's control-plane address.",
         names=(
-            "AGENT_WEB_API_URL",
-            "AGENT_WEB_BASE_PATH",
             "NEXT_PUBLIC_AGENT_API_URL",
-            "NEXT_PUBLIC_BASE_PATH",
             "AGENT_CONTROL_PLANE_URL",
         ),
     ),
@@ -539,7 +538,8 @@ FAMILIES: tuple[Family, ...] = (
         "operation",
         "The settings root key: needed to decrypt the settings row itself. Without it, "
         "the environment's AGENT_SESSION_SECRET (once the Gateway session key) is the "
-        "fallback root; changing the root in use is a re-encryption procedure.",
+        "fallback root; changing the root in use is a re-encryption procedure. deploy.sh "
+        "generates it only on a provably new installation with no fallback.",
         names=("AGENT_SETTINGS_ENCRYPTION_KEY", "AGENT_SESSION_SECRET"),
     ),
     # -- internal ---------------------------------------------------------
@@ -689,6 +689,12 @@ FAMILIES: tuple[Family, ...] = (
         "No longer read: sandbox_host.sh only warns that AGENT_RUNNER_REPLICAS is set and "
         "should be removed from .env.",
         names=("AGENT_RUNNER_REPLICAS",),
+    ),
+    Family(
+        "retired",
+        "Mounting the web app under a path prefix was removed. Named only so deploy.sh and "
+        "the release deployer refuse a deployment that still sets it.",
+        names=("AGENT_WEB_BASE_PATH",),
     ),
     Family(
         "retired",

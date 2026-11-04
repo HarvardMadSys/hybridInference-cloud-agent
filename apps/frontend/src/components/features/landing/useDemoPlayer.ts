@@ -44,6 +44,7 @@ function firstView(calm: boolean): DemoView {
 
 interface Pause {
   hover: boolean;
+  focus: boolean;
   offscreen: boolean;
 }
 
@@ -98,7 +99,8 @@ function createPlayer(
     let left = ms;
     while (left > 0) {
       await wait(run, 100);
-      const paused = pause.current.hover || pause.current.offscreen || document.hidden;
+      const paused =
+        pause.current.hover || pause.current.focus || pause.current.offscreen || document.hidden;
       if (!paused) left -= 100;
     }
   }
@@ -174,7 +176,7 @@ function createPlayer(
 export function useDemoPlayer(calm: boolean) {
   const [view, setView] = useState<DemoView>(() => firstView(calm));
   const generation = useRef(0);
-  const pause = useRef<Pause>({ hover: false, offscreen: false });
+  const pause = useRef<Pause>({ hover: false, focus: false, offscreen: false });
   const player = useMemo(() => createPlayer(setView, generation, pause, calm), [calm]);
 
   useEffect(() => {

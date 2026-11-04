@@ -1,7 +1,9 @@
 """Validated, database-backed application settings shared by both listeners.
 
-The environment is imported once when the settings row is first created.
-After that, the database is authoritative, including resets to registry defaults.
+The environment is imported once when the settings row is first created, and
+the service keys it does not supply are generated then
+(:data:`GENERATED_ON_FIRST_START`). After that, the database is authoritative,
+including resets to registry defaults.
 Secrets are encrypted under a separate domain and never returned to the browser.
 Only database access, the settings root key, recovery access and process
 infrastructure remain bootstrap. Runtime identity and service keys are persisted.
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -1276,20 +1279,58 @@ def weak_credentials() -> list[str]:
     return weak
 
 
+#: Keys a new deployment needs and nobody has to choose. When the settings row
+#: is first created and the environment supplies none, each is generated into
+#: it; a seed racing that one keeps whichever row was stored first. Never into
+#: an existing row: what it holds, empty included, is the deployment's.
+GENERATED_ON_FIRST_START = (
+    "control_signing_secret",
+    "source_control_encryption_key",
+    "compute_encryption_key",
+)
+
+
+def first_settings(problems: list[str] | None = None) -> tuple[dict[str, Any], list[str]]:
+    """The first settings row: the environment's import plus the keys it lacks.
+
+    Returns the encoded row and the names of the keys generated, never their
+    values. Without a settings root key nothing secret can be stored, so
+    nothing is generated; the setup status names the root key instead.
+    """
+    encoded = initial_settings(problems=problems)
+    if len(settings_root_key().encode()) < MINIMUM_CREDENTIAL_BYTES:
+        return encoded, []
+    generated = []
+    for key in GENERATED_ON_FIRST_START:
+        setting = SETTINGS_BY_KEY[key]
+        if not encoded.get(setting.storage_key):
+            encoded[setting.storage_key] = _encode(setting, secrets.token_hex(32))
+            generated.append(setting.env or key)
+    return encoded, generated
+
+
 async def initialize_settings(repository: SettingsRepository, *, seed: bool = True) -> None:
     """Seed once, then adopt the database rather than reimporting the environment."""
     revision, encoded = await repository.read_settings()
     missing = {setting.storage_key for setting in MIGRATED_SETTINGS} - encoded.keys()
     if revision < 0 or missing:
         if seed:
-            problems: list[str] = []
-            revision, encoded = await repository.seed_settings(
-                initial_settings(keys=missing if revision >= 0 else None, problems=problems)
-            )
             from cloud_agent.logging_utils import get_logger
 
+            problems: list[str] = []
+            generated: list[str] = []
+            if revision < 0:
+                values, generated = first_settings(problems)
+            else:
+                values = initial_settings(keys=missing, problems=problems)
+            revision, encoded = await repository.seed_settings(values)
             for problem in problems:
                 get_logger(__name__).warning("settings import: %s", problem)
+            if generated:
+                get_logger(__name__).info(
+                    "first settings row: generated %s, which the environment did not set",
+                    ", ".join(generated),
+                )
         else:
             # Only the main listener has the complete legacy environment.
             # A relay racing it must never seed blank integration credentials.

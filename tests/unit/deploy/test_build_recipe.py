@@ -34,10 +34,7 @@ def manifest() -> dict[str, Any]:
         )
 
     artifacts = [{"role": "control", "image": ref("control")}]
-    for variant, base in (("root", ""), ("agents", "/agents")):
-        artifacts.append(
-            {"role": "web", "variant": variant, "base_path": base, "image": ref(f"web{variant}")}
-        )
+    artifacts.append({"role": "web", "variant": "root", "base_path": "", "image": ref("webroot")})
     for role in ("runner", "sandbox", "tunnel"):
         artifacts.append({"role": role, "image": ref(role)})
     return {"source_commit": "a" * 40, "artifacts": artifacts}
@@ -127,7 +124,7 @@ def test_the_extracted_recipe_renders_a_release_compose_without_a_checkout(
                 "--stack",
                 "control-plane",
                 "--variant",
-                "agents",
+                "root",
                 "--output",
                 str(output),
             ],
@@ -139,7 +136,7 @@ def test_the_extracted_recipe_renders_a_release_compose_without_a_checkout(
         rendered = yaml.safe_load(output.read_text())
         assert "build" not in yaml.safe_dump(rendered)
         assert rendered["services"]["web"]["image"] == next(
-            a["image"] for a in manifest()["artifacts"] if a.get("variant") == "agents"
+            a["image"] for a in manifest()["artifacts"] if a.get("variant") == "root"
         )
 
 

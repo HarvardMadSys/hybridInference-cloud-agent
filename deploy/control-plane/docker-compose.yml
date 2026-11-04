@@ -66,13 +66,13 @@ services:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
 
       # --- Public addresses -------------------------------------------------
-      # This API's public address, including any proxy prefix, such as
-      # https://agents.example.org/api. MCP sign-in callbacks and compute node
-      # registration are built from it unless they have their own address.
+      # This API's public address, such as https://agents.example.org/api.
+      # MCP sign-in callbacks and compute node registration are built from it
+      # unless they have their own address.
       AGENT_PUBLIC_API_URL: ${AGENT_PUBLIC_API_URL:-}
-      # The web app's public origin including any base path, e.g.
-      # https://example.org/agents. Account mail links (verification, password
-      # reset, email change) are built from it alone.
+      # The web app's public origin, e.g. https://agents.example.org. Account
+      # mail links (verification, password reset, email change) are built
+      # from it alone.
       AGENT_WEB_BASE_URL: ${AGENT_WEB_BASE_URL:-}
 
       # --- This service's own secrets ---------------------------------------
@@ -350,9 +350,9 @@ services:
     networks: [control-plane]
 
   # The browser-facing app. Two classes of configuration meet here, and the
-  # difference is deliberate: `basePath` and the browser's API prefix are
-  # properties of the image variant, resolved when the bundle is compiled, so
-  # they are build arguments and a change to either is a rebuild. The
+  # difference is deliberate: the browser's API prefix is a property of the
+  # image, resolved when the bundle is compiled, so it is a build argument and
+  # a change to it is a rebuild. The
   # deployment's identity — name, organisation, status page, contact — is
   # read by the server on every request instead, so it is
   # `environment:` below and changing it restarts the container rather than
@@ -362,25 +362,10 @@ services:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile.web
       args:
-        # Where this app is mounted. `/agents` serves it under a parent site's
-        # hostname whose frontend proxies it, which keeps the session cookie
-        # same-origin and takes CORS out of the deployment entirely. Empty for
-        # a deployment that owns its own hostname.
-        #
-        # **Required, not defaulted to empty**, and the three below with it.
-        # Empty is a real answer for one deployment shape and silently wrong
-        # for the other, and the wrongness does not show at start: the stack
-        # comes up healthy with the app mounted at the wrong path, calling the
-        # parent site instead of the control plane, and unable to sign anyone in.
-        # `?` (without `:`) requires an explicit choice while still accepting
-        # the empty string, which is the value for a deployment that owns its
-        # hostname. `:?` would contradict that contract by rejecting empty.
-        NEXT_PUBLIC_BASE_PATH: ${AGENT_WEB_BASE_PATH?the prefix this app is mounted under; empty string for a deployment that owns its own hostname}
-        # Relative on purpose when mounted under a prefix: a same-origin path
-        # means the cookie is sent without `SameSite=None`, and no absolute
-        # host has to be known at build time. Under a base path this is that
-        # base path plus `/api`, which the reverse proxy strips.
-        NEXT_PUBLIC_AGENT_API_URL: ${AGENT_WEB_API_URL:?control-plane base URL as the browser calls it, e.g. /agents/api}
+        # The browser calls the control plane at `/api` on the same origin;
+        # the edge in front routes it. The app is served at the root of its
+        # own hostname: mounting it under a path prefix was removed.
+        NEXT_PUBLIC_AGENT_API_URL: /api
         NEXT_PUBLIC_BUILD_SHA: ${BUILD_SHA:-}
         NEXT_PUBLIC_BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-}
     # Read per request by `apps/frontend/src/config/site.server.ts`. Display values only:
@@ -408,18 +393,14 @@ services:
         condition: service_started
     networks: [control-plane]
 
-  # --- Optional: the edge for a deployment that owns its own hostname -------
-  # Under a parent site's hostname its frontend proxies `/agents/*` to these two
-  # services and this one has no job, which is why it sits behind a profile:
-  # those deployments never run it. On a standalone hostname
-  # (agents.example.org) the tunnel or load balancer in front points at this
-  # one port and nginx splits the origin — `/api/*` to the control plane with
+  # --- Optional: the edge ----------------------------------------------------
+  # Behind a profile, for a deployment whose own reverse proxy does not already
+  # split the origin. The tunnel or load balancer in front of the hostname
+  # (agents.example.org) points at this one port and nginx splits the origin — `/api/*` to the control plane with
   # the prefix stripped, everything else to the web app. One origin for both
   # is what lets the session cookie travel; two hostnames would not.
   #
-  # Enable with `COMPOSE_PROFILES=edge` in .env, and build the web app for the
-  # root: AGENT_WEB_BASE_PATH= (empty) and AGENT_WEB_API_URL=/api. Loopback by
-  # default, like every other published port here: the tunnel is on this host.
+  # Enable with `COMPOSE_PROFILES=edge` in .env. Loopback by default, like every other published port here: the tunnel is on this host.
   edge:
     profiles: [edge]
     image: nginx:1.27.5-alpine
@@ -488,9 +469,9 @@ services:
 
 networks:
   control-plane:
-    # **Named, so another stack can join it.** A parent site's frontend that
-    # proxies `/agents/*` here has to resolve `web` and `control-plane` by
-    # name — and a compose-derived name like `cloudagent_control-plane`
+    # **Named, so another stack can join it.** A reverse proxy in another
+    # stack has to resolve `web` and `control-plane` by name — and a
+    # compose-derived name like `cloudagent_control-plane`
     # depends on the project name whoever ran `up` happened to use.
     name: ${AGENT_NETWORK_NAME:-cloud-agent}
     driver: bridge

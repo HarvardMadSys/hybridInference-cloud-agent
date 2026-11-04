@@ -1,4 +1,4 @@
-// The variant's browser API prefix, asserted where it is written.
+// The image's browser API prefix, asserted where it is written.
 //
 // `next.config.js` is plain CommonJS loaded before any TypeScript exists, so
 // this test runs the real file in a subprocess instead of restating the rule.
@@ -19,12 +19,12 @@ interface Loaded {
 }
 
 /**
- * Load `next.config.js` with exactly the two build arguments a variant sets.
+ * Load `next.config.js` with exactly the build argument an image sets.
  *
  * The inherited environment is not used: a developer shell that happens to
  * export one of these would otherwise decide what this test proves.
  */
-function loadVariant(basePath: string, apiUrl: string): Loaded {
+function loadVariant(apiUrl: string): Loaded {
   try {
     const output = execFileSync(
       process.execPath,
@@ -34,7 +34,6 @@ function loadVariant(basePath: string, apiUrl: string): Loaded {
           // Next's own types require this key; the config file does not read it.
           NODE_ENV: process.env.NODE_ENV || 'test',
           PATH: process.env.PATH,
-          NEXT_PUBLIC_BASE_PATH: basePath,
           NEXT_PUBLIC_AGENT_API_URL: apiUrl,
         },
         encoding: 'utf8',
@@ -48,43 +47,35 @@ function loadVariant(basePath: string, apiUrl: string): Loaded {
   }
 }
 
-describe('the variant API-prefix assertion', () => {
+describe('the browser API-prefix assertion', () => {
   it.each([
-    ['the root variant', '', '/api'],
-    ['the /agents variant', '/agents', '/agents/api'],
-    ['trailing slashes on either value', '/agents/', '/agents/api/'],
-    ['a prefix that arrives without its leading slash', 'agents', '/agents/api'],
-  ])('accepts %s', (_case, basePath, apiUrl) => {
-    expect(loadVariant(basePath, apiUrl).ok).toBe(true);
+    ['the same-origin prefix', '/api'],
+    ['a trailing slash', '/api/'],
+  ])('accepts %s', (_case, apiUrl) => {
+    expect(loadVariant(apiUrl).ok).toBe(true);
   });
 
   it.each([
-    ['the root prefix inside the /agents variant', '/agents', '/api'],
-    ['the /agents prefix inside the root variant', '', '/agents/api'],
-    ['a prefix belonging to neither variant', '/agents', '/v1'],
-  ])('refuses %s', (_case, basePath, apiUrl) => {
-    expect(loadVariant(basePath, apiUrl).ok).toBe(false);
+    ['the retired /agents prefix', '/agents/api'],
+    ['any other relative prefix', '/v1'],
+  ])('refuses %s', (_case, apiUrl) => {
+    expect(loadVariant(apiUrl).ok).toBe(false);
   });
 
-  it('names the value it got and the one the variant needs', () => {
-    const { output } = loadVariant('/agents', '/api');
-    expect(output).toContain('AGENT_WEB_API_URL');
-    expect(output).toContain('"/api"');
+  it('names the value it got and the one it needs', () => {
+    const { output } = loadVariant('/agents/api');
+    expect(output).toContain('NEXT_PUBLIC_AGENT_API_URL');
     expect(output).toContain('"/agents/api"');
+    expect(output).toContain('"/api"');
   });
 
   it('leaves an absolute prefix alone', () => {
-    // The cross-origin shape. It cannot be derived from a mount point — it
-    // needs CORS with credentials on the control plane — so this file has
-    // nothing to say about it.
-    expect(loadVariant('/agents', 'https://api.example.org').ok).toBe(true);
+    // The cross-origin shape: it needs CORS with credentials on the control
+    // plane, which is a deployment's decision, not this file's.
+    expect(loadVariant('https://api.example.org').ok).toBe(true);
   });
 
   it('leaves an unset prefix alone', () => {
-    // Pinned deliberately: an unset prefix is the same-origin shape, and under
-    // a mount prefix the compose file is what refuses it — `AGENT_WEB_API_URL`
-    // is a required variable there. Guessing a deployment's proxy topology
-    // here would refuse a shape this file cannot see.
-    expect(loadVariant('', '').ok).toBe(true);
+    expect(loadVariant('').ok).toBe(true);
   });
 });

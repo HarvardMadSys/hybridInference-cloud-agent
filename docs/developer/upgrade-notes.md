@@ -40,10 +40,31 @@ from then on the database wins and the line is ignored. After the control plane
 
 `AGENT_COMPUTE_SECRET_KEY` is imported the same way: once stored, saved compute
 credentials decrypt with the stored key and a different value in `.env` is
-ignored. `deploy.sh` writes a new random value whenever the line is missing, so
-deleting it only brings back an unused one; leave it. Keep
-`AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own copy of the
-credential.
+ignored, so the line can be deleted too. `deploy.sh` no longer writes one: a new
+deployment's control plane generates the key into its settings on first start.
+What must be backed up with the database is the settings root key
+(`AGENT_SETTINGS_ENCRYPTION_KEY`, or `AGENT_SESSION_SECRET` where that is the
+root). Keep `AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own
+copy of the credential.
+
+`ADMIN_TOKEN` is optional: the first administrator of a new deployment signs in
+with the one-time setup code. An existing deployment can keep it as its
+recovery door. `deploy.sh` now generates a new installation's database
+password and DSN, account key and settings root key. It never replaces a set
+value, never adds a settings key beside `AGENT_SESSION_SECRET`, and on a
+deployment root that has deployed before it stops with the names of any
+missing required value rather than generate one.
+
+The web app is now served only at the root of its own hostname, with the API at
+`/api` on the same origin; mounting it under a path prefix such as `/agents`
+inside another site was removed, and releases no longer carry the `web-agents`
+image. Delete `AGENT_WEB_BASE_PATH`, `AGENT_WEB_API_URL` and
+`AGENT_DEPLOYMENT_SHA` from the control plane's `.env` (`deploy.sh` exports the
+commit it deploys). An empty `AGENT_WEB_BASE_PATH` is harmless; one with a value
+stops `deploy.sh` and the release deployer, since it would now be ignored.
+`AGENT_NETWORK_NAME` can go too unless another stack's reverse proxy joins the
+network by a name other than `cloud-agent`. A distribution that resolves
+releases must accept one without the `/agents` web image before deploying it.
 
 Four values moved into Admin in this release:
 

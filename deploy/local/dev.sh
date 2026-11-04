@@ -215,7 +215,11 @@ upgrade_existing_env() {
   append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
   append_dns_server_if_missing
   append_env_if_missing AGENT_LOCAL_SESSION_SECRET "$(random_hex)"
-  append_env_if_missing AGENT_SETTINGS_ENCRYPTION_KEY "$(random_hex)"
+  # A stack whose settings were saved under AGENT_SESSION_SECRET keeps that
+  # root: a new settings key beside it would make every saved secret unreadable.
+  if ! grep -q '^AGENT_SESSION_SECRET=.' "$ENV_FILE"; then
+    append_env_if_missing AGENT_SETTINGS_ENCRYPTION_KEY "$(random_hex)"
+  fi
   append_env_if_missing AGENT_WEB_BASE_URL "http://127.0.0.1:${edge_port}"
   append_env_if_missing AGENT_PUBLIC_API_URL "http://127.0.0.1:${edge_port}/api"
 }
@@ -286,8 +290,6 @@ ensure_env() {
       'LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16' \
       'AGENT_WEB_BASE_URL=http://127.0.0.1:13002' \
       'AGENT_PUBLIC_API_URL=http://127.0.0.1:13002/api' \
-      'AGENT_WEB_BASE_PATH=' \
-      'AGENT_WEB_API_URL=/api' \
       'AGENT_WEB_APP_NAME=FreeInference Cloud Agent (local)' \
       'LOCAL_CHAT_IDLE_TIMEOUT_S=15' \
       'LOCAL_AGENT_TIMEOUT_S=600' \

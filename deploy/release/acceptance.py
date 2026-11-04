@@ -37,7 +37,7 @@ because the web image is the one artifact carrying a variant: checking it is how
 Run it against a candidate before publishing, or against any published release:
 
     python deploy/release/acceptance.py \\
-        --manifest release.json --recipe recipe.tar.gz --variant agents \\
+        --manifest release.json --recipe recipe.tar.gz --variant root \\
         --workdir /tmp/acceptance --project acceptance-1234
 """
 
@@ -203,7 +203,6 @@ def synthetic_environment(compose: Path, variant: str, project: str) -> dict[str
         raise AcceptanceFailure(
             f"unknown variant {variant!r}; the release builds {sorted(VARIANTS)}"
         )
-    base_path, api_url = VARIANTS[variant]
     # Fixed, not random. This database is reachable only from the stack's own
     # network, holds nothing, and is removed with the project — so a random
     # value protects nothing, and a failure that cannot be reproduced costs
@@ -225,8 +224,6 @@ def synthetic_environment(compose: Path, variant: str, project: str) -> dict[str
             # is the Compose service, which is where the database now lives.
             "AGENT_DATABASE_URL": f"postgresql://cloudagent:{password}@postgres:5432/cloudagent",
             "AGENT_WEB_VARIANT": variant,
-            "AGENT_WEB_BASE_PATH": base_path,
-            "AGENT_WEB_API_URL": api_url,
             # A network of this run's own. The stack's network is *named*
             # rather than project-scoped — `${AGENT_NETWORK_NAME:-cloud-agent}`,
             # deliberately, so a parent site's frontend can resolve `web` and
@@ -631,7 +628,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--recipe", type=Path, required=True)
-    parser.add_argument("--variant", default="agents", choices=sorted(VARIANTS))
+    parser.add_argument("--variant", default="root", choices=sorted(VARIANTS))
     parser.add_argument("--workdir", type=Path, required=True)
     parser.add_argument("--project", required=True, help="Compose project, unique to this run.")
     parser.add_argument("--keep", action="store_true", help="Leave the stack up for inspection.")

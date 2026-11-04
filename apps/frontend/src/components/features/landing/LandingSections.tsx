@@ -319,7 +319,7 @@ export function ReviewSection() {
         <div className="mt-4 rounded-[10px] bg-surface px-[22px] py-5 text-foreground shadow-card">
           <span className="font-mono text-[11.5px] text-muted">your-org/web · #128</span>
           <b className="mt-1.5 block text-[17px] font-semibold tracking-[-0.015em]">
-            Add CSV export tests
+            {t('landing.demo.example1.title')}
           </b>
           <span className="mt-2 flex gap-3 font-mono text-[11.5px] text-muted">
             <span>

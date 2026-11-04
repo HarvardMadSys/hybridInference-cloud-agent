@@ -1,6 +1,6 @@
 """Between the cells that push images and the manifest that names them.
 
-Six jobs each push one image and come back with a digest and a label map. The
+Five jobs each push one image and come back with a digest and a label map. The
 manifest generator (`release_manifest.py`) wants one document — the commit,
 every artifact, the sandbox's labels — and refuses an incomplete one. This
 module is the seam between the two, in three pieces the workflow calls in turn:
@@ -16,7 +16,7 @@ module is the seam between the two, in three pieces the workflow calls in turn:
 * `notes` renders the manifest for the release page, with the one number a
   distribution pins — the sha256 of the manifest's bytes — at the top.
 
-Records are files rather than job outputs because six cells of one matrix
+Records are files rather than job outputs because five cells of one matrix
 share one output namespace, and the last writer wins silently.
 """
 

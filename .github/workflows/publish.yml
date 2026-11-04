@@ -222,14 +222,6 @@ jobs:
             build_args: |
               NEXT_PUBLIC_BASE_PATH=
               NEXT_PUBLIC_AGENT_API_URL=/api
-          - name: web-agents
-            arch: arm64
-            smoke_args: --role web --variant agents
-            dockerfile: deploy/control-plane/Dockerfile.web
-            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
-            build_args: |
-              NEXT_PUBLIC_BASE_PATH=/agents
-              NEXT_PUBLIC_AGENT_API_URL=/agents/api
           - name: runner
             arch: amd64
             smoke_args: --role runner
@@ -623,16 +615,15 @@ jobs:
             --publisher-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --output release/release.json
 
-      # The `/agents` variant, because that is the one production serves and the
-      # one whose base path a wrong binding would break. The root variant's image
-      # is started by the smoke in its own cell above.
+      # The root web image, the only one built: the app is served at the root
+      # of its own hostname.
       - name: Deploy it, and check what came up
         run: |
           set -euo pipefail
           uv run python deploy/release/acceptance.py \
             --manifest release/release.json \
             --recipe release/recipe.tar.gz \
-            --variant agents \
+            --variant root \
             --workdir "${WORKDIR}" \
             --project "${PROJECT}"
 

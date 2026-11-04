@@ -74,7 +74,6 @@ def built_artifacts() -> list[dict[str, Any]]:
     return [
         artifact("control"),
         artifact("web", base_path=""),
-        artifact("web", base_path="/agents"),
         *(artifact(role) for role in ROLES[1:]),
     ]
 
@@ -131,11 +130,10 @@ def test_a_complete_build_produces_a_manifest_the_schema_accepts() -> None:
     manifest = build()
     SCHEMA_VALIDATOR.validate(manifest)
     assert [entry["role"] for entry in manifest["artifacts"]] == sorted(
-        ["control", "web", "web", "runner", "sandbox", "tunnel"]
+        ["control", "web", "runner", "sandbox", "tunnel"]
     )
     assert {entry["variant"] for entry in manifest["artifacts"] if entry["role"] == "web"} == {
         "root",
-        "agents",
     }
 
 
@@ -165,10 +163,10 @@ def test_a_duplicated_role_is_refused(duplicated: str) -> None:
 
 
 def test_web_is_built_once_per_mount_shape() -> None:
-    only_root = [entry for entry in built_artifacts() if entry.get("base_path") != "/agents"]
+    retired = [*built_artifacts(), artifact("web", base_path="/agents", seed="web-agents")]
     with pytest.raises(rm.ManifestError) as raised:
-        build(artifacts=only_root)
-    assert "mount shape" in str(raised.value)
+        build(artifacts=retired)
+    assert "base path" in str(raised.value)
 
     two_roots = [*built_artifacts(), artifact("web", base_path="", seed="web-root-again")]
     with pytest.raises(rm.ManifestError) as raised:
@@ -176,7 +174,7 @@ def test_web_is_built_once_per_mount_shape() -> None:
     assert "mount shape" in str(raised.value)
 
     unknown_path = [
-        entry if entry.get("base_path") != "/agents" else artifact("web", base_path="/agent")
+        entry if entry.get("base_path") != "" else artifact("web", base_path="/agent")
         for entry in built_artifacts()
     ]
     with pytest.raises(rm.ManifestError) as raised:
@@ -204,16 +202,6 @@ def test_one_image_cannot_stand_in_for_two_artifacts() -> None:
     with pytest.raises(rm.ManifestError) as raised:
         build(artifacts=artifacts)
     assert "same image" in str(raised.value)
-
-
-def test_the_two_web_variants_cannot_share_a_digest() -> None:
-    artifacts = built_artifacts()
-    first = next(entry for entry in artifacts if entry.get("base_path") == "")
-    second = next(entry for entry in artifacts if entry.get("base_path") == "/agents")
-    second["image"] = first["image"]
-    with pytest.raises(rm.ManifestError) as raised:
-        build(artifacts=artifacts)
-    assert "never built" in str(raised.value)
 
 
 @pytest.mark.parametrize(

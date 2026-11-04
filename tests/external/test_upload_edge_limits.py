@@ -27,7 +27,6 @@ IMAGE = os.environ.get("AGENT_UPLOAD_TEST_NGINX_IMAGE", "nginx:1.27.5-alpine")
 CASES = [
     ("deploy/control-plane/edge.nginx.conf", "/api", 80),
     ("deploy/local/nginx.conf", "/api", 8088),
-    ("deploy/reverse-proxy/agents-under-parent-site.conf", "/agents/api", 80),
 ]
 MOCKS = r"""
 server {
@@ -79,12 +78,10 @@ def nginx_network():
         docker("network", "rm", network, check=False)
 
 
-@pytest.fixture(params=CASES, ids=["standalone", "local", "parent-site-reference"])
+@pytest.fixture(params=CASES, ids=["standalone", "local"])
 def edge(request, tmp_path: Path, nginx_network):
     source, prefix, port = request.param
     configuration = (REPO_ROOT / source).read_text()
-    if source.startswith("deploy/reverse-proxy/"):
-        configuration = "server { listen 80;\n" + configuration + "\n}"
     config = tmp_path / "nginx.conf"
     config.write_text("events {}\nhttp { access_log off;\n" + configuration + MOCKS + "\n}")
     name = "review-test-upload-" + uuid.uuid4().hex[:12]

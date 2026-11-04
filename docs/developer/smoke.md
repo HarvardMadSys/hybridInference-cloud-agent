@@ -61,20 +61,17 @@ from [`control-plane/.env.example`](../../deploy/control-plane/.env.example) and
 [`host/.env.example`](../../deploy/host/.env.example); [ENVIRONMENT.md](../../ENVIRONMENT.md)
 is the reference.
 
-Generate deployment-owned secrets once and keep them out of version control:
+Leave the control plane's keys empty. On a new deployment root with the
+bundled database, the first `deploy.sh` run generates the database password
+and DSN, `AGENT_LOCAL_SESSION_SECRET` and `AGENT_SETTINGS_ENCRYPTION_KEY` into
+its `.env`, and the control plane generates its host signing and credential
+encryption keys into its settings
+([new installation](operations.md#admin-settings)). Keep that `.env` out of
+version control and stable so saved connections and settings remain
+decryptable. None of these keys is shared with any other service.
 
-```bash
-for name in AGENT_LOCAL_SESSION_SECRET AGENT_SETTINGS_ENCRYPTION_KEY \
-  AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY; do
-  printf '%s=%s\n' "$name" "$(openssl rand -hex 32)"
-done
-```
-
-Keep the encryption keys stable so saved connections and settings remain
-decryptable. None of them is shared with any other service.
-
-- [ ] Set `AGENT_WEB_BASE_URL`, `AGENT_PUBLIC_API_URL`, the web base path and
-      browser API path. Set no `GATEWAY_*`, `IDENTITY_*` or `AGENT_AUTH_MODE`:
+- [ ] Set `AGENT_WEB_BASE_URL` and `AGENT_PUBLIC_API_URL`; the app is served at
+      the root of its hostname with the API at `/api`. Set no `GATEWAY_*`, `IDENTITY_*` or `AGENT_AUTH_MODE`:
       the control plane and `deploy.sh` refuse them.
 - [ ] Set explicit Compose project names, sandbox image, enrolled host name,
       sandbox manager credential/reverse route, both tunnel destinations and keys,

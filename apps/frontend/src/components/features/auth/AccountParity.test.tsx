@@ -111,8 +111,11 @@ describe('sign-up', () => {
     vi.mocked(api.sendPhoneCode).mockResolvedValue({ ok: true, retry_after: 60 });
     vi.mocked(api.signupPhone).mockResolvedValue({ ok: true, requires_approval: true });
     render(<SignupPage />);
-    fireEvent.click(await screen.findByRole('checkbox'));
-    fireEvent.click(screen.getByRole('tab', { name: 'Phone number' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Phone number' }));
+    // Phone fields stay visible before the Terms checkbox is checked.
+    expect(screen.getByLabelText('Phone number')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox'));
     fill('Phone number', '13800138000');
     fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
     await waitFor(() =>
@@ -125,6 +128,13 @@ describe('sign-up', () => {
     // The code proved the number: no email to check, and the account is made.
     expect(steps()).toEqual(['Account', 'Get access']);
     expect(currentStep()).toBe('Get access');
+  });
+  it('offers no phone sign-up while only phone sign-in is enabled', async () => {
+    vi.mocked(api.getAuthOptions).mockResolvedValue({ ...OPTIONS, phone_signup_enabled: false });
+    render(<SignupPage />);
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Phone number' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Phone number')).not.toBeInTheDocument();
   });
   it('shows the email check among the steps only for an email sign-up that needs one', async () => {
     vi.mocked(api.signupAccount).mockResolvedValue({ ok: true });

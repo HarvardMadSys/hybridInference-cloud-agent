@@ -4,9 +4,14 @@
 // password, or with a phone number and a code. The use case goes with the
 // sign-up as the Agent application; signing up never grants Agent use.
 import Link from 'next/link';
-import { useCallback, useState, type FormEvent } from 'react';
+import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { useT } from '@/components/providers/LocaleProvider';
-import { signupPhone, type SignupDetails } from '@/lib/api/accounts';
+import {
+  signupAccount,
+  signupPhone,
+  type AuthOptions,
+  type SignupDetails,
+} from '@/lib/api/accounts';
 import { getErrorMessage } from '@/lib/utils/errors';
 import {
   AccountField,
@@ -15,81 +20,14 @@ import {
   AccountSteps,
   BackToLogin,
 } from './AccountFrame';
+import { NewPasswordFields } from './NewPasswordFields';
 import { PhoneCodeFields } from './PhoneCodeFields';
-import { SignupEmailForm } from './SignupForm';
 import { TermsConsent } from './TermsConsent';
 import { TurnstileWidget } from './TurnstileWidget';
+import { validNewPassword } from './passwordPolicy';
 import { useAuthOptions } from './useAuthOptions';
 
 type SignupMethod = 'email' | 'phone';
-
-function PhoneSignup({
-  details,
-  countryCode,
-  siteKey,
-  onCaptchaUsed,
-  onDone,
-}: {
-  details: SignupDetails;
-  countryCode: string;
-  siteKey?: string | null;
-  onCaptchaUsed: () => void;
-  onDone: () => void;
-}) {
-  const t = useT();
-  const [phone, setPhone] = useState('');
-  const [code, setCode] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ requires_approval: boolean } | null>(null);
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      setResult(
-        await signupPhone({
-          phone: phone.trim(),
-          code,
-          user_name: details.user_name,
-          use_case: details.use_case,
-          accepted_tos: details.accepted_tos,
-        }),
-      );
-      onDone();
-    } catch (cause) {
-      setError(getErrorMessage(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
-  if (result)
-    return (
-      <AccountNotice>
-        {result.requires_approval ? t('signup.phoneWaiting') : t('signup.createdVerified')}
-      </AccountNotice>
-    );
-  return (
-    <form className="space-y-4" onSubmit={submit}>
-      {error && <AccountNotice error>{error}</AccountNotice>}
-      <PhoneCodeFields
-        purpose="signup"
-        phone={phone}
-        code={code}
-        onPhone={setPhone}
-        onCode={setCode}
-        onError={setError}
-        defaultCountryCode={countryCode}
-        siteKey={siteKey}
-        captchaToken={details.turnstile_token ?? null}
-        onCaptchaUsed={onCaptchaUsed}
-      />
-      <button className="ui-button ui-button-primary w-full" disabled={busy || code.length !== 6}>
-        {busy ? t('account.saving') : t('account.signup')}
-      </button>
-    </form>
-  );
-}
 
 function MethodTabs({
   method,
@@ -165,70 +103,247 @@ function SignupSteps({
   return <AccountSteps steps={steps} current={done ? 1 : 0} />;
 }
 
-export function SignupPage() {
+function SignupCompleted({
+  done,
+  verifyEmail,
+  phoneRequiresApproval,
+}: {
+  done: SignupMethod;
+  verifyEmail: boolean;
+  phoneRequiresApproval: boolean;
+}) {
   const t = useT();
-  const options = useAuthOptions();
+  if (done === 'phone') {
+    return (
+      <AccountNotice>
+        {phoneRequiresApproval ? t('signup.phoneWaiting') : t('signup.createdVerified')}
+      </AccountNotice>
+    );
+  }
+  return (
+    <>
+      <AccountNotice>
+        {verifyEmail ? t('account.signupSent') : t('signup.createdVerified')}
+      </AccountNotice>
+      {verifyEmail && (
+        <Link href="/resend-verification" className="block text-sm text-accent underline">
+          {t('account.resend')}
+        </Link>
+      )}
+    </>
+  );
+}
+
+function EmailCredentialFields({
+  email,
+  password,
+  confirm,
+  onEmail,
+  onPassword,
+  onConfirm,
+}: {
+  email: string;
+  password: string;
+  confirm: string;
+  onEmail: (value: string) => void;
+  onPassword: (value: string) => void;
+  onConfirm: (value: string) => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      <AccountField id="email" label={t('account.email')}>
+        <input
+          id="email"
+          className="ui-input w-full"
+          type="email"
+          autoComplete="email"
+          autoCapitalize="none"
+          required
+          maxLength={255}
+          value={email}
+          onChange={(e) => onEmail(e.target.value)}
+        />
+      </AccountField>
+      <NewPasswordFields
+        password={password}
+        confirm={confirm}
+        onPassword={onPassword}
+        onConfirm={onConfirm}
+      />
+    </>
+  );
+}
+
+function ProfileFields({
+  userName,
+  useCase,
+  onUserName,
+  onUseCase,
+}: {
+  userName: string;
+  useCase: string;
+  onUserName: (value: string) => void;
+  onUseCase: (value: string) => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      <AccountField id="user-name" label={t('signup.name')}>
+        <input
+          id="user-name"
+          className="ui-input w-full"
+          autoComplete="name"
+          minLength={2}
+          maxLength={50}
+          value={userName}
+          onChange={(e) => onUserName(e.target.value)}
+        />
+      </AccountField>
+      <AccountField id="use-case" label={t('waitlist.purpose')}>
+        <textarea
+          id="use-case"
+          className="ui-input w-full"
+          rows={3}
+          maxLength={2000}
+          value={useCase}
+          onChange={(e) => onUseCase(e.target.value)}
+        />
+      </AccountField>
+    </>
+  );
+}
+
+function ActiveSignupForm({
+  options,
+  chosen,
+  onMethod,
+  onDone,
+}: {
+  options: AuthOptions;
+  chosen: SignupMethod;
+  onMethod: (value: SignupMethod) => void;
+  onDone: (method: SignupMethod, requiresApproval?: boolean) => void;
+}) {
+  const t = useT();
   const [accepted, setAccepted] = useState(false);
   const [userName, setUserName] = useState('');
   const [useCase, setUseCase] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [phone, setPhone] = useState('');
+  const [code, setCode] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [captcha, setCaptcha] = useState<string | null>(null);
-  const [method, setMethod] = useState<SignupMethod>('email');
-  // Which form created the account, once one has.
-  const [done, setDone] = useState<SignupMethod | null>(null);
   const [captchaReset, setCaptchaReset] = useState(0);
+  const submitting = useRef(false);
   const onToken = useCallback((token: string | null) => setCaptcha(token), []);
-  // A token is good for one request: after each, a fresh challenge replaces it.
   const resetCaptcha = useCallback(() => {
     setCaptcha(null);
     setCaptchaReset((value) => value + 1);
   }, []);
-  if (!options)
-    return (
-      <AccountFrame title={t('account.signup')}>
-        <p role="status">{t('common.loading')}</p>
-      </AccountFrame>
-    );
-  const emailOpen = options.signup_enabled;
-  const phoneOpen = options.phone_signup_enabled;
-  if (!emailOpen && !phoneOpen) return <SignupClosed />;
-  const chosen = chooseMethod(method, emailOpen, phoneOpen);
   const needsCaptcha = Boolean(options.turnstile_site_key);
   const details = signupDetails(userName, useCase, accepted, captcha);
   const ready = accepted && (!needsCaptcha || Boolean(captcha));
+  const submitDisabled = busy || (chosen === 'email' ? !ready : !accepted || code.length !== 6);
+
+  async function submitEmail() {
+    if (!validNewPassword(password)) {
+      setError(t('account.passwordRules'));
+      return;
+    }
+    if (password !== confirm) {
+      setError(t('account.passwordMismatch'));
+      return;
+    }
+    submitting.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await signupAccount(email.trim(), password, details);
+      setPassword('');
+      setConfirm('');
+      onDone('email');
+    } catch (cause) {
+      setError(getErrorMessage(cause));
+    } finally {
+      submitting.current = false;
+      setBusy(false);
+      if (needsCaptcha) resetCaptcha();
+    }
+  }
+
+  async function submitPhone() {
+    submitting.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await signupPhone({
+        phone: phone.trim(),
+        code,
+        user_name: details.user_name,
+        use_case: details.use_case,
+        accepted_tos: details.accepted_tos,
+      });
+      onDone('phone', res.requires_approval);
+    } catch (cause) {
+      setError(getErrorMessage(cause));
+    } finally {
+      submitting.current = false;
+      setBusy(false);
+    }
+  }
+
+  function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (submitting.current) return;
+    void (chosen === 'email' ? submitEmail() : submitPhone());
+  }
+
   return (
-    <AccountFrame
-      title={t(
-        done === 'email' && options.require_email_verification
-          ? 'account.checkEmail'
-          : 'account.signup',
+    <>
+      {options.signup_enabled && options.phone_signup_enabled && (
+        <MethodTabs
+          method={chosen}
+          onMethod={(next) => {
+            onMethod(next);
+            setError(null);
+          }}
+        />
       )}
-      description={t('signup.description')}
-      steps={
-        <SignupSteps method={chosen} done={done} verifyEmail={options.require_email_verification} />
-      }
-    >
-      <div className="space-y-4">
-        <AccountField id="user-name" label={t('signup.name')}>
-          <input
-            id="user-name"
-            className="ui-input w-full"
-            autoComplete="name"
-            minLength={2}
-            maxLength={50}
-            value={userName}
-            onChange={(e) => setUserName(e.target.value)}
+      <form className="space-y-4" onSubmit={handleSubmit}>
+        {error && <AccountNotice error>{error}</AccountNotice>}
+        {chosen === 'email' ? (
+          <EmailCredentialFields
+            email={email}
+            password={password}
+            confirm={confirm}
+            onEmail={setEmail}
+            onPassword={setPassword}
+            onConfirm={setConfirm}
           />
-        </AccountField>
-        <AccountField id="use-case" label={t('waitlist.purpose')}>
-          <textarea
-            id="use-case"
-            className="ui-input w-full"
-            rows={3}
-            maxLength={2000}
-            value={useCase}
-            onChange={(e) => setUseCase(e.target.value)}
+        ) : (
+          <PhoneCodeFields
+            purpose="signup"
+            phone={phone}
+            code={code}
+            onPhone={setPhone}
+            onCode={setCode}
+            onError={setError}
+            defaultCountryCode={options.phone.default_country_code}
+            siteKey={options.turnstile_site_key}
+            captchaToken={details.turnstile_token ?? null}
+            onCaptchaUsed={resetCaptcha}
           />
-        </AccountField>
+        )}
+        <ProfileFields
+          userName={userName}
+          useCase={useCase}
+          onUserName={setUserName}
+          onUseCase={setUseCase}
+        />
         <TermsConsent options={options} accepted={accepted} onAccepted={setAccepted} />
         {needsCaptcha && (
           <TurnstileWidget
@@ -237,28 +352,63 @@ export function SignupPage() {
             resetKey={captchaReset}
           />
         )}
-        {emailOpen && phoneOpen && <MethodTabs method={chosen} onMethod={setMethod} />}
-      </div>
-      {!ready && <p className="text-xs text-muted">{t('signup.agreeFirst')}</p>}
-      {chosen === 'email' ? (
-        <SignupEmailForm
-          details={details}
-          verified={!options.require_email_verification}
-          ready={ready}
-          onDone={() => setDone('email')}
-          onAttempt={needsCaptcha ? resetCaptcha : undefined}
+        {!ready && <p className="text-xs text-muted">{t('signup.agreeFirst')}</p>}
+        <button
+          className="ui-button ui-button-primary w-full"
+          disabled={submitDisabled}
+          aria-busy={busy}
+        >
+          {busy ? t('account.saving') : t('account.signup')}
+        </button>
+      </form>
+    </>
+  );
+}
+
+export function SignupPage() {
+  const t = useT();
+  const options = useAuthOptions();
+  const [method, setMethod] = useState<SignupMethod>('email');
+  const [done, setDone] = useState<SignupMethod | null>(null);
+  const [phoneRequiresApproval, setPhoneRequiresApproval] = useState(false);
+
+  if (!options)
+    return (
+      <AccountFrame title={t('account.signup')}>
+        <p role="status">{t('common.loading')}</p>
+      </AccountFrame>
+    );
+  if (!options.signup_enabled && !options.phone_signup_enabled) return <SignupClosed />;
+  const chosen = chooseMethod(method, options.signup_enabled, options.phone_signup_enabled);
+  const titleKey =
+    done === 'email' && options.require_email_verification
+      ? 'account.checkEmail'
+      : 'account.signup';
+
+  return (
+    <AccountFrame
+      title={t(titleKey)}
+      description={done ? undefined : t('signup.description')}
+      steps={
+        <SignupSteps method={chosen} done={done} verifyEmail={options.require_email_verification} />
+      }
+    >
+      {done ? (
+        <SignupCompleted
+          done={done}
+          verifyEmail={options.require_email_verification}
+          phoneRequiresApproval={phoneRequiresApproval}
         />
       ) : (
-        // The consent is what the form waits for; the code button waits for a token.
-        accepted && (
-          <PhoneSignup
-            details={details}
-            countryCode={options.phone.default_country_code}
-            siteKey={options.turnstile_site_key}
-            onCaptchaUsed={resetCaptcha}
-            onDone={() => setDone('phone')}
-          />
-        )
+        <ActiveSignupForm
+          options={options}
+          chosen={chosen}
+          onMethod={setMethod}
+          onDone={(completedMethod, requiresApproval = false) => {
+            setPhoneRequiresApproval(requiresApproval);
+            setDone(completedMethod);
+          }}
+        />
       )}
       <p className="text-sm">
         <Link className="text-accent underline" href="/login">

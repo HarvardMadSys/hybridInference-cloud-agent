@@ -37,18 +37,16 @@ afterEach(() => {
 });
 
 describe('standalone environment policy', () => {
-  it('forces public build paths to match the selected variant', () => {
-    const variant = { basePath: '/agents', apiUrl: '/agents/api' };
+  it('forces the browser API path to match the selected variant', () => {
+    const variant = { basePath: '', apiUrl: '/api' };
 
     expect(
       buildEnvironmentForVariant(variant, {
-        NEXT_PUBLIC_BASE_PATH: '/wrong',
         NEXT_PUBLIC_AGENT_API_URL: 'https://wrong.invalid',
         UNRELATED: 'kept',
       }),
     ).toEqual({
-      NEXT_PUBLIC_BASE_PATH: '/agents',
-      NEXT_PUBLIC_AGENT_API_URL: '/agents/api',
+      NEXT_PUBLIC_AGENT_API_URL: '/api',
       UNRELATED: 'kept',
     });
   });

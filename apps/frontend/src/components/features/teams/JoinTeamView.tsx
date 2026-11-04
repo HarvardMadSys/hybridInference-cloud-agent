@@ -9,7 +9,6 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useAuth, useLocale, useT } from '@/components/providers';
-import { basePath } from '@/config/env';
 import { claimInvitation, listOwnJoinRequests, type OwnJoinRequest } from '@/lib/api/teams';
 import {
   clearInvitationToken,
@@ -178,7 +177,7 @@ export function JoinTeamView() {
           className={primary}
           onClick={() => {
             const query = new URLSearchParams({ return_to: JOIN_PATH });
-            window.location.assign(`${basePath}/login?${query.toString()}`);
+            window.location.assign(`/login?${query.toString()}`);
           }}
         >
           {t('teams.join.signIn')}

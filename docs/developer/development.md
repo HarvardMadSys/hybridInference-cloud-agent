@@ -343,8 +343,7 @@ iterate on fixture/spec changes after a successful root build, use
 
 The `make ci-frontend` target runs the checks above, including browser recovery.
 Hosted CI also
-builds and smoke-tests both the root and `/agents` web variants when image
-changes are selected. See
+builds and smoke-tests the web image when image changes are selected. See
 [CONTRIBUTING.md](../../CONTRIBUTING.md#continuous-integration) for the wider CI gate.
 
 ## Changing an API

@@ -37,7 +37,7 @@
     },
     "artifacts": {
       "type": "array",
-      "minItems": 6,
+      "minItems": 5,
       "description": "Every image the deployment runs: exactly one entry per role, and web exactly one per build variant because basePath is resolved at build time. A release is not consumable until all of them exist: a missing artifact is not a smaller release, it is a broken one, and a list of the right length holding the wrong roles is the same failure wearing a valid-looking shape. The cardinality is enforced with contains/minContains/maxContains per role rather than by counting entries.",
       "items": {
         "$ref": "#/$defs/artifact"
@@ -133,7 +133,7 @@
               "variant"
             ]
           },
-          "minContains": 1,
+          "minContains": 0,
           "maxContains": 1
         }
       ]
