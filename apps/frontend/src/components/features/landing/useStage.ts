@@ -1,6 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type RefObject,
+} from 'react';
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
 
@@ -97,7 +104,56 @@ export function useStage(calm: boolean) {
     };
   }, [calm]);
 
+  useFitTabs(scene, rig);
+
   // The pose the window starts from; the animation frames take it from here.
   const startPose = (calm ? {} : { '--ex': '14deg', '--ty': '64px' }) as CSSProperties;
   return { scene, rig, entering, startPose };
+}
+
+const FIT_MARGIN = 16;
+// Following the pointer turns the window up to 4deg toward it, which can
+// carry its right side about this much further out.
+const FOLLOW_SLACK = 1.04;
+
+/**
+ * Where the tilted window runs past the right of the viewport, as designed at
+ * laptop widths, scale it just enough that the workspace's tabs, which a
+ * visitor can click and focus, stay on screen. Elsewhere it is left at full
+ * size. The tilt has no perspective, so the window's reach from its transform
+ * origin scales linearly with it.
+ */
+function useFitTabs(scene: RefObject<HTMLDivElement>, rig: RefObject<HTMLDivElement>) {
+  useLayoutEffect(() => {
+    const sceneElement = scene.current;
+    const rigElement = rig.current;
+    const tabs = rigElement?.querySelector<HTMLElement>('[role="tablist"]');
+    if (!sceneElement || !rigElement || !tabs) return;
+    let fit = 1;
+    const measure = () => {
+      const style = getComputedStyle(rigElement);
+      const originX =
+        sceneElement.getBoundingClientRect().left +
+        rigElement.offsetLeft +
+        parseFloat(style.transformOrigin);
+      const reach = (tabs.getBoundingClientRect().right - originX) / fit;
+      const room = document.documentElement.clientWidth - FIT_MARGIN - originX;
+      const next =
+        style.transform === 'none' || reach <= 0 ? 1 : Math.min(1, room / (reach * FOLLOW_SLACK));
+      const rounded = Math.floor(next * 1000) / 1000;
+      if (rounded === fit) return;
+      fit = rounded;
+      rigElement.style.setProperty('--fit', String(fit));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    // A language switch changes the tabs' width without resizing the window.
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(sceneElement);
+    observer?.observe(tabs);
+    return () => {
+      window.removeEventListener('resize', measure);
+      observer?.disconnect();
+    };
+  }, [scene, rig]);
 }

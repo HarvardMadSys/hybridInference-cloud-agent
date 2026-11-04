@@ -6,11 +6,25 @@
 .scene {
   --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
   position: relative;
-  perspective: 1900px;
-  perspective-origin: 15% 35%;
 }
 
+/* Only the floor is drawn in perspective; its box covers the scene, whose
+   origin it uses. The window's tilt is drawn without one, as designed. That
+   used to come from a plain box between the window and a perspective set on
+   the scene: Chromium painted the window flat but hit-tested it as if in
+   perspective, so a click on its tabs landed on the conversation. With no
+   perspective above the window, paint and hit testing agree. */
 .floor {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  perspective: 1900px;
+  perspective-origin: 15% 35%;
+  transition: opacity 1.4s ease;
+}
+
+.floor::before {
+  content: '';
   position: absolute;
   left: -30%;
   top: 52%;
@@ -18,13 +32,11 @@
   height: 640px;
   transform: rotateX(78deg);
   transform-origin: 50% 0;
-  pointer-events: none;
   background-image:
     linear-gradient(rgb(var(--ui-foreground) / 0.07) 1px, transparent 1px),
     linear-gradient(90deg, rgb(var(--ui-foreground) / 0.07) 1px, transparent 1px);
   background-size: 56px 56px;
   mask-image: radial-gradient(closest-side, #000 18%, transparent 100%);
-  transition: opacity 1.4s ease;
 }
 
 .scene[data-entering='true'] .floor {
@@ -39,13 +51,15 @@
   --my: 0deg;
   --ex: 0deg;
   --ty: 0px;
+  --fit: 1;
   position: relative;
   width: 1000px;
   margin-left: 70px;
   transform-style: preserve-3d;
   transform-origin: 0 50%;
-  transform: translateY(var(--ty)) rotateX(calc(var(--rx) + var(--my) + var(--ex)))
-    rotateY(calc(var(--ry) + var(--mx))) rotateZ(var(--rz));
+  transform: translateY(var(--ty)) scale(var(--fit))
+    rotateX(calc(var(--rx) + var(--my) + var(--ex))) rotateY(calc(var(--ry) + var(--mx)))
+    rotateZ(var(--rz));
 }
 
 .shadow {
@@ -670,12 +684,25 @@
   font-weight: 500;
 }
 
-.tabs > span {
+.tabList {
+  display: flex;
+  align-self: stretch;
+  align-items: flex-end;
+  gap: 14px;
+}
+
+.tab {
   padding-bottom: 10px;
   transition: color 0.3s ease;
 }
 
-.tabs > span[data-on='true'] {
+button.tab {
+  cursor: pointer;
+  user-select: none;
+}
+
+button.tab:hover,
+.tab[aria-selected='true'] {
   color: rgb(var(--ui-foreground));
 }
 
@@ -709,6 +736,11 @@
 
 .pane[data-on='true'] {
   opacity: 1;
+}
+
+/* Inside the window's clipped edges, where an outer ring would be cut off. */
+.panes > .pane:focus-visible {
+  outline-offset: -2px;
 }
 
 .mono {
@@ -835,6 +867,7 @@
     0 34px 60px -24px rgb(0 0 0 / 0.4),
     0 10px 18px -12px rgb(0 0 0 / 0.2);
   opacity: 0;
+  /* Drawings only: a card overlapping the workspace's tabs never takes their clicks. */
   pointer-events: none;
   transform: translate3d(0, 14px, calc(var(--z) * 0.4));
   transition:
@@ -845,7 +878,6 @@
 
 .float[data-show='true'] {
   opacity: 1;
-  pointer-events: auto;
   transform: translate3d(0, 0, var(--z));
 }
 
@@ -1071,7 +1103,7 @@
 /* ---------- smaller screens ---------- */
 
 @media (max-width: 1100px) {
-  .scene {
+  .floor {
     perspective-origin: 50% 20%;
   }
 
@@ -1094,10 +1126,6 @@
 }
 
 @media (max-width: 900px) {
-  .scene {
-    perspective: none;
-  }
-
   .rig {
     transform: none !important;
   }

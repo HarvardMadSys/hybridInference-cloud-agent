@@ -129,6 +129,13 @@ describe('sign-up', () => {
     expect(steps()).toEqual(['Account', 'Get access']);
     expect(currentStep()).toBe('Get access');
   });
+  it('offers no phone sign-up while only phone sign-in is enabled', async () => {
+    vi.mocked(api.getAuthOptions).mockResolvedValue({ ...OPTIONS, phone_signup_enabled: false });
+    render(<SignupPage />);
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Phone number' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Phone number')).not.toBeInTheDocument();
+  });
   it('shows the email check among the steps only for an email sign-up that needs one', async () => {
     vi.mocked(api.signupAccount).mockResolvedValue({ ok: true });
     render(<SignupPage />);

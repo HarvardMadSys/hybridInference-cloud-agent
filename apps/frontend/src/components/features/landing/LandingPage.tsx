@@ -11,7 +11,6 @@ import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { useT } from '@/components/providers/LocaleProvider';
 import { BrandMark } from '@/components/BrandMark';
 import { DeploymentFooter } from '@/components/DeploymentFooter';
-import { SignedOutControls } from '@/components/SignedOutControls';
 import { LandingHero } from './LandingHero';
 import {
   AgentStrip,
@@ -85,26 +84,22 @@ export function LandingPage() {
           <BrandMark />
           <span className="truncate">{branding.appName}</span>
         </Link>
-        <div className="flex shrink-0 items-center gap-2">
-          <SignedOutControls />
-          <span aria-hidden="true" className="h-4 w-px bg-border" />
-          <nav aria-label={t('landing.nav')} className="flex shrink-0 items-center gap-1.5">
+        <nav aria-label={t('landing.nav')} className="flex shrink-0 items-center gap-1.5">
+          <Link
+            href="/login"
+            className="ui-focus-ring rounded-md px-2 py-2 text-sm text-muted transition-colors hover:text-foreground sm:px-3"
+          >
+            {t('landing.signIn')}
+          </Link>
+          {!loading && signupOpen && (
             <Link
-              href="/login"
-              className="ui-focus-ring rounded-md px-2 py-2 text-sm text-muted transition-colors hover:text-foreground sm:px-3"
+              href="/signup"
+              className="ui-focus-ring inline-flex h-9 items-center rounded-lg bg-accent px-3.5 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent-hover"
             >
-              {t('landing.signIn')}
+              {t('landing.signUp')}
             </Link>
-            {!loading && signupOpen && (
-              <Link
-                href="/signup"
-                className="ui-focus-ring inline-flex h-9 items-center rounded-lg bg-accent px-3.5 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent-hover"
-              >
-                {t('landing.signUp')}
-              </Link>
-            )}
-          </nav>
-        </div>
+          )}
+        </nav>
       </header>
       <main className="flex-1">
         <LandingHero actions={<AccountActions signupOpen={signupOpen} loading={loading} />} />

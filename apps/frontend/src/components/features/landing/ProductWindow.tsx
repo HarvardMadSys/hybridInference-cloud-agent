@@ -1,8 +1,8 @@
 'use client';
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { useT } from '@/components/providers/LocaleProvider';
-import type { Translator } from '@/lib/i18n/translate';
+import type { TranslationKey, Translator } from '@/lib/i18n/translate';
 import { AgentMark } from './AgentMarks';
 import {
   AGENT_IDS,
@@ -126,7 +126,7 @@ function Sidebar({ frame, example, instant }: WindowProps) {
   const t = useT();
   const title = frame.sent ? example.title : t('landing.demo.newTask');
   return (
-    <aside className={styles.sidebar}>
+    <aside aria-hidden="true" className={styles.sidebar}>
       <span className={styles.newTask}>
         <PlusIcon />
         {t('landing.demo.newTask')}
@@ -276,49 +276,62 @@ function AgentPill({ agent, instant }: { agent: AgentId; instant: boolean }) {
   );
 }
 
-const PANE_TAB = { files: 1, terminal: 2, changes: 0 } as const;
-const INDEX_PANE: Partial<Record<number, DemoFrame['pane']>> = {
-  0: 'changes',
-  1: 'files',
-  2: 'terminal',
+type Pane = DemoFrame['pane'];
+
+const PANES: { pane: Pane; label: TranslationKey }[] = [
+  { pane: 'changes', label: 'landing.demo.changes' },
+  { pane: 'files', label: 'landing.demo.files' },
+  { pane: 'terminal', label: 'landing.demo.terminal' },
+];
+
+const KEY_STEP: Record<string, (index: number) => number> = {
+  ArrowRight: (index) => (index + 1) % PANES.length,
+  ArrowLeft: (index) => (index + PANES.length - 1) % PANES.length,
+  Home: () => 0,
+  End: () => PANES.length - 1,
 };
 
-function Tabs({
-  pane,
-  onSelect,
-}: {
-  pane: DemoFrame['pane'];
-  onSelect: (pane: DemoFrame['pane']) => void;
-}) {
+/** The workspace's views: real tabs a visitor can pick, by pointer or keyboard. */
+function Tabs({ id, pane, onSelect }: { id: string; pane: Pane; onSelect: (pane: Pane) => void }) {
   const t = useT();
-  const tabs = useRef<HTMLDivElement>(null);
   const [line, setLine] = useState({ left: 0, width: 0 });
-  const labels = [
-    t('landing.demo.changes'),
-    t('landing.demo.files'),
-    t('landing.demo.terminal'),
-    t('landing.demo.review'),
-  ];
-  const first = labels[0];
+  const first = t(PANES[0].label);
   useEffect(() => {
-    const tab = tabs.current?.children[PANE_TAB[pane]] as HTMLElement | undefined;
+    const tab = document.getElementById(`${id}-tab-${pane}`);
     if (tab?.offsetWidth) setLine({ left: tab.offsetLeft, width: tab.offsetWidth });
-  }, [pane, first]);
+  }, [id, pane, first]);
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const step = KEY_STEP[event.key];
+    if (!step) return;
+    event.preventDefault();
+    const next = PANES[step(index)].pane;
+    onSelect(next);
+    document.getElementById(`${id}-tab-${next}`)?.focus();
+  };
   return (
-    <div className={styles.tabs} ref={tabs}>
-      {labels.map((label, index) => {
-        const target = INDEX_PANE[index];
-        return (
-          <span
-            key={index}
-            data-on={index === PANE_TAB[pane]}
-            className={target ? 'cursor-pointer select-none' : 'select-none'}
-            onClick={target ? () => onSelect(target) : undefined}
+    <div className={styles.tabs}>
+      <div role="tablist" aria-label={t('landing.demo.views')} className={styles.tabList}>
+        {PANES.map((entry, index) => (
+          <button
+            key={entry.pane}
+            id={`${id}-tab-${entry.pane}`}
+            type="button"
+            role="tab"
+            aria-selected={entry.pane === pane}
+            aria-controls={`${id}-pane-${entry.pane}`}
+            tabIndex={entry.pane === pane ? 0 : -1}
+            className={`ui-focus-ring ${styles.tab}`}
+            onClick={() => onSelect(entry.pane)}
+            onKeyDown={(event) => onKeyDown(event, index)}
           >
-            {label}
-          </span>
-        );
-      })}
+            {t(entry.label)}
+          </button>
+        ))}
+      </div>
+      {/* The app's fourth view, drawn for the likeness; the demo has nothing to show in it. */}
+      <span aria-hidden="true" className={styles.tab}>
+        {t('landing.demo.review')}
+      </span>
       <i
         className={styles.tabLine}
         style={{ width: line.width, transform: `translateX(${line.left}px)` }}
@@ -327,18 +340,52 @@ function Tabs({
   );
 }
 
+/**
+ * One view's panel. The others stay drawn underneath for the crossfade, hidden
+ * from assistive technology.
+ */
+function ViewPanel({
+  id,
+  pane,
+  active,
+  className = '',
+  children,
+}: {
+  id: string;
+  pane: Pane;
+  active: Pane;
+  className?: string;
+  children: ReactNode;
+}) {
+  const on = pane === active;
+  return (
+    <div
+      id={`${id}-pane-${pane}`}
+      role="tabpanel"
+      aria-labelledby={`${id}-tab-${pane}`}
+      aria-hidden={!on}
+      tabIndex={on ? 0 : -1}
+      className={`ui-focus-ring ${styles.pane} ${className}`}
+      data-on={on}
+    >
+      {children}
+    </div>
+  );
+}
+
 function Workspace({ frame, example }: WindowProps) {
-  const [manualPane, setManualPane] = useState<DemoFrame['pane'] | null>(null);
+  const [manualPane, setManualPane] = useState<Pane | null>(null);
   useEffect(() => {
     setManualPane(null);
   }, [frame.pane, example.agent]);
   const activePane = manualPane ?? frame.pane;
+  const id = useId();
   let index = 0;
   return (
-    <aside className={styles.workspace}>
-      <Tabs pane={activePane} onSelect={setManualPane} />
+    <div className={styles.workspace}>
+      <Tabs id={id} pane={activePane} onSelect={setManualPane} />
       <div className={styles.panes}>
-        <div className={styles.pane} data-on={activePane === 'files'}>
+        <ViewPanel id={id} pane="files" active={activePane}>
           <div className={`${styles.tree} ${styles.mono}`}>
             {example.tree.map((entry) => (
               <div
@@ -350,8 +397,8 @@ function Workspace({ frame, example }: WindowProps) {
               </div>
             ))}
           </div>
-        </div>
-        <div className={styles.pane} data-on={activePane === 'terminal'}>
+        </ViewPanel>
+        <ViewPanel id={id} pane="terminal" active={activePane}>
           <div className={`${styles.terminal} ${styles.mono}`}>
             {visibleTerminal(example, frame).map((line, key) => (
               <div key={key} className={TERM_TONE[line.tone]}>
@@ -359,8 +406,8 @@ function Workspace({ frame, example }: WindowProps) {
               </div>
             ))}
           </div>
-        </div>
-        <div className={`${styles.pane} ${styles.mono}`} data-on={activePane === 'changes'}>
+        </ViewPanel>
+        <ViewPanel id={id} pane="changes" active={activePane} className={styles.mono}>
           {example.files.map((file) => (
             <div key={file.path}>
               <div className={styles.file} style={{ '--i': index++ } as React.CSSProperties}>
@@ -387,9 +434,9 @@ function Workspace({ frame, example }: WindowProps) {
               </div>
             </div>
           ))}
-        </div>
+        </ViewPanel>
       </div>
-    </aside>
+    </div>
   );
 }
 
@@ -397,7 +444,7 @@ function Picker({ frame }: { frame: DemoFrame }) {
   const t = useT();
   const offset = AGENT_IDS.indexOf(frame.highlight) * 30;
   return (
-    <div className={`${styles.float} ${styles.picker}`} data-show={frame.picker}>
+    <div aria-hidden="true" className={`${styles.float} ${styles.picker}`} data-show={frame.picker}>
       <p className={styles.pickerCaption}>{t('landing.demo.agent')}</p>
       <div className={styles.pickerList}>
         <i className={styles.pickerHighlight} style={{ transform: `translateY(${offset}px)` }} />
@@ -427,6 +474,7 @@ function StatusCard({ frame, example, instant }: WindowProps) {
   return (
     <div
       ref={card}
+      aria-hidden="true"
       className={`${styles.float} ${styles.status}`}
       data-show={frame.status !== 'none'}
       style={{ height }}
@@ -492,7 +540,10 @@ interface WindowProps {
   instant: boolean;
 }
 
-/** The app, drawn at one frame of the demo. Decorative: the page around it says the same. */
+/**
+ * The app, drawn at one frame of the demo. Decorative, as the page around it
+ * says the same, except for the workspace's views, which a visitor can switch.
+ */
 export function ProductWindow({ example, frame, instant }: WindowProps) {
   const t = useT();
   const localized = localizeExample(example, t);
@@ -506,7 +557,7 @@ export function ProductWindow({ example, frame, instant }: WindowProps) {
     <>
       <div className={styles.shadow} />
       <div className={styles.app}>
-        <div className={styles.top}>
+        <div aria-hidden="true" className={styles.top}>
           <div className={styles.crumb}>
             <span className={styles.crumbRepo}>your-org/web</span>
             <span className={styles.crumbSep}>/</span>
@@ -531,7 +582,7 @@ export function ProductWindow({ example, frame, instant }: WindowProps) {
         </div>
         <div className={styles.grid}>
           <Sidebar {...props} />
-          <section className={styles.conversation}>
+          <section aria-hidden="true" className={styles.conversation}>
             <div className={styles.body}>
               <div className={styles.empty} data-out={frame.sent}>
                 <span className={styles.mono}>your-org/web · main</span>
