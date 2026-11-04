@@ -138,7 +138,7 @@ async def test_new_fields_are_imported_atomically_without_replacing_a_concurrent
     )
 
 
-async def test_empty_deployment_starts_and_saves_missing_keys_through_recovery_setup(
+async def test_empty_deployment_starts_with_generated_keys_and_recovery_setup_replaces_one(
     db, monkeypatch
 ):
     from cloud_agent import settings
@@ -189,7 +189,11 @@ async def test_empty_deployment_starts_and_saves_missing_keys_through_recovery_s
             initial = await client.get("/admin/agent/settings", headers=recovery)
             assert initial.status_code == 200
             assert initial.json()["setup"]["required"] is True
-            assert initial.json()["secret_configured"]["control_signing_secret"] is False
+            # The first settings row generated the service keys the
+            # environment did not set; recovery setup can still replace one.
+            assert initial.json()["secret_configured"]["control_signing_secret"] is True
+            assert initial.json()["secret_configured"]["compute_encryption_key"] is True
+            assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") != signing_key
             saved = await client.put(
                 "/admin/agent/settings",
                 headers=recovery,

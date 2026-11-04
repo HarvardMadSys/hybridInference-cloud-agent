@@ -50,10 +50,9 @@ STACKS: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 
-#: The web variant each stack's web service is built for. The control plane
-#: stack serves one mount shape; which one is a deployment's decision, and it
-#: has to match the image the manifest names.
-WEB_VARIANTS = ("root", "agents")
+#: The web variant each stack's web service is built for: only `root`, served at
+#: the root of its own hostname. Sub-path mounting (`agents`) was removed.
+WEB_VARIANTS = ("root",)
 
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
 
@@ -124,7 +123,7 @@ def render(
     rendered = yaml.safe_load(yaml.safe_dump(document, sort_keys=False))
     for role, names in STACKS[stack].items():
         if role == "web" and variant is None:
-            raise ComposeError("the control-plane stack needs --variant: root or agents")
+            raise ComposeError("the control-plane stack needs --variant root")
         if role not in images:
             raise ComposeError(
                 f"the manifest carries no {role!r} artifact, and this stack runs "

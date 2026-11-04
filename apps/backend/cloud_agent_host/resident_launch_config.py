@@ -19,6 +19,7 @@ from cloud_agent_shared.environment import (  # noqa: TC001 — Pydantic resolve
 )
 from cloud_agent_shared.model_connections import MAX_BASE_URL_CHARS
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
+from cloud_agent_shared.sandbox_mcp import MAX_SANDBOX_MCP_SERVERS, SandboxMcpServer
 
 
 class SharedResidentLaunchConfig(BaseModel):
@@ -40,6 +41,9 @@ class SharedResidentLaunchConfig(BaseModel):
     # Replaced by this host's own MCP relay address.
     mcp_base_url: str = Field("", max_length=2048)
     mcp_credential: str = Field("", max_length=16384, repr=False)
+    sandbox_mcp_servers: list[SandboxMcpServer] = Field(
+        default_factory=list, max_length=MAX_SANDBOX_MCP_SERVERS
+    )
     github_credential: str = Field("", max_length=16384, repr=False)
     github_repo: str = Field("", max_length=512)
     git_author_name: str = Field("", max_length=256)
@@ -92,6 +96,7 @@ def resident_launch(
             else ""
         ),
         mcp_credential=body.mcp_credential,
+        sandbox_mcp_servers=tuple(body.sandbox_mcp_servers) if body.mcp_server_ids else (),
         github_credential=body.github_credential,
         github_repo=body.github_repo,
         git_author_name=body.git_author_name,

@@ -6,7 +6,6 @@ import { useState, type FormEvent } from 'react';
 import { useT } from '@/components/providers/LocaleProvider';
 import { createSetupAdmin } from '@/lib/api/accounts';
 import { announceSession } from '@/lib/auth/sessionSync';
-import { basePath } from '@/config/env';
 import { getErrorMessage } from '@/lib/utils/errors';
 import { AccountField, AccountFrame, AccountNotice, BackToLogin } from './AccountFrame';
 import { NewPasswordFields } from './NewPasswordFields';
@@ -37,7 +36,7 @@ export function FirstRunSetup() {
         display_name: displayName.trim() || undefined,
       });
       announceSession(user.id);
-      window.location.assign(`${basePath}/admin/users`);
+      window.location.assign('/admin/users');
     } catch (cause) {
       setError(getErrorMessage(cause));
       setBusy(false);

@@ -7,10 +7,9 @@
 # Two classes of configuration, and the difference is the whole point:
 #
 #   * **Build arguments** are substituted into the bundle during `next build`.
-#     `basePath` is resolved by `next.config.js` at that moment, and
-#     `NEXT_PUBLIC_AGENT_API_URL` is how the browser reaches the control plane.
-#     Both describe the image *variant* — where this app is mounted — so a
-#     deployment that changes one rebuilds.
+#     `NEXT_PUBLIC_AGENT_API_URL` is how the browser reaches the control plane
+#     (`/api` on the same origin), so a deployment that changes it rebuilds.
+#     The app is always served at the root of its hostname.
 #   * **Runtime environment** is read by the server on every request. The
 #     deployment's identity — product name, organisation, status page,
 #     contact — is in this class. Setting one of those on the running
@@ -44,12 +43,10 @@ COPY apps/frontend/ ./
 # built with the code's fallback and setting the variable anywhere — compose,
 # the host, the running container — changes nothing. `NEXT_PUBLIC_STATUS_URL`
 # was exactly that, and the header's Status link pointed at the empty string.
-ARG NEXT_PUBLIC_BASE_PATH=
-ARG NEXT_PUBLIC_AGENT_API_URL=
+ARG NEXT_PUBLIC_AGENT_API_URL=/api
 ARG NEXT_PUBLIC_BUILD_SHA=
 ARG NEXT_PUBLIC_BUILD_TIMESTAMP=
-ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH \
-    NEXT_PUBLIC_AGENT_API_URL=$NEXT_PUBLIC_AGENT_API_URL \
+ENV NEXT_PUBLIC_AGENT_API_URL=$NEXT_PUBLIC_AGENT_API_URL \
     NEXT_PUBLIC_BUILD_SHA=$NEXT_PUBLIC_BUILD_SHA \
     NEXT_PUBLIC_BUILD_TIMESTAMP=$NEXT_PUBLIC_BUILD_TIMESTAMP \
     NEXT_TELEMETRY_DISABLED=1
@@ -88,11 +85,12 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 # deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
 # built by hand says `unknown`, and a resolver refuses it.
 ARG SOURCE_COMMIT=unknown
-ARG NEXT_PUBLIC_BASE_PATH=
+# The base path label stays, always empty: a distribution's resolver checks it
+# against the manifest's web artifact, which is the root image.
 LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}" \
       io.hybridinference.artifact.role="web" \
-      io.hybridinference.artifact.base_path="${NEXT_PUBLIC_BASE_PATH}"
+      io.hybridinference.artifact.base_path=""
 
 USER nextjs
 EXPOSE 3000

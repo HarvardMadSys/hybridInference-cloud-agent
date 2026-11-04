@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 from cloud_agent.mcp.models import ExecutionLocation, LaunchSpec, Mount
+from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_COMMANDS
 
 #: Interpreters whose argument vector is ``<runner> <package> [args...]`` and
 #: whose package therefore has to be pinned.
@@ -93,6 +94,11 @@ MANAGED_ALLOWED_COMMANDS: frozenset[str] = frozenset(
 #: what it means, and this only decides whether a version is present at all.
 _PINNED_NPM = re.compile(r"^(?P<name>(?:@[^/@]+/)?[^@/][^@]*)@(?P<version>[^@]+)$")
 _PINNED_PYPI = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)\s*(?:==|>=|~=)\s*(?P<version>.+)$")
+#: An exact release: what a sandbox server must name, since the sandbox installs
+#: it at run time. ``latest``, ``^1.2`` or ``>=1`` would change under the user.
+_EXACT_VERSION = re.compile(
+    r"^(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){1,3}(?:[-+.][0-9A-Za-z.-]+)?$"
+)
 
 
 class LaunchPlanError(ValueError):
@@ -236,7 +242,9 @@ def build_launch_plan(
     Only ``managed-worker`` plans are built here. A ``user-connector`` server
     runs under the user's own policy on their own machine, so the platform
     records the spec and sends it to the connector rather than deciding how it
-    starts; a connector plan still gets the same no-shell shape.
+    starts; a connector plan still gets the same no-shell shape. A ``sandbox``
+    server is checked against the narrower rules the sandbox's MCP gateway
+    runs by (:func:`_check_sandbox`).
     """
     resolved = policy or ManagedLaunchPolicy()
     if location is ExecutionLocation.REMOTE:
@@ -255,6 +263,16 @@ def build_launch_plan(
     if len(spec.env) > resolved.max_env_entries:
         raise LaunchPlanError("this launch command sets more environment variables than allowed")
 
+    if location is ExecutionLocation.SANDBOX:
+        pinned = _check_sandbox(spec, argv)
+        return LaunchPlan(
+            connection_id=connection_id,
+            run_argv=argv,
+            install=pinned,
+            env=dict(spec.env),
+            network="egress",
+            plan_digest=_plan_digest(argv, pinned, spec.env, (), resolved),
+        )
     if location is ExecutionLocation.MANAGED_WORKER:
         if _command_name(command) not in resolved.allowed_commands:
             allowed = ", ".join(sorted(resolved.allowed_commands))
@@ -278,6 +296,44 @@ def build_launch_plan(
         network=resolved.network,
         plan_digest=digest,
     )
+
+
+def _check_sandbox(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep:
+    """Refuse what a sandbox server may not be (cloud_agent_shared.sandbox_mcp).
+
+    It runs next to repository code, behind the sandbox's MCP gateway, which
+    starts only a package runner with one exactly pinned package. So: ``npx``
+    or ``uvx`` by name, an exact version, no mounts or working directory (it
+    already has the workspace), and no secret, which the repository could read.
+    """
+    if spec.command not in SANDBOX_MCP_COMMANDS:
+        raise LaunchPlanError(
+            f"a sandbox server starts with npx or uvx and one pinned package, not {spec.command!r}"
+        )
+    if spec.mounts or spec.cwd:
+        raise LaunchPlanError("a sandbox server runs in the workspace; it takes no mounts or cwd")
+    for name, value in spec.env.items():
+        if value.startswith("secret://"):
+            raise LaunchPlanError(
+                f"{name}: a sandbox server cannot be given a secret, because the sandbox also "
+                "runs the repository's code. Run a server that needs one as a remote connection.",
+                kind="sandbox_secret",
+            )
+    install = _install_for(spec, argv)
+    if install is None:  # pragma: no cover - npx and uvx are package runners
+        raise LaunchPlanError("a sandbox server needs a package to run")
+    if not _EXACT_VERSION.match(install.version):
+        raise LaunchPlanError(
+            f"pin {install.package!r} to an exact release (for example "
+            f"{install.package}@1.2.3), not {install.version!r}",
+            kind="unpinned_package",
+        )
+    reference = next(arg for arg in argv[1:] if not arg.startswith("-"))
+    if install.ecosystem == "pypi" and "==" not in reference:
+        raise LaunchPlanError(
+            f"pin {install.package!r} with == to an exact release", kind="unpinned_package"
+        )
+    return install
 
 
 def _check_mounts(mounts: Sequence[Mount], policy: ManagedLaunchPolicy) -> tuple[Mount, ...]:

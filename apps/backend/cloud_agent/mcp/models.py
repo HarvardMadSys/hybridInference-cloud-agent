@@ -57,6 +57,10 @@ class ExecutionLocation(StrEnum):
     MANAGED_WORKER = "managed-worker"
     #: A connector the user runs on their own machine or private network.
     USER_CONNECTOR = "user-connector"
+    #: Inside the task's own sandbox, next to the agent, behind the sandbox's
+    #: MCP gateway: it sees the task's ``localhost``, files and browser. Pinned
+    #: packages only, and no secrets (cloud_agent_shared.sandbox_mcp).
+    SANDBOX = "sandbox"
 
 
 class AuthKind(StrEnum):
@@ -319,7 +323,7 @@ class ConnectionConfig:
                 raise ValueError("a remote connection needs a URL")
         else:
             if self.transport is not Transport.STDIO:
-                raise ValueError("a managed or connector location is only valid for stdio")
+                raise ValueError("a managed, connector or sandbox location is only valid for stdio")
             if self.launch is None:
                 raise ValueError("a stdio connection needs a launch spec")
 

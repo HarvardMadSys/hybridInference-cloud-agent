@@ -81,7 +81,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0111_thread_pull_requests`) before
+Run `alembic upgrade head` (through `0112_thread_pull_requests`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -137,10 +137,25 @@ keys cannot be replaced or reset through the settings editor without a separate
 re-encryption procedure.
 
 The Settings page identifies missing required fields and incomplete optional
-integrations. Before any administrator account exists, an operator can open
-`<web base path>/setup` with `ADMIN_TOKEN`. Setup uses the same authenticated,
-audited settings API. The recovery token stays in page memory and is never saved
-in browser storage.
+integrations. A new deployment's first administrator signs in with the one-time
+setup code the control plane logs and completes them in Admin → Settings. When
+no administrator can sign in, an operator with `ADMIN_TOKEN` can open
+`/setup` instead. Setup uses the same authenticated, audited
+settings API. The recovery token stays in page memory and is never saved in
+browser storage.
+
+A new installation has no keys to invent. On its first run, the control-plane
+`deploy.sh` writes a random `AGENT_POSTGRES_PASSWORD` with its matching
+`AGENT_DATABASE_URL` for the bundled database, `AGENT_LOCAL_SESSION_SECRET` and
+`AGENT_SETTINGS_ENCRYPTION_KEY` into the empty lines of `.env`. It does so only
+when nothing can depend on them yet: the deployment root has never completed a
+deployment, the database is the bundled one, Docker holds no volume or container
+of the Compose project, and no legacy `AGENT_SESSION_SECRET` serves as the
+settings root. It never replaces a value that is set; a deployment that is
+missing one and may hold data stops and names what to set. The control plane
+then creates its settings with random `AGENT_CONTROL_TOKEN_SECRET`,
+`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` and `AGENT_COMPUTE_SECRET_KEY` values when
+the environment supplies none; an existing settings row is never given one.
 
 Keep bootstrap configuration in deployment files: database access; the settings
 encryption root (`AGENT_SETTINGS_ENCRYPTION_KEY`, with the legacy environment
@@ -218,7 +233,7 @@ deployed-service setting.
 | Variable | Value / who provisions |
 |---|---|
 | `AGENT_DATABASE_URL` | Postgres DSN for a database owned exclusively by Cloud Agent. A new deployment starts on an empty one; a database from before the independent-accounts release is refused and kept as an archive ([cutover](docs/developer/upgrade-notes.md#independent-accounts-cutover)). |
-| `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. |
+| `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. On a new installation with both the password and `AGENT_DATABASE_URL` empty, `deploy.sh` generates the password and the bundled database's DSN. |
 | `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | Read by `make test-db` and the CI `dbtest` tier as five separate values, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. The database name must contain `_test_`; fixtures refuse other names. With xdist, each worker appends its ID and needs a pre-created database. CI creates `<TEST_DB_NAME>_gw0`…`_gw3` for `-n 4`. |
 
 ### pgAdmin database administration
@@ -243,7 +258,7 @@ accounts, sessions, and saved connections persist in `agent-pgadmin`.
 
 | Variable | Value / who provisions |
 |---|---|
-| `AGENT_WEB_BASE_URL` | Public web-app URL, including its base path, for example `https://agents.example.org/agents`. Every emailed link is built from it, never from a request's `Host`. Its origin is also one the main API accepts session-cookie writes from: a POST, PUT, PATCH or DELETE carrying the session cookie is refused with 403 when the browser reports it came from another origin (`Sec-Fetch-Site`, or `Origin` without it) that is neither this one, the request's own host, nor the pgAdmin public URL's. |
+| `AGENT_WEB_BASE_URL` | Public web-app URL, for example `https://agents.example.org`. Every emailed link is built from it, never from a request's `Host`. Its origin is also one the main API accepts session-cookie writes from: a POST, PUT, PATCH or DELETE carrying the session cookie is refused with 403 when the browser reports it came from another origin (`Sec-Fetch-Site`, or `Origin` without it) that is neither this one, the request's own host, nor the pgAdmin public URL's. |
 | `AGENT_PUBLIC_API_URL` | NEW. This API's public base URL, including its prefix, for example `https://agents.example.org/api`. OAuth callbacks (MCP sign-in, compute registration) are built from it. It replaces the address `AGENT_SESSION_REDIRECT_URI` used to give. |
 
 ### Retired Gateway variables
@@ -279,14 +294,14 @@ these is refused: the control plane stops at startup naming it, and
 
 | Variable | Value / who provisions |
 |---|---|
-| `AGENT_SETTINGS_ENCRYPTION_KEY` | Optional dedicated key of at least 32 bytes for encrypted admin setting secrets. If absent, `AGENT_SESSION_SECRET` supplies the key. Keep the same effective key on the main API and MCP-only listener, and preserve it with database backups. Changing the effective key requires re-encrypting existing settings first; session-key rotation also changes it when the fallback is in use. |
-| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Encrypts stored source-control credentials, per-user MCP credentials, and reusable cloud-environment variables/overrides under separate domain separators. Generate random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced. Without a key, none store plaintext; MCP offers an empty picker and value-bearing environment operations fail closed. |
-| `AGENT_CONTROL_TOKEN_SECRET` | Signs host/worker control tokens. Generate random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved earlier still loads, and startup logs `agent_weak_credential` until it is replaced. |
+| `AGENT_SETTINGS_ENCRYPTION_KEY` | Optional dedicated key of at least 32 bytes for encrypted admin setting secrets. If absent, `AGENT_SESSION_SECRET` supplies the key. Keep the same effective key on the main API and MCP-only listener, and preserve it with database backups. Changing the effective key requires re-encrypting existing settings first; session-key rotation also changes it when the fallback is in use. `deploy.sh` generates it on a new installation only, never beside an `AGENT_SESSION_SECRET`. |
+| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Encrypts stored source-control credentials, per-user MCP credentials, and reusable cloud-environment variables/overrides under separate domain separators. Generated into the first settings row when unset; otherwise random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced. Without a key, none store plaintext; MCP offers an empty picker and value-bearing environment operations fail closed. |
+| `AGENT_CONTROL_TOKEN_SECRET` | Signs host/worker control tokens. Generated into the first settings row when unset; otherwise random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved earlier still loads, and startup logs `agent_weak_credential` until it is replaced. |
 | `AGENT_SESSION_SECRET` | Legacy. Only the fallback root for `AGENT_SETTINGS_ENCRYPTION_KEY` on an installation that never set that key; no session uses it. New deployments set `AGENT_SETTINGS_ENCRYPTION_KEY` instead. If both it and `AGENT_LOCAL_SESSION_SECRET` are set, they must differ. |
 | `AGENT_DEFAULT_EXECUTION_PROFILE` | Server-owned policy for new root threads. Application default: `trusted-v1`; supported production Compose default: `untrusted-kata-v1`; local Compose uses `trusted-v1`. The untrusted profile requires the current enrolled Host credential and the exact claiming replica's attestation of `io.containerd.kata.v2` with a guest kernel different from the host. The trusted profile permits runc for trusted internal/dev repositories. Follow-ups and Fork inherit the stored policy; callers cannot select it. |
 | `AGENT_ALERT_WEBHOOK_URL` | Operator-owned JSON webhook for queue incidents, recovery and compute replacement events. Queue monitoring runs every minute, reports ten-minute-old runnable queue heads after two observations, retries delivery on the next pass and repeats unchanged incidents at most every 30 minutes. Delivery timeout: five seconds. Queue payloads contain event, deployment SHA and aggregate counts; compute events also contain Host identity and reason codes. Unset retains structured logs. Downstream distributions own deployment-workflow alerts. This URL never enters runners or sandboxes. |
 | `AGENT_RESIDENCY_TTL_S` | How long a member's independently fenced live-process residency survives between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
-| `ADMIN_TOKEN` | Optional machine-to-machine admin credential. An unset value opens no token access; admin sessions remain a separate authorization path. Use at least 32 random bytes; startup logs `agent_weak_credential` for a shorter value. |
+| `ADMIN_TOKEN` | Optional machine-to-machine admin credential, and the recovery door to `/setup` when no administrator can sign in; a new deployment does not need it. An unset value opens no token access; admin sessions remain a separate authorization path. Use at least 32 random bytes; startup logs `agent_weak_credential` for a shorter value. |
 
 ### Accounts
 
@@ -298,7 +313,7 @@ encrypted and never shown again. See [accounts](docs/developer/local-accounts.md
 
 | Variable | Value / who provisions |
 |---|---|
-| `AGENT_LOCAL_SESSION_SECRET` | Required: at least 32 random bytes, different from `AGENT_SESSION_SECRET`. Keys the hashes of session cookies, emailed tokens and abuse counters. Rotating it ends every session and outstanding link. |
+| `AGENT_LOCAL_SESSION_SECRET` | Required: at least 32 random bytes, different from `AGENT_SESSION_SECRET`; `deploy.sh` generates it on a new installation. Keys the hashes of session cookies, emailed tokens and abuse counters. Rotating it ends every session and outstanding link. |
 | `AGENT_LOCAL_SIGNUP_ENABLED` | Defaults to on. `false` closes public sign-up, by email and by phone; existing accounts still sign in. Signing up never grants Agent use. |
 | `AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION` | NEW. Defaults to `true`. `false` treats a new email account as verified at sign-up and sends it no link, so sign-up works without SMTP. Such an address is accepted, not proven: it matches neither the signup domain list nor `AGENT_LOCAL_ADMIN_EMAILS` until a link sent to it is followed. Accounts created while it was on still verify. |
 | `AGENT_LOCAL_SIGNUP_APPROVAL` | NEW. `manual` (default): every account waits for an administrator. `domains`: a verified account whose proven email domain is on the signup domain list (Admin → Users → Sign-up policy) is approved at once; with an empty list, every verified account is. |
@@ -503,7 +518,7 @@ for deployment profiles, verified SSH access and CloudLab endpoint setup.
 | Variable | Meaning |
 | --- | --- |
 | `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY` | Where automatic Server setup looks for the sandbox image this release published, as `<repository>:sandbox-<commit>`. Default `ghcr.io/harvardmadsys/cloud-agent-sandbox`; empty disables the lookup. When the image exists (checked anonymously), the generated Host configuration pulls `<repository>:sandbox-{deployment_sha}` with `AGENT_SANDBOX_IMAGE_PULL=true`, so its chats record a registry digest and can be restored on another Host. Otherwise the Host builds its own image, as before, and its chats stay on it. |
-| `AGENT_COMPUTE_SECRET_KEY` | Independent encryption key, at least 32 bytes, for stored compute connections and Admin-managed deployment profiles. The supported deployer generates and persists a random value in `.env` when blank. Preserve it with database backups. |
+| `AGENT_COMPUTE_SECRET_KEY` | Independent encryption key, at least 32 bytes, for stored compute connections and Admin-managed deployment profiles. A setting: imported once when the settings row is created, or generated there when unset, and stored encrypted under the settings root key. Later values in `.env` are ignored, so an upgraded deployment can delete the line. Back up the settings root key with the database. |
 | `AGENT_COMPUTE_CONFIG` | Absolute path inside the control-plane process to the operator-owned JSON deployment configuration. |
 | `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
 | `AGENT_CONTROL_PLANE_SSH_HOST` | Editable first-time Server setup address for the service node. The supported deployer defaults to the node's FQDN, falling back to its hostname; set an SSH address explicitly when using another deployment system or a different SSH alias. Saved setups take precedence. |
@@ -832,18 +847,17 @@ variable an operator can set everywhere and change nothing. Every row names its
 compose argument, and `test_web_build_arguments_are_wired` fails on a row that
 has none. Changing one is a rebuild.
 
-The base path and API prefix must match the reverse proxy. The supported
-same-origin layouts use `AGENT_WEB_API_URL=<AGENT_WEB_BASE_PATH>/api`: `/api`
-for the standalone edge, or `/agents/api` under `/agents`. The build rejects a
-nonempty relative API value that disagrees with the base path. Absolute URLs
-and an empty value are accepted for operator-defined routing; empty means API
-requests start directly at `/v1/...`. The pairing tests run the actual Next.js
-configuration.
+The web app is served at the root of its own hostname, and the browser calls
+the control plane at `/api` on the same origin, where the edge routes it.
+Mounting the app under a path prefix inside another site was removed;
+`deploy.sh` and the release deployer refuse a leftover `AGENT_WEB_BASE_PATH`.
+The build rejects a relative API value other than `/api`; an absolute URL is
+accepted for operator-defined cross-origin routing. The tests run the actual
+Next.js configuration.
 
 | Variable | Compose build argument | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_BASE_PATH` | `AGENT_WEB_BASE_PATH` | Prefix the app is mounted under. `/agents` serves it inside another site's hostname — same origin, so the session cookie needs no CORS and no DNS record is involved, and a rollback is a reverse-proxy edit rather than a DNS change waiting out a TTL. Empty for a deployment that owns its hostname. It has to match the path in `AGENT_WEB_BASE_URL`, from which the control plane builds every emailed link. |
-| `NEXT_PUBLIC_AGENT_API_URL` | `AGENT_WEB_API_URL` | Browser API base. For the shipped standalone edge, use `/api`; under a mount prefix use `<AGENT_WEB_BASE_PATH>/api`, for example `/agents/api`. Empty sends `/v1/...` requests directly to the browser origin and requires routing that exposes those paths. Cross-origin URLs need control-plane CORS with credentials because authentication uses a session cookie. |
+| `NEXT_PUBLIC_AGENT_API_URL` | Set to `/api` | Browser API base, fixed at `/api` on the same origin. A build that needs a cross-origin control plane passes an absolute URL, which needs control-plane CORS with credentials because authentication uses a session cookie. |
 | `NEXT_PUBLIC_BUILD_SHA` | `BUILD_SHA` | Optional build identity, baked in by the deploy script. |
 | `NEXT_PUBLIC_BUILD_TIMESTAMP` | `BUILD_TIMESTAMP` | Optional build identity. |
 

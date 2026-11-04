@@ -765,7 +765,6 @@ def verify_identity(image: str, role: str, variant: str | None, revision: str | 
 SMOKE_CASES: dict[str, SmokeCase] = {
     "control": SmokeCase("control", None, verify_control),
     "web-root": SmokeCase("web", "root", partial(verify_web, variant="root")),
-    "web-agents": SmokeCase("web", "agents", partial(verify_web, variant="agents")),
     "runner": SmokeCase("runner", None, verify_runner),
     "sandbox": SmokeCase("sandbox", None, verify_sandbox),
     "tunnel": SmokeCase("tunnel", None, verify_tunnel),

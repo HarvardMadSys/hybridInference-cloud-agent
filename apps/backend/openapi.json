@@ -20595,6 +20595,48 @@
         "title": "SandboxCheckpointMember",
         "type": "object"
       },
+      "SandboxMcpServer": {
+        "additionalProperties": false,
+        "description": "One admitted sandbox server, as a claim carries it to the host.",
+        "properties": {
+          "alias": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$",
+            "title": "Alias",
+            "type": "string"
+          },
+          "args": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "title": "Args",
+            "type": "array"
+          },
+          "command": {
+            "enum": [
+              "npx",
+              "uvx"
+            ],
+            "title": "Command",
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 64,
+            "title": "Env",
+            "type": "object"
+          }
+        },
+        "required": [
+          "alias",
+          "command"
+        ],
+        "title": "SandboxMcpServer",
+        "type": "object"
+      },
       "SandboxPlugin": {
         "additionalProperties": false,
         "description": "One native marketplace plugin or npm plugin package for a chat.",
@@ -25331,6 +25373,15 @@
               }
             ],
             "title": "Runtime Version"
+          },
+          "sandbox_mcp_servers": {
+            "description": "MCP servers the owner chose to run inside the sandbox, next to the agent, with their pinned launch. The host admits them to the sandbox's MCP gateway for the member that runs this job. They carry no secret.",
+            "items": {
+              "$ref": "#/components/schemas/SandboxMcpServer"
+            },
+            "maxItems": 16,
+            "title": "Sandbox Mcp Servers",
+            "type": "array"
           },
           "setup_script": {
             "anyOf": [

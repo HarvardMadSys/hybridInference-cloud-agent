@@ -11,25 +11,22 @@ from deploy.release import artifact_catalog as catalog, generate_artifact_contra
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_catalog_pins_the_existing_six_release_cells() -> None:
+def test_catalog_pins_the_existing_five_release_cells() -> None:
     """Independent release expectations stay visible beside the shared data."""
     entries = catalog.artifacts()
     assert [entry.name for entry in entries] == [
         "control",
         "web-root",
-        "web-agents",
         "runner",
         "sandbox",
         "tunnel",
     ]
     assert catalog.site_variants() == {
         "root": ("", "/api"),
-        "agents": ("/agents", "/agents/api"),
     }
     assert {entry.name: entry.platform for entry in entries} == {
         "control": "linux/arm64",
         "web-root": "linux/arm64",
-        "web-agents": "linux/arm64",
         "runner": "linux/amd64",
         "sandbox": "linux/amd64",
         "tunnel": "linux/amd64",
@@ -62,12 +59,22 @@ def test_schema_version_is_not_rewritten_as_a_catalog_side_effect() -> None:
 def test_generated_schema_requires_every_catalog_cell_once() -> None:
     schema = generate.normalized_schema(json.loads(generate.SCHEMA_PATH.read_text()))
     artifacts = schema["properties"]["artifacts"]
-    assert artifacts["minItems"] == artifacts["maxItems"] == len(catalog.artifacts())
+    retired = catalog.retired_web_variants()
+    assert artifacts["minItems"] == len(catalog.artifacts())
+    assert artifacts["maxItems"] == len(catalog.artifacts()) + len(retired)
     required = {
         (
             rule["contains"]["properties"]["role"]["const"],
             rule["contains"]["properties"].get("variant", {}).get("const"),
         )
         for rule in artifacts["allOf"]
+        if rule["minContains"] == 1
     }
     assert required == {(entry.role, entry.variant) for entry in catalog.artifacts()}
+    # A retired variant is accepted at most once, never required.
+    optional = {
+        rule["contains"]["properties"]["variant"]["const"]
+        for rule in artifacts["allOf"]
+        if rule["minContains"] == 0
+    }
+    assert optional == {item["variant"] for item in retired} == {"agents"}

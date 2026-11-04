@@ -15,7 +15,6 @@ import { useJobConversation } from './job-detail/useJobConversation';
 import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
 import { useT } from '@/components/providers';
-import { basePath } from '@/config/env';
 import { publishAgentThread } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
 import { APIError } from '@/lib/utils/errors';
@@ -558,7 +557,7 @@ export function JobDetail({
       // scroll:false and a stable JobDetail key. Native history updates Next's
       // usePathname without replacing the page, preserving the conversation
       // while useAgentJob loads the next turn. Reload and Back keep real URLs.
-      window.history.pushState(null, '', `${basePath}/${encodeURIComponent(jobId)}`);
+      window.history.pushState(null, '', `/${encodeURIComponent(jobId)}`);
       // The reader asked for this turn, so following its output is what they
       // asked for — the one place besides "back to bottom" that resumes it.
       scroll.followLatest();

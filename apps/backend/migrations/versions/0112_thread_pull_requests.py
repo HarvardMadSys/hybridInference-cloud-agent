@@ -9,16 +9,16 @@ One row per pull request per conversation. ``job_id`` is the turn that opened
 it, kept for attribution only: a turn's row may outlive nothing it refers to,
 so it is not a foreign key that a turn's deletion would have to wait on.
 
-Revision ID: 0111_thread_pull_requests
-Revises: 0110_host_late_settings
+Revision ID: 0112_thread_pull_requests
+Revises: 0111_mcp_sandbox_location
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0111_thread_pull_requests"
-down_revision = "0110_host_late_settings"
+revision = "0112_thread_pull_requests"
+down_revision = "0111_mcp_sandbox_location"
 branch_labels = None
 depends_on = None
 

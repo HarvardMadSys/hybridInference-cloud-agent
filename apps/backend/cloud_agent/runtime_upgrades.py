@@ -181,13 +181,22 @@ class RegistryClient:
         self._version_reads: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
-    def _cache_key(self, package: str) -> str:
-        """Cache per registry: a changed registry setting reads afresh."""
-        return f"{self._base_url or registry_url()} {package}"
+    def _registry(self) -> str:
+        """The registry a read uses, fixed when it starts.
 
-    def _client(self) -> httpx.AsyncClient:
+        Read once per call: an answer from the registry that was saved when the
+        request began is cached under that registry, never under one saved
+        while it was in flight.
+        """
+        return self._base_url or registry_url()
+
+    def _cache_key(self, package: str, registry: str | None = None) -> str:
+        """Cache per registry: a changed registry setting reads afresh."""
+        return f"{registry or self._registry()} {package}"
+
+    def _client(self, registry: str | None = None) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=self._base_url or registry_url(),
+            base_url=registry or self._registry(),
             timeout=_REGISTRY_TIMEOUT_S,
             transport=self._transport,
             headers={"accept": "application/json"},
@@ -195,14 +204,16 @@ class RegistryClient:
 
     async def latest(self, package: str) -> tuple[str | None, str | None]:
         """``(version, None)``, or ``(None, why it is unknown)``."""
+        registry = self._registry()
+        key = self._cache_key(package, registry)
         async with self._lock:
-            cached = self._latest.get(self._cache_key(package))
+            cached = self._latest.get(key)
             if cached is not None and self._clock() - cached[0] < REGISTRY_CACHE_S:
                 return cached[1], cached[2]
         version: str | None = None
         error: str | None = None
         try:
-            async with self._client() as client:
+            async with self._client(registry) as client:
                 response = await client.get(f"/{_package_path(package)}/latest")
             if response.status_code != 200:
                 error = f"npm answered {response.status_code} for {package}"
@@ -222,31 +233,33 @@ class RegistryClient:
                 if version
                 else self._clock() - REGISTRY_CACHE_S + REGISTRY_FAILURE_CACHE_S
             )
-            self._latest[self._cache_key(package)] = (stamp, version, error)
+            self._latest[key] = (stamp, version, error)
         return version, error
 
     async def versions(self, package: str) -> NpmVersions:
         """Every stable release of ``package`` worth offering, cached for an hour."""
+        registry = self._registry()
+        key = self._cache_key(package, registry)
         async with self._lock:
-            read = self._version_reads.setdefault(package, asyncio.Lock())
+            read = self._version_reads.setdefault(key, asyncio.Lock())
         async with read:
             async with self._lock:
-                cached = self._versions.get(self._cache_key(package))
+                cached = self._versions.get(key)
                 if cached is not None and self._clock() - cached[0] < REGISTRY_CACHE_S:
                     return cached[1]
-            result = await self._read_versions(package)
+            result = await self._read_versions(package, registry)
             async with self._lock:
                 stamp = (
                     self._clock()
                     if result.error is None
                     else self._clock() - REGISTRY_CACHE_S + REGISTRY_FAILURE_CACHE_S
                 )
-                self._versions[self._cache_key(package)] = (stamp, result)
+                self._versions[key] = (stamp, result)
             return result
 
-    async def _read_versions(self, package: str) -> NpmVersions:
+    async def _read_versions(self, package: str, registry: str) -> NpmVersions:
         try:
-            async with self._client() as client:
+            async with self._client(registry) as client:
                 response = await client.get(
                     f"/{_package_path(package)}",
                     headers={"accept": _ABBREVIATED},

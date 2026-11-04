@@ -84,7 +84,9 @@ _EXAMPLE_LINE = re.compile(r"\s*#?\s*([A-Z][A-Z0-9_]*)=")
 HOST_ADMIN_OUTSIDE_REGISTRY = frozenset({"AGENT_HOST_SLOTS"})
 #: Retired names that are not former Sandbox Manager spellings: a warning in
 #: sandbox_host.sh, and the removed Gateway integration startup refuses.
-RETIRED_OUTSIDE_LEGACY = frozenset({"AGENT_RUNNER_REPLICAS", *RETIRED_GATEWAY_VARIABLES})
+RETIRED_OUTSIDE_LEGACY = frozenset(
+    {"AGENT_RUNNER_REPLICAS", "AGENT_WEB_BASE_PATH", *RETIRED_GATEWAY_VARIABLES}
+)
 
 SETTING_ENVS = frozenset(setting.env for setting in SETTINGS if setting.env)
 HOST_SETTING_ENVS = frozenset(setting.env for setting in HOST_SETTINGS)

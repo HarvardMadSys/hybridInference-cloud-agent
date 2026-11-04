@@ -98,7 +98,6 @@ def test_ci_images_build_on_their_deployment_architecture() -> None:
     expected = {
         "control": ("deploy/control-plane/Dockerfile", arm64),
         "web-root": ("deploy/control-plane/Dockerfile.web", arm64),
-        "web-agents": ("deploy/control-plane/Dockerfile.web", arm64),
         "runner": ("deploy/host/Dockerfile.agent-runner", x64),
         "sandbox": ("deploy/sandbox/Dockerfile.agent-sandbox", x64),
         "tunnel": ("deploy/host/Dockerfile.agent-ssh-tunnel", x64),

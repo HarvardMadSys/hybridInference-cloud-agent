@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0111_thread_pull_requests`. The supported deployment scripts run migrations
+`0112_thread_pull_requests`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -40,10 +40,31 @@ from then on the database wins and the line is ignored. After the control plane
 
 `AGENT_COMPUTE_SECRET_KEY` is imported the same way: once stored, saved compute
 credentials decrypt with the stored key and a different value in `.env` is
-ignored. `deploy.sh` writes a new random value whenever the line is missing, so
-deleting it only brings back an unused one; leave it. Keep
-`AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own copy of the
-credential.
+ignored, so the line can be deleted too. `deploy.sh` no longer writes one: a new
+deployment's control plane generates the key into its settings on first start.
+What must be backed up with the database is the settings root key
+(`AGENT_SETTINGS_ENCRYPTION_KEY`, or `AGENT_SESSION_SECRET` where that is the
+root). Keep `AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own
+copy of the credential.
+
+`ADMIN_TOKEN` is optional: the first administrator of a new deployment signs in
+with the one-time setup code. An existing deployment can keep it as its
+recovery door. `deploy.sh` now generates a new installation's database
+password and DSN, account key and settings root key. It never replaces a set
+value, never adds a settings key beside `AGENT_SESSION_SECRET`, and on a
+deployment root that has deployed before it stops with the names of any
+missing required value rather than generate one.
+
+The web app is now served only at the root of its own hostname, with the API at
+`/api` on the same origin; mounting it under a path prefix such as `/agents`
+inside another site was removed, and releases no longer carry the `web-agents`
+image. Delete `AGENT_WEB_BASE_PATH`, `AGENT_WEB_API_URL` and
+`AGENT_DEPLOYMENT_SHA` from the control plane's `.env` (`deploy.sh` exports the
+commit it deploys). An empty `AGENT_WEB_BASE_PATH` is harmless; one with a value
+stops `deploy.sh` and the release deployer, since it would now be ignored.
+`AGENT_NETWORK_NAME` can go too unless another stack's reverse proxy joins the
+network by a name other than `cloud-agent`. A distribution that resolves
+releases must accept one without the `/agents` web image before deploying it.
 
 Four values moved into Admin in this release:
 
@@ -178,7 +199,8 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
-| `0111_thread_pull_requests` | Adds `agent_thread_pull_requests`: the pull requests a conversation's agent opened through the GitHub relay, one row per conversation and pull request. Nothing reads it before this release, so the previous release runs unchanged beside it. A downgrade drops the table. |
+| `0112_thread_pull_requests` | Adds `agent_thread_pull_requests`: the pull requests a conversation's agent opened through the GitHub relay, one row per conversation and pull request. Nothing reads it before this release, so the previous release runs unchanged beside it. A downgrade drops the table. |
+| `0111_mcp_sandbox_location` | Lets an MCP connection run inside the task sandbox: the `agent_mcp_connections.location` check constraint admits `sandbox` beside `remote`, `managed-worker` and `user-connector`, under the stable name `agent_mcp_connections_location_check`. No row changes. A downgrade restores the three-location constraint, and refuses while any sandbox connection exists rather than deleting it. |
 | `0110_host_late_settings` | Adds two columns to `agent_runner_hosts`: the host settings registered after a host's first import that it has already offered (so each is imported once, and an administrator's reset is never undone), and what the host reports it uses for configuration delivered on the heartbeat, such as the agent package registry. Existing rows get an empty list and no report. A downgrade drops both columns. |
 | `0109_local_account_parity` | Local accounts only. Splits `agent_local_password_logins` into sign-in identities (email, login name, phone) and optional password credentials, carrying every account over with its verification time and hash (a verified email is recorded as verified by its link, the only way `0108_local_accounts` had); adds the access view every SQL gate reads, the `deleted` account state with the account's name, note, language and sign-in and deletion times, phone codes, browser sessions, sign-in events, the signup domain list, first-run setup and administrator mail to accounts. It touches only the account tables. A downgrade restores the email-and-password table and drops the new tables, with the sign-in events and mail history in them; it refuses while any account signs in some other way or is deleted, rather than dropping that account. |
 | `0108_local_accounts` | Creates the tables accounts use: accounts, password sign-in, waiting-list admissions, server-side sessions, emailed tokens, abuse counters, access terminations and the account identity marker. It changes no existing row and locks no existing table. A downgrade drops them, and with them every account. |

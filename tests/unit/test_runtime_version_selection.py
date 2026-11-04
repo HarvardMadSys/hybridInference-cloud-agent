@@ -36,6 +36,7 @@ from cloud_agent_host.sandbox import (
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef, snapshot_object_key
 from cloud_agent_shared.model_connections import ModelConnectionAccess
+from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 from cloud_agent_shared.ssh_access import SshAccess
 
 _MENU = {"claude-code": ["2.1.220", "2.1.235"]}
@@ -397,6 +398,9 @@ def _full_claim() -> WorkerClaimResponse:
         mcp_token="t",
         clone_token="c",
         mcp_bindings=["docs"],
+        sandbox_mcp_servers=[
+            SandboxMcpServer(alias="browser", command="npx", args=("-y", "@playwright/mcp@0.0.83"))
+        ],
         metadata={"source": "test"},
     )
 

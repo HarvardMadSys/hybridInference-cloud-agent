@@ -15,16 +15,20 @@ selected unavailable Host keeps work waiting; it never triggers a fallback.
 ## What must remain on stable infrastructure
 
 Keep the control plane, Postgres, background worker, deployment profiles,
-provider credentials and compute encryption key on stable infrastructure. A
+provider credentials and the settings root key on stable infrastructure. A
 managed resource runs only the Host, sandbox manager, tunnels and sandboxes.
 Provider expiry remains a hard limit; renewal does not guarantee uptime.
 
-Stored API tokens and management SSH keys are encrypted with
-`AGENT_COMPUTE_SECRET_KEY`. The supported deployer generates a random 32-byte
-value in its persistent `.env` when none is configured; other deployment
-systems must provide equivalent stable key material. Back it up with the
-encrypted database: restoring the database without this key cannot recover
-compute connections. Do not reuse account, settings, enrollment or sandbox manager keys.
+Stored API tokens and management SSH keys are encrypted with the compute
+credential encryption key. It is a setting kept in the database, itself
+encrypted under the settings root key (`AGENT_SETTINGS_ENCRYPTION_KEY`, or the
+legacy `AGENT_SESSION_SECRET`). The control plane generates a random one when
+it first creates its settings, unless `AGENT_COMPUTE_SECRET_KEY` supplies one
+then; a later `AGENT_COMPUTE_SECRET_KEY` is ignored. So the key travels with
+the database, and what must be kept with every database backup is the settings
+root key: restoring the database without it cannot recover compute
+connections, or any other saved secret. Do not reuse account, settings,
+enrollment or sandbox manager keys.
 Compute management credentials never enter sandboxes or the deployed Host.
 
 The Host separately needs purpose-scoped tunnel credentials and
@@ -367,7 +371,6 @@ Set these values in the private deployment environment:
 
 ```text
 AGENT_COMPUTE_DIRECTORY=/private/compute
-AGENT_COMPUTE_SECRET_KEY=<leave blank for deploy.sh to generate, or supply a stable secret>
 AGENT_CLOUDLAB_API_URL=<operator-verified HTTPS Portal API base URL>
 ```
 

@@ -32,7 +32,7 @@ def test_every_role_a_release_carries_has_a_start_check() -> None:
 
 
 def test_web_is_checked_once_per_variant() -> None:
-    assert smoke.ROLES["web"].variants == ("root", "agents")
+    assert smoke.ROLES["web"].variants == ("root",)
     assert set(smoke.ROLES["web"].variants) == {
         entry.variant for entry in artifact_catalog.artifacts() if entry.role == "web"
     }
@@ -96,7 +96,7 @@ def matching_labels(**overrides: str) -> dict[str, str]:
         ),
         "org.opencontainers.image.revision": COMMIT,
         "io.hybridinference.artifact.role": "web",
-        "io.hybridinference.artifact.base_path": "/agents",
+        "io.hybridinference.artifact.base_path": "",
     }
     labels.update(overrides)
     return labels
@@ -106,7 +106,7 @@ def test_the_identity_labels_are_what_the_release_will_be_checked_against(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(smoke, "image_labels", lambda image: matching_labels())
-    evidence = smoke.verify_identity("image", "web", "agents", COMMIT)
+    evidence = smoke.verify_identity("image", "web", "root", COMMIT)
     assert any("revision" in line for line in evidence)
     assert any("base path" in line for line in evidence)
 
@@ -115,25 +115,24 @@ def test_the_identity_labels_are_what_the_release_will_be_checked_against(
     ("role", "variant", "revision", "labels"),
     [
         ("control", None, COMMIT, matching_labels()),
-        ("web", "root", COMMIT, matching_labels()),
-        ("web", "agents", "b" * 40, matching_labels()),
+        ("web", "root", "b" * 40, matching_labels()),
         (
             "web",
-            "agents",
+            "root",
             COMMIT,
             matching_labels(**{"org.opencontainers.image.revision": "unknown"}),
         ),
         (
             "web",
-            "agents",
+            "root",
             COMMIT,
             matching_labels(**{"io.hybridinference.artifact.role": "runner"}),
         ),
         (
             "web",
-            "agents",
+            "root",
             COMMIT,
-            matching_labels(**{"io.hybridinference.artifact.base_path": ""}),
+            matching_labels(**{"io.hybridinference.artifact.base_path": "/agents"}),
         ),
     ],
 )

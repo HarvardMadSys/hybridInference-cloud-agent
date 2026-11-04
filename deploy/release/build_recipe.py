@@ -73,7 +73,6 @@ RECIPE_FILES: tuple[str, ...] = (
     "deploy/host/setup_kata_runtime.sh",
     "deploy/host/kata_runtime_epoch.py",
     "deploy/host/.env.example",
-    "deploy/reverse-proxy/agents-under-parent-site.conf",
     "deploy/release/artifact_compose.py",
     "deploy/release/artifact_env.sh",
     "deploy/release/release_env.py",

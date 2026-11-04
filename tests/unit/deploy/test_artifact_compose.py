@@ -3,9 +3,9 @@
 `build` is gone and `image` is set from the manifest; everything else — ports,
 mounts, networks, dependencies, third-party images — has to be identical, which
 is what most of this file checks. The awkward half is `build`: Compose
-interpolates a file before it does anything else, and the console's build args
-carry `${AGENT_WEB_API_URL:?...}`, so a deployment that has the image and no
-build arguments cannot even parse the file. `up --no-build` does not skip that,
+interpolates a file before it does anything else, so a build argument that
+required a variable would stop a deployment that has the image, and no build
+arguments, from even parsing the file. `up --no-build` does not skip that,
 and the deploy path runs `compose run` for migrations and readiness as well.
 """
 
@@ -26,7 +26,7 @@ SOURCES = {
     "control-plane": REPO_ROOT / "deploy/control-plane/docker-compose.yml",
     "host": REPO_ROOT / "deploy/host/docker-compose.sandbox.yml",
 }
-CASES = [("control-plane", "agents"), ("control-plane", "root"), ("host", None)]
+CASES = [("control-plane", "root"), ("host", None)]
 
 
 def digest(seed: str) -> str:
@@ -46,13 +46,6 @@ def manifest() -> dict[str, Any]:
                 "variant": "root",
                 "base_path": "",
                 "image": reference("web", "root"),
-                "platforms": ["linux/arm64"],
-            },
-            {
-                "role": "web",
-                "variant": "agents",
-                "base_path": "/agents",
-                "image": reference("web", "agents"),
                 "platforms": ["linux/arm64"],
             },
             {"role": "runner", "image": reference("runner"), "platforms": ["linux/amd64"]},
@@ -201,7 +194,7 @@ def test_host_stacks_share_receipts_without_the_credential_root():
                 next(a for a in m["artifacts"] if a["role"] == "control")
             ),
             "control-plane",
-            "agents",
+            "root",
             id="a role this stack needs is missing",
         ),
         pytest.param(
@@ -215,13 +208,13 @@ def test_host_stacks_share_receipts_without_the_credential_root():
         pytest.param(
             lambda m: m["artifacts"][0].update(image="ghcr.io/harvardmadsys/cloud-agent:latest"),
             "control-plane",
-            "agents",
+            "root",
             id="a tag instead of a digest",
         ),
         pytest.param(
             lambda m: m["artifacts"].append(dict(m["artifacts"][0])),
             "control-plane",
-            "agents",
+            "root",
             id="a role appears twice",
         ),
     ],
@@ -255,7 +248,7 @@ def test_the_cli_writes_a_file_with_no_build_left(tmp_path: Path) -> None:
             "--stack",
             "control-plane",
             "--variant",
-            "agents",
+            "root",
             "--output",
             str(output),
         ]
@@ -263,7 +256,7 @@ def test_the_cli_writes_a_file_with_no_build_left(tmp_path: Path) -> None:
     assert code == 0
     written = yaml.safe_load(output.read_text())
     assert "build" not in yaml.safe_dump(written)
-    assert written["services"]["web"]["image"] == reference("web", "agents")
+    assert written["services"]["web"]["image"] == reference("web", "root")
 
 
 def test_the_cli_writes_nothing_when_it_refuses(tmp_path: Path) -> None:

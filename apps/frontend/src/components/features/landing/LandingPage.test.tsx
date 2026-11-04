@@ -29,7 +29,7 @@ function options(changes: Partial<AuthOptions> = {}): AuthOptions {
   };
 }
 
-const demo = () => document.querySelector('[role="img"]') as HTMLElement;
+const demo = () => screen.getByRole('group', { name: /Cloud Agent/ });
 const row = () => demo().querySelector('[data-demo="pr-row"]');
 const message = () => demo().querySelector('[data-demo="message"]');
 
@@ -92,6 +92,27 @@ describe('the signed-out home page', () => {
 
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('你的 Agent，在云端开工。');
     expect(screen.getAllByRole('link', { name: '注册' })[0]).toHaveAttribute('href', '/signup');
+    expect(message()).toHaveTextContent('给 CSV 导出补上测试，包括空文件的情况。');
+  });
+
+  it('does not flash a Sign in hero CTA while account options are still loading', async () => {
+    let resolveOptions!: (value: AuthOptions) => void;
+    vi.mocked(getAuthOptions).mockReturnValue(
+      new Promise((resolve) => {
+        resolveOptions = resolve;
+      }),
+    );
+    render(<LandingPage />);
+
+    // Only the header's Sign in link is present while options are in flight;
+    // the hero and closing CTAs wait rather than flashing Sign in and flipping to Sign up.
+    expect(screen.getAllByRole('link', { name: 'Sign in' })).toHaveLength(1);
+    expect(screen.queryByRole('link', { name: 'Sign up' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveOptions(options({ signup_enabled: true }));
+    });
+    expect(screen.getAllByRole('link', { name: 'Sign up' }).length).toBeGreaterThanOrEqual(2);
   });
 
   it('plays a task through to an opened draft pull request, then moves to the next example', async () => {
@@ -185,6 +206,73 @@ describe('the signed-out home page', () => {
     fireEvent.click(screen.getByRole('button', { name: /Give it a task/ }));
     await advance(1000);
     expect(fading()).toBe(0);
+  });
+
+  it('lets a visitor switch the workspace view with a pointer or the keyboard', async () => {
+    render(<LandingPage />);
+    await advance(2000);
+    // Held on the finished task, which stays put once chosen by hand.
+    fireEvent.click(screen.getByRole('button', { name: /Review the result/ }));
+    await advance(stageDuration(EXAMPLES[0], 2) + 50);
+
+    // The demo is a labelled group, not an image, so its tabs are exposed.
+    expect(screen.queryByRole('img', { name: /Cloud Agent/ })).not.toBeInTheDocument();
+    const views = within(demo()).getByRole('tablist', { name: 'Workspace views' });
+    const tab = (name: string) => within(views).getByRole('tab', { name });
+    expect(
+      within(views)
+        .getAllByRole('tab')
+        .map((element) => element.textContent),
+    ).toEqual(['Changes', 'Files', 'Terminal']);
+    const selected = () => within(views).getByRole('tab', { selected: true });
+    const panel = () => within(demo()).getByRole('tabpanel');
+
+    fireEvent.click(tab('Files'));
+    expect(selected()).toHaveTextContent('Files');
+    expect(panel()).toHaveAccessibleName('Files');
+    expect(panel()).toHaveTextContent('csv.test.ts');
+    // One tab stop for the list: the selected tab.
+    expect(tab('Files')).toHaveAttribute('tabindex', '0');
+    expect(tab('Changes')).toHaveAttribute('tabindex', '-1');
+
+    act(() => tab('Files').focus());
+    fireEvent.keyDown(tab('Files'), { key: 'ArrowRight' });
+    expect(selected()).toHaveTextContent('Terminal');
+    expect(tab('Terminal')).toHaveFocus();
+    expect(panel()).toHaveAccessibleName('Terminal');
+    fireEvent.keyDown(tab('Terminal'), { key: 'ArrowRight' });
+    expect(tab('Changes')).toHaveFocus();
+    expect(selected()).toHaveTextContent('Changes');
+    fireEvent.keyDown(tab('Changes'), { key: 'ArrowLeft' });
+    expect(tab('Terminal')).toHaveFocus();
+    fireEvent.keyDown(tab('Terminal'), { key: 'Home' });
+    expect(selected()).toHaveTextContent('Changes');
+    fireEvent.keyDown(tab('Changes'), { key: 'End' });
+    expect(selected()).toHaveTextContent('Terminal');
+    expect(tab('Terminal')).toHaveFocus();
+  });
+
+  it('holds the finished task while keyboard focus is in it', async () => {
+    render(<LandingPage />);
+    await advance(0);
+    const total = STAGES.reduce<number>((sum, stage) => sum + stageDuration(EXAMPLES[0], stage), 0);
+    await advance(1100 + total + 200);
+    expect(row()).toHaveAttribute('data-state', 'opened');
+
+    const tab = within(demo()).getByRole('tab', { selected: true });
+    act(() => tab.focus());
+    await advance(HOLD_MS * 3);
+    expect(screen.getByRole('button', { name: 'Add tests' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    act(() => tab.blur());
+    await advance(HOLD_MS + 1000);
+    expect(screen.getByRole('button', { name: 'Fix a bug' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 
   it('switches to the chosen example', async () => {

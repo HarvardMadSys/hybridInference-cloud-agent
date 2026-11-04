@@ -123,11 +123,30 @@ shows the value in effect; save a valid value or confirm **Restore default**
 to clear the warning. Undecryptable or unencrypted stored credentials still
 stop the listener.
 
-For a new installation, provision the database, a stable
-`AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate random
-`ADMIN_TOKEN`, plus the infrastructure/build fields in the minimal
-`deploy/control-plane/.env.example`. Bootstrap the setup UI before enrolling
-execution hosts or running the normal deployment readiness gate:
+For a new installation, copy `deploy/control-plane/.env.example` to `.env` and
+adjust only the web path and network lines if the defaults do not fit. Nothing
+secret is filled in by hand. Run the deployer's preparation phase once; on a
+root that has never deployed, with the bundled database and no Docker volume
+or container of the Compose project yet, it writes a random database password
+and matching `AGENT_DATABASE_URL`, `AGENT_LOCAL_SESSION_SECRET` and
+`AGENT_SETTINGS_ENCRYPTION_KEY` into `.env`. From the deployment checkout:
+
+```bash
+SOURCE_REPO="$PWD" DEPLOY_ROOT="$PWD" \
+  deploy/control-plane/deploy.sh --phase prepare "$(git rev-parse HEAD)"
+```
+
+An artifact deployment's `prepare` phase does the same
+([release artifacts](../../deploy/release/README.md)).
+
+To use another database, set `AGENT_DATABASE_URL` and `AGENT_POSTGRES_PASSWORD`
+yourself first; the deployer then cannot prove the database is new and asks for
+the account key and settings root key as well. It never replaces a value that
+is set. Back up `.env` with the database from now on: the settings root key in
+it decrypts every saved secret.
+
+Bootstrap the web application before enrolling execution hosts or running the
+normal deployment readiness gate:
 
 ```bash
 AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
@@ -135,15 +154,21 @@ AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
   up -d --build control-plane mcp-relay web
 ```
 
-Open `<web base path>/setup` and enter the recovery token. This route is outside
-the sign-in guard. It uses the ordinary administrator API and audit trail;
-unauthenticated visitors cannot read or change settings. Reloading or locking
-the page clears its in-memory token. Complete the account, execution and user
-credential fields, create the first administrator at `/setup/administrator`
-with the setup code the control plane logs, then enroll hosts and run the
-usual deployment command.
+On its first start the control plane creates its settings with a random host
+signing key and user and compute credential encryption keys, and logs a
+one-time setup code (`agent_local_setup_pending`). Create the first
+administrator at `/setup/administrator` with that code, sign
+in, and complete the remaining required settings in Admin → Settings: the
+public web address and the sandbox manager credential your hosts share. Then
+enroll hosts and run the usual deployment command.
 Optional integrations need setup only when their configuration has been started.
 The shared-live deployment gate continues to require qualified host readiness.
+
+`/setup` is the recovery door when no administrator can sign in.
+It needs `ADMIN_TOKEN`, which a deployment sets only when it wants that door.
+The route is outside the sign-in guard. It uses the ordinary administrator API
+and audit trail; unauthenticated visitors cannot read or change settings.
+Reloading or locking the page clears its in-memory token.
 
 Existing installations can retain the environment `AGENT_SESSION_SECRET`
 fallback for the settings root. Before removing that legacy environment entry,
@@ -915,9 +940,8 @@ Discovery stores a capability snapshot. Templates prefill the form; they do
 not define a deployment-wide registry or server catalogue.
 
 MCP OAuth uses `AGENT_MCP_PUBLIC_BASE_URL` for the public API callback and
-`AGENT_WEB_BASE_URL` for the browser's return to `/integrations`. For a shared
-hostname deployment these can be `https://example.com/agents/api` and
-`https://example.com/agents` respectively. The page reports the authorization
+`AGENT_WEB_BASE_URL` for the browser's return to `/integrations`, for example
+`https://agents.example.org/api` and `https://agents.example.org`. The page reports the authorization
 result, verifies a stored credential before showing success, and directs the
 user to Test to discover the connection's tools.
 
@@ -1187,6 +1211,35 @@ and `self-test` in a sandbox to check a host; `/run/agent-browser/daemon.log`
 has the service's log. A retained container created from an image without the
 browser has none until it is recreated.
 
+## Sandbox MCP servers
+
+An MCP connection can run in each chat's sandbox (location `sandbox`) instead
+of behind the relay, so it reaches the task's `localhost`, its files and the
+sandbox browser. The Playwright and Chrome DevTools presets drive that browser.
+The [design](../agents/specs/2026-11-02-computer-use-base-capability.md#in-sandbox-mcp-servers-phase-2)
+explains it.
+
+- **What may run there.** One exactly pinned package started by `npx` or `uvx`,
+  with no secret, mount or working directory. A server that needs a
+  credential stays remote: the sandbox also runs the repository's code.
+- **How it runs.** Before it launches a member's CLI, the host writes the
+  slot's admission as root, then starts the image's MCP gateway,
+  `cloud-agent-mcp`, as `agent-mcp` (uid 10003) on
+  `http://127.0.0.1:47801/mcp`. Last, it starts the slot's runner as
+  `agent-mcp-<slot>` (uid 12001 + slot), which runs that slot's servers. The
+  CLI reaches them as the MCP server `sandbox` with its relay token. A server
+  can affect only its own slot. A failed step is logged and leaves the chat
+  without those tools, not without its turn.
+- **Changes.** Turning a server off, adding one or changing its version takes
+  effect at the next turn, which starts a new CLI that resumes the session.
+- **No approval step.** The relay's per-tool policies do not apply: a sandbox
+  server can do what the agent's shell can.
+- **Where to look.** `/run/agent-mcp/gateway.log` records the methods each
+  slot called, readable as `agent-mcp`. A slot's runner logs its servers'
+  starts and stops in `/run/agent-mcp-slots/<slot>/runner.log`, and each
+  server's own output is in `/run/agent-mcp-slots/<slot>/<alias>.log`, readable
+  as `agent-mcp-<slot>`. Admissions are in `/run/agent-mcp-admissions`.
+
 ## Before a job can run for real
 
 Complete host provisioning, network checks, enrollment, and credentials before
@@ -1394,8 +1447,7 @@ AGENT_GITHUB_APP_INSTALL_URL=https://github.com/apps/<app-slug>/installations/ne
 ```
 
 Set the callback to the **agent web's own origin**, where the callback page and
-session cookie live. For a web build with a base path, use
-`<origin><basePath>/connected?provider=github`. The authorize link sends no
+session cookie live. The authorize link sends no
 `redirect_uri`, so GitHub uses the App's first Callback URL. Update that setting
 whenever the web origin moves.
 

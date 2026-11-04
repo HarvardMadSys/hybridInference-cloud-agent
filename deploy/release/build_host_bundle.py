@@ -64,6 +64,7 @@ HOST_FILES = (
     "deploy/sandbox/claude-session-fork",
     "deploy/sandbox/member-process-reaper",
     "deploy/sandbox/cloud-agent-browser",
+    "deploy/sandbox/cloud-agent-mcp",
     "deploy/sandbox/codex-requirements.toml",
 )
 _EXCLUDED_PART = re.compile(

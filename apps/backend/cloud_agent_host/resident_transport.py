@@ -51,6 +51,7 @@ from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_host.sandbox_browser import ensure_browser_service
+from cloud_agent_host.sandbox_mcp import admit_sandbox_mcp
 from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.shared_protocol import (
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from cloud_agent_shared.environment import BoundEnvironment
+    from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 
 #: The dialect a resident transport is speaking; the transport only reads the
 #: session it was handed, so the parameter stays covariant and a caller that
@@ -186,6 +188,9 @@ class ResidentLaunch:
     mcp_server_ids: tuple[str, ...] = ()
     mcp_base_url: str = ""
     mcp_credential: str = field(default="", repr=False)
+    # MCP servers this member runs inside the sandbox, behind its MCP gateway
+    # (cloud_agent_host.sandbox_mcp). Fixed at process start like the relay's.
+    sandbox_mcp_servers: tuple[SandboxMcpServer, ...] = ()
     slot_id: int = 0
     residency_generation: int = 0
     plugins: tuple[dict[str, str], ...] = ()
@@ -378,7 +383,10 @@ class ResidentTransport(Generic[_RuntimeT_co]):
         """
         held = self.launch
         held_mcp = held.mcp_credential
-        same_mcp = held.mcp_server_ids == launch.mcp_server_ids and (
+        same_mcp = (
+            held.mcp_server_ids == launch.mcp_server_ids
+            and held.sandbox_mcp_servers == launch.sandbox_mcp_servers
+        ) and (
             not launch.mcp_server_ids
             or (
                 held.mcp_base_url == launch.mcp_base_url
@@ -829,6 +837,14 @@ class ResidentTransportFactory:
         # Every runtime: a member's tools reach the sandbox's shared browser
         # through its service, which no member's own exec may start.
         ensure_browser_service(self._manager, spec)
+        # Its sandbox MCP servers, or the removal of an earlier launch's.
+        admit_sandbox_mcp(
+            self._manager,
+            spec,
+            slot_id=launch.slot_id,
+            credential=launch.mcp_credential,
+            servers=launch.sandbox_mcp_servers,
+        )
         # HTTP dialects always use the trusted live bridge, and pi its
         # wrapper and MCP bridge, including turns without MCP. Refresh
         # them from the host when resuming a retained container so new
@@ -992,6 +1008,9 @@ class ResidentTransportFactory:
                 server_ids=launch.mcp_server_ids,
                 base_url=launch.mcp_base_url if mcp_enabled else "",
                 credential=launch.mcp_credential if mcp_enabled else "",
+                # The gateway authenticates the relay's credential, so a launch
+                # with no relay has none to reach it with.
+                sandbox=mcp_enabled and bool(launch.sandbox_mcp_servers),
             ),
             state_dir=CHAT_STATE_DIR,
             session_state_dir=state_dir or CHAT_STATE_DIR,

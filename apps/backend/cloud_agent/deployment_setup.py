@@ -84,9 +84,11 @@ BOOTSTRAP: tuple[dict[str, Any], ...] = (
         "key": "ADMIN_TOKEN",
         "label": "Administrator recovery access",
         "description": (
-            "Optional deployment credential for the setup page when Gateway sign-in is "
-            "not configured. It remains independent of saved settings; changing it does "
-            "not repair an unavailable database or unreadable encryption key."
+            "Optional deployment credential for the admin API and the setup page when no "
+            "administrator can sign in. A new deployment does not need it: the first "
+            "administrator uses the one-time setup code the control plane logs. It "
+            "remains independent of saved settings; changing it does not repair an "
+            "unavailable database or unreadable encryption key."
         ),
         "management": "deployment",
         "requirement": "optional",

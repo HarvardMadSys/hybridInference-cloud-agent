@@ -74,8 +74,8 @@ from cloud_agent.goals.report import (
 )
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp.models import ConnectionStatus
 from cloud_agent.mcp.registry import resolve_for_thread
+from cloud_agent.mcp.sandbox_servers import split_bindings
 from cloud_agent.measurement_ingest import Owner
 from cloud_agent.measurement_persistence import persist_measurement
 from cloud_agent.owner_access import (
@@ -171,6 +171,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentExecutionRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
+    from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 
 
 #: Check the raw report before FastAPI parses JSON or validates its model.
@@ -841,16 +842,12 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     # resumes. Loading the bindings adds newly connected servers while retaining
     # explicit opt-outs, independently of whether anyone opened the Tools UI.
     mcp_aliases: list[str] = []
+    sandbox_mcp_servers: list[SandboxMcpServer] = []
     if claim["runtime"] in runtimes_supporting_mcp():
-        mcp_aliases = [
-            binding.alias
-            for resolved, binding in await resolve_for_thread(
-                job_store.mcp, thread_id=str(claim["thread_id"])
-            )
-            if binding.enabled
-            and resolved.usable
-            and resolved.connection.status is not ConnectionStatus.ERROR
-        ]
+        # Relay aliases, and the sandbox servers the host runs itself.
+        mcp_aliases, sandbox_mcp_servers = split_bindings(
+            await resolve_for_thread(job_store.mcp, thread_id=str(claim["thread_id"]))
+        )
         if web_search.configured():
             # A non-secret marker makes the runtime load the merged MCP endpoint
             # even when this conversation selected no user-owned connections.
@@ -919,6 +916,7 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         # path segment is the binding alias, and the runner learns nothing about
         # where the connection points.
         mcp_bindings=mcp_aliases,
+        sandbox_mcp_servers=sandbox_mcp_servers,
         metadata=claim["metadata"],
     )
     return response

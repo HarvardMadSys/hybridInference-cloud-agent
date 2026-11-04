@@ -15,7 +15,6 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import { safeReturnTo } from '@/lib/auth/signin';
 import { announceSession } from '@/lib/auth/sessionSync';
-import { basePath } from '@/config/env';
 import { AccountField, AccountFrame, AccountNotice } from './AccountFrame';
 import { PasswordInput } from './PasswordInput';
 import { PhoneCodeFields } from './PhoneCodeFields';
@@ -29,7 +28,7 @@ function useSignedIn() {
       user.agent_access?.allowed === true
         ? safeReturnTo(params?.get('return_to') ?? '/')
         : '/waiting-list';
-    window.location.assign(`${basePath}${destination}`);
+    window.location.assign(destination);
   };
 }
 

@@ -383,35 +383,67 @@ msgstr ""
 
 #: ../developer/operations.md:126
 msgid ""
-"For a new installation, provision the database, a stable "
-"`AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate "
-"random `ADMIN_TOKEN`, plus the infrastructure/build fields in the minimal"
-" `deploy/control-plane/.env.example`. Bootstrap the setup UI before "
-"enrolling execution hosts or running the normal deployment readiness "
-"gate:"
+"For a new installation, copy `deploy/control-plane/.env.example` to "
+"`.env` and adjust only the web path and network lines if the defaults do "
+"not fit. Nothing secret is filled in by hand. Run the deployer's "
+"preparation phase once; on a root that has never deployed, with the "
+"bundled database and no Docker volume or container of the Compose project"
+" yet, it writes a random database password and matching "
+"`AGENT_DATABASE_URL`, `AGENT_LOCAL_SESSION_SECRET` and "
+"`AGENT_SETTINGS_ENCRYPTION_KEY` into `.env`. From the deployment "
+"checkout:"
 msgstr ""
-"全新安装时，需要准备：数据库；一个固定不变、至少 32 字节的 `AGENT_SETTINGS_ENCRYPTION_KEY`；一个单独的随机 "
-"`ADMIN_TOKEN`；以及精简版 `deploy/control-plane/.env.example` "
-"里的基础设施和构建字段。在注册执行主机、跑常规的部署就绪检查之前，先把 setup 界面启动起来："
+"全新安装时，把 `deploy/control-plane/.env.example` 复制成 `.env`，默认值不合适的话只需改网页路径和网络那几行，任何密钥都不用手填。先运行一次部署脚本的准备阶段：如果部署根目录从没部署过、用的是自带数据库，并且 Docker 里还没有这个 Compose 项目的卷或容器，它会把随机的数据库密码和配套的 `AGENT_DATABASE_URL`、`AGENT_LOCAL_SESSION_SECRET`、`AGENT_SETTINGS_ENCRYPTION_KEY` 写进 `.env`。在部署用的 checkout 里运行："
 
-#: ../developer/operations.md:138
+#: ../developer/operations.md:139
 msgid ""
-"Open `<web base path>/setup` and enter the recovery token. This route is "
-"outside the sign-in guard. It uses the ordinary administrator API and "
-"audit trail; unauthenticated visitors cannot read or change settings. "
-"Reloading or locking the page clears its in-memory token. Complete the "
-"account, execution and user credential fields, create the first "
-"administrator at `/setup/administrator` with the setup code the control "
-"plane logs, then enroll hosts and run the usual deployment command. "
-"Optional integrations need setup only when their configuration has been "
-"started. The shared-live deployment gate continues to require qualified "
-"host readiness."
+"An artifact deployment's `prepare` phase does the same ([release "
+"artifacts](../../deploy/release/README.md))."
 msgstr ""
-"打开 `<web base path>/setup`，输入恢复令牌。这个页面不受登录检查限制，但用的是普通的管理员 API "
-"和审计记录，没有认证的访问者既看不到也改不了设置。刷新或锁定页面，内存里的令牌就会被清掉。把账号、执行相关和用户凭据相关的字段填完，在 "
-"`/setup/administrator` "
-"用控制平面日志中的设置代码创建首个管理员，然后注册主机，执行平常的部署命令。可选的集成只有开始配置之后才需要填完。shared-live "
-"部署关卡仍然要求主机通过资格验证并处于就绪状态。"
+"用发布制品部署时，`prepare` 阶段也会做同样的事（见[发布制品](../../deploy/release/README.md)）。"
+
+#: ../developer/operations.md:142
+msgid ""
+"To use another database, set `AGENT_DATABASE_URL` and "
+"`AGENT_POSTGRES_PASSWORD` yourself first; the deployer then cannot prove "
+"the database is new and asks for the account key and settings root key as"
+" well. It never replaces a value that is set. Back up `.env` with the "
+"database from now on: the settings root key in it decrypts every saved "
+"secret."
+msgstr ""
+"要用别的数据库，就先自己填好 `AGENT_DATABASE_URL` 和 `AGENT_POSTGRES_PASSWORD`；这时部署脚本无法确认这是个新库，会要求你把账号密钥和设置的根密钥也一并填上。已经有值的，它绝不替换。从这一步起，`.env` 要和数据库一起备份：里面的设置根密钥用来解密所有已保存的 secret。"
+
+#: ../developer/operations.md:148
+msgid ""
+"Bootstrap the web application before enrolling execution hosts or running"
+" the normal deployment readiness gate:"
+msgstr ""
+"在注册执行主机、跑常规的部署就绪检查之前，先把网页应用启动起来："
+
+#: ../developer/operations.md:157
+msgid ""
+"On its first start the control plane creates its settings with a random "
+"host signing key and user and compute credential encryption keys, and "
+"logs a one-time setup code (`agent_local_setup_pending`). Create the "
+"first administrator at `/setup/administrator` with that code, sign in, "
+"and complete the remaining required settings in Admin → Settings: the "
+"public web address and the sandbox manager credential your hosts share. "
+"Then enroll hosts and run the usual deployment command. Optional "
+"integrations need setup only when their configuration has been started. "
+"The shared-live deployment gate continues to require qualified host "
+"readiness."
+msgstr ""
+"控制平面第一次启动时会创建设置，随机生成主机签名密钥，以及用户凭据和计算资源凭据的加密密钥，并在日志里记下一次性设置码（`agent_local_setup_pending`）。用这个设置码在 `/setup/administrator` 创建第一位管理员，登录后到 Admin → Settings 补齐剩下的必填项：网站的公开地址，以及各台主机共用的 sandbox manager 凭据。然后注册主机，执行平常的部署命令。可选的集成只有开始配置之后才需要填完。shared-live 部署关卡仍然要求主机通过资格验证并处于就绪状态。"
+
+#: ../developer/operations.md:167
+msgid ""
+"`/setup` is the recovery door when no administrator can sign in. It needs"
+" `ADMIN_TOKEN`, which a deployment sets only when it wants that door. The"
+" route is outside the sign-in guard. It uses the ordinary administrator "
+"API and audit trail; unauthenticated visitors cannot read or change "
+"settings. Reloading or locking the page clears its in-memory token."
+msgstr ""
+"`/setup` 是没有管理员能登录时的后门。它需要 `ADMIN_TOKEN`，部署只有在想留这道门时才设置它。这个页面不受登录检查限制，但用的是普通的管理员 API 和审计记录，没有认证的访问者既看不到也改不了设置。刷新或锁定页面，内存里的令牌就会被清掉。"
 
 #: ../developer/operations.md:148
 msgid ""
@@ -1897,21 +1929,16 @@ msgstr ""
 "`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` 加密，并使用 MCP "
 "专用的域分隔符。发现过程会保存一份能力快照。模板只用来预填表单，并不构成部署级别的注册表或服务器目录。"
 
-#: ../developer/operations.md:916
+#: ../developer/operations.md:941
 msgid ""
 "MCP OAuth uses `AGENT_MCP_PUBLIC_BASE_URL` for the public API callback "
-"and `AGENT_WEB_BASE_URL` for the browser's return to `/integrations`. For"
-" a shared hostname deployment these can be "
-"`https://example.com/agents/api` and `https://example.com/agents` "
-"respectively. The page reports the authorization result, verifies a "
-"stored credential before showing success, and directs the user to Test to"
-" discover the connection's tools."
+"and `AGENT_WEB_BASE_URL` for the browser's return to `/integrations`, for"
+" example `https://agents.example.org/api` and "
+"`https://agents.example.org`. The page reports the authorization result, "
+"verifies a stored credential before showing success, and directs the user"
+" to Test to discover the connection's tools."
 msgstr ""
-"MCP OAuth 用 `AGENT_MCP_PUBLIC_BASE_URL` 作为公开 API 的回调地址，用 "
-"`AGENT_WEB_BASE_URL` 作为浏览器回到 `/integrations` 的地址。如果是共用一个主机名的部署，可以分别设为 "
-"`https://example.com/agents/api` 和 "
-"`https://example.com/agents`。页面会显示授权结果，确认凭据确实保存下来之后才提示成功，并引导用户点 Test "
-"来发现这个连接提供的工具。"
+"MCP OAuth 用 `AGENT_MCP_PUBLIC_BASE_URL` 作为公开 API 的回调地址，用 `AGENT_WEB_BASE_URL` 作为浏览器回到 `/integrations` 的地址，例如分别是 `https://agents.example.org/api` 和 `https://agents.example.org`。页面会显示授权结果，确认凭据确实保存下来之后才提示成功，并引导用户点 Test 来发现这个连接提供的工具。"
 
 #: ../developer/operations.md:923
 msgid ""
@@ -2599,6 +2626,67 @@ msgstr ""
 "browser/daemon.log`。用不带浏览器的旧镜像创建的保留容器，在重建之前都没有浏览器。"
 
 #: ../developer/operations.md:1189
+msgid "Sandbox MCP servers"
+msgstr "沙箱 MCP 服务器"
+
+#: ../developer/operations.md:1191
+msgid ""
+"An MCP connection can run in each chat's sandbox (location `sandbox`) "
+"instead of behind the relay, so it reaches the task's `localhost`, its "
+"files and the sandbox browser. The Playwright and Chrome DevTools presets"
+" drive that browser. The [design](../agents/specs/2026-11-02-computer-"
+"use-base-capability.md#in-sandbox-mcp-servers-phase-2) explains it."
+msgstr ""
+"MCP 连接可以运行在每个对话的沙箱里（位置为 `sandbox`），而不是放在 relay 后面，这样它就能访问任务的 "
+"`localhost`、文件和沙箱浏览器。Playwright 和 Chrome DevTools "
+"两个预设用的就是这个浏览器。原理见[设计文档](../agents/specs/2026-11-02-computer-use-base-"
+"capability.md#in-sandbox-mcp-servers-phase-2)。"
+
+#: ../developer/operations.md:1197
+msgid ""
+"**What may run there.** One exactly pinned package started by `npx` or "
+"`uvx`, with no secret, mount or working directory. A server that needs a "
+"credential stays remote: the sandbox also runs the repository's code."
+msgstr ""
+"**能在里面跑什么。** 只能是一个用 `npx` 或 `uvx` "
+"启动、精确锁定版本的包，不能带密钥、挂载目录或工作目录。需要凭据的服务器仍然用远程方式：沙箱里同时也在运行仓库的代码。"
+
+#: ../developer/operations.md:1200
+msgid ""
+"**How it runs.** Before it launches a member's CLI, the host writes the "
+"slot's admission as root, then starts the image's MCP gateway, `cloud-"
+"agent-mcp`, as `agent-mcp` (uid 10003) on `http://127.0.0.1:47801/mcp`. "
+"Last, it starts the slot's runner as `agent-mcp-<slot>` (uid 12001 + "
+"slot), which runs that slot's servers. The CLI reaches them as the MCP "
+"server `sandbox` with its relay token. A server can affect only its own "
+"slot. A failed step is logged and leaves the chat without those tools, "
+"not without its turn."
+msgstr "**怎么运行。** 启动成员的 CLI 之前，主机先以 root 身份写入这个对话位的授权，再以 `agent-mcp`（uid 10003）身份在 `http://127.0.0.1:47801/mcp` 上启动镜像里的 MCP 网关 `cloud-agent-mcp`，最后以 `agent-mcp-<slot>`（uid 12001 + 对话位编号）身份启动这个对话位的运行者，由它运行这个对话位的服务器。CLI 用它的 relay token，把这些服务器当作名为 `sandbox` 的 MCP 服务器来连接。一个服务器只能影响它自己的对话位。任何一步失败都只记日志，对话会少这些工具，但这一轮照常进行。"
+
+#: ../developer/operations.md:1208
+msgid ""
+"**Changes.** Turning a server off, adding one or changing its version "
+"takes effect at the next turn, which starts a new CLI that resumes the "
+"session."
+msgstr "**改动何时生效。** 关闭、新增服务器或修改版本，都在下一轮生效：下一轮会启动新的 CLI，并接着原来的会话继续。"
+
+#: ../developer/operations.md:1210
+msgid ""
+"**No approval step.** The relay's per-tool policies do not apply: a "
+"sandbox server can do what the agent's shell can."
+msgstr "**没有审批步骤。** relay 的按工具权限设置对它不起作用：沙箱 MCP 服务器能做的事，和 agent 的 shell 一样。"
+
+#: ../developer/operations.md:1212
+msgid ""
+"**Where to look.** `/run/agent-mcp/gateway.log` records the methods each "
+"slot called, readable as `agent-mcp`. A slot's runner logs its servers' "
+"starts and stops in `/run/agent-mcp-slots/<slot>/runner.log`, and each "
+"server's own output is in `/run/agent-mcp-slots/<slot>/<alias>.log`, "
+"readable as `agent-mcp-<slot>`. Admissions are in `/run/agent-mcp-"
+"admissions`."
+msgstr "**去哪里看。** `/run/agent-mcp/gateway.log` 记录每个对话位调用了哪些方法，以 `agent-mcp` 身份可读。对话位的运行者把服务器的启动和停止记在 `/run/agent-mcp-slots/<slot>/runner.log`，每个服务器自己的输出在 `/run/agent-mcp-slots/<slot>/<alias>.log`，以 `agent-mcp-<slot>` 身份可读。授权文件在 `/run/agent-mcp-admissions`。"
+
+#: ../developer/operations.md:1189
 msgid "Before a job can run for real"
 msgstr "任务真正跑起来之前"
 
@@ -2984,17 +3072,14 @@ msgid ""
 "deployment's frontend:"
 msgstr "*连接*流程（用户授权自己的仓库）还需要 App 的 OAuth 部分，回调地址指向这个部署的前端："
 
-#: ../developer/operations.md:1395
+#: ../developer/operations.md:1367
 msgid ""
 "Set the callback to the **agent web's own origin**, where the callback "
-"page and session cookie live. For a web build with a base path, use "
-"`<origin><basePath>/connected?provider=github`. The authorize link sends "
-"no `redirect_uri`, so GitHub uses the App's first Callback URL. Update "
-"that setting whenever the web origin moves."
+"page and session cookie live. The authorize link sends no `redirect_uri`,"
+" so GitHub uses the App's first Callback URL. Update that setting "
+"whenever the web origin moves."
 msgstr ""
-"回调地址要设在 **agent Web 自己的源**上，回调页面和会话 cookie 都在那里。如果 Web 构建带了 base path，就用 "
-"`<origin><basePath>/connected?provider=github`。授权链接里不带 `redirect_uri`，所以 "
-"GitHub 会用 App 配置里的第一个 Callback URL。Web 的源一旦变了，就要更新这项设置。"
+"回调地址要设在 **agent Web 自己的源**上，回调页面和会话 cookie 都在那里。授权链接里不带 `redirect_uri`，所以 GitHub 会用 App 配置里的第一个 Callback URL。Web 的源一旦变了，就要更新这项设置。"
 
 #: ../developer/operations.md:1401
 msgid ""

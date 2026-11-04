@@ -133,22 +133,26 @@ msgstr "控制平面和主机各用一份独立的私有环境文件。分别从
 
 #: ../developer/smoke.md:64
 msgid ""
-"Generate deployment-owned secrets once and keep them out of version "
-"control:"
-msgstr "部署自己用的 secret 只生成一次，并且不要放进版本控制："
+"Leave the control plane's keys empty. On a new deployment root with the "
+"bundled database, the first `deploy.sh` run generates the database "
+"password and DSN, `AGENT_LOCAL_SESSION_SECRET` and "
+"`AGENT_SETTINGS_ENCRYPTION_KEY` into its `.env`, and the control plane "
+"generates its host signing and credential encryption keys into its "
+"settings ([new installation](operations.md#admin-settings)). Keep that "
+"`.env` out of version control and stable so saved connections and "
+"settings remain decryptable. None of these keys is shared with any other "
+"service."
+msgstr ""
+"控制平面的密钥都留空。在一个新的部署根目录上使用自带数据库时，第一次运行 `deploy.sh` 会把数据库密码和 DSN、`AGENT_LOCAL_SESSION_SECRET` 和 `AGENT_SETTINGS_ENCRYPTION_KEY` 生成到它的 `.env` 里，控制平面则把主机签名密钥和凭据加密密钥生成到自己的设置里（见[全新安装](operations.md#admin-settings)）。这个 `.env` 不要放进版本控制，也不要再改动，这样已保存的连接和设置才能一直解密。这些密钥都不与其他任何服务共用。"
 
 #: ../developer/smoke.md:73
 msgid ""
-"Keep the encryption keys stable so saved connections and settings remain "
-"decryptable. None of them is shared with any other service."
-msgstr "加密密钥要保持不变，已保存的连接和设置才能继续解密。它们都不与任何其他服务共用。"
-
-#: ../developer/smoke.md:76
-msgid ""
-"Set `AGENT_WEB_BASE_URL`, `AGENT_PUBLIC_API_URL`, the web base path and"
-"     browser API path. Set no `GATEWAY_*`, `IDENTITY_*` or "
-"`AGENT_AUTH_MODE`:     the control plane and `deploy.sh` refuse them."
-msgstr "设置 `AGENT_WEB_BASE_URL`、`AGENT_PUBLIC_API_URL`、Web base path 和浏览器 API 路径。不要设置任何 `GATEWAY_*`、`IDENTITY_*` 或 `AGENT_AUTH_MODE`：控制平面和 `deploy.sh` 会拒绝它们。"
+"Set `AGENT_WEB_BASE_URL` and `AGENT_PUBLIC_API_URL`; the app is served at"
+"     the root of its hostname with the API at `/api`. Set no `GATEWAY_*`,"
+" `IDENTITY_*` or `AGENT_AUTH_MODE`:     the control plane and `deploy.sh`"
+" refuse them."
+msgstr ""
+"设置 `AGENT_WEB_BASE_URL` 和 `AGENT_PUBLIC_API_URL`；应用挂在主机名的根路径下，API 在 `/api`。不要设置任何 `GATEWAY_*`、`IDENTITY_*` 或 `AGENT_AUTH_MODE`：控制平面和 `deploy.sh` 会拒绝它们。"
 
 #: ../developer/smoke.md:79
 msgid ""

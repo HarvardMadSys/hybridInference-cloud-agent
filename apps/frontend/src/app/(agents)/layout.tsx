@@ -35,10 +35,9 @@ import {
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
 // The signed-out home page, loaded only for a visitor who will see it.
-const LandingPage = dynamic(
-  () => import('@/components/features/landing/LandingPage').then((module) => module.LandingPage),
-  { ssr: false },
-);
+const loadLandingPage = () =>
+  import('@/components/features/landing/LandingPage').then((module) => module.LandingPage);
+const LandingPage = dynamic(loadLandingPage, { ssr: false });
 
 const NAV_ITEM =
   'ui-focus-ring inline-flex min-h-8 shrink-0 items-center rounded-md px-2 py-1 text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11';
@@ -375,6 +374,10 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
     query.addEventListener('change', sync);
     return () => query.removeEventListener('change', sync);
   }, []);
+
+  useEffect(() => {
+    if (pathname === '/') void loadLandingPage().catch(() => undefined);
+  }, [pathname]);
 
   useEffect(() => setMobileSidebarOpen(false), [pathname]);
 
