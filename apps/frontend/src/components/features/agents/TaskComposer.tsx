@@ -50,6 +50,7 @@ import { UserAvatar } from './UserAvatar';
 import { UserHomeInsights } from './UserHomeInsights';
 import { useUserHomeProfile } from './useUserHomeProfile';
 import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
+import { connectionAgentName } from '@/components/features/settings/modelConnectionDisplay';
 import {
   TemporaryWorkspaceConfirm,
   useTemporaryWorkspaceAcknowledgement,
@@ -80,6 +81,13 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
  */
 function selectableRepos(config: AgentConfigApi | null): string[] {
   return config?.github_connected ? config.repos : [];
+}
+
+/** Product names for the agent picker; the submitted runtime stays its id. */
+function runtimeLabels(config: AgentConfigApi | null): Record<string, string> {
+  return Object.fromEntries(
+    (config?.runtimes ?? []).map((runtime) => [runtime, connectionAgentName(runtime)]),
+  );
 }
 
 /** A refreshed config must still admit this workspace before a task can run. */
@@ -745,31 +753,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           onStatusChange={setEnvironmentStatus}
           onSummaryChange={setEnvironmentSummary}
         />
-        <div className="flex min-w-0 flex-nowrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
-          <ComposerPlusMenu
-            disabled={busy}
-            onOpen={goalCommand.dismiss}
-            onFiles={attachments.add}
-            onOpenSkills={() => setSkillsOpen(true)}
-            skillSummary={
-              pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
-            }
-            goalSummary={t('commands.goalHint')}
-            onOpenGoal={insertGoalCommand}
-            mcp={mcp}
-            mcpBlockedReason={mcpBlockedReason}
-            ssh={ssh}
-            onOpenPlugins={
-              pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
-            }
-            pluginSummary={String(plugins.length)}
-            onOpenEnvironment={repo ? () => setEnvironmentOpen(true) : undefined}
-            environmentSummary={environmentSummary}
-          />
-          <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
-          {/* Leave the scroller unpositioned so the repository menu anchors
-                  to the composer and can extend outside the scroll area. */}
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>label]:shrink-0 [&>label]:whitespace-nowrap">
+        {/* Two rows: where the task runs, then how. Each row wraps by the
+            composer's own width, so nothing scrolls sideways or hides behind
+            Run. The rows stay unpositioned so the repository menu anchors to
+            the composer itself. */}
+        <div className="space-y-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             <RepositoryPicker
               repos={selectableRepos(config)}
               value={repo}
@@ -800,13 +789,41 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
                 onChange={setBranch}
               />
             )}
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
+            <ComposerPlusMenu
+              disabled={busy}
+              onOpen={goalCommand.dismiss}
+              onFiles={attachments.add}
+              onOpenSkills={() => setSkillsOpen(true)}
+              skillSummary={
+                pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
+              }
+              goalSummary={t('commands.goalHint')}
+              onOpenGoal={insertGoalCommand}
+              mcp={mcp}
+              mcpBlockedReason={mcpBlockedReason}
+              ssh={ssh}
+              onOpenPlugins={
+                pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
+              }
+              pluginSummary={String(plugins.length)}
+              onOpenEnvironment={repo ? () => setEnvironmentOpen(true) : undefined}
+              environmentSummary={environmentSummary}
+            />
+            <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+            {/* The control names stay in each trigger's accessible name and
+                its menu's heading; the row shows only the choices. */}
             <Picker
+              compact
               label={t('composer.agent')}
               value={runtime}
               options={config?.runtimes ?? []}
+              optionLabels={runtimeLabels(config)}
               onChange={setRuntime}
             />
             <Picker
+              compact
               label={t('composer.model')}
               {...picker}
               // Empty until something resolves for this owner. The model is
@@ -815,38 +832,38 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               triggerRef={modelControl.attach}
             />
             <Picker
+              compact
               label={t('composer.reasoning')}
               value={effort}
               options={efforts}
               onChange={setEffort}
             />
-          </div>
-
-          <button
-            type="button"
-            disabled={!canRun}
-            onClick={() => void run()}
-            title={
-              missingRepository
-                ? t('composer.chooseRepository')
-                : missingModel
-                  ? t('composer.chooseModel')
-                  : t('composer.runTitle')
-            }
-            className="ui-button ui-button-primary ml-auto shrink-0 px-3 text-xs"
-          >
-            {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
-            <svg
-              aria-hidden="true"
-              className="h-3.5 w-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
+            <button
+              type="button"
+              disabled={!canRun}
+              onClick={() => void run()}
+              title={
+                missingRepository
+                  ? t('composer.chooseRepository')
+                  : missingModel
+                    ? t('composer.chooseModel')
+                    : t('composer.runTitle')
+              }
+              className="ui-button ui-button-primary ml-auto shrink-0 px-3 text-xs"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
-            </svg>
-          </button>
+              {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
+              <svg
+                aria-hidden="true"
+                className="h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
 

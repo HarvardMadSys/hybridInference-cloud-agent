@@ -2726,7 +2726,7 @@ describe('TaskComposer plugins', () => {
     fireEvent.keyDown(box, { key: 'Enter' });
     expect(createAgentJob).not.toHaveBeenCalled();
     fireEvent.click(screen.getByLabelText('Agent'));
-    fireEvent.click(screen.getByRole('option', { name: 'claude-code' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Claude Code' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));

@@ -270,7 +270,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       const agent = page.getByRole('button', { name: 'Agent', exact: true });
       const model = page.getByRole('button', { name: text.model, exact: true });
       await agent.click();
-      await page.getByRole('option', { name: 'codex', exact: true }).click();
+      await page.getByRole('option', { name: 'Codex', exact: true }).click();
       await model.click();
       // The connection's own models, named alone: no other connection lists them.
       await expect(page.getByRole('option', { name: 'chat-model', exact: true })).toBeVisible();
@@ -279,7 +279,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await page.keyboard.press('Escape');
 
       await agent.click();
-      await page.getByRole('option', { name: 'claude-code', exact: true }).click();
+      await page.getByRole('option', { name: 'Claude Code', exact: true }).click();
       await model.click();
       await page.getByRole('option', { name: 'claude-model', exact: true }).click();
       await page.locator('#new-task-prompt').fill('Run Claude Code on my provider');
@@ -293,7 +293,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
 
       // Codex cannot run the Messages-only model: the pick is kept, marked, and holds Run.
       await agent.click();
-      await page.getByRole('option', { name: 'codex', exact: true }).click();
+      await page.getByRole('option', { name: 'Codex', exact: true }).click();
       await expect(model).toContainText(text.unavailable);
       await expect(page.getByRole('button', { name: text.run, exact: true })).toBeDisabled();
     });

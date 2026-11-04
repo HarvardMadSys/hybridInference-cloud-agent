@@ -156,7 +156,7 @@ describe('TaskComposer model sources', () => {
       'other-only',
     ]);
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
-    choose('Agent', 'codex');
+    choose('Agent', 'Codex');
     fireEvent.click(screen.getByLabelText('Model'));
     // The remembered pick stays in view, marked, rather than becoming its namesake.
     expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
@@ -169,7 +169,7 @@ describe('TaskComposer model sources', () => {
   it('sends a personal model with its connection and no effort', async () => {
     render(<TaskComposer />);
     await chooseRepository();
-    choose('Agent', 'codex');
+    choose('Agent', 'Codex');
     choose('Model', 'shared · My provider');
     expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('shared · My provider');
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Run on my key' } });
@@ -188,7 +188,7 @@ describe('TaskComposer model sources', () => {
   it('keeps a personal pick and its source in the draft across a visit', async () => {
     const first = render(<TaskComposer />);
     await chooseRepository();
-    choose('Agent', 'codex');
+    choose('Agent', 'Codex');
     choose('Model', 'shared · My provider');
     await waitFor(() =>
       expect(savedDraft()).toMatchObject({
@@ -234,7 +234,7 @@ describe('TaskComposer model sources', () => {
     expect(screen.getByLabelText('Agent')).toHaveValue('claude-code');
     expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('mine (unavailable)');
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
-    choose('Agent', 'codex');
+    choose('Agent', 'Codex');
     expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('mine');
   });
 
@@ -313,7 +313,7 @@ describe('TaskComposer model sources', () => {
     render(<TaskComposer />);
     await chooseRepository();
     choose('Model', 'shared');
-    choose('Agent', 'codex');
+    choose('Agent', 'Codex');
     expect(screen.getByLabelText('Model')).toHaveAccessibleDescription('shared (unavailable)');
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
   });
@@ -334,7 +334,7 @@ describe('TaskComposer model sources', () => {
     );
     render(<TaskComposer />);
     await chooseRepository();
-    choose('Agent', 'codex');
+    choose('Agent', 'Codex');
     fireEvent.click(screen.getByLabelText('Model'));
     const options = screen.getAllByRole('option').map((option) => option.textContent);
     // The unverified model is not offered; no label names an API.
@@ -373,12 +373,12 @@ describe('TaskComposer model sources', () => {
     );
     render(<TaskComposer />);
     await chooseRepository();
-    choose('Agent', 'codex');
+    choose('Agent', 'Codex');
     fireEvent.click(screen.getByLabelText('Model'));
     expect(screen.getByRole('option', { name: 'chat-model' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'messages-only' })).not.toBeInTheDocument();
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
-    choose('Agent', 'claude-code');
+    choose('Agent', 'Claude Code');
     fireEvent.click(screen.getByLabelText('Model'));
     expect(screen.getByRole('option', { name: 'messages-only' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'chat-model' })).toBeInTheDocument();
@@ -431,7 +431,7 @@ describe('local account model onboarding', () => {
     render(<TaskComposer />);
     await chooseRepository();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my unsent task' } });
-    choose('Agent', 'codex');
+    choose('Agent', 'Codex');
     vi.mocked(getAgentConfig).mockResolvedValue(config({ default_model: null }));
     act(() => announceModelConnectionsChanged());
     await waitFor(() =>

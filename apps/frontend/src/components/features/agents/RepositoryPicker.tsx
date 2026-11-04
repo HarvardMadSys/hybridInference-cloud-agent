@@ -220,7 +220,7 @@ export function RepositoryPicker({
   const temporary = value === TEMPORARY_WORKSPACE;
   const rowClass = (chosen: boolean) => (chosen ? MENU_ROW_SELECTED : MENU_ROW);
   const shown = temporary ? t('temporaryWorkspace.name') : value;
-  const [owner, name] = splitRepository(value);
+  const [, name] = splitRepository(value);
   const temporaryRow = showTemporary ? (
     <button
       type="button"
@@ -283,17 +283,11 @@ export function RepositoryPicker({
         ) : (
           <GitHubMark className="h-3.5 w-3.5 shrink-0" />
         )}
-        <span className="max-w-[10rem] truncate sm:max-w-[13rem]">
-          {temporary ? (
-            shown
-          ) : value ? (
-            <>
-              <span className="text-muted">{owner}</span>
-              {name}
-            </>
-          ) : (
-            t('composer.repositoryPlaceholder')
-          )}
+        {/* The name alone: the owner repeats across most rows and would take
+            the room the name needs. The title, accessible name and menu rows
+            keep the full `owner/name`. */}
+        <span className="min-w-0 max-w-[16rem] truncate">
+          {temporary ? shown : value ? name : t('composer.repositoryPlaceholder')}
         </span>
         <svg
           aria-hidden
