@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fixture
     _configure_host,
@@ -174,3 +175,31 @@ def test_the_registry_cache_is_kept_per_registry(monkeypatch) -> None:
     row.update(settings.encode_changes({"runtime_registry_url": "https://npm.example.org"}))
     settings.apply_settings(1, row)
     assert client._cache_key("pkg") != public
+
+
+@pytest.mark.asyncio
+async def test_an_answer_is_cached_under_the_registry_it_came_from() -> None:
+    """Switching registry mid-request must not file A's answer under B."""
+    asked: list[str] = []
+
+    def save(url: str) -> None:
+        row = settings.initial_settings()
+        row.update(settings.encode_changes({"runtime_registry_url": url}))
+        settings.apply_settings(len(asked) + 2, row)
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.host)
+        if request.url.host == "a.example.org":
+            save("https://b.example.org")  # saved while A's request is in flight
+        if request.url.path.endswith("/latest"):
+            return httpx.Response(200, json={"version": f"1.0.{len(asked)}"})
+        return httpx.Response(200, json={"versions": {f"1.0.{len(asked)}": {}}})
+
+    save("https://a.example.org")
+    client = runtime_upgrades.RegistryClient(transport=httpx.MockTransport(answer))
+    await client.latest("pkg")
+    await client.latest("pkg")
+    save("https://a.example.org")
+    await client.versions("pkg")
+    await client.versions("pkg")
+    assert asked == ["a.example.org", "b.example.org", "a.example.org", "b.example.org"]

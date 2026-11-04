@@ -12,19 +12,24 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
  * Not polled: npm adds a release a day at most, and the control plane caches
  * each list for an hour. A failed read is kept as that agent's error, so the
  * menu still offers what the servers already have, and is asked again the
- * next time the tab opens.
+ * next time the tab opens. A different saved package registry reads every
+ * list again: the releases it offers are not the last one's.
  */
 export function useRuntimeVersions({
   runtimes,
   enabled,
   onAccessDenied,
+  registry = '',
 }: {
   runtimes: string[];
   enabled: boolean;
   onAccessDenied: (cause: unknown) => void;
+  /** The saved agent package registry the lists come from. */
+  registry?: string;
 }): Record<string, RuntimeVersions> {
   const [lists, setLists] = useState<Record<string, RuntimeVersions>>({});
   const read = useRef<Record<string, RuntimeVersions>>({});
+  const source = useRef(registry);
   const denied = useRef(onAccessDenied);
   useEffect(() => {
     denied.current = onAccessDenied;
@@ -32,6 +37,11 @@ export function useRuntimeVersions({
   const wanted = runtimes.join('\n');
 
   useEffect(() => {
+    if (source.current !== registry) {
+      source.current = registry;
+      read.current = {};
+      setLists({});
+    }
     if (!enabled || !wanted) return undefined;
     // Each run asks for whatever it does not have yet, and a run replaced
     // before its answers arrive gives way to the next, which asks again.
@@ -57,7 +67,7 @@ export function useRuntimeVersions({
         });
     }
     return () => controller.abort();
-  }, [enabled, wanted]);
+  }, [enabled, wanted, registry]);
 
   return lists;
 }
