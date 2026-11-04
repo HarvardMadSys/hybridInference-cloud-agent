@@ -4,7 +4,7 @@
 // used once: after every request a fresh challenge replaces it. The widget is
 // a stand-in for Cloudflare's script, which the page loads only in a browser.
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@/lib/api/accounts';
 import * as self from '@/lib/api/accountSelf';
@@ -110,10 +110,14 @@ describe('phone codes with Turnstile on', () => {
   it('proves a phone-only owner with a token, and binds a number with one', async () => {
     vi.mocked(self.getOwnAccount).mockResolvedValue(PHONE_ONLY);
     render(<AccountSecurity />);
-    expect(await screen.findByText('Set a password')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Set a password' }));
     // Each place that sends a code shows its own challenge.
-    await waitFor(() => expect(challenges.length).toBeGreaterThanOrEqual(2));
-    const [first] = screen.getAllByRole('button', { name: 'Send code' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
+    await waitFor(() => expect(challenges).toHaveLength(2));
+    const first = within(screen.getByRole('group', { name: 'Set a password' })).getByRole(
+      'button',
+      { name: 'Send code' },
+    );
     expect(first).toBeDisabled();
     act(() => challenges[0].callback('owner-token'));
     fireEvent.click(first);
@@ -136,7 +140,7 @@ describe('phone codes with Turnstile on', () => {
       label: 'me@example.edu',
     });
     render(<AccountSecurity />);
-    await screen.findByLabelText('Phone number');
+    fireEvent.click(await screen.findByRole('button', { name: 'Add phone number' }));
     fill('Phone number', '13800138000');
     await waitFor(() => expect(challenges).toHaveLength(1));
     solve('bind-token');
