@@ -170,7 +170,7 @@ export function LandingHero({ actions }: { actions: ReactNode }) {
       </div>
       <div
         ref={scene}
-        role="img"
+        role="group"
         aria-label={t('landing.demoLabel')}
         className={`${styles.scene} ${styles.heroScene}`}
         data-entering={entering}
@@ -182,18 +182,21 @@ export function LandingHero({ actions }: { actions: ReactNode }) {
         onPointerLeave={() => {
           pause.current.hover = false;
         }}
+        // The workspace's tabs hold the demo for a keyboard as a pointer does.
+        onFocus={() => {
+          pause.current.focus = true;
+        }}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) pause.current.focus = false;
+        }}
       >
         <div className={styles.floor} />
-        {/* A plain box between the stage and the window, as in the approved
-            prototype: it keeps the depth of the tilt as designed. */}
-        <div>
-          <div ref={rig} className={styles.rig} data-entering={entering} style={startPose}>
-            <ProductWindow
-              example={EXAMPLES[view.example]}
-              frame={view.frame}
-              instant={view.instant}
-            />
-          </div>
+        <div ref={rig} className={styles.rig} data-entering={entering} style={startPose}>
+          <ProductWindow
+            example={EXAMPLES[view.example]}
+            frame={view.frame}
+            instant={view.instant}
+          />
         </div>
       </div>
     </section>

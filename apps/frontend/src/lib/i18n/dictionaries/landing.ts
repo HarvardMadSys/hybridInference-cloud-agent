@@ -106,6 +106,7 @@ export const landingEn = {
   'landing.demo.changes': 'Changes',
   'landing.demo.files': 'Files',
   'landing.demo.terminal': 'Terminal',
+  'landing.demo.views': 'Workspace views',
   'landing.demo.agent': 'Agent',
   'landing.demo.running': 'Running in its own sandbox',
   'landing.demo.closeTab': 'You can close this tab.',
@@ -115,6 +116,28 @@ export const landingEn = {
   'landing.demo.checksRunning': 'checks running',
   'landing.demo.checksPassed': 'checks passed',
   'landing.demo.watchMerge': 'Watch PR and merge',
+  'landing.demo.myKey': '{model} · My key',
+  'landing.demo.stepFailed': '{count} failed',
+  'landing.demo.stepPassed': '{count} passed',
+  'landing.demo.callers': '{count} callers',
+  'landing.demo.sidebarTask1': 'Fix flaky login spec',
+  'landing.demo.sidebarTask2': 'Upgrade to Next 15',
+  'landing.demo.sidebarTask3': 'Profile the solver loop',
+  'landing.demo.sidebarTask4': 'Port configs to TOML',
+  'landing.demo.example1.title': 'Add CSV export tests',
+  'landing.demo.example1.prompt': 'Add tests for the CSV export, including empty files.',
+  'landing.demo.example1.answer':
+    'An empty file dropped the header row. Fixed in `csv.ts`, with tests for empty, quoted and multi-line rows.',
+  'landing.demo.example2.title': 'Fix login redirect',
+  'landing.demo.example2.prompt':
+    'After sign-in, send people back to the page they asked for. Reject outside URLs.',
+  'landing.demo.example2.answer':
+    'Sign-in now keeps the page you asked for. Return URLs that point off the site fall back to `/`.',
+  'landing.demo.example3.title': 'Share one retry helper',
+  'landing.demo.example3.prompt':
+    'Pull the duplicated retry logic into one helper. Keep the behavior the same.',
+  'landing.demo.example3.answer':
+    'Three callers now share `withRetry`. Tests cover success, recovery and running out of attempts.',
 } as const;
 
 export const landingZh: Record<keyof typeof landingEn, string> = {
@@ -217,6 +240,7 @@ export const landingZh: Record<keyof typeof landingEn, string> = {
   'landing.demo.changes': '修改',
   'landing.demo.files': '文件',
   'landing.demo.terminal': '终端',
+  'landing.demo.views': '工作区视图',
   'landing.demo.agent': 'Agent',
   'landing.demo.running': '在自己的沙箱里运行',
   'landing.demo.closeTab': '可以关掉这个标签页。',
@@ -226,4 +250,24 @@ export const landingZh: Record<keyof typeof landingEn, string> = {
   'landing.demo.checksRunning': '检查进行中',
   'landing.demo.checksPassed': '检查通过',
   'landing.demo.watchMerge': '关注 PR 并合并',
+  'landing.demo.myKey': '{model} · 我的 Key',
+  'landing.demo.stepFailed': '{count} 项失败',
+  'landing.demo.stepPassed': '{count} 项通过',
+  'landing.demo.callers': '{count} 处调用',
+  'landing.demo.sidebarTask1': '修复偶发失败的登录测试',
+  'landing.demo.sidebarTask2': '升级到 Next 15',
+  'landing.demo.sidebarTask3': '分析求解器循环性能',
+  'landing.demo.sidebarTask4': '迁移配置到 TOML',
+  'landing.demo.example1.title': '补齐 CSV 导出测试',
+  'landing.demo.example1.prompt': '给 CSV 导出补上测试，包括空文件的情况。',
+  'landing.demo.example1.answer':
+    '空文件漏掉了表头行。已在 `csv.ts` 中修复，并补齐了空表、带引号与多行数据的测试。',
+  'landing.demo.example2.title': '修复登录跳转',
+  'landing.demo.example2.prompt': '登录后跳回用户原本请求的页面，并拦截外部 URL。',
+  'landing.demo.example2.answer':
+    '登录后会回到原本访问的页面；指向站外的回调地址会安全回退到 `/`。',
+  'landing.demo.example3.title': '提取公共重试函数',
+  'landing.demo.example3.prompt': '把重复的重试逻辑抽成一个公共辅助函数，保持现有行为不变。',
+  'landing.demo.example3.answer':
+    '三个调用处现在共用 `withRetry`。测试覆盖了正常返回、重试恢复与耗尽重试次数。',
 };
