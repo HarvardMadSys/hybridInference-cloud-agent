@@ -539,22 +539,34 @@ RUN set -eu; \
     git lfs version; \
     gh --version
 
-# The managed browser, end to end, as the unprivileged user: the service
-# starts, the first client starts Chromium behind it, two CDP clients connect,
-# one loads and screenshots a page, and the other cannot reach its session.
-# Everything it writes goes to /tmp and is removed, so no profile, token or
-# artifact lands in the image.
+# The managed browser, end to end, across users as a sandbox runs it: the
+# service starts as agent-browser, and a member (agent-member-0) runs the
+# self-test. The first client starts Chromium; two clients connect; one loads
+# and screenshots a page and the other cannot reach its session; and a
+# download lands in a directory only the member can write, through the
+# member's courier. Root only switches users here (setpriv); everything it
+# writes goes to /tmp and the member's home, and is removed, so no profile,
+# token or artifact lands in the image.
+USER root
 RUN set -eu; \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; \
     check=/tmp/cloud-agent-browser-check; \
-    export HOME=$check \
-        CLOUD_AGENT_BROWSER_STATE_DIR=$check/run \
-        CLOUD_AGENT_BROWSER_PROFILE=$check/profile \
-        CLOUD_AGENT_ARTIFACTS_DIR=$check/artifacts; \
-    cloud-agent-browser service start; \
-    cloud-agent-browser self-test; \
-    cloud-agent-browser service stop; \
-    rm -rf "$check"
+    install -d -m 0755 "$check"; \
+    install -d -m 0750 -o 10002 -g 10001 "$check/run"; \
+    install -d -m 0700 -o 10002 -g 10001 "$check/profile"; \
+    install -d -m 2770 -o 11001 -g 10001 "$check/artifacts"; \
+    as() { uid=$1; home=$2; shift 2; \
+        setpriv --reuid="$uid" --regid=10001 --clear-groups \
+            env HOME="$home" CLOUD_AGENT_BROWSER_STATE_DIR="$check/run" \
+                CLOUD_AGENT_BROWSER_PROFILE="$check/profile" \
+                CLOUD_AGENT_ARTIFACTS_DIR="$check/artifacts" "$@"; }; \
+    as 10002 /home/agent-browser cloud-agent-browser service start; \
+    as 11001 /home/agent-member-0 cloud-agent-browser self-test \
+        || { tail -n 60 "$check/run/daemon.log"; exit 1; }; \
+    as 10002 /home/agent-browser cloud-agent-browser service stop; \
+    rm -rf "$check" /home/agent-member-0/.cloud-agent-browser /home/agent-browser/.cache \
+        /home/agent-browser/.config /home/agent-browser/.local /home/agent-browser/.pki
+USER agent
 
 # What this image is, in the two places a deployment looks: OCI's own labels,
 # and one of ours naming the artifact's role. A resolver reads both out of the

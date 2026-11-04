@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
+import json
 import logging
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import replace
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -549,8 +554,17 @@ def test_malformed_commands_end_the_connection():
 FAKE_CHROMIUM = r"""
 import json, os, sys
 # Answers CDP on fds 3/4 like Chromium's --remote-debugging-pipe, minimally.
+if os.environ.get("FAKE_NEEDS_NO_SANDBOX") and "--no-sandbox" not in sys.argv:
+    sys.stderr.write("No usable sandbox! (fake)\n")
+    sys.exit(1)
 sessions = 0
+downloads = 0
+behavior = ("", "")
 buffer = b""
+
+def send(message):
+    os.write(4, json.dumps(message).encode() + b"\0")
+
 while True:
     chunk = os.read(3, 65536)
     if not chunk:
@@ -560,35 +574,84 @@ while True:
         raw, buffer = buffer.split(b"\0", 1)
         message = json.loads(raw)
         method = message.get("method")
+        params = message.get("params") or {}
+        session = message.get("sessionId")
         if method == "Target.attachToBrowserTarget":
             sessions += 1
             result = {"sessionId": f"S{sessions}"}
         elif method == "Browser.getVersion":
             result = {"product": "FakeChrome/1", "protocolVersion": "1.3"}
+        elif method == "Test.big":
+            result = {"data": "x" * params["size"]}
+        elif method == "Browser.setDownloadBehavior":
+            behavior = (params.get("behavior", ""), params.get("downloadPath", ""))
+            result = {}
+        elif method == "Test.download":
+            downloads += 1
+            guid = f"guid-{downloads}"
+            name = guid if behavior[0] == "allowAndName" else "suggested.txt"
+            with open(os.path.join(behavior[1], name), "w") as handle:
+                handle.write(params["body"])
+            def event(method, **fields):
+                send({"method": method, "params": fields, "sessionId": session})
+            event("Browser.downloadWillBegin", guid=guid, suggestedFilename="suggested.txt", url="x")
+            for _ in range(params.get("events", 1)):
+                event("Browser.downloadProgress", guid=guid, state="completed")
+            result = {"guid": guid}
         else:
             result = {}
         reply = {"id": message["id"], "result": result}
-        if "sessionId" in message:
-            reply["sessionId"] = message["sessionId"]
-        os.write(4, json.dumps(reply).encode() + b"\0")
+        if session is not None:
+            reply["sessionId"] = session
+        send(reply)
 """
 
 
-def test_the_service_starts_chromium_per_use_for_every_member(tmp_path, monkeypatch):
+@pytest.fixture
+def fake_paths(tmp_path, monkeypatch):
+    """A service whose Chromium is FAKE_CHROMIUM, its state under a short path.
+
+    A unix socket's path has to fit in 108 bytes, so the state directory is
+    not under ``tmp_path``, which pytest nests deeply.
+    """
     fake = tmp_path / "chromium"
     fake.write_text(f"#!{sys.executable}\n{FAKE_CHROMIUM}")
     fake.chmod(0o755)
     monkeypatch.setattr(browser, "CHROMIUM", str(fake))
     # In-process, the service has no "_serve" command line to recognise.
     monkeypatch.setattr(browser, "_is_service", lambda pid, owner: pid == os.getpid())
+    state = tempfile.mkdtemp(prefix="cab-")
+    monkeypatch.setenv("HOME", str(tmp_path))
     paths = browser.resolve_paths(
         {
-            "CLOUD_AGENT_BROWSER_STATE_DIR": str(tmp_path / "run"),
+            "CLOUD_AGENT_BROWSER_STATE_DIR": os.path.join(state, "run"),
             "CLOUD_AGENT_BROWSER_PROFILE": str(tmp_path / "profile"),
             "HOME": str(tmp_path),
         }
     )
     browser.ensure_service_dir(paths.state)
+    yield paths
+    shutil.rmtree(state, ignore_errors=True)
+
+
+@contextlib.asynccontextmanager
+async def _running(paths, *, idle_s=60.0, sandboxed=False):
+    daemon = browser.Daemon(paths, idle_s=idle_s, ready_fd=None)
+    daemon.sandboxed = sandboxed
+    service = asyncio.create_task(daemon.run())
+    for _ in range(200):
+        if browser.read_trusted(paths.endpoint, os.getuid()):
+            break
+        await asyncio.sleep(0.02)
+    try:
+        yield daemon, browser.read_trusted(paths.endpoint, os.getuid()).strip()
+    finally:
+        daemon._stop("test over")
+        await asyncio.wait_for(service, 10)
+
+
+def test_the_service_starts_chromium_per_use_for_every_member(fake_paths):
+    paths = fake_paths
 
     async def scenario():
         daemon = browser.Daemon(paths, idle_s=1.0, ready_fd=None)
@@ -653,6 +716,247 @@ def test_the_service_starts_chromium_per_use_for_every_member(tmp_path, monkeypa
     asyncio.run(scenario())
 
 
+async def _stalled_client(url, request):
+    """A client that sends one command and then never reads its socket.
+
+    The small reader limit makes asyncio stop reading the socket once a
+    little is buffered, so the kernel's buffers fill and the service's writes
+    to it stall, as for a tool that paused.
+    """
+    rest = url.removeprefix("ws://")
+    hostport, _, path = rest.partition("/")
+    host, _, port = hostport.partition(":")
+    reader, writer = await asyncio.open_connection(host, int(port), limit=16 * 1024)
+    writer.write(
+        (
+            f"GET /{path} HTTP/1.1\r\nHost: {hostport}\r\nUpgrade: websocket\r\n"
+            "Connection: Upgrade\r\nSec-WebSocket-Key: c3RhbGxlZA==\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode()
+    )
+    await writer.drain()
+    assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 101")
+    writer.write(browser.encode_frame(browser.OP_TEXT, json.dumps(request).encode(), mask=True))
+    await writer.drain()
+    return reader, writer
+
+
+def test_a_stalled_client_never_holds_up_another(fake_paths):
+    """Codex's finding: one paused 8 MiB reply stalled every other client's replies."""
+
+    async def scenario():
+        async with _running(fake_paths) as (daemon, url):
+            fast = await browser.CdpClient.connect(url)
+            await fast.call("Browser.getVersion")
+            big = {"id": 1, "method": "Test.big", "params": {"size": 32 * 1024 * 1024}}
+            _reader, stalled = await _stalled_client(url, big)
+            await asyncio.sleep(0.5)  # the 32 MiB reply is now stuck on its socket
+            assert len(daemon.peers) == 2
+            for _ in range(5):
+                started = time.monotonic()
+                reply = await asyncio.wait_for(fast.call("Browser.getVersion"), 5)
+                assert reply["product"] == "FakeChrome/1"
+                assert time.monotonic() - started < 2
+
+            # The stalled client leaves: its session, channel and task go with it.
+            stalled.transport.abort()
+            for _ in range(100):
+                if len(daemon.peers) == 1:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(daemon.peers) == 1
+            assert len(daemon.mux.clients) == 1
+            await fast.call("Browser.getVersion")
+            await fast.socket.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_client_too_far_behind_is_disconnected(fake_paths, monkeypatch):
+    monkeypatch.setattr(browser, "MAX_CLIENT_BACKLOG", 8 * 1024 * 1024)
+
+    async def scenario():
+        async with _running(fake_paths) as (daemon, url):
+            fast = await browser.CdpClient.connect(url)
+            await fast.call("Browser.getVersion")
+            big = {"id": 1, "method": "Test.big", "params": {"size": 6 * 1024 * 1024}}
+            _reader, stalled = await _stalled_client(url, big)
+            for request_id in (2, 3, 4):
+                frame = json.dumps({**big, "id": request_id}).encode()
+                stalled.write(browser.encode_frame(browser.OP_TEXT, frame, mask=True))
+            await stalled.drain()
+            for _ in range(100):
+                if len(daemon.peers) == 1:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(daemon.peers) == 1, "a client 24 MiB behind an 8 MiB limit stayed"
+            assert (await fast.call("Browser.getVersion"))["product"] == "FakeChrome/1"
+            stalled.close()
+
+    asyncio.run(scenario())
+
+
+def test_chromium_that_cannot_use_its_sandbox_falls_back_once(fake_paths, monkeypatch, capfd):
+    """CI's failure: the probe passed under AppArmor, and Chromium aborted sandboxed."""
+    monkeypatch.setenv("FAKE_NEEDS_NO_SANDBOX", "1")
+
+    async def scenario():
+        async with _running(fake_paths, sandboxed=True) as (daemon, url):
+            client = await browser.CdpClient.connect(url)
+            assert (await client.call("Browser.getVersion"))["product"] == "FakeChrome/1"
+            assert browser.status(fake_paths)["chromium_sandbox"] is False
+            assert "--no-sandbox" in daemon.chromium.args
+            await client.socket.close()
+
+    asyncio.run(scenario())
+    # Chromium's own words in the service log; the service's on its stderr.
+    assert "No usable sandbox! (fake)" in Path(fake_paths.log).read_text()
+    assert "starting it with --no-sandbox" in capfd.readouterr().err
+
+
+def test_the_probe_asks_for_a_user_mapping_not_just_a_namespace(monkeypatch):
+    seen = []
+
+    def run(argv, **_kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(browser.subprocess, "run", run)
+    assert browser.probe_user_namespaces() is False
+    assert seen == [["unshare", "--user", "--map-root-user", "true"]]
+
+
+async def _download(client, target, *, behavior="allowAndName", events=1):
+    await client.call(
+        "Browser.setDownloadBehavior",
+        {"behavior": behavior, "downloadPath": str(target), "eventsEnabled": True},
+    )
+    guid = (await client.call("Test.download", {"body": "payload", "events": events}))["guid"]
+    progress = [
+        await client.wait_event(
+            "Browser.downloadProgress", lambda params: params.get("guid") == guid, timeout=15
+        )
+        for _ in range(events)
+    ]
+    return guid, progress
+
+
+def test_a_download_reaches_a_directory_chromium_cannot_write(fake_paths, monkeypatch, tmp_path):
+    """Codex's finding: a member's 0700 download directory is not the browser's to write."""
+    monkeypatch.setattr(browser, "browser_can_write", lambda path: False)
+    target = tmp_path / "member-downloads"
+    target.mkdir(mode=0o700)
+
+    async def scenario():
+        async with _running(fake_paths) as (daemon, url):
+            courier = asyncio.create_task(asyncio.to_thread(browser.run_courier, fake_paths))
+            client = await browser.CdpClient.connect(url)
+            guid, [progress] = await _download(client, target)
+            assert progress["state"] == "completed"
+            assert (target / guid).read_text() == "payload"
+            [route] = daemon.peers[next(iter(daemon.peers))].routes
+            assert route.target == str(target) and not os.listdir(route.staging)
+
+            # One download heard on two sessions: copied once, completed twice.
+            guid, progress = await _download(client, target, events=2)
+            assert [event["state"] for event in progress] == ["completed", "completed"]
+            assert (target / guid).read_text() == "payload"
+
+            # Puppeteer's "allow" names the file as the page suggested.
+            _guid, [progress] = await _download(client, target, behavior="allow")
+            assert progress["state"] == "completed"
+            assert (target / "suggested.txt").read_text() == "payload"
+            await client.socket.close()
+        await asyncio.wait_for(courier, 10)  # it leaves with the service
+
+    asyncio.run(scenario())
+
+
+def test_a_download_with_no_courier_is_reported_canceled(fake_paths, monkeypatch, tmp_path, capfd):
+    monkeypatch.setattr(browser, "browser_can_write", lambda path: False)
+    monkeypatch.setattr(browser, "COURIER_WAIT_S", 0.2)
+    target = tmp_path / "member-downloads"
+    target.mkdir(mode=0o700)
+
+    async def scenario():
+        async with _running(fake_paths) as (daemon, url):
+            client = await browser.CdpClient.connect(url)
+            guid, [progress] = await _download(client, target)
+            assert progress["state"] == "canceled"
+            assert not (target / guid).exists()
+            [route] = daemon.peers[next(iter(daemon.peers))].routes
+            assert not os.listdir(route.staging)
+            await client.socket.close()
+
+    asyncio.run(scenario())
+    assert "no courier for uid" in capfd.readouterr().err
+
+
+def test_a_download_chromium_can_write_is_left_alone(fake_paths, tmp_path):
+    target = tmp_path / "shared-downloads"
+    target.mkdir()
+
+    async def scenario():
+        async with _running(fake_paths) as (daemon, url):
+            client = await browser.CdpClient.connect(url)
+            guid, [progress] = await _download(client, target)
+            assert progress["state"] == "completed"
+            assert (target / guid).read_text() == "payload"
+            assert not daemon.peers[next(iter(daemon.peers))].routes
+            await client.socket.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_courier_copies_only_a_staged_file_into_a_new_name_of_its_own(tmp_path):
+    paths = browser.resolve_paths({"CLOUD_AGENT_BROWSER_STATE_DIR": str(tmp_path / "run")})
+    staging = Path(paths.downloads) / "client-1"
+    staging.mkdir(parents=True)
+    (staging / "file").write_text("staged")
+    target = tmp_path / "target"
+    target.mkdir()
+    owner = os.getuid()
+
+    browser.deliver(paths, owner, str(staging / "file"), str(target / "file"))
+    assert (target / "file").read_text() == "staged"
+
+    elsewhere = tmp_path / "secret"
+    elsewhere.write_text("not a download")
+    (staging / "link").symlink_to(elsewhere)
+    refusals = [
+        (str(elsewhere), str(target / "a")),  # not in the staging directory
+        (str(staging / "link"), str(target / "b")),  # a symlink out of it
+        (str(staging / "file"), str(target / "file")),  # an existing file
+        (str(staging / "file"), str(target)),  # no file name
+        (str(staging / "file"), "relative/c"),
+    ]
+    for src, dst in refusals:
+        with pytest.raises((browser.BrowserError, OSError)):
+            browser.deliver(paths, owner, src, dst)
+    with pytest.raises(browser.BrowserError):
+        browser.deliver(paths, owner + 1, str(staging / "file"), str(target / "d"))
+    assert sorted(os.listdir(target)) == ["file"]
+
+
+def test_a_clients_uid_comes_from_the_kernels_socket_table():
+    async def scenario():
+        accepted = asyncio.get_running_loop().create_future()
+
+        async def handle(reader, writer):
+            accepted.set_result(writer.get_extra_info("peername"))
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        peer = await asyncio.wait_for(accepted, 5)
+        assert browser.tcp_peer_uid(port, peer[1]) == os.getuid()
+        assert browser.tcp_peer_uid(port, 1) is None
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.skipif(not Path(browser.CHROMIUM).exists(), reason="needs a local Chromium")
 def test_self_test_against_a_real_chromium(tmp_path):
     env = {
@@ -673,11 +977,16 @@ def test_self_test_against_a_real_chromium(tmp_path):
             check=False,
         )
 
+    def log_tail():
+        # What Chromium itself said: CI keeps none of tmp_path.
+        log = tmp_path / "run" / "daemon.log"
+        return log.read_text(errors="replace")[-6000:] if log.exists() else "(no daemon log)"
+
     try:
         started = helper("service", "start")
-        assert started.returncode == 0, started.stderr
+        assert started.returncode == 0, f"{started.stderr}\n--- daemon.log\n{log_tail()}"
         result = helper("self-test")
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, f"{result.stderr}\n--- daemon.log\n{log_tail()}"
         assert result.stdout.startswith("self-test ok")
     finally:
         helper("service", "stop", timeout=30)

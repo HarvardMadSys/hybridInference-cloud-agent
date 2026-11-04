@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import contextlib
 import ctypes
 import errno
@@ -56,11 +57,14 @@ import http.client
 import json
 import os
 import secrets
+import shutil
 import signal
+import socket as socketlib
 import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -78,6 +82,15 @@ READY_TIMEOUT_S = 30.0
 #: run to tens of megabytes; nothing legitimate comes near this.
 MAX_MESSAGE_BYTES = 128 * 1024 * 1024
 MAX_CLIENTS = 32
+#: What may wait to be written to one client. A client that stops reading is
+#: disconnected past this rather than buffered without bound, and never holds
+#: up another client's replies (:class:`Channel`).
+MAX_CLIENT_BACKLOG = 2 * MAX_MESSAGE_BYTES
+#: How long a finished download waits for its client's courier to appear and
+#: to copy the file, before the client is told it was canceled.
+COURIER_WAIT_S = 10.0
+HANDOFF_TIMEOUT_S = 120.0
+DOWNLOAD_COMMANDS = frozenset({"Browser.setDownloadBehavior", "Page.setDownloadBehavior"})
 MAX_REQUEST_HEAD = 16 * 1024
 
 #: Whether the managed browser may run without Chromium's own sandbox when the
@@ -143,6 +156,15 @@ class Paths:
     @property
     def log(self) -> str:
         return os.path.join(self.state, "daemon.log")
+
+    @property
+    def downloads(self) -> str:
+        """Where Chromium writes a download its client's directory cannot take."""
+        return os.path.join(self.state, "downloads")
+
+    @property
+    def courier_socket(self) -> str:
+        return os.path.join(self.state, "courier.sock")
 
 
 def resolve_paths(environ: dict[str, str] | None = None) -> Paths:
@@ -421,10 +443,16 @@ class Multiplexer:
     are testable without Chromium or sockets.
     """
 
-    def __init__(self, to_browser, to_client, on_internal=None) -> None:
+    def __init__(
+        self, to_browser, to_client, on_internal=None, *, rewrite=None, on_event=None
+    ) -> None:
         self._to_browser = to_browser
         self._to_client = to_client
         self._on_internal = on_internal or (lambda message: None)
+        #: ``rewrite(client, command)``: the command as the browser should get it.
+        self._rewrite = rewrite or (lambda client, message: message)
+        #: ``on_event(client, event)``: False keeps the event; the caller delivers it.
+        self._on_event = on_event or (lambda client, message: True)
         self._next_id = 1
         self._pending: dict[int, _Pending] = {}
         self._owners: dict[str, Client] = {}
@@ -480,7 +508,7 @@ class Multiplexer:
                 client.hang_up = True
                 self._to_client(client, {"id": client_id, "result": {}})
                 return
-            outgoing = {**message, "sessionId": client.root}
+            outgoing = self._rewrite(client, {**message, "sessionId": client.root})
             self._send(outgoing, _Pending(client, client_id, method, at_root=True))
             return
         if self._owners.get(session) is not client or session == client.root:
@@ -496,7 +524,9 @@ class Multiplexer:
                 },
             )
             return
-        self._send(message, _Pending(client, client_id, method, at_root=False))
+        self._send(
+            self._rewrite(client, message), _Pending(client, client_id, method, at_root=False)
+        )
 
     def from_browser(self, message: dict[str, Any]) -> None:
         if "id" in message:
@@ -566,7 +596,8 @@ class Multiplexer:
             self._release(params.get("sessionId"))
         if session == owner.root:
             message = {key: value for key, value in message.items() if key != "sessionId"}
-        self._to_client(owner, message)
+        if self._on_event(owner, message):
+            self._to_client(owner, message)
 
 
 # --------------------------------------------------------------------------
@@ -575,10 +606,18 @@ class Multiplexer:
 
 
 def probe_user_namespaces() -> bool:
-    """Whether this guest lets an unprivileged process create a user namespace."""
+    """Whether this guest lets an unprivileged process use a user namespace.
+
+    Creating one is not enough: under Ubuntu's AppArmor restriction
+    (``kernel.apparmor_restrict_unprivileged_userns``) ``unshare --user``
+    succeeds, but the namespace has no capabilities, and Chromium's sandbox
+    then aborts with "No usable sandbox". Mapping a user into it is what that
+    restriction refuses, so that is what is probed. A launch that still fails
+    sandboxed falls back too (:meth:`Daemon._ensure_browser`).
+    """
     try:
         result = subprocess.run(
-            ["unshare", "--user", "true"],
+            ["unshare", "--user", "--map-root-user", "true"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -627,6 +666,163 @@ def _child_setup(read_fd: int, write_fd: int) -> None:
     os.dup2(high_write, 4)
 
 
+class Channel:
+    """One client's outbound frames, written by a task of its own.
+
+    The browser's pipe is read by one loop for every client, so that loop must
+    never wait for any client's socket: a client that stops reading an 8 MiB
+    screenshot would otherwise hold every other client's replies until it
+    reads again. Frames queue here instead; a client whose queue passes
+    ``MAX_CLIENT_BACKLOG`` is disconnected.
+    """
+
+    def __init__(self, socket: WebSocket) -> None:
+        self.socket = socket
+        self.frames: collections.deque[bytes] = collections.deque()
+        self.pending = 0
+        self.closing = False
+        self.wake = asyncio.Event()
+        self.task = asyncio.get_running_loop().create_task(self._run())
+
+    def send(self, frame: bytes) -> bool:
+        """Queue one frame; False when the client is too far behind to keep."""
+        if self.closing:
+            return True
+        self.frames.append(frame)
+        self.pending += len(frame)
+        self.wake.set()
+        return self.pending <= MAX_CLIENT_BACKLOG
+
+    def close_after_flush(self) -> None:
+        self.closing = True
+        self.wake.set()
+
+    def abort(self) -> None:
+        """Drop the connection now, unsent frames and all."""
+        self.closing = True
+        self.frames.clear()
+        self.pending = 0
+        self.task.cancel()
+        self.socket.closed = True
+        with contextlib.suppress(Exception):
+            self.socket.writer.transport.abort()
+
+    async def _run(self) -> None:
+        writer = self.socket.writer
+        try:
+            while True:
+                await self.wake.wait()
+                self.wake.clear()
+                while self.frames:
+                    frame = self.frames.popleft()
+                    self.pending -= len(frame)
+                    writer.write(frame)
+                    await writer.drain()
+                if self.closing:
+                    break
+            await self.socket.close()
+        except (ConnectionError, RuntimeError):
+            self.socket.closed = True
+
+
+@dataclass
+class DownloadRoute:
+    """A client's download directory, which Chromium writes to through ``staging``."""
+
+    target: str
+    staging: str
+    named_by_guid: bool
+
+
+@dataclass(eq=False)
+class Peer:
+    """What the daemon knows of one connected client beyond its CDP sessions."""
+
+    channel: Channel
+    #: The UID that owns the client's socket, from the kernel's socket table.
+    uid: int | None
+    routes: list[DownloadRoute] = field(default_factory=list)
+    #: Each download's suggested file name, by guid.
+    names: dict[str, str] = field(default_factory=dict)
+    #: Each hand-off's outcome, "completed" or "canceled", by guid. A client
+    #: with several sessions hears of one download once per session, and every
+    #: copy of the event must wait for, and report, the one hand-off.
+    handoffs: dict[str, asyncio.Future[str]] = field(default_factory=dict)
+
+
+def tcp_peer_uid(server_port: int, client_port: int) -> int | None:
+    """The UID that owns the loopback socket at ``client_port`` connected to us.
+
+    Members share the container's loopback; the kernel's socket table is what
+    says which user's process opened a connection.
+    """
+    local = f"0100007F:{client_port:04X}"
+    remote = f"0100007F:{server_port:04X}"
+    try:
+        with open("/proc/net/tcp", encoding="ascii") as handle:
+            lines = handle.read().splitlines()[1:]
+    except OSError:
+        return None
+    for line in lines:
+        fields = line.split()
+        if len(fields) > 7 and fields[1] == local and fields[2] == remote:
+            with contextlib.suppress(ValueError):
+                return int(fields[7])
+    return None
+
+
+def browser_can_write(path: str) -> bool:
+    """Whether Chromium, as this service's user, can create a file in ``path``."""
+    probe = path if os.path.isdir(path) else os.path.dirname(os.path.normpath(path))
+    return os.path.isdir(probe) and os.access(probe, os.W_OK | os.X_OK)
+
+
+class Courier:
+    """The service's end of one UID's courier connection (:func:`run_courier`)."""
+
+    def __init__(self, uid: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self.uid = uid
+        self.reader = reader
+        self.writer = writer
+        self.next_id = 1
+        self.pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+
+    async def copy(self, src: str, dst: str) -> tuple[bool, str]:
+        request_id = self.next_id
+        self.next_id += 1
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self.pending[request_id] = future
+        try:
+            self.writer.write(
+                json.dumps({"id": request_id, "src": src, "dst": dst}).encode() + b"\n"
+            )
+            await self.writer.drain()
+            reply = await asyncio.wait_for(future, HANDOFF_TIMEOUT_S)
+        except (ConnectionError, TimeoutError) as exc:
+            return False, f"the courier did not answer: {exc or 'timed out'}"
+        finally:
+            self.pending.pop(request_id, None)
+        return bool(reply.get("ok")), str(reply.get("error") or "")
+
+    async def run(self) -> None:
+        try:
+            while True:
+                line = await self.reader.readline()
+                if not line:
+                    break
+                with contextlib.suppress(ValueError):
+                    reply = json.loads(line)
+                    future = self.pending.get(reply.get("id")) if isinstance(reply, dict) else None
+                    if future is not None and not future.done():
+                        future.set_result(reply)
+        except (ConnectionError, asyncio.LimitOverrunError, ValueError):
+            pass
+        finally:
+            for future in self.pending.values():
+                if not future.done():
+                    future.set_exception(ConnectionError("the courier left"))
+
+
 class Daemon:
     """The service: a loopback CDP endpoint, and Chromium behind it on demand."""
 
@@ -647,11 +843,15 @@ class Daemon:
         self.browser_writer: asyncio.StreamWriter | None = None
         self.pump: asyncio.Task[None] | None = None
         self.version: dict[str, Any] = {}
-        self.sockets: dict[Client, WebSocket] = {}
+        self.peers: dict[Client, Peer] = {}
+        #: One courier per UID, the latest to register.
+        self.couriers: dict[int, Courier] = {}
+        self.courier_joined: asyncio.Event | None = None
         self.mux = self._new_mux(None)
         self._launch_lock: asyncio.Lock | None = None
         self._version_id: int | None = None
         self._version_ready: asyncio.Future[dict[str, Any]] | None = None
+        self._staging_count = 0
 
     # -- urls -------------------------------------------------------------
 
@@ -676,20 +876,179 @@ class Daemon:
             if writer is not None and not writer.is_closing():
                 writer.write(json.dumps(message).encode() + b"\0")
 
-        return Multiplexer(to_browser, self._to_client, self._on_internal)
+        return Multiplexer(
+            to_browser,
+            self._to_client,
+            self._on_internal,
+            rewrite=self._rewrite,
+            on_event=self._on_event,
+        )
 
     def _to_client(self, client: Client, message: dict[str, Any]) -> None:
-        socket = self.sockets.get(client)
-        if socket is None:
+        peer = self.peers.get(client)
+        if peer is None:
             return
-        socket.writer.write(encode_frame(OP_TEXT, json.dumps(message).encode()))
+        if not peer.channel.send(encode_frame(OP_TEXT, json.dumps(message).encode())):
+            print(
+                f"cloud-agent-browser: {client.name} fell {peer.channel.pending} bytes "
+                "behind; disconnecting it",
+                file=sys.stderr,
+                flush=True,
+            )
+            peer.channel.abort()
+            return
         if client.hang_up:
-            asyncio.get_running_loop().create_task(socket.close())
+            peer.channel.close_after_flush()
 
     def _on_internal(self, message: dict[str, Any]) -> None:
         ready = self._version_ready
         if message.get("id") == self._version_id and ready is not None and not ready.done():
             ready.set_result(message)
+
+    # -- downloads across users ---------------------------------------------
+    #
+    # A client names a directory of its own for downloads; Playwright makes
+    # one 0700 in its own temporary directory. Chromium runs as the service's
+    # user and cannot write there, so the download is sent to a staging
+    # directory of the service's instead, and when it finishes, the client's
+    # UID's courier copies it to where the client looks for it, before the
+    # client hears that it finished.
+
+    def _rewrite(self, client: Client, message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") not in DOWNLOAD_COMMANDS:
+            return message
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        behavior, target = params.get("behavior"), params.get("downloadPath")
+        peer = self.peers.get(client)
+        if (
+            peer is None
+            or behavior not in ("allow", "allowAndName")
+            or not isinstance(target, str)
+            or not os.path.isabs(target)
+            or browser_can_write(target)
+        ):
+            return message
+        self._staging_count += 1
+        staging = os.path.join(self.paths.downloads, f"{client.name}-{self._staging_count}")
+        os.makedirs(staging, mode=0o750, exist_ok=True)
+        os.chmod(staging, 0o750)
+        peer.routes.append(DownloadRoute(target, staging, behavior == "allowAndName"))
+        return {**message, "params": {**params, "downloadPath": staging}}
+
+    def _on_event(self, client: Client, message: dict[str, Any]) -> bool:
+        method = message.get("method")
+        peer = self.peers.get(client)
+        if peer is None or not peer.routes or not isinstance(method, str):
+            return True
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        guid = params.get("guid")
+        if method.endswith(".downloadWillBegin") and isinstance(guid, str):
+            peer.names[guid] = str(params.get("suggestedFilename") or "")
+            return True
+        if not method.endswith(".downloadProgress") or not isinstance(guid, str):
+            return True
+        state = params.get("state")
+        if state not in ("completed", "canceled"):
+            return True
+        if guid in peer.handoffs:
+            asyncio.get_running_loop().create_task(
+                self._deliver_after(client, peer, peer.handoffs[guid], message)
+            )
+            return False
+        staged = self._staged(peer, guid)
+        if staged is None:
+            return True
+        if state == "canceled":
+            with contextlib.suppress(OSError):
+                os.unlink(os.path.join(staged[0].staging, staged[1]))
+            return True
+        outcome: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        peer.handoffs[guid] = outcome
+        asyncio.get_running_loop().create_task(
+            self._hand_off(client, peer, staged, outcome, message)
+        )
+        return False
+
+    @staticmethod
+    def _staged(peer: Peer, guid: str) -> tuple[DownloadRoute, str] | None:
+        for route in reversed(peer.routes):
+            name = guid if route.named_by_guid else peer.names.get(guid, "")
+            if name and os.path.isfile(os.path.join(route.staging, name)):
+                return route, name
+        return None
+
+    async def _hand_off(
+        self,
+        client: Client,
+        peer: Peer,
+        staged: tuple[DownloadRoute, str],
+        outcome: asyncio.Future[str],
+        message: dict[str, Any],
+    ) -> None:
+        route, name = staged
+        source = os.path.join(route.staging, name)
+        ok, why = False, f"no courier for uid {peer.uid}; run `cloud-agent-browser start` as it"
+        courier = await self._courier_for(peer.uid)
+        if courier is not None:
+            ok, why = await courier.copy(source, os.path.join(route.target, name))
+        with contextlib.suppress(OSError):
+            os.unlink(source)
+        if not ok:
+            print(
+                f"cloud-agent-browser: download for {client.name} not delivered: {why}",
+                file=sys.stderr,
+                flush=True,
+            )
+        outcome.set_result("completed" if ok else "canceled")
+        await self._deliver_after(client, peer, outcome, message)
+
+    async def _deliver_after(
+        self, client: Client, peer: Peer, outcome: asyncio.Future[str], message: dict[str, Any]
+    ) -> None:
+        state = await asyncio.shield(outcome)
+        params = message.get("params") or {}
+        if self.peers.get(client) is peer:
+            self._to_client(client, {**message, "params": {**params, "state": state}})
+
+    async def _courier_for(self, uid: int | None) -> Courier | None:
+        if uid is None or self.courier_joined is None:
+            return None
+        deadline = time.monotonic() + COURIER_WAIT_S
+        while uid not in self.couriers and time.monotonic() < deadline:
+            self.courier_joined.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.courier_joined.wait(), deadline - time.monotonic())
+        return self.couriers.get(uid)
+
+    async def _accept_courier(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        sock = writer.get_extra_info("socket")
+        try:
+            credentials = sock.getsockopt(
+                socketlib.SOL_SOCKET, socketlib.SO_PEERCRED, struct.calcsize("3i")
+            )
+            _pid, uid, _gid = struct.unpack("3i", credentials)
+        except (OSError, AttributeError, struct.error):
+            writer.close()
+            return
+        courier = Courier(uid, reader, writer)
+        self.couriers[uid] = courier
+        assert self.courier_joined is not None
+        self.courier_joined.set()
+        try:
+            await courier.run()
+        finally:
+            if self.couriers.get(uid) is courier:
+                del self.couriers[uid]
+            writer.close()
+
+    def _forget_downloads(self, peer: Peer) -> None:
+        for route in peer.routes:
+            shutil.rmtree(route.staging, ignore_errors=True)
+        peer.routes.clear()
+
+    # -- Chromium -----------------------------------------------------------
 
     async def _start_chromium(self, loop: asyncio.AbstractEventLoop) -> asyncio.StreamReader:
         if self.sandboxed is None:
@@ -729,6 +1088,8 @@ class Daemon:
         return reader
 
     async def _pump_browser(self, reader: asyncio.StreamReader, mux: Multiplexer) -> None:
+        # Never waits on a client: each one's frames are written by its own
+        # Channel. Reading on is what keeps every other client's replies moving.
         try:
             while True:
                 raw = await reader.readuntil(b"\0")
@@ -738,16 +1099,27 @@ class Daemon:
                     continue
                 if isinstance(message, dict):
                     mux.from_browser(message)
-                    for socket in list(self.sockets.values()):
-                        if not socket.closed:
-                            with contextlib.suppress(ConnectionError):
-                                await socket.writer.drain()
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
             pass
         finally:
             if asyncio.current_task() is self.pump:
                 self.pump = None
                 self._close_browser("chromium exited")
+
+    async def _launch(self) -> None:
+        loop = asyncio.get_running_loop()
+        reader = await self._start_chromium(loop)
+        self.mux = self._new_mux(self.browser_writer)
+        self.pump = loop.create_task(self._pump_browser(reader, self.mux))
+        self._version_ready = loop.create_future()
+        self._version_id = self.mux.internal("Browser.getVersion")
+        done, _ = await asyncio.wait(
+            {self._version_ready, self.pump},
+            timeout=READY_TIMEOUT_S,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if self._version_ready not in done or "result" not in self._version_ready.result():
+            raise BrowserError("Chromium did not answer; see " + self.paths.log)
 
     async def _ensure_browser(self) -> bool:
         """Start Chromium unless it runs; False (and the reason logged) if it cannot."""
@@ -756,26 +1128,31 @@ class Daemon:
             if self.browser_running:
                 return True
             self._close_browser(None)
-            loop = asyncio.get_running_loop()
             try:
-                reader = await self._start_chromium(loop)
-                self.mux = self._new_mux(self.browser_writer)
-                self.pump = loop.create_task(self._pump_browser(reader, self.mux))
-                self._version_ready = loop.create_future()
-                self._version_id = self.mux.internal("Browser.getVersion")
-                done, _ = await asyncio.wait(
-                    {self._version_ready, self.pump},
-                    timeout=READY_TIMEOUT_S,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if self._version_ready not in done or "result" not in self._version_ready.result():
-                    raise BrowserError("Chromium did not answer; see " + self.paths.log)
+                try:
+                    await self._launch()
+                except BrowserError:
+                    if not (self.sandboxed and ALLOW_UNSANDBOXED):
+                        raise
+                    # The probe can pass where the sandbox still cannot work:
+                    # Chromium aborts with "No usable sandbox" under some
+                    # namespace policies. Fall back once, for this service.
+                    self._close_browser(None)
+                    self.sandboxed = False
+                    print(
+                        "cloud-agent-browser: Chromium could not start sandboxed (see the "
+                        "log above); starting it with --no-sandbox",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    await self._launch()
             except BrowserError as exc:
                 print(f"cloud-agent-browser: {exc}", file=sys.stderr, flush=True)
                 self._close_browser(None)
                 self.last_error = str(exc)
                 self._publish()
                 return False
+            assert self._version_ready is not None
             result = self._version_ready.result()["result"]
             self.version = {
                 "Browser": result.get("product", ""),
@@ -786,7 +1163,8 @@ class Daemon:
             self.last_error = ""
             self.last_active = time.monotonic()
             print(
-                f"cloud-agent-browser: chromium started: {self.version['Browser']}",
+                f"cloud-agent-browser: chromium started: {self.version['Browser']}"
+                f"{'' if self.sandboxed else ' (--no-sandbox)'}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -800,9 +1178,10 @@ class Daemon:
         pump, self.pump = self.pump, None
         if pump is not None and pump is not asyncio.current_task():
             pump.cancel()
-        for socket in self.sockets.values():
-            asyncio.get_running_loop().create_task(socket.close())
-        self.sockets = {}
+        for peer in self.peers.values():
+            peer.channel.close_after_flush()
+            self._forget_downloads(peer)
+        self.peers = {}
         if self.browser_writer is not None:
             self.browser_writer.close()
             self.browser_writer = None
@@ -830,7 +1209,7 @@ class Daemon:
             self._close_browser("stopped by a member")
             await self._respond(writer, b"200 OK", json.dumps({"stopped": was_running}).encode())
             return
-        if route != "socket" or len(self.sockets) >= MAX_CLIENTS:
+        if route != "socket" or len(self.peers) >= MAX_CLIENTS:
             await self._respond(
                 writer, b"404 Not Found" if route != "socket" else b"503 Service Unavailable"
             )
@@ -844,7 +1223,13 @@ class Daemon:
             + f"Sec-WebSocket-Accept: {websocket_accept(key)}\r\n\r\n".encode()
         )
         await writer.drain()
-        await self._serve_client(WebSocket(reader, writer))
+        await self._serve_client(WebSocket(reader, writer), self._peer_uid(writer))
+
+    def _peer_uid(self, writer: asyncio.StreamWriter) -> int | None:
+        peer = writer.get_extra_info("peername")
+        if not isinstance(peer, tuple) or len(peer) < 2:
+            return None
+        return tcp_peer_uid(self.port, int(peer[1]))
 
     async def _respond(
         self, writer: asyncio.StreamWriter, status: bytes, body: bytes = b""
@@ -883,15 +1268,16 @@ class Daemon:
             return "socket"
         return "none"
 
-    async def _serve_client(self, socket: WebSocket) -> None:
+    async def _serve_client(self, socket: WebSocket, uid: int | None) -> None:
         client = Client(name=f"client-{secrets.token_hex(4)}")
         # The run this client joined: it leaves that one, even after a restart.
         mux, browser_writer = self.mux, self.browser_writer
-        self.sockets[client] = socket
+        peer = Peer(Channel(socket), uid)
+        self.peers[client] = peer
         mux.connect(client)
         self.last_active = time.monotonic()
         try:
-            while not client.hang_up:
+            while not client.hang_up and not peer.channel.closing:
                 raw = await socket.receive()
                 if raw is None:
                     break
@@ -902,17 +1288,24 @@ class Daemon:
                 if not isinstance(message, dict):
                     break
                 mux.from_client(client, message)
+                # Backpressure toward the browser is shared and fair: every
+                # client waits for the one pipe. Never for another client.
                 if browser_writer is not None and not browser_writer.is_closing():
                     with contextlib.suppress(ConnectionError):
                         await browser_writer.drain()
-                await socket.writer.drain()
-        except (FrameError, asyncio.IncompleteReadError, ConnectionError):
+        except (FrameError, asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         finally:
             mux.disconnect(client)
-            if self.sockets.get(client) is socket:
-                del self.sockets[client]
-            await socket.close()
+            if self.peers.get(client) is peer:
+                del self.peers[client]
+            self._forget_downloads(peer)
+            if client.hang_up and not peer.channel.task.done():
+                # Let the reply to Browser.close reach the client first.
+                peer.channel.close_after_flush()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(peer.channel.task), 5)
+            peer.channel.abort()
             self.last_active = time.monotonic()
 
     # -- lifecycle --------------------------------------------------------
@@ -927,7 +1320,7 @@ class Daemon:
             await asyncio.sleep(min(30.0, max(1.0, self.idle_s / 4)))
             if (
                 self.chromium is not None
-                and not self.sockets
+                and not self.peers
                 and time.monotonic() - self.last_active > self.idle_s
             ):
                 self._close_browser("idle")
@@ -943,12 +1336,31 @@ class Daemon:
     async def run(self) -> int:
         loop = asyncio.get_running_loop()
         self.stopping = asyncio.Event()
+        self.courier_joined = asyncio.Event()
         self._launch_lock = asyncio.Lock()
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             loop.add_signal_handler(signum, self._stop, signal.Signals(signum).name)
         server = None
+        couriers = None
         idle = None
         try:
+            shutil.rmtree(self.paths.downloads, ignore_errors=True)
+            os.makedirs(self.paths.downloads, mode=0o750, exist_ok=True)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.paths.courier_socket)
+            # Group members connect to hand downloads over; the kernel says who.
+            # Without it the browser still serves; only cross-user downloads stop.
+            try:
+                couriers = await asyncio.start_unix_server(
+                    self._accept_courier, self.paths.courier_socket
+                )
+                os.chmod(self.paths.courier_socket, 0o660)
+            except OSError as exc:
+                print(
+                    f"cloud-agent-browser: no download hand-off ({self.paths.courier_socket}): {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             server = await asyncio.start_server(
                 self._handle, "127.0.0.1", 0, limit=MAX_REQUEST_HEAD
             )
@@ -967,13 +1379,20 @@ class Daemon:
             self._unpublish()
             if server is not None:
                 server.close()
+            # Couriers end with the service they serve.
+            for courier in list(self.couriers.values()):
+                courier.writer.close()
+            if couriers is not None:
+                couriers.close()
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.paths.courier_socket)
             if idle is not None:
                 idle.cancel()
-            sockets = list(self.sockets.values())
+            channels = [peer.channel for peer in self.peers.values()]
             self._close_browser(None)
-            for socket in sockets:
+            for channel in channels:
                 with contextlib.suppress(Exception):
-                    await socket.close()
+                    await asyncio.wait_for(channel.task, 5)
 
     def _publish(self) -> None:
         running = self.browser_running
@@ -1155,11 +1574,125 @@ def _require_service(paths: Paths) -> dict[str, Any]:
 
 
 def start(paths: Paths) -> dict[str, Any]:
-    """Make sure Chromium runs, and return the service's status."""
+    """Make sure Chromium runs, and return the service's status.
+
+    Also makes sure this UID has a courier, which puts the browser's downloads
+    where this UID's tools ask for them (:func:`run_courier`).
+    """
     ensure_artifacts(paths.artifacts)
     record = _require_service(paths)
+    ensure_courier(paths)
     asyncio.run(_wake(record["endpoint"]))
     return status(paths)
+
+
+# -- the courier: downloads, handed from the service's user to a member's ------
+#
+# Chromium writes a download as the service's user, which cannot write into a
+# client's own private directory (Playwright's is 0700 in the client's
+# temporary directory). The service stages it in its own directory, readable
+# by the sandbox group, and asks the client's UID's courier, a process of
+# that UID, to copy it to the file the client will read. The courier trusts
+# the service only so far: it copies a regular file the service user owns
+# from the service's staging directory, into a directory this UID owns,
+# under a name no file has yet. A compromised browser can make it add a new
+# file to one of this UID's directories, and nothing else.
+
+
+def _courier_lock(environ: dict[str, str] | None = None) -> str:
+    env = os.environ if environ is None else environ
+    home = env.get("HOME") or os.path.expanduser("~")
+    directory = os.path.join(home, ".cloud-agent-browser")
+    ensure_private_dir(directory)
+    return os.path.join(directory, "courier.lock")
+
+
+def ensure_courier(paths: Paths) -> None:
+    """Start this UID's courier unless one runs. The service's own user needs none."""
+    owner = service_owner(paths)
+    if owner is None or owner == os.getuid():
+        return
+    lock_path = _courier_lock()
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return  # a courier holds it
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+    subprocess.Popen(  # this script, re-executed isolated
+        [sys.executable, "-I", os.path.abspath(__file__), "_courier"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
+def deliver(paths: Paths, owner: int, src: str, dst: str) -> None:
+    """Copy one staged download to ``dst``, or raise ``BrowserError`` saying why not."""
+    staging_root = os.path.realpath(paths.downloads) + os.sep
+    if not os.path.realpath(src).startswith(staging_root):
+        raise BrowserError("not a staged download")
+    directory, name = os.path.split(dst)
+    if not name or name in (".", "..") or not os.path.isabs(directory):
+        raise BrowserError("not a file name")
+    source = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(source)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner:
+            raise BrowserError("the staged download is not the service's file")
+        folder = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            folder_info = os.fstat(folder)
+            if folder_info.st_uid != os.getuid():
+                raise BrowserError("the target directory is not this user's")
+            try:
+                target = os.open(
+                    name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=folder
+                )
+            except FileExistsError as exc:
+                raise BrowserError("the target file already exists") from exc
+        finally:
+            os.close(folder)
+        with os.fdopen(source, "rb", closefd=False) as reading, os.fdopen(target, "wb") as writing:
+            shutil.copyfileobj(reading, writing, 1 << 20)
+    finally:
+        os.close(source)
+
+
+def run_courier(paths: Paths) -> int:
+    """This UID's courier: one per UID, until the service it serves stops."""
+    lock = os.open(_courier_lock(), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return 0
+    owner = service_owner(paths)
+    if owner is None:
+        return 1
+    try:
+        info = os.lstat(paths.courier_socket)
+    except OSError:
+        return 1
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != owner:
+        return 1
+    with socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM) as connection:
+        connection.connect(paths.courier_socket)
+        reading = connection.makefile("rb")
+        for line in reading:
+            try:
+                request = json.loads(line)
+                deliver(paths, owner, str(request["src"]), str(request["dst"]))
+                reply = {"id": request.get("id"), "ok": True}
+            except (BrowserError, OSError, ValueError, KeyError, TypeError) as exc:
+                reply = {"id": request.get("id") if isinstance(request, dict) else None}
+                reply.update(ok=False, error=str(exc)[:300])
+            connection.sendall(json.dumps(reply).encode() + b"\n")
+    return 0
 
 
 async def _wake(url: str) -> None:
@@ -1267,6 +1800,66 @@ class CdpClient:
                 return reply.get("result", {})
             self.events.append(reply)
 
+    async def wait_event(self, method: str, match, timeout: float = 60) -> dict[str, Any]:
+        """The first event ``method`` whose params ``match`` accepts, seen or still to come."""
+        deadline = time.monotonic() + timeout
+        while True:
+            for event in self.events:
+                if event.get("method") == method and match(event.get("params") or {}):
+                    self.events.remove(event)
+                    return event.get("params") or {}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BrowserError(f"no {method} event")
+            raw = await asyncio.wait_for(self.socket.receive(), timeout=remaining)
+            if raw is None:
+                raise BrowserError("connection closed")
+            self.events.append(json.loads(raw))
+
+
+_DOWNLOAD_BODY = "cloud-agent-browser self-test download\n"
+_DOWNLOAD_SCRIPT = (
+    "const a = document.createElement('a');"
+    f"a.href = URL.createObjectURL(new Blob([{json.dumps(_DOWNLOAD_BODY)}]));"
+    "a.download = 'self-test.txt'; document.body.appendChild(a); a.click(); true"
+)
+
+
+async def _download_check(client: CdpClient, session: str) -> None:
+    """A download into a directory only the caller can write, as Playwright makes one.
+
+    Run by a member, Chromium (the service's user) cannot write there, so this
+    is the courier's hand-off end to end; run by the service's user, it is a
+    plain download.
+    """
+    target = tempfile.mkdtemp(prefix="cloud-agent-browser-download-")
+    try:
+        await client.call(
+            "Browser.setDownloadBehavior",
+            {"behavior": "allowAndName", "downloadPath": target, "eventsEnabled": True},
+        )
+        await client.call(
+            "Runtime.evaluate", {"expression": _DOWNLOAD_SCRIPT, "userGesture": True}, session
+        )
+        begun = await client.wait_event("Browser.downloadWillBegin", lambda params: True)
+        guid = begun["guid"]
+        done = await client.wait_event(
+            "Browser.downloadProgress",
+            lambda params: (
+                params.get("guid") == guid and params.get("state") in ("completed", "canceled")
+            ),
+        )
+        if done["state"] != "completed":
+            raise BrowserError("the download was canceled; see the service log")
+        path = os.path.join(target, guid)
+        with open(path, encoding="utf-8") as handle:
+            if handle.read() != _DOWNLOAD_BODY:
+                raise BrowserError("the downloaded file is not what the page offered")
+        if os.stat(path).st_uid != os.getuid():
+            raise BrowserError("the downloaded file is not the caller's")
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
 
 async def _self_test(url: str) -> None:
     first = await CdpClient.connect(url)
@@ -1294,6 +1887,7 @@ async def _self_test(url: str) -> None:
     shot = await first.call("Page.captureScreenshot", {"format": "png"}, session)
     if not base64.b64decode(shot["data"]).startswith(b"\x89PNG"):
         raise BrowserError("the screenshot is not a PNG")
+    await _download_check(first, session)
     # The second client sees the browser, but not the first client's session.
     try:
         await second.call("Runtime.evaluate", {"expression": "1"}, session)
@@ -1359,6 +1953,8 @@ def main(argv: list[str]) -> int:
             else:
                 print(record["endpoint"])
             return 0
+        if command == "_courier":
+            return run_courier(paths)
         if command == "status":
             print(json.dumps(status(paths), indent=2))
             return 0

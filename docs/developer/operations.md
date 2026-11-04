@@ -1158,6 +1158,14 @@ why it is built this way and what comes next.
   the unprivileged user namespaces it needs, under runc and Kata alike, so the
   launcher starts Chromium with `--no-sandbox`. The container and the Kata VM
   stay the boundary. `cloud-agent-browser status` reports `chromium_sandbox`.
+  Where a probe passes but Chromium still cannot use its sandbox (Ubuntu's
+  AppArmor user-namespace restriction), the service falls back on its own and
+  says so in its log.
+- **Downloads.** Chromium cannot write into a member's private download
+  directory, so the service stages each download and the member's courier,
+  started by `cloud-agent-browser start`, copies it there. A download the
+  service could not hand over reaches the tool as canceled, and the service
+  log says why.
 - **Lifecycle.** The service starts Chromium when the first client connects
   and stops it after 15 minutes without one (`CLOUD_AGENT_BROWSER_IDLE_S`). A
   crashed Chromium comes back with the next connection. The profile
