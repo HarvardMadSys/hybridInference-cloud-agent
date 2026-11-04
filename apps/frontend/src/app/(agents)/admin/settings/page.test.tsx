@@ -720,6 +720,49 @@ describe('application category tabs', () => {
     expect(updateArchiveSettings).not.toHaveBeenCalled();
   });
 
+  it('puts the agent package registry on the existing Agent versions tab', async () => {
+    const current = applicationSnapshot({
+      definitions: [
+        {
+          key: 'runtime_registry_url',
+          category: 'Agent versions',
+          label: 'Agent package registry',
+          description: '',
+          kind: 'string',
+          default: '',
+          secret: false,
+        },
+      ],
+      values: { runtime_registry_url: '' },
+    });
+    vi.mocked(getAgentAdminSettings).mockResolvedValue(current);
+    vi.mocked(setAgentAdminSettings).mockResolvedValue({
+      ...current,
+      revision: 2,
+      values: { runtime_registry_url: 'http://verdaccio:4873' },
+    });
+    window.history.replaceState(null, '', '/admin/settings?tab=versions');
+    renderSettings();
+    const input = await loadedField('Agent package registry');
+    expect(screen.getAllByRole('tab', { name: 'Agent versions' })).toHaveLength(1);
+    expect(screen.getByRole('tab', { name: 'Agent versions' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByRole('region', { name: 'Where agent versions come from' })).toContainElement(
+      input,
+    );
+    fireEvent.change(input, { target: { value: 'http://verdaccio:4873' } });
+    submit(input);
+    await waitFor(() =>
+      expect(setAgentAdminSettings).toHaveBeenCalledWith(
+        { runtime_registry_url: 'http://verdaccio:4873' },
+        1,
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
   it('reveals a deletion archive link in the existing Sandbox tab', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     window.history.replaceState(

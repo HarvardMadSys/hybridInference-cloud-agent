@@ -27,6 +27,15 @@ const snapshot: AgentAdminSettings = {
       secret: false,
     },
     {
+      key: 'runtime_registry_url',
+      label: 'Agent package registry',
+      description: 'The npm registry agent versions come from.',
+      category: 'Agent versions',
+      kind: 'string',
+      default: '',
+      secret: false,
+    },
+    {
       key: 'future.setting',
       label: 'Future limit',
       description: 'A newly introduced setting.',
@@ -93,6 +102,16 @@ describe('settings search', () => {
     expect(searchSettingsItems(catalog, 'github unmatched-term')).toEqual([]);
     expect(searchSettingsItems(catalog, '   ')).toEqual([]);
     expect(searchSettingsItems(catalog, '__...--')).toEqual([]);
+  });
+
+  it('routes the agent package registry to the Agent versions tab', () => {
+    expect(searchSettingsItems(items(), 'npm registry')).toEqual([
+      expect.objectContaining({
+        applicationKey: 'runtime_registry_url',
+        tab: 'versions',
+        section: 'Agent versions',
+      }),
+    ]);
   });
 
   it('keeps new definitions searchable and routes archive storage into Sandbox', () => {
