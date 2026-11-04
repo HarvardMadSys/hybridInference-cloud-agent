@@ -130,9 +130,10 @@ msgstr "生成器检查什么，又故意不检查什么"
 
 #: ../../deploy/release/README.md:40
 msgid ""
-"The generator requires all six artifacts, with distinct digests and "
+"The generator requires all five artifacts, with distinct digests and "
 "exactly these platforms:"
-msgstr "生成器要求六个产物一个不少，摘要互不相同，平台必须正好是下面这样："
+msgstr ""
+"生成器要求五个产物一个不少，摘要互不相同，平台必须正好是下面这样："
 
 #: ../developer/releases.md:1
 msgid "Role"
@@ -167,10 +168,6 @@ msgid "`root`, base path `\"\"`"
 msgstr "`root`，base path 为 `\"\"`"
 
 #: ../developer/releases.md:1
-msgid "`agents`, base path `/agents`"
-msgstr "`agents`，base path 为 `/agents`"
-
-#: ../developer/releases.md:1
 msgid "`runner`"
 msgstr ""
 
@@ -185,6 +182,15 @@ msgstr ""
 #: ../developer/releases.md:1
 msgid "`tunnel`"
 msgstr ""
+
+#: ../../deploy/release/README.md:51
+msgid ""
+"The `agents` web variant (base path `/agents`) is retired: it is no "
+"longer built, and the schema keeps accepting it in published v1 manifests"
+" (`manifest_contract.retired_web_variants`) so a rollback still "
+"validates."
+msgstr ""
+"`agents` 这个 Web 变体（base path 为 `/agents`）已经退役：不再构建，但清单格式仍然接受已发布的 v1 清单里带着它（见 `manifest_contract.retired_web_variants`），这样回滚到旧版本时清单检查照样能通过。"
 
 #: ../../deploy/release/README.md:52
 msgid ""
@@ -501,14 +507,13 @@ msgstr ""
 msgid "Sandbox, with a separate visibility setting for bundled third-party CLIs"
 msgstr "沙箱；因为里面打包了第三方 CLI，单独设置了可见性"
 
-#: ../../deploy/release/README.md:178
+#: ../../deploy/release/README.md:181
 msgid ""
 "After its smoke test passes, each digest receives a tag such as "
-"`control-<sha>`, `web-agents-<sha>`, or `sandbox-<sha>`. These tags help "
+"`control-<sha>`, `web-root-<sha>`, or `sandbox-<sha>`. These tags help "
 "people inspect images and are not deployment selectors."
 msgstr ""
-"冒烟测试通过后，每个摘要会打上 `control-<sha>`、`web-agents-<sha>`、`sandbox-<sha>` "
-"这样的标签。这些标签只是方便人查看镜像，部署时不靠它们来选镜像。"
+"冒烟测试通过后，每个摘要会打上 `control-<sha>`、`web-root-<sha>`、`sandbox-<sha>` 这样的标签。这些标签只是方便人查看镜像，部署时不靠它们来选镜像。"
 
 #: ../../deploy/release/README.md:182
 msgid ""
@@ -619,14 +624,12 @@ msgid ""
 msgstr ""
 "`DEPLOY_ROOT` 在不同的发布之间不要变。它下面的 `.env`、`.deployed-sha` 和 `.shared-live-ready` 描述的是这套长期存在的部署，而每次解压出来的 recipe 可以放在别的地方。全新安装时，创建这个根目录，参照对应 recipe 里控制平面或主机的 `.env.example` 填好 `.env`。控制平面上，数据库、账号和设置的密钥都留空：第一次 `prepare` 阶段会把它们生成到这个 `.env` 里，具体见[全新安装步骤](../../docs/developer/operations.md#admin-settings)。已有的安装，则保留原来的配置、Compose 项目名、主机注册根目录和 Docker 数据目录。生成的 Compose 文件放在 `DEPLOY_ROOT` 下，这样相对路径的挂载还能指向原来的数据；edge 代理的配置则来自所选的 recipe。"
 
-#: ../../deploy/release/README.md:240
+#: ../../deploy/release/README.md:246
 msgid ""
-"Select `AGENT_WEB_VARIANT=root` or `agents` in the control-plane "
-"configuration. If omitted, `AGENT_WEB_BASE_PATH` selects the variant: "
-"empty or unset selects `root`, and `/agents` selects `agents`."
+"`AGENT_WEB_VARIANT` may be omitted or set to `root`, the only web image. "
+"A leftover `AGENT_WEB_BASE_PATH` with a value is refused."
 msgstr ""
-"在控制平面配置里，用 `AGENT_WEB_VARIANT=root` 或 `agents` 选择 Web 变体。不设置的话，就看 "
-"`AGENT_WEB_BASE_PATH`：为空或没设置时用 `root`，设为 `/agents` 时用 `agents`。"
+"`AGENT_WEB_VARIANT` 可以不设，或者设为 `root`，这是唯一的 Web 镜像。如果还留着有值的 `AGENT_WEB_BASE_PATH`，部署会被拒绝。"
 
 #: ../../deploy/release/README.md:244
 msgid "Set the artifact environment on the control-plane machine:"

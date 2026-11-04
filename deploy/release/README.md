@@ -36,17 +36,20 @@ independent contract fixture when compatibility changes.
 
 ## What the generator checks, and what it deliberately does not
 
-The generator requires all six artifacts, with distinct digests and exactly
+The generator requires all five artifacts, with distinct digests and exactly
 these platforms:
 
 | Role | Variant | Platform |
 |---|---|---|
 | `control` | — | `linux/arm64` |
 | `web` | `root`, base path `""` | `linux/arm64` |
-| `web` | `agents`, base path `/agents` | `linux/arm64` |
 | `runner` | — | `linux/amd64` |
 | `sandbox` | — | `linux/amd64` |
 | `tunnel` | — | `linux/amd64` |
+
+The `agents` web variant (base path `/agents`) is retired: it is no longer
+built, and the schema keeps accepting it in published v1 manifests
+(`manifest_contract.retired_web_variants`) so a rollback still validates.
 
 Image references must use digests under this organization's registry. The
 schema enforces role and web-variant cardinality, and the generator validates
@@ -175,7 +178,7 @@ tags are storage conventions; deployments select the manifest's digests.
 | `ghcr.io/harvardmadsys/cloud-agent-sandbox` | Sandbox, with a separate visibility setting for bundled third-party CLIs |
 
 After its smoke test passes, each digest receives a tag such as
-`control-<sha>`, `web-agents-<sha>`, or `sandbox-<sha>`. These tags help people
+`control-<sha>`, `web-root-<sha>`, or `sandbox-<sha>`. These tags help people
 inspect images and are not deployment selectors.
 
 Tags such as `buildcache-sandbox-2026-w42` are the publication workflow's layer
@@ -239,9 +242,8 @@ host enrollment root, and Docker data root. Generated Compose files stay under
 `DEPLOY_ROOT` so relative mounts preserve their data paths; the edge proxy
 configuration comes from the selected recipe.
 
-Select `AGENT_WEB_VARIANT=root` or `agents` in the control-plane configuration.
-If omitted, `AGENT_WEB_BASE_PATH` selects the variant: empty or unset selects
-`root`, and `/agents` selects `agents`.
+`AGENT_WEB_VARIANT` may be omitted or set to `root`, the only web image. A
+leftover `AGENT_WEB_BASE_PATH` with a value is refused.
 
 Set the artifact environment on the control-plane machine:
 

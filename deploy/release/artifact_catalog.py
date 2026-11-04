@@ -100,6 +100,7 @@ def artifact_shape_fingerprint(document: Mapping[str, Any]) -> str:
         # Scheduling order and workflow-only cell names are not published
         # manifest shape, so neither should force a compatibility decision.
         "artifacts": sorted(entries, key=lambda item: json.dumps(item, sort_keys=True)),
+        "retired_web_variants": _retired_web_variants(document),
     }
     payload = json.dumps(shape, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
@@ -200,6 +201,28 @@ def load_catalog(path: Path = CATALOG_PATH) -> tuple[Artifact, ...]:
 @lru_cache
 def artifacts() -> tuple[Artifact, ...]:
     return load_catalog()
+
+
+def _retired_web_variants(document: Mapping[str, Any]) -> list[dict[str, str]]:
+    contract = document.get("manifest_contract")
+    raw = contract.get("retired_web_variants", []) if isinstance(contract, dict) else []
+    if not isinstance(raw, list) or not all(
+        isinstance(item, dict)
+        and isinstance(item.get("variant"), str)
+        and isinstance(item.get("base_path"), str)
+        for item in raw
+    ):
+        raise CatalogError("manifest_contract.retired_web_variants must list variant and base_path")
+    return [{"variant": item["variant"], "base_path": item["base_path"]} for item in raw]
+
+
+def retired_web_variants() -> list[dict[str, str]]:
+    """Web variants no longer built that a published v1 manifest may still carry.
+
+    The schema keeps accepting them so a rollback to an older release still
+    validates; nothing here builds, smokes or deploys them.
+    """
+    return _retired_web_variants(read_document())
 
 
 def manifest_schema_version() -> int:

@@ -33,11 +33,10 @@ export function sanitizeRuntimeSiteEnvironment(env) {
   );
 }
 
-/** Bind a build's public paths to the identity written beside its artifact. */
+/** Bind a build's browser API path to the identity written beside its artifact. */
 export function buildEnvironmentForVariant(variant, env = process.env) {
   return {
     ...env,
-    NEXT_PUBLIC_BASE_PATH: variant.basePath,
     NEXT_PUBLIC_AGENT_API_URL: variant.apiUrl,
   };
 }

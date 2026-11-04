@@ -16,7 +16,6 @@ import {
   type BrowserAccounts as Accounts,
 } from '@/lib/api/accounts';
 import { announceSession, listenForSession } from '@/lib/auth/sessionSync';
-import { basePath } from '@/config/env';
 import { getErrorMessage } from '@/lib/utils/errors';
 import { AccountFrame, AccountNotice } from './AccountFrame';
 
@@ -95,7 +94,7 @@ export function BrowserAccounts() {
                         () => switchAccount(account.id),
                         () => {
                           announceSession(account.id);
-                          window.location.assign(`${basePath}/`);
+                          window.location.assign('/');
                         },
                       )
                     }
@@ -145,7 +144,7 @@ export function BrowserAccounts() {
             onClick={() =>
               void run(signOutEverywhereHere, () => {
                 announceSession(null);
-                window.location.assign(`${basePath}/login`);
+                window.location.assign('/login');
               })
             }
           >

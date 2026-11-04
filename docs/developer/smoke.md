@@ -70,8 +70,8 @@ encryption keys into its settings
 version control and stable so saved connections and settings remain
 decryptable. None of these keys is shared with any other service.
 
-- [ ] Set `AGENT_WEB_BASE_URL`, `AGENT_PUBLIC_API_URL`, the web base path and
-      browser API path. Set no `GATEWAY_*`, `IDENTITY_*` or `AGENT_AUTH_MODE`:
+- [ ] Set `AGENT_WEB_BASE_URL` and `AGENT_PUBLIC_API_URL`; the app is served at
+      the root of its hostname with the API at `/api`. Set no `GATEWAY_*`, `IDENTITY_*` or `AGENT_AUTH_MODE`:
       the control plane and `deploy.sh` refuse them.
 - [ ] Set explicit Compose project names, sandbox image, enrolled host name,
       sandbox manager credential/reverse route, both tunnel destinations and keys,

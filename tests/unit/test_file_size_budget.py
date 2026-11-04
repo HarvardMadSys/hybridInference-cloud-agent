@@ -60,7 +60,7 @@ TEST_BASELINE = {
     "tests/unit/test_chat_sandbox.py": 3138,
     "tests/unit/test_compute_providers.py": 2002,
     "tests/unit/test_compute_reconcile.py": 2291,
-    "tests/unit/test_deploy_config.py": 2064,
+    "tests/unit/test_deploy_config.py": 2058,
     "tests/unit/test_host_pool_api.py": 3378,
     "tests/unit/test_mcp_connections_api.py": 3043,
     "tests/unit/test_retained_deploy.py": 2231,

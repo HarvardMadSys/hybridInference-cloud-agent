@@ -140,7 +140,7 @@ The Settings page identifies missing required fields and incomplete optional
 integrations. A new deployment's first administrator signs in with the one-time
 setup code the control plane logs and completes them in Admin → Settings. When
 no administrator can sign in, an operator with `ADMIN_TOKEN` can open
-`<web base path>/setup` instead. Setup uses the same authenticated, audited
+`/setup` instead. Setup uses the same authenticated, audited
 settings API. The recovery token stays in page memory and is never saved in
 browser storage.
 
@@ -258,7 +258,7 @@ accounts, sessions, and saved connections persist in `agent-pgadmin`.
 
 | Variable | Value / who provisions |
 |---|---|
-| `AGENT_WEB_BASE_URL` | Public web-app URL, including its base path, for example `https://agents.example.org/agents`. Every emailed link is built from it, never from a request's `Host`. Its origin is also one the main API accepts session-cookie writes from: a POST, PUT, PATCH or DELETE carrying the session cookie is refused with 403 when the browser reports it came from another origin (`Sec-Fetch-Site`, or `Origin` without it) that is neither this one, the request's own host, nor the pgAdmin public URL's. |
+| `AGENT_WEB_BASE_URL` | Public web-app URL, for example `https://agents.example.org`. Every emailed link is built from it, never from a request's `Host`. Its origin is also one the main API accepts session-cookie writes from: a POST, PUT, PATCH or DELETE carrying the session cookie is refused with 403 when the browser reports it came from another origin (`Sec-Fetch-Site`, or `Origin` without it) that is neither this one, the request's own host, nor the pgAdmin public URL's. |
 | `AGENT_PUBLIC_API_URL` | NEW. This API's public base URL, including its prefix, for example `https://agents.example.org/api`. OAuth callbacks (MCP sign-in, compute registration) are built from it. It replaces the address `AGENT_SESSION_REDIRECT_URI` used to give. |
 
 ### Retired Gateway variables
@@ -301,7 +301,7 @@ these is refused: the control plane stops at startup naming it, and
 | `AGENT_DEFAULT_EXECUTION_PROFILE` | Server-owned policy for new root threads. Application default: `trusted-v1`; supported production Compose default: `untrusted-kata-v1`; local Compose uses `trusted-v1`. The untrusted profile requires the current enrolled Host credential and the exact claiming replica's attestation of `io.containerd.kata.v2` with a guest kernel different from the host. The trusted profile permits runc for trusted internal/dev repositories. Follow-ups and Fork inherit the stored policy; callers cannot select it. |
 | `AGENT_ALERT_WEBHOOK_URL` | Operator-owned JSON webhook for queue incidents, recovery and compute replacement events. Queue monitoring runs every minute, reports ten-minute-old runnable queue heads after two observations, retries delivery on the next pass and repeats unchanged incidents at most every 30 minutes. Delivery timeout: five seconds. Queue payloads contain event, deployment SHA and aggregate counts; compute events also contain Host identity and reason codes. Unset retains structured logs. Downstream distributions own deployment-workflow alerts. This URL never enters runners or sandboxes. |
 | `AGENT_RESIDENCY_TTL_S` | How long a member's independently fenced live-process residency survives between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
-| `ADMIN_TOKEN` | Optional machine-to-machine admin credential, and the recovery door to `<web base path>/setup` when no administrator can sign in; a new deployment does not need it. An unset value opens no token access; admin sessions remain a separate authorization path. Use at least 32 random bytes; startup logs `agent_weak_credential` for a shorter value. |
+| `ADMIN_TOKEN` | Optional machine-to-machine admin credential, and the recovery door to `/setup` when no administrator can sign in; a new deployment does not need it. An unset value opens no token access; admin sessions remain a separate authorization path. Use at least 32 random bytes; startup logs `agent_weak_credential` for a shorter value. |
 
 ### Accounts
 
@@ -844,18 +844,17 @@ variable an operator can set everywhere and change nothing. Every row names its
 compose argument, and `test_web_build_arguments_are_wired` fails on a row that
 has none. Changing one is a rebuild.
 
-The base path and API prefix must match the reverse proxy. The supported
-same-origin layouts use `AGENT_WEB_API_URL=<AGENT_WEB_BASE_PATH>/api`: `/api`
-for the standalone edge, or `/agents/api` under `/agents`. The build rejects a
-nonempty relative API value that disagrees with the base path. Absolute URLs
-and an empty value are accepted for operator-defined routing; empty means API
-requests start directly at `/v1/...`. The pairing tests run the actual Next.js
-configuration.
+The web app is served at the root of its own hostname, and the browser calls
+the control plane at `/api` on the same origin, where the edge routes it.
+Mounting the app under a path prefix inside another site was removed;
+`deploy.sh` and the release deployer refuse a leftover `AGENT_WEB_BASE_PATH`.
+The build rejects a relative API value other than `/api`; an absolute URL is
+accepted for operator-defined cross-origin routing. The tests run the actual
+Next.js configuration.
 
 | Variable | Compose build argument | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_BASE_PATH` | `AGENT_WEB_BASE_PATH` | Prefix the app is mounted under. `/agents` serves it inside another site's hostname — same origin, so the session cookie needs no CORS and no DNS record is involved, and a rollback is a reverse-proxy edit rather than a DNS change waiting out a TTL. Empty for a deployment that owns its hostname. It has to match the path in `AGENT_WEB_BASE_URL`, from which the control plane builds every emailed link. |
-| `NEXT_PUBLIC_AGENT_API_URL` | `AGENT_WEB_API_URL` | Browser API base. For the shipped standalone edge, use `/api`; under a mount prefix use `<AGENT_WEB_BASE_PATH>/api`, for example `/agents/api`. Empty sends `/v1/...` requests directly to the browser origin and requires routing that exposes those paths. Cross-origin URLs need control-plane CORS with credentials because authentication uses a session cookie. |
+| `NEXT_PUBLIC_AGENT_API_URL` | Set to `/api` | Browser API base, fixed at `/api` on the same origin. A build that needs a cross-origin control plane passes an absolute URL, which needs control-plane CORS with credentials because authentication uses a session cookie. |
 | `NEXT_PUBLIC_BUILD_SHA` | `BUILD_SHA` | Optional build identity, baked in by the deploy script. |
 | `NEXT_PUBLIC_BUILD_TIMESTAMP` | `BUILD_TIMESTAMP` | Optional build identity. |
 

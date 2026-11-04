@@ -55,6 +55,17 @@ value, never adds a settings key beside `AGENT_SESSION_SECRET`, and on a
 deployment root that has deployed before it stops with the names of any
 missing required value rather than generate one.
 
+The web app is now served only at the root of its own hostname, with the API at
+`/api` on the same origin; mounting it under a path prefix such as `/agents`
+inside another site was removed, and releases no longer carry the `web-agents`
+image. Delete `AGENT_WEB_BASE_PATH`, `AGENT_WEB_API_URL` and
+`AGENT_DEPLOYMENT_SHA` from the control plane's `.env` (`deploy.sh` exports the
+commit it deploys). An empty `AGENT_WEB_BASE_PATH` is harmless; one with a value
+stops `deploy.sh` and the release deployer, since it would now be ignored.
+`AGENT_NETWORK_NAME` can go too unless another stack's reverse proxy joins the
+network by a name other than `cloud-agent`. A distribution that resolves
+releases must accept one without the `/agents` web image before deploying it.
+
 Four values moved into Admin in this release:
 
 - **Live streams per account** (`AGENT_MAX_STREAMS_PER_USER`) and **Serve API

@@ -16,7 +16,6 @@ const CONFIG_PATH = fileURLToPath(new URL('../../next.config.js', import.meta.ur
 
 interface HeaderRule {
   source: string;
-  basePath?: boolean;
   headers: { key: string; value: string }[];
 }
 
@@ -25,8 +24,8 @@ interface Declared {
   rules: HeaderRule[];
 }
 
-/** What `next.config.js` declares when built as one variant. */
-function declared(basePath: string, apiUrl: string): Declared {
+/** What `next.config.js` declares when built as the image is. */
+function declared(): Declared {
   const output = execFileSync(
     process.execPath,
     [
@@ -39,8 +38,7 @@ function declared(basePath: string, apiUrl: string): Declared {
       env: {
         NODE_ENV: process.env.NODE_ENV || 'test',
         PATH: process.env.PATH,
-        NEXT_PUBLIC_BASE_PATH: basePath,
-        NEXT_PUBLIC_AGENT_API_URL: apiUrl,
+        NEXT_PUBLIC_AGENT_API_URL: '/api',
       },
       encoding: 'utf8',
     },
@@ -48,22 +46,13 @@ function declared(basePath: string, apiUrl: string): Declared {
   return JSON.parse(output) as Declared;
 }
 
-const VARIANTS: [string, string, string][] = [
-  ['the root variant', '', '/api'],
-  ['the /agents variant', '/agents', '/agents/api'],
-];
-
 describe('the security headers every response carries', () => {
-  it.each(VARIANTS)('covers every path of %s', (_case, basePath, apiUrl) => {
-    const { rules } = declared(basePath, apiUrl);
+  it('covers every path', () => {
+    const { rules } = declared();
 
-    // One rule over the whole app. `source` is relative to `basePath`, so the
-    // same pattern is the whole mount in either variant. A rule that set
-    // `basePath: false` would no longer be prefixed, and `/:path*` would stop
-    // meaning the variant's tree.
+    // One rule over the whole app.
     expect(rules).toHaveLength(1);
     expect(rules[0].source).toBe('/:path*');
-    expect(rules[0].basePath).toBeUndefined();
     expect(Object.fromEntries(rules[0].headers.map(({ key, value }) => [key, value]))).toEqual({
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -71,7 +60,7 @@ describe('the security headers every response carries', () => {
     });
   });
 
-  it.each(VARIANTS)('does not advertise the framework in %s', (_case, basePath, apiUrl) => {
-    expect(declared(basePath, apiUrl).poweredByHeader).toBe(false);
+  it('does not advertise the framework', () => {
+    expect(declared().poweredByHeader).toBe(false);
   });
 });

@@ -55,32 +55,47 @@ def normalized_schema(source: Mapping[str, Any]) -> dict[str, Any]:
             f"version {catalog_version}; resolve that compatibility decision explicitly"
         )
 
+    # A retired web variant is no longer built, but a published v1 manifest may
+    # carry it: at most once, beside every current artifact.
+    retired = catalog.retired_web_variants()
     artifacts_schema = rendered["properties"]["artifacts"]
     artifacts_schema["minItems"] = len(entries)
-    artifacts_schema["maxItems"] = len(entries)
+    artifacts_schema["maxItems"] = len(entries) + len(retired)
     # Keep role cardinality first and variant cardinality second for a stable,
     # review-friendly schema independent of build scheduling order.
     ordered = [entry for entry in entries if entry.variant is None] + [
         entry for entry in entries if entry.variant is not None
     ]
-    artifacts_schema["allOf"] = [_contains(entry) for entry in ordered]
+    artifacts_schema["allOf"] = [_contains(entry) for entry in ordered] + [
+        {
+            "contains": {
+                "properties": {"role": {"const": "web"}, "variant": {"const": item["variant"]}},
+                "required": ["role", "variant"],
+            },
+            "minContains": 0,
+            "maxContains": 1,
+        }
+        for item in retired
+    ]
 
     artifact_properties = rendered["$defs"]["artifact"]["properties"]
     artifact_properties["role"]["enum"] = list(dict.fromkeys(entry.role for entry in entries))
-    web = [entry for entry in entries if entry.role == "web"]
-    artifact_properties["variant"]["enum"] = [entry.variant for entry in web]
-    artifact_properties["base_path"]["enum"] = [entry.base_path for entry in web]
+    web = [(entry.variant, entry.base_path) for entry in entries if entry.role == "web"] + [
+        (item["variant"], item["base_path"]) for item in retired
+    ]
+    artifact_properties["variant"]["enum"] = [variant for variant, _ in web]
+    artifact_properties["base_path"]["enum"] = [base_path for _, base_path in web]
     artifact_properties["platforms"]["items"]["enum"] = sorted(
         {entry.platform for entry in entries}
     )
     rendered["$defs"]["artifact"]["allOf"][0]["then"]["oneOf"] = [
         {
             "properties": {
-                "variant": {"const": entry.variant},
-                "base_path": {"const": entry.base_path},
+                "variant": {"const": variant},
+                "base_path": {"const": base_path},
             }
         }
-        for entry in web
+        for variant, base_path in web
     ]
     return rendered
 

@@ -27,11 +27,11 @@ from tests.unit.deploy.test_artifacts_workflow import (
 @pytest.mark.parametrize(
     ("paths", "scope", "names"),
     [
-        (["apps/frontend/src/app/page.tsx"], "web", {"web-root", "web-agents"}),
+        (["apps/frontend/src/app/page.tsx"], "web", {"web-root"}),
         (
             ["apps/frontend/package-lock.json", "docs/feature.md", "tests/unit/test_ui.py"],
             "web",
-            {"web-root", "web-agents"},
+            {"web-root"},
         ),
         (["apps/backend/cloud_agent/api/jobs.py"], "backend", {"control", "runner", "sandbox"}),
         (["apps/backend/cloud_agent_host/runner.py"], "backend", {"control", "runner", "sandbox"}),

@@ -35,12 +35,6 @@ def manifest() -> dict[str, Any]:
         "artifacts": [
             {"role": "control", "image": reference("control")},
             {"role": "web", "variant": "root", "base_path": "", "image": reference("web", "root")},
-            {
-                "role": "web",
-                "variant": "agents",
-                "base_path": "/agents",
-                "image": reference("web", "agents"),
-            },
         ],
     }
 
@@ -67,11 +61,11 @@ def test_a_digest_reference_is_the_only_thing_that_names_an_artifact() -> None:
 
 
 def test_every_service_gets_the_role_that_supplies_it() -> None:
-    expected = aa.expected_services(manifest(), "control-plane", "agents")
+    expected = aa.expected_services(manifest(), "control-plane", "root")
     assert expected["control-plane"]["digest"] == digest("control:None")
     assert expected["mcp-relay"]["digest"] == digest("control:None")
-    assert expected["web"]["digest"] == digest("web:agents")
-    assert expected["web"]["base_path"] == "/agents"
+    assert expected["web"]["digest"] == digest("web:root")
+    assert expected["web"]["base_path"] == ""
     assert all(entry["revision"] == COMMIT for entry in expected.values())
 
 
@@ -79,7 +73,7 @@ def test_a_service_whose_role_is_missing_is_refused() -> None:
     document = manifest()
     document["artifacts"] = [a for a in document["artifacts"] if a["role"] != "control"]
     with pytest.raises(aa.AcceptanceError) as raised:
-        aa.expected_services(document, "control-plane", "agents")
+        aa.expected_services(document, "control-plane", "root")
     assert "control" in str(raised.value)
 
 
@@ -89,7 +83,7 @@ def test_the_stack_needs_to_know_which_console_it_serves() -> None:
 
 
 def test_a_correctly_deployed_service_passes() -> None:
-    expected = aa.expected_services(manifest(), "control-plane", "agents")
+    expected = aa.expected_services(manifest(), "control-plane", "root")
     observed = {name: observation(want) for name, want in expected.items()}
     evidence = aa.check_running(expected, observed)
     assert len(evidence) == len(expected)
@@ -118,9 +112,9 @@ def test_a_correctly_deployed_service_passes() -> None:
             id="another role",
         ),
         pytest.param(
-            lambda o: o["labels"].update(**{"io.hybridinference.artifact.base_path": ""}),
+            lambda o: o["labels"].update(**{"io.hybridinference.artifact.base_path": "/agents"}),
             "base path",
-            id="the other mount shape",
+            id="a retired mount shape",
         ),
     ],
 )
@@ -129,9 +123,9 @@ def test_what_is_running_must_be_what_the_release_named(mutation, expected_text:
 
     Each case below is a deployment that would work and be wrong: a locally built
     image standing in for a registry digest, another commit's bytes, a runner
-    image answering for the control plane, and the other console variant.
+    image answering for the control plane, and a console built for a retired mount.
     """
-    expected = aa.expected_services(manifest(), "control-plane", "agents")
+    expected = aa.expected_services(manifest(), "control-plane", "root")
     observed = {name: observation(want) for name, want in expected.items()}
     mutation(observed["web"])
     with pytest.raises(aa.AcceptanceError) as raised:
@@ -140,7 +134,7 @@ def test_what_is_running_must_be_what_the_release_named(mutation, expected_text:
 
 
 def test_a_service_that_is_not_running_is_refused() -> None:
-    expected = aa.expected_services(manifest(), "control-plane", "agents")
+    expected = aa.expected_services(manifest(), "control-plane", "root")
     observed = {name: observation(want) for name, want in expected.items()}
     del observed["mcp-relay"]
     with pytest.raises(aa.AcceptanceError) as raised:

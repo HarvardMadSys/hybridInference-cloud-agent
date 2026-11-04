@@ -290,8 +290,6 @@ ensure_env() {
       'LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16' \
       'AGENT_WEB_BASE_URL=http://127.0.0.1:13002' \
       'AGENT_PUBLIC_API_URL=http://127.0.0.1:13002/api' \
-      'AGENT_WEB_BASE_PATH=' \
-      'AGENT_WEB_API_URL=/api' \
       'AGENT_WEB_APP_NAME=FreeInference Cloud Agent (local)' \
       'LOCAL_CHAT_IDLE_TIMEOUT_S=15' \
       'LOCAL_AGENT_TIMEOUT_S=600' \

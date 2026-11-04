@@ -14,11 +14,6 @@ import {
 } from '@/lib/api/environments';
 import type { EnvironmentBinding } from '@/lib/api/environments';
 import { WorkspaceEnvironment } from './WorkspaceEnvironment';
-// The `/agents` image. next.config.js makes NEXT_PUBLIC_BASE_PATH Next's
-// basePath, which a build compiles in as this variable for `<Link>` to read.
-vi.hoisted(() => {
-  process.env.__NEXT_ROUTER_BASEPATH = '/agents';
-});
 vi.mock('@/components/providers', () => ({ useT: () => (key: string) => key }));
 vi.mock('./EnvironmentDialog', () => ({
   EnvironmentDialog: ({ initial }: { initial: { name: string } }) => (
@@ -133,12 +128,12 @@ it('updates runtime variables by their version', async () => {
   await waitFor(() => expect(refreshWorkspaceRuntime).toHaveBeenCalledWith('job', 3));
 });
 
-it('starts a task on a newer version inside the app, under its mount prefix', async () => {
+it('starts a task on a newer version inside the app', async () => {
   vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...binding, has_new_version: true });
   render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
   expect(await screen.findByRole('link', { name: 'environment.newWorkspace' })).toHaveAttribute(
     'href',
-    '/agents?repo=org%2Frepo',
+    '/?repo=org%2Frepo',
   );
 });
 

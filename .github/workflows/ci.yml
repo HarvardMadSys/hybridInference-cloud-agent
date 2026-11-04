@@ -843,12 +843,11 @@ jobs:
         working-directory: ./apps/frontend
         run: node scripts/check-server-only-guard.mjs
 
-      # Builds both web variants — root and `/agents` — and boots each under
-      # two runtime environments. A unit test cannot see this: the failure
+      # Builds the web app and boots it under two runtime environments. A unit test cannot see this: the failure
       # being guarded against is configuration resolved at `next build` and
       # frozen into the bundle, and only the built server can show whether
       # that happened. See the script's header for the full list of
-      # assertions, including the sign-in and asset prefixes per variant.
+      # assertions.
       - name: Runtime site config
         id: runtime-config
         continue-on-error: true
@@ -1631,15 +1630,8 @@ jobs:
           AGENT_POSTGRES_PASSWORD=ci-placeholder
           AGENT_SANDBOX_MANAGER_TOKEN=ci-placeholder-sandbox-manager-token
           # Account mail links and MCP OAuth callbacks are built from these two.
-          AGENT_PUBLIC_API_URL=https://agents.invalid/agents/api
-          AGENT_WEB_BASE_URL=https://agents.invalid/agents
-          # The web build arguments are required rather than defaulted to
-          # empty: empty is a real answer for a deployment that owns its
-          # hostname and silently wrong for one mounted under a prefix, and
-          # the difference does not show at start. Their presence here is
-          # part of what this step checks.
-          AGENT_WEB_BASE_PATH=/agents
-          AGENT_WEB_API_URL=/agents/api
+          AGENT_PUBLIC_API_URL=https://agents.invalid/api
+          AGENT_WEB_BASE_URL=https://agents.invalid
           ENVFILE
           docker compose \
             -f deploy/control-plane/docker-compose.yml \
