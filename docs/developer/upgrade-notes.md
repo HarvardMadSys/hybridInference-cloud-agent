@@ -38,8 +38,10 @@ from then on the database wins and the line is ignored. After the control plane
 | Each host | `AGENT_HOST_SLOTS`, `AGENT_SHARED_RESIDENT_CAPACITY`, `AGENT_SANDBOX_CPU_MILLICORES`, `AGENT_SANDBOX_MEMORY_MIB`, `AGENT_SANDBOX_DISK_MIB`, `AGENT_CHAT_IDLE_TIMEOUT_S`, `AGENT_SOURCE_IMPORT_MAX_MIB`, `AGENT_LEASE_TTL`, `AGENT_RUNTIME_REGISTRY_URL`, `AGENT_GIT_AUTHOR_NAME`, `AGENT_GIT_AUTHOR_EMAIL` |
 | A managed host's environment file in a deployment profile | `AGENT_HOST_SLOTS`, `AGENT_SHARED_RESIDENT_CAPACITY` |
 
-Keep `AGENT_COMPUTE_SECRET_KEY` on the control plane: `deploy.sh` manages that
-line, and without it the next deployment writes a new key there. Keep
+`AGENT_COMPUTE_SECRET_KEY` is imported the same way: once stored, saved compute
+credentials decrypt with the stored key and a different value in `.env` is
+ignored. `deploy.sh` writes a new random value whenever the line is missing, so
+deleting it only brings back an unused one; leave it. Keep
 `AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own copy of the
 credential.
 
