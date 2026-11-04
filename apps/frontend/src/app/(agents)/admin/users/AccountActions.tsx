@@ -144,10 +144,9 @@ export function ActionEditor({
   const label = account.identity?.label ?? account.email ?? account.id;
   return (
     <section
-      className="mt-3 space-y-3 rounded-lg border border-border bg-surface-muted p-4"
+      className="mt-3 space-y-3 rounded-lg border border-border bg-surface p-4"
       aria-label={t('adminAccounts.reviewOf', { label })}
     >
-      <p className="text-sm font-medium break-all">{label}</p>
       {actions.length === 0 ? (
         <p className="text-sm text-muted">{t('adminAccounts.erasedNothing')}</p>
       ) : (
