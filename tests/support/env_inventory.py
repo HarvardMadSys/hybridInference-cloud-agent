@@ -826,7 +826,7 @@ HOST_BOOTSTRAP_READS: dict[tuple[str, str], str] = {
     ("apps/backend/cloud_agent_host/runner.py", "_sandbox_resource_setting"): (
         "a sandbox resource limit when the turn carries no settings"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "_local_shared_resident_capacity"): (
+    ("apps/backend/cloud_agent_host/local_settings.py", "local_shared_resident_capacity"): (
         "sessions per sandbox before the first settings heartbeat; an unusable local "
         "value is the default, so it cannot withhold the shared-live capabilities"
     ),

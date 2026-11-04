@@ -29,6 +29,7 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
+from cloud_agent.host_settings_import import plan_settings_import
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import (
     archive_settings_payload,
@@ -71,10 +72,6 @@ from cloud_agent.storage._sql.runner_policy import (
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
 from cloud_agent_shared.host_settings import (
-    HOST_SETTINGS_BY_KEY,
-    LATE_IMPORT_KEYS,
-    RUNNER_SETTING_KEYS,
-    admin_values,
     reported_values,
 )
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
@@ -651,48 +648,22 @@ class PostgresHostPoolRepository:
             )
             if row is None:
                 return None
-            late_offered = (
-                LATE_IMPORT_KEYS & (reported_values(dict(settings_local or {})) or {}).keys()
+            plan = plan_settings_import(
+                dict(row),
+                reported_values(dict(settings_local)) if settings_local is not None else None,
+                global_settings=global_settings,
+                global_exclusions=global_exclusions,
+                legacy_sandbox_manager_keys=_LEGACY_SANDBOX_MANAGER_KEYS,
             )
-            if (
-                (not row["settings_imported"] or late_offered - set(row["settings_late_imported"]))
-                and settings_local is not None
-                and (
-                    credential_hash is None
-                    or await conn.fetchval(
-                        "SELECT credential_hash = $2 FROM agent_runner_hosts WHERE host = $1",
-                        host,
-                        credential_hash,
-                    )
+            if plan is not None and (
+                credential_hash is None
+                or await conn.fetchval(
+                    "SELECT credential_hash = $2 FROM agent_runner_hosts WHERE host = $1",
+                    host,
+                    credential_hash,
                 )
             ):
-                observed = reported_values(dict(settings_local)) or {}
-                previous = dict(load_json(row["settings_desired"]) or {})
-                excluded = global_exclusions | set(row["settings_import_excluded"])
-                # Once the first import is complete only a late key not yet
-                # offered may import; anything else would resurrect a reset.
-                offered = set(row["settings_late_imported"])
-                importable = (
-                    observed.keys()
-                    if not row["settings_imported"]
-                    else (LATE_IMPORT_KEYS & observed.keys()) - offered
-                )
-                imports = {
-                    key: value
-                    for key, value in admin_values(observed).items()
-                    if key in importable
-                    and value != HOST_SETTINGS_BY_KEY[key].default
-                    and key not in previous
-                    and key not in global_settings
-                    and key not in excluded
-                }
-                # A runner from before a late key never reports it, so the
-                # first import cannot wait for one.
-                expected = (RUNNER_SETTING_KEYS - LATE_IMPORT_KEYS) | (
-                    _LEGACY_SANDBOX_MANAGER_KEYS if row["sandbox_manager_url"] else frozenset()
-                )
-                complete = row["settings_imported"] or expected <= observed.keys()
-                offered |= LATE_IMPORT_KEYS & observed.keys()
+                desired, complete, offered = plan
                 row = await conn.fetchrow(
                     f"""
                     UPDATE agent_runner_hosts
@@ -703,7 +674,7 @@ class PostgresHostPoolRepository:
                         settings_late_imported
                     """,
                     host,
-                    json.dumps({**previous, **imports}),
+                    json.dumps(desired),
                     complete,
                     sorted(offered),
                 )

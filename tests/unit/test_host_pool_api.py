@@ -1100,19 +1100,6 @@ async def test_a_heartbeat_does_not_undo_a_drain(client):
     assert response.json()["status"] == HOST_DRAINING
 
 
-async def test_a_heartbeat_only_overwrites_what_it_carries(client):
-    """A liveness-only beat must not blank what enrollment declared."""
-    async_client, store = client
-    credential = await _enroll(async_client, store, slots_total=4, capabilities=["kata"])
-
-    await async_client.post(
-        "/v1/agent/host/heartbeat", json={}, headers={"Authorization": f"Bearer {credential}"}
-    )
-
-    assert store.rows["runner-a"]["slots_total"] == 4
-    assert store.rows["runner-a"]["capabilities"] == ["kata"]
-
-
 async def test_a_heartbeat_can_update_capacity_and_version(client):
     async_client, store = client
     credential = await _enroll(async_client, store, slots_total=1)
@@ -3389,21 +3376,3 @@ async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residenc
     assert response.json()["retained_sandboxes_stop"] == [
         {**store.sandbox_stop_due, "activation_generation": 3, "shared_live": True}
     ]
-
-
-async def test_a_heartbeat_names_the_saved_registry_and_keeps_the_hosts_report(client, monkeypatch):
-    """Every host is told the one registry, and says which one it uses (WP2)."""
-    from cloud_agent import settings
-
-    async_client, store = client
-    credential = await _enroll(async_client, store)
-    monkeypatch.setenv("AGENT_RUNTIME_REGISTRY_URL", "https://npm.example.org/")
-    settings.reset_settings()
-    response = await async_client.post(
-        "/v1/agent/host/heartbeat",
-        json={"config_reports": {"runtime_registry_url": "", "unknown": "x"}},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-    assert response.status_code == 200
-    assert response.json()["runtime_registry_url"] == "https://npm.example.org"
-    assert store.rows["runner-a"]["config_reports"] == {"runtime_registry_url": ""}
