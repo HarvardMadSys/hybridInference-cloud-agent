@@ -31,6 +31,7 @@ from cloud_agent_host.chat_sandbox import (
     claude_member_config_dir,
 )
 from cloud_agent_host.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.member_preparation import (
     RUNNER,
@@ -40,6 +41,7 @@ from cloud_agent_host.member_preparation import (
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.sandbox_browser import LAUNCHER
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
 _SPEC = ChatSandboxSpec(
@@ -401,6 +403,10 @@ def _name(argv: list[str]) -> str:
     return argv[0]
 
 
+#: The sandbox's shared browser service, started as its own user before each CLI.
+_BROWSER = ("exec", LAUNCHER, BROWSER_SERVICE_UID)
+
+
 class _Guest:
     """Records each exec of a launch, and the queue each runner exec carries."""
 
@@ -514,7 +520,7 @@ def test_a_launch_runs_its_member_steps_in_one_exec_in_their_order(driver, runti
 
     factory.open(_SPEC, _launch(runtime_id))
 
-    assert guest.events == [("runner", queue, MEMBER_UID_BASE + 1), ("spawn", None, None)]
+    assert guest.events == [("runner", queue, MEMBER_UID_BASE + 1), _BROWSER, ("spawn", None, None)]
 
 
 @pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi"])
@@ -525,9 +531,10 @@ def test_owner_credentials_are_written_by_their_own_exec_after_the_reap(driver, 
 
     factory.open(_SPEC, _launch(runtime_id, environment=_OWNER_SECRET))
 
-    (runner, write, spawn) = guest.events
+    (runner, write, browser, spawn) = guest.events
     assert runner[0] == "runner" and "reap" in runner[1]
     assert write == ("exec", "inference-env", MEMBER_UID_BASE + 1)
+    assert browser == _BROWSER
     assert spawn[0] == "spawn"
 
 
@@ -565,6 +572,7 @@ def test_plugin_installers_find_their_slot_reaped_and_home_prepared(
         # After the installers, alone, as before: its failure is the driver's to report.
         *hooks,
         ("exec", "inference-env", MEMBER_UID_BASE + 1),
+        _BROWSER,
         ("spawn", None, None),
     ]
 
@@ -599,6 +607,7 @@ def test_an_untrusted_collection_is_secured_and_the_queue_resumed_from_the_home(
         ("runner", ["home", "reap", "stale"], MEMBER_UID_BASE + 1),
         ("exec", "collections", None),  # as the sandbox user, never a member
         ("runner", ["home", "reap", "stale"], MEMBER_UID_BASE + 1),
+        _BROWSER,
         ("spawn", None, None),
     ]
 
@@ -626,3 +635,38 @@ def test_the_hooks_reach_the_members_own_settings_through_the_queue(driver):
     assert json.loads(base64.b64decode(hooks["input"])) == {"hooks": {"PreToolUse": []}}
     assert hooks["soft"] is True and hooks["timeout"] == 10
     assert all(not step["soft"] for step in captured[:-1])
+
+
+def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
+    """Moved from test_shared_session_supervisor; the browser service starts before the CLI."""
+    events: list[str] = []
+    contexts: list[Any] = []
+    manager = SimpleNamespace(
+        backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
+        reap_member_processes=lambda *_args, **_kwargs: events.append("reap"),
+        exec_capture=lambda _spec, argv, **_kwargs: (
+            events.append("browser" if argv[0] == LAUNCHER else argv[0])
+            or subprocess.CompletedProcess(argv, 0, b"", b"")
+        ),
+        spawn=lambda *_args, **_kwargs: events.append("spawn"),
+    )
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        factory, "_prepare_claude_member_state", lambda *_args: events.append("prepare")
+    )
+
+    def launch_live(context):
+        contexts.append(context)
+        return SimpleNamespace(
+            ensure_started=lambda **_kwargs: context.spawn_live(["claude"], {}),
+            process_alive=lambda: True,
+        )
+
+    monkeypatch.setattr(
+        resident_transport, "get_driver", lambda _runtime: SimpleNamespace(launch_live=launch_live)
+    )
+
+    factory.open(_SPEC, _launch("claude-code", native_session_id=None, thread_id="athr_new"))
+
+    assert events == ["reap", "prepare", "browser", "spawn"]
+    assert contexts[0].claude_config_dir == claude_member_config_dir(1, "athr_new")

@@ -380,8 +380,8 @@ COPY deploy/sandbox/pi-mcp-bridge.ts /usr/local/libexec/pi-mcp-bridge.ts
 COPY deploy/sandbox/http-agent-live-bridge /usr/local/bin/http-agent-live-bridge
 COPY deploy/sandbox/claude-session-fork /usr/local/bin/claude-session-fork
 COPY deploy/sandbox/member-process-reaper /usr/local/bin/member-process-reaper
-# The managed browser's launcher. Root-owned and read-only like the reaper: it
-# holds each member's CDP token, so a member must not be able to rewrite it.
+# The managed browser's launcher. Root-owned and read-only like the reaper:
+# every member trusts it with the sandbox's CDP token and browser traffic.
 COPY deploy/sandbox/cloud-agent-browser /usr/local/bin/cloud-agent-browser
 COPY --from=guest-observer-build /src/freeinference-guest-observer \
      /usr/local/libexec/freeinference-guest-observer
@@ -428,6 +428,11 @@ RUN groupadd --gid 10001 agent \
            "agent-member-$slot"; \
          slot=$((slot + 1)); \
        done \
+    # The sandbox's shared browser runs as its own user, in the agent group so
+    # members can read its endpoint and its downloads. No member's turn-end
+    # reap scans this uid, so the browser outlives the turn that started it.
+    && useradd --uid 10002 --gid 10001 --create-home --shell /usr/sbin/nologin agent-browser \
+    && chmod 0700 /home/agent-browser \
     && install -d -m 2770 -o 10001 -g 10001 /workspace /agent-state \
     # Root-owned and unwritable: the sandbox reads its uploads and cannot add,
     # remove or alter one. docker cp extracts as root, so the daemon can still
@@ -436,7 +441,8 @@ RUN groupadd --gid 10001 agent \
     # create one under /.
     && install -d -m 0555 -o 0 -g 0 /uploads \
     && install -d -m 0700 -o 10001 -g 10001 /run/agent-activation \
-    && install -d -m 0711 -o 0 -g 10001 /run/agent-members
+    && install -d -m 0711 -o 0 -g 10001 /run/agent-members \
+    && install -d -m 0750 -o 10002 -g 10001 /run/agent-browser
 USER agent
 WORKDIR /workspace
 
@@ -451,13 +457,17 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     CI=1 \
     PI_OFFLINE=1
 
-# The image-wide half of the browser contract (v1). The host adds each
-# member's own profile and state directory at launch
-# (cloud_agent_host/sandbox_browser.py). CHROME_PATH is what tools that look
-# for an installed Chrome (chrome-launcher, Karma, Lighthouse) read; nothing
-# here stops a tool or a repository from downloading a browser of its own.
+# The browser contract (v1). One browser serves the sandbox: the host starts
+# its service as agent-browser at every container start
+# (cloud_agent_host/sandbox_browser.py). Its endpoint and token are in the
+# state directory, and a new start writes a new token; its profile is in that
+# user's home, which the retained writable layer keeps. CHROME_PATH is what tools that look for an
+# installed Chrome (chrome-launcher, Karma, Lighthouse) read; nothing here
+# stops a tool or a repository from downloading a browser of its own.
 ENV CLOUD_AGENT_BROWSER_CONTRACT=1 \
     CLOUD_AGENT_BROWSER_BIN=/usr/bin/chromium \
+    CLOUD_AGENT_BROWSER_STATE_DIR=/run/agent-browser \
+    CLOUD_AGENT_BROWSER_PROFILE=/home/agent-browser/profile \
     CLOUD_AGENT_ARTIFACTS_DIR=/workspace/.cloud-agent-artifacts \
     CHROME_PATH=/usr/bin/chromium
 
@@ -529,17 +539,22 @@ RUN set -eu; \
     git lfs version; \
     gh --version
 
-# The managed browser, end to end, as the unprivileged user: Chromium starts
-# behind the launcher, two CDP clients connect, one loads and screenshots a
-# page, and the other cannot reach its session. Everything it writes goes to
-# /tmp and is removed, so no profile or artifact lands in the image.
+# The managed browser, end to end, as the unprivileged user: the service
+# starts, the first client starts Chromium behind it, two CDP clients connect,
+# one loads and screenshots a page, and the other cannot reach its session.
+# Everything it writes goes to /tmp and is removed, so no profile, token or
+# artifact lands in the image.
 RUN set -eu; \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; \
-    export HOME=/tmp/cloud-agent-browser-check \
-        CLOUD_AGENT_ARTIFACTS_DIR=/tmp/cloud-agent-browser-check/artifacts; \
+    check=/tmp/cloud-agent-browser-check; \
+    export HOME=$check \
+        CLOUD_AGENT_BROWSER_STATE_DIR=$check/run \
+        CLOUD_AGENT_BROWSER_PROFILE=$check/profile \
+        CLOUD_AGENT_ARTIFACTS_DIR=$check/artifacts; \
+    cloud-agent-browser service start; \
     cloud-agent-browser self-test; \
-    cloud-agent-browser stop; \
-    rm -rf /tmp/cloud-agent-browser-check
+    cloud-agent-browser service stop; \
+    rm -rf "$check"
 
 # What this image is, in the two places a deployment looks: OCI's own labels,
 # and one of ours naming the artifact's role. A resolver reads both out of the

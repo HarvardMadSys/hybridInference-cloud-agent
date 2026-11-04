@@ -1,5 +1,6 @@
 """Native question forwarding stays attached to its resident turn."""
 
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +64,8 @@ def test_retained_http_launch_refreshes_the_trusted_bridge_without_mcp(
     manager = SimpleNamespace(
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         reap_member_processes=lambda spec, **kwargs: events.append(("reap", spec)),
+        # The sandbox's shared browser service, started before every CLI.
+        exec_capture=lambda spec, argv, **kwargs: subprocess.CompletedProcess(argv, 0, b"", b""),
         ensure_mcp_helpers=lambda spec, runtime: events.append(("helpers", spec, runtime)),
         ensure_kilo_mcp_runtime=lambda spec, version: events.append(("kilo", spec, version)),
         ensure_codex_mcp_policy=lambda spec, base_url: events.append(("policy", spec, base_url)),

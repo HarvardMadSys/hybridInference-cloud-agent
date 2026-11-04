@@ -1,6 +1,6 @@
 # Design: Computer Use Base Capability for Cloud Agent
 
-Status: Phase 0 done, Phase 1 implemented · 2026-11-02, updated 2026-11-03
+Status: Phase 0 done, Phase 1 implemented · 2026-11-02, updated 2026-11-04
 
 ## Summary
 
@@ -40,7 +40,7 @@ Other platforms close this gap with an in-environment browser or desktop: Cursor
 - An agent in any of the five runtimes can open, read and operate a web page served by the task itself (`localhost`) or by an allowed external host.
 - The user chooses the driver tool (MCP server or CLI); the platform does not hard-code one.
 - One default template works out of the box for users who do not want to choose.
-- Browser state is scoped to a chat session and reclaimed with it.
+- Browser state is scoped to a sandbox (a chat and its Forks, all one owner's) and reclaimed with it.
 - Existing guarantees hold: repositories cannot auto-start MCP servers, egress stays guarded, no credentials leak into the sandbox.
 
 **Non-goals**
@@ -61,9 +61,9 @@ Each requirement names what the platform owns; everything else belongs to the us
 | R3 | Perception and input | Nothing beyond R1: accessibility tree, DOM, screenshots and input come from CDP, used by the tool | 1 |
 | R4 | Coding-loop signals | Console, network and page errors reachable from the same tool session | 1 |
 | R5 | Tool attachment | A user-chosen CLI or MCP server can run next to the browser, with a well-known connection contract | 1 (CLI), 2 (MCP) |
-| R6 | Session continuity | Cookies, tabs and storage persist across turns of one chat | 1 |
+| R6 | Session continuity | Cookies, tabs and storage persist across turns, for a chat and its Forks | 1 |
 | R7 | Lifecycle | Start on demand, idle reclaim, crash recovery, kill with the sandbox | 1 |
-| R8 | Isolation | No browser shared between chats or members; no control endpoint reachable from outside the sandbox | 1 |
+| R8 | Isolation | No browser shared between sandboxes; the browser outside every member's UID; no control endpoint reachable from outside the sandbox | 1 |
 | R9 | Evidence | Screenshots and traces land in the workspace and show in the UI | 1 (files), 3 (recordings) |
 | R10 | Live view and takeover | User watches, pauses and takes control of the browser | 3 |
 
@@ -98,14 +98,14 @@ Measured on 2026-11-03 with Debian bookworm's `chromium` 156.0.8078.79 in a `nod
 
 **Decision on Chromium's sandbox.** The managed browser runs with `--no-sandbox` when the guest refuses user namespaces, and `cloud-agent-browser status` reports `chromium_sandbox: false`. Reasons:
 
-- The member UID already runs unvetted repository code; the image's threat model treats that side as untrusted. A compromised renderer gains what that code already has.
-- The boundary that matters, the Kata VM plus the member UID, is unchanged.
+- Member UIDs already run unvetted repository code; the image's threat model treats that side as untrusted. A compromised renderer gains the browser's own user (`agent-browser`), which can do less than a member: it holds no member's credentials and can write only the shared workspace and its own home.
+- The boundary that matters, the container and the Kata VM, is unchanged.
 - The platform cannot enforce Chromium's sandbox anyway: a member can start the same binary, or a browser a tool downloads, with `--no-sandbox` itself.
 - The alternatives (a custom seccomp profile that allows `CLONE_NEWUSER`, or a sandbox per browser-using member) widen the kernel surface or cost a VM each, for no gain against the threat above.
 
 The launcher prefers Chromium's sandbox whenever user namespaces work, so a later seccomp change takes effect without a new image. `ALLOW_UNSANDBOXED` in the launcher is the switch if this decision is reversed.
 
-**Threads.** One browser with a few pages stays well inside 512, but the limit is per group and counts threads, and a Fork's sibling may run its own browser. The launcher caps renderers at four (`--renderer-process-limit=4`). We keep the group limit as it is and watch it (see [Resources and performance](#resources-and-performance)).
+**Threads.** One browser with a few pages stays well inside 512. The limit is per group and counts threads; since a group shares one managed browser, a Fork adds tabs, not a second browser. The launcher caps renderers at four (`--renderer-process-limit=4`). We keep the group limit as it is and watch it (see [Resources and performance](#resources-and-performance)).
 
 ## Proposed design
 
@@ -118,12 +118,14 @@ flowchart LR
         ui["Chat UI<br/>files today, live view later"]
     end
     subgraph SB["Task sandbox · Kata VM, guarded egress"]
-        subgraph M["Member slot agent-member-N"]
+        subgraph M["Each member slot agent-member-N · the chat and its Forks"]
             rt["Agent runtime<br/>Claude Code, Codex, pi, OpenCode, Kilo"]
             cli["Browser CLI<br/>phase 1, via shell"]
             mcp["MCP server<br/>phase 2, admitted"]
+        end
+        subgraph B["Browser service · user agent-browser, one per sandbox"]
             launcher["cloud-agent-browser<br/>CDP WebSocket on 127.0.0.1, token-guarded"]
-            chrome["Chromium, headless<br/>per-chat profile"]
+            chrome["Chromium, headless<br/>started on first use, one profile"]
         end
         art["Artifacts dir<br/>screenshots, traces"]
         dev["Task dev server<br/>on localhost"]
@@ -145,8 +147,10 @@ The launcher is the contract boundary: everything above it is the user's choice,
 ### Browser runtime (phase 1)
 
 - **Binary.** Debian's `chromium` package (full Chromium, not headless-shell, so a headed mode stays possible for phase 3), plus `fonts-liberation` and `fonts-noto-color-emoji`, in its own layer of `Dockerfile.agent-sandbox`. Debian's build rather than a pinned Chrome for Testing download: it exists for amd64 and arm64 (Chrome for Testing has no arm64 Linux build), it takes Debian's security updates with every rebuild, and its dependencies are exactly the shared libraries that a browser a tool downloads for itself needs. CDP clients connect to any current Chromium, so an exact Playwright-matched build buys nothing here.
-- **Launcher.** `/usr/local/bin/cloud-agent-browser`, root-owned and mode 0555, Python standard library only, with `start`, `status`, `stop` and `self-test`. `start` reuses or launches one headless Chromium for the calling member UID (`--headless=new`, `--disable-dev-shm-usage`, background networking, component updates, crash upload and metrics off, at most four renderers, the per-chat profile). It prints the CDP WebSocket URL.
-- **One pipe, many clients.** Chromium speaks CDP only over `--remote-debugging-pipe` to the launcher's daemon. The daemon serves it as a WebSocket on `127.0.0.1`, at a random port, behind a random path token (`ws://127.0.0.1:<port>/<token>/devtools/browser`). Each client gets its own browser-level session (`Target.attachToBrowserTarget`). Its command ids are rewritten into one space, and every reply and event goes back only to the client that owns the session it came from. Two Playwright clients and two Puppeteer clients worked at the same time in the spike. `Browser.close` from a client ends only that client's connection, because the browser belongs to the member, not to one tool.
+- **One browser per sandbox.** Every member of a group (the chat and its Forks) shares one managed browser, its tabs and its sign-ins, as they already share `/workspace`. A group belongs to one owner: memberships and forks carry the sandbox's `user_id` by foreign key. This is how a local agent works too: Claude Code's `--fork-session` forks the conversation and keeps working in the same directory.
+- **Its own user.** The browser runs as `agent-browser` (uid 10002, group `agent`), not as a member. A member's turn ends with a reap of every process its UID started during the turn (`member-process-reaper`), so a member's browser could never outlive a turn; and a shared browser cannot belong to any one member. A member cannot switch UID inside the sandbox, so the trusted host starts the service.
+- **Launcher.** `/usr/local/bin/cloud-agent-browser`, root-owned and mode 0555, Python standard library only. The host runs `cloud-agent-browser service start` as `agent-browser` before each member launch (`cloud_agent_host/sandbox_browser.py`); it is idempotent, so a container that was stopped and started again gets its service back with its next member. The service is a small loopback server. It starts headless Chromium (`--headless=new`, `--disable-dev-shm-usage`, background networking, component updates, crash upload and metrics off, at most four renderers, one profile) only when the first client connects, and stops it again after the idle timeout. Members use `start`, `status`, `stop` and `self-test`; `start` makes sure Chromium runs and prints the CDP WebSocket URL.
+- **One pipe, many clients.** Chromium speaks CDP only over `--remote-debugging-pipe` to the launcher's daemon. The daemon serves it as a WebSocket on `127.0.0.1`, at a random port, behind a random path token (`ws://127.0.0.1:<port>/<token>/devtools/browser`). Each client gets its own browser-level session (`Target.attachToBrowserTarget`). Its command ids are rewritten into one space, and every reply and event goes back only to the client that owns the session it came from. Two Playwright clients and two Puppeteer clients worked at the same time in the spike. `Browser.close` from a client ends only that client's connection, because the browser belongs to the sandbox, not to one tool.
 - **No HTTP discovery.** There is no `/json/version` endpoint. Clients resolve it against the server's root, which would drop the token from the path. Every client we target accepts a WebSocket URL directly.
 - **Downloads stay possible.** Egress allows them (public IPv4 TCP 80/443), and a repository's own tests may depend on the exact browser its tooling downloads, so the image sets no `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` or `PUPPETEER_SKIP_DOWNLOAD`. It sets `CHROME_PATH`, which tools that look for an installed Chrome read. The preinstalled browser still matters: it needs no download, and its libraries are what lets a downloaded browser start at all as a non-root member.
 - **Tool install.** Users install a CLI into `~/.local` or `~/.npm-global` from their environment setup, as with any other dev tool. Pinning is the user's choice in phase 1.
@@ -157,20 +161,21 @@ This is the stable surface that templates and user tools rely on. It is versione
 
 | Name | Kind | Meaning |
 | --- | --- | --- |
-| `cloud-agent-browser start` | command | Ensures the browser runs; prints the CDP WebSocket URL (`ws://127.0.0.1:<port>/<token>/devtools/browser`) |
-| `cloud-agent-browser status` | command | JSON: `running`, `endpoint`, `browser`, `chromium_sandbox`, `profile`, `artifacts_dir` |
-| `cloud-agent-browser stop` | command | Stops the browser; the profile is kept |
+| `cloud-agent-browser start` | command | Ensures Chromium runs; prints the CDP WebSocket URL (`ws://127.0.0.1:<port>/<token>/devtools/browser`). `--json` prints the status instead |
+| `cloud-agent-browser status` | command | JSON: `service`, `running`, `endpoint`, `browser`, `chromium_sandbox`, `last_error`, `profile`, `artifacts_dir` |
+| `cloud-agent-browser stop` | command | Closes Chromium for every member; the service and the profile stay, and the next `start` relaunches it |
 | `cloud-agent-browser self-test` | command | Starts the browser and checks it end to end (two clients, a page, a screenshot, session isolation) |
-| `CLOUD_AGENT_BROWSER_CONTRACT` | env, image | Contract version, `1` |
-| `CLOUD_AGENT_BROWSER_BIN` | env, image | `/usr/bin/chromium` |
-| `CLOUD_AGENT_ARTIFACTS_DIR` | env, image | `/workspace/.cloud-agent-artifacts`: screenshots and traces; shown in the workspace files, kept out of Git |
-| `CLOUD_AGENT_BROWSER_STATE_DIR` | env, host | `/run/agent-members/<slot>/browser`: the 0700 directory holding the endpoint file (0600) and the daemon's log |
-| `CLOUD_AGENT_BROWSER_PROFILE` | env, host | `/home/agent-member-<slot>/.cloud-agent-browser/profiles/<sha256 of the chat>` |
+| `cloud-agent-browser service start` / `stop` | command, platform | Runs or ends the service, as `agent-browser`. The host runs `service start`; a member cannot stop the service |
+| `CLOUD_AGENT_BROWSER_CONTRACT` | env | Contract version, `1` |
+| `CLOUD_AGENT_BROWSER_BIN` | env | `/usr/bin/chromium` |
+| `CLOUD_AGENT_ARTIFACTS_DIR` | env | `/workspace/.cloud-agent-artifacts`: screenshots, traces and downloads; shown in the workspace files, kept out of Git |
+| `CLOUD_AGENT_BROWSER_STATE_DIR` | env | `/run/agent-browser`: 0750, owned by `agent-browser`, group `agent`. Holds the endpoint file and status record (0640) and the service log |
+| `CLOUD_AGENT_BROWSER_PROFILE` | env | `/home/agent-browser/profile` (0700) |
 | `CLOUD_AGENT_BROWSER_IDLE_S` | env, optional | Idle timeout in seconds; default 900 |
 
-"env, image" values are the same in every sandbox. "env, host" values are set per member by the resident launch (`cloud_agent_host/sandbox_browser.py`), for all five runtimes. Without them, the launcher falls back to directories under `$HOME`.
+Every value is set by the image and is the same in every sandbox; the host adds nothing per member. Without them, the launcher falls back to directories under `$HOME`.
 
-**Managed vs self-launched browsers.** Only a browser started by the launcher is *managed*: it gets the guarantees in this doc (idle reclaim, session continuity, token-guarded CDP, per-member isolation, operator signals). A tool may still launch `CLOUD_AGENT_BROWSER_BIN` itself; that browser is an ordinary user process. It is killed with the sandbox and counted against its limits, but the platform makes no promise about its debug port, profile or lifetime. Templates always use the managed browser.
+**Managed vs self-launched browsers.** Only a browser started by the launcher is *managed*: it gets the guarantees in this doc (idle reclaim, session continuity, token-guarded CDP, a lifetime independent of any member, operator signals). A tool may still launch `CLOUD_AGENT_BROWSER_BIN` itself; that browser is an ordinary user process. It is killed with the sandbox and counted against its limits, but the platform makes no promise about its debug port, profile or lifetime. Templates always use the managed browser.
 
 ### In-sandbox MCP servers (phase 2)
 
@@ -187,35 +192,38 @@ The launcher becomes a platform-owned browser supervisor. It streams frames over
 
 ## Security and isolation
 
-The browser adds no new trust boundary in phases 1 and 2: it runs as the agent's uid, inside the same Kata VM and guarded network, and can do nothing the agent's shell cannot already do.
+The browser adds no new trust boundary in phases 1 and 2: it runs as its own unprivileged user inside the same Kata VM and guarded network, and can do nothing the agent's shell cannot already do.
 
-- **CDP is token-guarded on loopback.** One sandbox hosts several resident member slots (`agent-member-N`), and loopback is shared by every UID in it. So Chromium never opens a TCP debug port itself; only the launcher's WebSocket is on `127.0.0.1`. Its token lives in the member's 0700 tmpfs, the path is compared in constant time, and the `Host` header must name loopback. This is the same loopback-plus-secret shape as the OpenCode and Kilo bridge. No port is published from the sandbox until phase 3, and that channel is authenticated per session and revocable.
-- **Clients are isolated from each other.** A client can only send commands on sessions it created; any other session id gets CDP's "session not found" error, and events reach only the owning client. Pages themselves are shared: every client of the member's browser sees every tab.
+- **CDP is token-guarded on loopback.** Chromium never opens a TCP debug port itself; only the launcher's WebSocket is on `127.0.0.1`. Its token is in `/run/agent-browser`, which only `agent-browser` writes and only the `agent` group reads: the members, the sandbox user and owner environments, all the group owner's. A member reads the endpoint only from a directory and file no other user could have written, so no member can plant an endpoint for the others. The path is compared in constant time, and the `Host` header must name loopback. This is the same loopback-plus-secret shape as the OpenCode and Kilo bridge. No port is published from the sandbox until phase 3, and that channel is authenticated per session and revocable.
+- **Members share the browser, not each other's credentials.** The browser runs as `agent-browser`, so no member owns its processes or its profile, and none can signal them. A member's tools reach it only through CDP. A member's own credentials (its home, its provider state) stay private as before.
+- **Clients are isolated from each other.** A client can only send commands on sessions it created; any other session id gets CDP's "session not found" error, and events reach only the owning client. Pages themselves are shared: every client of the sandbox's browser sees every tab.
 - **Chromium's own sandbox.** `--cap-drop ALL` and `no-new-privileges` rule out the setuid sandbox, and Docker's default seccomp profile refuses the user namespaces its namespace sandbox needs. The managed browser therefore runs with `--no-sandbox`, a decision recorded with its reasons in [Phase 0 findings](#phase-0-findings). It is visible (`chromium_sandbox` in `status`) and reversible in one place.
 - **Egress.** Browser traffic uses the sandbox's single guarded network and resolver. A page can reach only what the agent could reach with `curl`. No new allowlist entries are added for browsing.
 - **Untrusted page content.** Pages can carry prompt injection. This is the same risk as a fetched web page today; templates default to the task's `localhost` and allowed hosts, and the agent sees page text as tool output, not instructions.
 - **Repository configs stay inert.** In-sandbox MCP servers are admitted only by the trusted host from the user's selection. `.mcp.json`, `.codex/config.toml` and similar files in the repo still start nothing.
 - **Relay authorization.** An in-sandbox server is not behind the relay's authorization layer. That is acceptable because its power equals the agent's shell; audit comes from the runtime's tool-call events, as for shell commands.
-- **Credentials.** The profile holds only cookies created during the task. We do not import user browser profiles. Profiles are deleted with the chat unless the user opts into keeping a login (open question).
+- **Credentials.** The profile holds only cookies created in the sandbox's tasks. We do not import user browser profiles. A profile lives as long as its sandbox's retained container.
 
 ## Session semantics
 
-A browser belongs to exactly one chat member, the same unit that owns a resident slot and its private tmpfs. Nothing is shared between members, even inside one sandbox.
+A browser belongs to exactly one sandbox group: the chat that created the sandbox and every Fork that joined it. They share its tabs, cookies and storage, as they share `/workspace`. Nothing is shared between sandboxes.
 
 | Event | Browser process | Profile (cookies, storage) | Open tabs |
 | --- | --- | --- | --- |
-| New turn in the same chat | Reused if alive, else relaunched | Kept | Kept if the process survived |
-| Idle past the reclaim timeout | Stopped by the launcher | Kept | Lost |
-| Sandbox stop or eviction | Killed with the sandbox | Kept: homes live in the retained container's writable layer | Lost |
-| Fork | Not copied; the fork starts its own browser on first use | Fresh, empty profile | Lost |
-| Chat's member cleaned up | Killed with the member's processes | Kept on disk until the container is removed; no other chat can open it | Lost |
-| Two tools or subagents in one chat | Shared, one daemon per member | Shared | Shared; each client has its own CDP sessions and should open its own tab |
+| New turn in the same chat | Reused if alive, else started on the first connection | Kept | Kept if the process survived |
+| A turn ends | Untouched: the turn-end reap scans the member's UID only | Kept | Kept |
+| Idle past the reclaim timeout | Chromium stopped by the service; the service stays | Kept | Lost |
+| Chromium crashes | Its clients are disconnected; the next connection starts a new one | Kept | Lost |
+| Sandbox stop or eviction | Killed with the sandbox; the service is started again with the next member launch | Kept: the browser user's home lives in the retained container's writable layer | Lost |
+| Fork | Shared with the source chat | Shared | Shared |
+| A member stops the browser (`stop`) | Stopped for every member | Kept | Lost |
+| Two tools or subagents | Shared | Shared | Shared; each client has its own CDP sessions and should open its own tab |
 
 Rules behind the table:
 
-- **Fork starts clean.** `session_fork.py` materializes residencies and credentials for a new job. A live CDP connection cannot be forked, and copying cookies would hand the fork the parent's access to every site it logged into. That is a product decision about who may act as whom, not an implementation convenience. So a fork gets a fresh profile, and login inheritance is designed separately (open question).
-- **One browser per profile, not one client.** Chromium's profile lock only stops two browser processes from opening the same directory. It does not stop several CDP clients (two tools, or two subagents) from driving the same managed browser and interfering with each other's tabs, cookies or downloads. The launcher accepts any number of CDP clients; coordinating them is the tools' job (next rule).
-- **Tab ownership is the tool's job.** The platform does not arbitrate tabs between subagents; templates open a new page per agent by default.
+- **A Fork shares the browser.** A Fork continues the source chat's work in the same container, on the same files, for the same owner. Signing in again in the Fork, or a browser that had none of the source's tabs, would be the surprise. A Fork that should start clean belongs in a new sandbox.
+- **One browser per profile, not one client.** Chromium's profile lock only stops two browser processes from opening the same directory. It does not stop several CDP clients (two tools, two subagents, or a chat and its Fork) from driving the same managed browser and interfering with each other's tabs, cookies or downloads. The launcher accepts any number of CDP clients; coordinating them is the tools' job (next rule).
+- **Tab ownership is the tool's job.** The platform does not arbitrate tabs between subagents or members; templates open a new page per agent by default.
 
 ## Resources and performance
 
@@ -229,7 +237,7 @@ A browser that is never started costs only image size; the costs below apply onl
 | Image size (about 5.3 GB today) | `Dockerfile.agent-sandbox` | Chromium and its libraries add a layer | About 274 MB uncompressed, in its own cacheable layer |
 | CPU limit | `cpu_limit` | Rendering and screenshots compete with builds | Headless only in phases 1 and 2 |
 
-Startup is paid once per member per idle period, not per tool call, because the launcher reuses the process.
+Startup is paid once per sandbox per idle period, not per tool call, because the service reuses Chromium for every member. The idle service itself is one small Python process.
 
 ## Evidence, observability and UX
 
@@ -237,7 +245,7 @@ Phase 1 shows evidence as files; phase 3 adds a live view. No new UI is needed f
 
 - **Screenshots and traces.** Tools write into `CLOUD_AGENT_ARTIFACTS_DIR` (`/workspace/.cloud-agent-artifacts`). The workspace file listing walks the directory tree and skips only `.git`, and `WorkspaceFiles.tsx` already previews PNG, JPEG, GIF and WebP, so the user can open what the agent saw. `cloud-agent-browser start` creates the directory and adds it to `.git/info/exclude`, the way the environment tools directory is excluded, so it never enters a diff or a published branch.
 - **Inline images.** When a tool returns an image in a tool result, `protocol_compat/tool_images.py` already moves it into a user message for runtimes that need that.
-- **Operator signals.** The launcher logs start, stop, crash and reclaim with the member slot and duration. We add counters for browser starts, crashes, OOM kills of sandboxes with a running browser, and peak threads.
+- **Operator signals.** The service logs Chromium's start, stop, crash and reclaim to its log in the state directory, and the host logs a service that could not start. We add counters for browser starts, crashes, OOM kills of sandboxes with a running browser, and peak threads.
 - **Live view (phase 3).** A browser pane in the chat shows the screencast. Takeover pauses the agent's turn, forwards the user's input, and hands control back with a short note to the agent about what changed.
 - **Recordings (phase 3).** Screencast frames or a Playwright trace, saved to the artifacts dir and linked from the turn.
 
@@ -263,16 +271,25 @@ Phase 1 already unblocks most use cases: an agent can verify its own frontend ch
 
 - At least two independent tools (for example Playwright CLI and agent-browser) connect to the managed browser through the contract.
 - Each opens the task's own `localhost` app, completes a multi-step interaction and writes a screenshot to `CLOUD_AGENT_ARTIFACTS_DIR`.
-- Isolation tests pass: another member uid in the same sandbox cannot connect to the CDP endpoint or read its token.
+- Isolation tests pass: a uid outside the sandbox group cannot read the token; a member cannot stop the service or plant an endpoint; the browser survives a member's turn-end reap.
 - Lifecycle tests pass: idle reclaim, crash relaunch, kill with the sandbox, no orphaned processes.
 
 The default-tool evaluation below runs in parallel and does not gate any phase.
 
-**Phase 1 acceptance so far.** In a container with the sandbox's flags, against a fixture app on `localhost`: two Playwright clients (`connectOverCDP`) at once, one clicking and screenshotting into the artifacts directory; two Puppeteer clients (`browserWSEndpoint`), one of them calling `browser.close()` without ending the browser for the others; a member UID other than the browser's unable to read the endpoint file and refused (404) on a guessed path; a killed Chromium cleaning up its endpoint and restarting on the next `start`; an idle browser stopping with no process left; a different chat's profile never handed over on the same slot. Still to run: the same on Kata, through a real chat turn.
+**Phase 1 acceptance so far.** In the built image, in a container with the sandbox's flags, with the service started the way the host starts it (`service start` as uid 10002, workdir `/`), against a fixture app on `localhost`:
+
+- Member 0 drove the browser with Playwright (`connectOverCDP`), clicked, set a cookie and wrote a screenshot to the artifacts directory.
+- Every member-0 process was then reaped with `member-process-reaper` and an empty baseline, as at the end of a turn. The browser kept running.
+- Member 1, standing in for a Fork, connected with Puppeteer (`browserWSEndpoint`), saw member 0's tab and its cookie, and called `browser.close()` without ending the browser.
+- A uid outside the `agent` group could not read the endpoint. A member could neither stop the service nor write its directory.
+- After a container restart, the service was gone until the next `service start`, and the profile was still there.
+- Before that, with the earlier per-member launcher: two Playwright and two Puppeteer clients at once, a refused (404) guessed path, crash relaunch, and an idle browser stopping with no process left.
+
+A unit test drives the service against a fake Chromium: lazy start, two clients on one Chromium, `stop`, crash recovery and idle reclaim. Still to run: the same on Kata, through a real chat turn.
 
 **Delivery.** Phases 1 and 2 ship as two pull requests:
 
-1. **Base capability** (this doc, Phase 0 findings, Phase 1): the sandbox image with Chromium, the `cloud-agent-browser` launcher, contract v1 env injection, the artifacts dir, and the isolation, lifecycle and baseline acceptance tests.
+1. **Base capability** (this doc, Phase 0 findings, Phase 1): the sandbox image with Chromium, the `cloud-agent-browser` launcher and its per-sandbox service, the host starting it, contract v1, the artifacts dir, and the isolation, lifecycle and baseline acceptance tests.
 2. **In-sandbox MCP** (Phase 2): the `sandbox` connection location with its migration, catalog templates, MCP directory UI, host admission and change/revocation lifecycle, and wiring for all five runtimes. Branched from `dev` after PR 1 merges.
 
 Phase 3 gets its own design doc once both are in production.
@@ -302,9 +319,10 @@ The default is the tool with the highest success rate on our own tasks; cost and
 - [x] Do unprivileged user namespaces work in our Kata guest? No (Docker's default seccomp profile); the managed browser runs with `--no-sandbox`, see [Phase 0 findings](#phase-0-findings).
 - [x] Do the 4 GiB and 512-pid limits hold? Yes for one browser with a few pages; confirm on Kata with a heavy SPA and two browsers in one group.
 - [x] Is the member's home persisted across sandbox eviction? Yes, in the retained container's writable layer.
-- [ ] Should profiles of chats whose member was cleaned up be deleted before the container is removed?
+- [ ] Should a user be able to clear the sandbox's browser profile (sign out everywhere) from the UI?
 - [ ] How do agents learn the browser exists? Phase 1 relies on `chromium` and `cloud-agent-browser` being on `PATH` and on the environment; a short platform instruction to every runtime is a follow-up.
-- [ ] Login inheritance: should a user be able to opt a fork, or a new chat, into a saved login? Who approves it, and how is it scoped?
+- [x] Does a Fork share the browser? Yes, like `/workspace`: one browser per sandbox group.
+- [ ] Login inheritance across sandboxes: should a user be able to opt a new chat into a saved login? Who approves it, and how is it scoped?
 - [x] Where does `CLOUD_AGENT_ARTIFACTS_DIR` live? `/workspace/.cloud-agent-artifacts`, excluded through `.git/info/exclude`.
 - [ ] Phase 2: do we let users enter arbitrary in-sandbox servers, or only catalog templates at first?
 - [ ] Phase 3: is takeover input forwarded through the existing session channel, or a new one?

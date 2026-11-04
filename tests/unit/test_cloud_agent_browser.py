@@ -1,9 +1,10 @@
-"""The sandbox's managed browser launcher and the contract the host hands it."""
+"""The sandbox's shared browser: its launcher, its service and how the host starts it."""
 
 from __future__ import annotations
 
 import asyncio
 import importlib.util
+import logging
 import os
 import stat
 import subprocess
@@ -17,13 +18,15 @@ import pytest
 from tests.support.owners import launch_connection
 
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.chat_sandbox_models import MEMBER_TMPFS_ROOT
+from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.sandbox_browser import member_browser_env
+from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.sandbox_browser import LAUNCHER, ensure_browser_service
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / "deploy" / "sandbox" / "cloud-agent-browser"
 DOCKERFILE = REPO_ROOT / "deploy" / "sandbox" / "Dockerfile.agent-sandbox"
+BROWSER_STATE_DIR = "/run/agent-browser"
 
 
 def _load_helper():
@@ -53,9 +56,18 @@ def test_launcher_is_root_owned_read_only_image_code_checked_at_build():
     assert "        chromium \\\n" in dockerfile
     assert "CLOUD_AGENT_BROWSER_CONTRACT=1" in dockerfile
     assert "CLOUD_AGENT_BROWSER_BIN=/usr/bin/chromium" in dockerfile
+    assert f"CLOUD_AGENT_BROWSER_STATE_DIR={BROWSER_STATE_DIR}" in dockerfile
+    assert "CLOUD_AGENT_BROWSER_PROFILE=/home/agent-browser/profile" in dockerfile
+    # Its own user, in the agent group, and a state directory only it writes.
+    assert (
+        f"useradd --uid {BROWSER_SERVICE_UID} --gid 10001 --create-home "
+        "--shell /usr/sbin/nologin agent-browser"
+    ) in dockerfile
+    assert f"install -d -m 0750 -o {BROWSER_SERVICE_UID} -g 10001 {BROWSER_STATE_DIR}" in dockerfile
     # The build proves the browser works as the unprivileged user, after USER.
     user_line = dockerfile.index("USER agent")
-    assert dockerfile.index("cloud-agent-browser self-test") > user_line
+    started = dockerfile.index("cloud-agent-browser service start")
+    assert user_line < started < dockerfile.index("cloud-agent-browser self-test")
     # A browser-download kill switch would change how repositories' own tests run.
     assert "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" not in dockerfile
     assert "PUPPETEER_SKIP_DOWNLOAD" not in dockerfile
@@ -83,29 +95,62 @@ def test_the_chromium_debug_port_is_never_opened_on_tcp():
     assert "--user-data-dir=/profile" in argv
 
 
-# -- the host's half of the contract -------------------------------------------
+# -- how the host starts the service ---------------------------------------------
 
 
-def test_member_browser_state_is_private_and_profiles_are_per_chat():
-    env = member_browser_env(3, "athr_parent")
-    fork = member_browser_env(3, "athr_fork")
+class _Manager:
+    def __init__(self, outcome):
+        self.backend = SimpleNamespace(gid=10001, base_env=dict)
+        self.outcome = outcome
+        self.calls = []
 
-    assert env["CLOUD_AGENT_BROWSER_STATE_DIR"] == f"{MEMBER_TMPFS_ROOT}/3/browser"
-    assert env["CLOUD_AGENT_BROWSER_PROFILE"].startswith(
-        "/home/agent-member-3/.cloud-agent-browser/profiles/"
-    )
-    # Same slot, new chat: a Fork never starts on its parent's cookies.
-    assert fork["CLOUD_AGENT_BROWSER_PROFILE"] != env["CLOUD_AGENT_BROWSER_PROFILE"]
-    assert "athr_parent" not in env["CLOUD_AGENT_BROWSER_PROFILE"]
-    with pytest.raises(ValueError):
-        member_browser_env(-1, "athr_parent")
-    with pytest.raises(ValueError):
-        member_browser_env(0, "")
+    def exec_capture(self, spec, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return subprocess.CompletedProcess(argv, self.outcome, b"", b"chromium broke")
+
+
+def test_the_host_starts_the_service_as_its_own_user():
+    manager = _Manager(0)
+
+    ensure_browser_service(manager, SimpleNamespace(container_name="c"))
+
+    [(argv, kwargs)] = manager.calls
+    assert argv == [LAUNCHER, "service", "start"]
+    assert (kwargs["user_uid"], kwargs["user_gid"]) == (BROWSER_SERVICE_UID, 10001)
+    # Not a member UID: no member's turn-end reap reaches the browser.
+    assert not 11001 <= BROWSER_SERVICE_UID < 11001 + 128
+
+
+@pytest.mark.parametrize("outcome", [127, 126])
+def test_an_image_without_the_browser_is_left_alone(outcome, caplog):
+    with caplog.at_level(logging.WARNING):
+        ensure_browser_service(_Manager(outcome), SimpleNamespace(container_name="c"))
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("outcome", [1, SandboxError("exec failed")])
+def test_a_service_that_cannot_start_never_blocks_the_member(outcome, caplog):
+    with caplog.at_level(logging.WARNING):
+        ensure_browser_service(_Manager(outcome), SimpleNamespace(container_name="c"))
+    assert "did not start" in caplog.text
 
 
 @pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
-def test_every_runtime_starts_with_the_members_browser_environment(runtime_id):
-    manager = SimpleNamespace(backend=SimpleNamespace(gid=10001, base_env=dict))
+def test_every_runtime_launch_starts_the_service_first(runtime_id):
+    events = []
+    manager = SimpleNamespace(
+        backend=SimpleNamespace(gid=10001, base_env=dict),
+        exec_capture=lambda spec, argv, **kwargs: (
+            events.append(("exec", argv[0], kwargs["user_uid"]))
+            or subprocess.CompletedProcess(argv, 0, b"", b"")
+        ),
+        ensure_downloaded_runtime=lambda *args: events.append(("runtime",)),
+        ensure_mcp_helpers=lambda *args: events.append(("helpers",)),
+        ensure_kilo_mcp_runtime=lambda *args: events.append(("kilo",)),
+        ensure_codex_mcp_policy=lambda *args: events.append(("codex",)),
+    )
     spec = ChatSandboxSpec(
         thread_id="athr_owner",
         sandbox_id="asbx_group",
@@ -125,19 +170,22 @@ def test_every_runtime_starts_with_the_members_browser_environment(runtime_id):
             **launch_connection(runtime_id),
         ),
         slot_id=2,
+        inference_client_protocol=None,
     )
-    context = ResidentTransportFactory(manager)._launch_context(
-        spec, launch, credential="inference-grant"
-    )
+    factory = ResidentTransportFactory(manager)
 
-    for key, value in member_browser_env(2, "athr_owner").items():
-        assert context.base_env[key] == value
+    factory._prepare_runtime_helpers(spec, launch)
+    context = factory._launch_context(spec, launch, credential="inference-grant")
+
+    assert events[0] == ("exec", LAUNCHER, BROWSER_SERVICE_UID)
+    # The image names the shared browser's paths; a member gets none of its own.
+    assert not any(key.startswith("CLOUD_AGENT_BROWSER_") for key in context.base_env)
 
 
 # -- paths ----------------------------------------------------------------------
 
 
-def test_paths_default_under_home_and_follow_the_host(tmp_path):
+def test_paths_default_under_home_and_follow_the_image(tmp_path):
     defaults = browser.resolve_paths({"HOME": str(tmp_path)})
     assert defaults.state == str(tmp_path / ".cloud-agent-browser" / "run")
     assert defaults.profile == str(tmp_path / ".cloud-agent-browser" / "profile")
@@ -146,38 +194,66 @@ def test_paths_default_under_home_and_follow_the_host(tmp_path):
     given = browser.resolve_paths(
         {
             "HOME": str(tmp_path),
-            "CLOUD_AGENT_BROWSER_STATE_DIR": "/run/agent-members/1/browser",
-            "CLOUD_AGENT_BROWSER_PROFILE": "/home/agent-member-1/p",
+            "CLOUD_AGENT_BROWSER_STATE_DIR": "/run/agent-browser",
+            "CLOUD_AGENT_BROWSER_PROFILE": "/home/agent-browser/profile",
             "CLOUD_AGENT_ARTIFACTS_DIR": "/elsewhere",
         }
     )
-    assert given.endpoint == "/run/agent-members/1/browser/endpoint"
-    assert given.profile == "/home/agent-member-1/p"
+    assert given.endpoint == "/run/agent-browser/endpoint"
+    assert given.profile == "/home/agent-browser/profile"
     assert given.artifacts == "/elsewhere"
 
 
-def test_private_directories_are_tightened_and_symlinks_refused(tmp_path):
-    loose = tmp_path / "state"
-    loose.mkdir(mode=0o755)
-    browser.ensure_private_dir(str(loose))
-    assert stat.S_IMODE(loose.stat().st_mode) == 0o700
+def test_service_directories_are_tightened_and_symlinks_refused(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o777)
+    os.chmod(state, 0o777)
+    browser.ensure_service_dir(str(state))
+    assert stat.S_IMODE(state.stat().st_mode) == 0o750
+
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o755)
+    browser.ensure_private_dir(str(profile))
+    assert stat.S_IMODE(profile.stat().st_mode) == 0o700
 
     target = tmp_path / "target"
     target.mkdir()
     link = tmp_path / "link"
     link.symlink_to(target)
     with pytest.raises(browser.BrowserError):
-        browser.ensure_private_dir(str(link))
+        browser.ensure_service_dir(str(link))
 
 
-def test_endpoint_files_are_written_atomically_and_owner_only(tmp_path):
+def test_endpoint_files_are_written_atomically_for_the_group_to_read(tmp_path):
     path = tmp_path / "endpoint"
-    browser.write_private(str(path), "ws://127.0.0.1:1/token\n")
-    browser.write_private(str(path), "ws://127.0.0.1:2/token\n")
+    browser.write_shared(str(path), "ws://127.0.0.1:1/token\n")
+    browser.write_shared(str(path), "ws://127.0.0.1:2/token\n")
 
     assert path.read_text() == "ws://127.0.0.1:2/token\n"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
     assert [entry.name for entry in tmp_path.iterdir()] == ["endpoint"]
+
+
+def test_a_member_trusts_only_what_the_service_user_alone_could_write(tmp_path):
+    paths = browser.resolve_paths({"CLOUD_AGENT_BROWSER_STATE_DIR": str(tmp_path / "run")})
+    assert browser.service_owner(paths) is None  # no service directory yet
+
+    browser.ensure_service_dir(paths.state)
+    owner = browser.service_owner(paths)
+    assert owner == os.getuid()
+    browser.write_shared(paths.record, '{"pid": 1}')
+    assert browser.read_trusted(paths.record, owner) == '{"pid": 1}'
+    assert browser.read_trusted(paths.record, owner + 1) is None
+
+    os.chmod(paths.record, 0o660)  # another group member could have written it
+    assert browser.read_trusted(paths.record, owner) is None
+    os.chmod(paths.record, 0o640)
+    os.symlink(paths.record, paths.endpoint)
+    assert browser.read_trusted(paths.endpoint, owner) is None
+
+    os.chmod(paths.state, 0o770)  # another group member could plant an endpoint
+    assert browser.service_owner(paths) is None
+    assert browser.read_record(paths) is None
 
 
 def test_artifacts_are_kept_out_of_git_once(tmp_path):
@@ -291,6 +367,12 @@ def test_only_the_tokened_path_on_a_loopback_host_upgrades(tmp_path):
     assert daemon._route(_upgrade(f"/{token}/devtools/browser")) == "socket"
     assert daemon._route(_upgrade(f"/{token}/devtools/browser", "localhost:4242")) == "socket"
     assert daemon.ws_url == f"ws://127.0.0.1:4242/{token}/devtools/browser"
+    stop = browser.parse_request(
+        f"GET /{token}/stop HTTP/1.1\r\nHost: 127.0.0.1:4242\r\n\r\n".encode()
+    )
+    assert daemon._route(stop) == "stop"
+    stop_elsewhere = browser.parse_request(b"GET /stop HTTP/1.1\r\nHost: 127.0.0.1:4242\r\n\r\n")
+    assert daemon._route(stop_elsewhere) == "none"
     for refused in (
         _upgrade("/devtools/browser"),
         _upgrade(f"/{token[:-1]}x/devtools/browser"),
@@ -464,25 +546,138 @@ def test_malformed_commands_end_the_connection():
 # -- end to end, where a Chromium is installed -------------------------------------
 
 
+FAKE_CHROMIUM = r"""
+import json, os, sys
+# Answers CDP on fds 3/4 like Chromium's --remote-debugging-pipe, minimally.
+sessions = 0
+buffer = b""
+while True:
+    chunk = os.read(3, 65536)
+    if not chunk:
+        break
+    buffer += chunk
+    while b"\0" in buffer:
+        raw, buffer = buffer.split(b"\0", 1)
+        message = json.loads(raw)
+        method = message.get("method")
+        if method == "Target.attachToBrowserTarget":
+            sessions += 1
+            result = {"sessionId": f"S{sessions}"}
+        elif method == "Browser.getVersion":
+            result = {"product": "FakeChrome/1", "protocolVersion": "1.3"}
+        else:
+            result = {}
+        reply = {"id": message["id"], "result": result}
+        if "sessionId" in message:
+            reply["sessionId"] = message["sessionId"]
+        os.write(4, json.dumps(reply).encode() + b"\0")
+"""
+
+
+def test_the_service_starts_chromium_per_use_for_every_member(tmp_path, monkeypatch):
+    fake = tmp_path / "chromium"
+    fake.write_text(f"#!{sys.executable}\n{FAKE_CHROMIUM}")
+    fake.chmod(0o755)
+    monkeypatch.setattr(browser, "CHROMIUM", str(fake))
+    # In-process, the service has no "_serve" command line to recognise.
+    monkeypatch.setattr(browser, "_is_service", lambda pid, owner: pid == os.getpid())
+    paths = browser.resolve_paths(
+        {
+            "CLOUD_AGENT_BROWSER_STATE_DIR": str(tmp_path / "run"),
+            "CLOUD_AGENT_BROWSER_PROFILE": str(tmp_path / "profile"),
+            "HOME": str(tmp_path),
+        }
+    )
+    browser.ensure_service_dir(paths.state)
+
+    async def scenario():
+        daemon = browser.Daemon(paths, idle_s=1.0, ready_fd=None)
+        daemon.sandboxed = False
+        service = asyncio.create_task(daemon.run())
+        for _ in range(100):
+            if browser.read_trusted(paths.endpoint, os.getuid()):
+                break
+            await asyncio.sleep(0.02)
+        url = browser.read_trusted(paths.endpoint, os.getuid()).strip()
+        try:
+            # Serving, but no Chromium until a tool connects.
+            assert browser.status(paths)["service"] is True
+            assert browser.status(paths)["running"] is False
+            assert daemon.chromium is None
+
+            # Two members' tools share one Chromium.
+            first = await browser.CdpClient.connect(url)
+            second = await browser.CdpClient.connect(url)
+            assert (await first.call("Browser.getVersion"))["product"] == "FakeChrome/1"
+            await second.call("Browser.getVersion")
+            pid = daemon.chromium.pid
+            status = browser.status(paths)
+            assert status["running"] is True
+            assert status["browser"] == "FakeChrome/1"
+
+            # A member's stop closes it for everyone; the service stays.
+            assert await asyncio.to_thread(browser.stop, paths) is True
+            assert await asyncio.wait_for(first.socket.receive(), 5) is None
+            assert browser.status(paths)["running"] is False
+            assert await asyncio.to_thread(browser.stop, paths) is False
+
+            # The next tool gets a fresh Chromium.
+            third = await browser.CdpClient.connect(url)
+            await third.call("Browser.getVersion")
+            assert daemon.chromium.pid != pid
+
+            # A crash ends its clients, and the next connection recovers.
+            daemon.chromium.kill()
+            assert await asyncio.wait_for(third.socket.receive(), 5) is None
+            for _ in range(100):
+                if not browser.status(paths)["running"]:
+                    break
+                await asyncio.sleep(0.02)
+            assert browser.status(paths)["running"] is False
+            fourth = await browser.CdpClient.connect(url)
+            await fourth.call("Browser.getVersion")
+            await fourth.socket.close()
+
+            # With no client for the idle timeout, Chromium stops; the service does not.
+            for _ in range(100):
+                if daemon.chromium is None:
+                    break
+                await asyncio.sleep(0.05)
+            assert daemon.chromium is None
+            assert browser.status(paths)["service"] is True
+        finally:
+            daemon._stop("test over")
+            await asyncio.wait_for(service, 10)
+        assert browser.status(paths)["service"] is False
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.skipif(not Path(browser.CHROMIUM).exists(), reason="needs a local Chromium")
 def test_self_test_against_a_real_chromium(tmp_path):
     env = {
         **os.environ,
         "HOME": str(tmp_path),
+        "CLOUD_AGENT_BROWSER_STATE_DIR": str(tmp_path / "run"),
+        "CLOUD_AGENT_BROWSER_PROFILE": str(tmp_path / "profile"),
         "CLOUD_AGENT_ARTIFACTS_DIR": str(tmp_path / "artifacts"),
     }
-    try:
-        result = subprocess.run(
-            [sys.executable, "-I", str(HELPER), "self-test"],
+
+    def helper(*args, timeout=120):
+        return subprocess.run(
+            [sys.executable, "-I", str(HELPER), *args],
             env=env,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
             check=False,
         )
+
+    try:
+        started = helper("service", "start")
+        assert started.returncode == 0, started.stderr
+        result = helper("self-test")
         assert result.returncode == 0, result.stderr
         assert result.stdout.startswith("self-test ok")
     finally:
-        subprocess.run(
-            [sys.executable, "-I", str(HELPER), "stop"], env=env, timeout=30, check=False
-        )
+        helper("service", "stop", timeout=30)
