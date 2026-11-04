@@ -2645,6 +2645,67 @@ msgstr ""
 "browser/daemon.log`。用不带浏览器的旧镜像创建的保留容器，在重建之前都没有浏览器。"
 
 #: ../developer/operations.md:1189
+msgid "Sandbox MCP servers"
+msgstr "沙箱 MCP 服务器"
+
+#: ../developer/operations.md:1191
+msgid ""
+"An MCP connection can run in each chat's sandbox (location `sandbox`) "
+"instead of behind the relay, so it reaches the task's `localhost`, its "
+"files and the sandbox browser. The Playwright and Chrome DevTools presets"
+" drive that browser. The [design](../agents/specs/2026-11-02-computer-"
+"use-base-capability.md#in-sandbox-mcp-servers-phase-2) explains it."
+msgstr ""
+"MCP 连接可以运行在每个对话的沙箱里（位置为 `sandbox`），而不是放在 relay 后面，这样它就能访问任务的 "
+"`localhost`、文件和沙箱浏览器。Playwright 和 Chrome DevTools "
+"两个预设用的就是这个浏览器。原理见[设计文档](../agents/specs/2026-11-02-computer-use-base-"
+"capability.md#in-sandbox-mcp-servers-phase-2)。"
+
+#: ../developer/operations.md:1197
+msgid ""
+"**What may run there.** One exactly pinned package started by `npx` or "
+"`uvx`, with no secret, mount or working directory. A server that needs a "
+"credential stays remote: the sandbox also runs the repository's code."
+msgstr ""
+"**能在里面跑什么。** 只能是一个用 `npx` 或 `uvx` "
+"启动、精确锁定版本的包，不能带密钥、挂载目录或工作目录。需要凭据的服务器仍然用远程方式：沙箱里同时也在运行仓库的代码。"
+
+#: ../developer/operations.md:1200
+msgid ""
+"**How it runs.** Before it launches a member's CLI, the host writes the "
+"slot's admission as root, then starts the image's MCP gateway, `cloud-"
+"agent-mcp`, as `agent-mcp` (uid 10003) on `http://127.0.0.1:47801/mcp`. "
+"Last, it starts the slot's runner as `agent-mcp-<slot>` (uid 12001 + "
+"slot), which runs that slot's servers. The CLI reaches them as the MCP "
+"server `sandbox` with its relay token. A server can affect only its own "
+"slot. A failed step is logged and leaves the chat without those tools, "
+"not without its turn."
+msgstr "**怎么运行。** 启动成员的 CLI 之前，主机先以 root 身份写入这个对话位的授权，再以 `agent-mcp`（uid 10003）身份在 `http://127.0.0.1:47801/mcp` 上启动镜像里的 MCP 网关 `cloud-agent-mcp`，最后以 `agent-mcp-<slot>`（uid 12001 + 对话位编号）身份启动这个对话位的运行者，由它运行这个对话位的服务器。CLI 用它的 relay token，把这些服务器当作名为 `sandbox` 的 MCP 服务器来连接。一个服务器只能影响它自己的对话位。任何一步失败都只记日志，对话会少这些工具，但这一轮照常进行。"
+
+#: ../developer/operations.md:1208
+msgid ""
+"**Changes.** Turning a server off, adding one or changing its version "
+"takes effect at the next turn, which starts a new CLI that resumes the "
+"session."
+msgstr "**改动何时生效。** 关闭、新增服务器或修改版本，都在下一轮生效：下一轮会启动新的 CLI，并接着原来的会话继续。"
+
+#: ../developer/operations.md:1210
+msgid ""
+"**No approval step.** The relay's per-tool policies do not apply: a "
+"sandbox server can do what the agent's shell can."
+msgstr "**没有审批步骤。** relay 的按工具权限设置对它不起作用：沙箱 MCP 服务器能做的事，和 agent 的 shell 一样。"
+
+#: ../developer/operations.md:1212
+msgid ""
+"**Where to look.** `/run/agent-mcp/gateway.log` records the methods each "
+"slot called, readable as `agent-mcp`. A slot's runner logs its servers' "
+"starts and stops in `/run/agent-mcp-slots/<slot>/runner.log`, and each "
+"server's own output is in `/run/agent-mcp-slots/<slot>/<alias>.log`, "
+"readable as `agent-mcp-<slot>`. Admissions are in `/run/agent-mcp-"
+"admissions`."
+msgstr "**去哪里看。** `/run/agent-mcp/gateway.log` 记录每个对话位调用了哪些方法，以 `agent-mcp` 身份可读。对话位的运行者把服务器的启动和停止记在 `/run/agent-mcp-slots/<slot>/runner.log`，每个服务器自己的输出在 `/run/agent-mcp-slots/<slot>/<alias>.log`，以 `agent-mcp-<slot>` 身份可读。授权文件在 `/run/agent-mcp-admissions`。"
+
+#: ../developer/operations.md:1189
 msgid "Before a job can run for real"
 msgstr "任务真正跑起来之前"
 

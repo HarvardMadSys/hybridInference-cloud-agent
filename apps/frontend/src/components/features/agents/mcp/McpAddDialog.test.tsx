@@ -147,6 +147,47 @@ describe('McpAddDialog', () => {
     expect(added).toHaveBeenCalledWith([{ id: 1, label: 'GitHub' }]);
   });
 
+  it('adds a sandbox browser preset as a pinned stdio server with no sign-in', async () => {
+    const playwright: McpTemplateApi = {
+      name: 'playwright-sandbox',
+      label: 'Playwright browser',
+      description: 'Open the task’s own localhost app in the sandbox browser.',
+      url: '',
+      transport: 'stdio',
+      auth_kind: 'none',
+      location: 'sandbox',
+      launch: {
+        command: 'npx',
+        args: ['-y', '@playwright/mcp@0.0.83', '--cdp-endpoint', '${CLOUD_AGENT_BROWSER_CDP}'],
+      },
+      notes: ['Runs inside each chat’s sandbox with the agent’s own access.'],
+    };
+    vi.mocked(createMcpConnection).mockResolvedValue({
+      id: 3,
+      label: 'Playwright browser',
+    } as never);
+    const added = vi.fn();
+    render(<McpAddDialog templates={[template, playwright]} onClose={vi.fn()} onAdded={added} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Playwright browser' }));
+    expect(
+      screen.getByText('npx -y @playwright/mcp@0.0.83 --cdp-endpoint ${CLOUD_AGENT_BROWSER_CDP}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Access token')).not.toBeInTheDocument();
+    expect(screen.getByText(/Nothing to sign in to/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Playwright browser' }));
+    await waitFor(() =>
+      expect(createMcpConnection).toHaveBeenCalledWith({
+        label: 'Playwright browser',
+        transport: 'stdio',
+        location: 'sandbox',
+        launch: { ...playwright.launch, env: {} },
+        auth_kind: 'none',
+        template: 'playwright-sandbox',
+      }),
+    );
+    expect(added).toHaveBeenCalledWith([{ id: 3, label: 'Playwright browser' }]);
+  });
+
   it('clears the token when switching connection methods', async () => {
     render(
       <McpAddDialog

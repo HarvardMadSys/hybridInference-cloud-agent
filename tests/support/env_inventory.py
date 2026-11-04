@@ -588,6 +588,19 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "internal",
+        "The sandbox image's MCP gateway: its state, admission and slot directories, set "
+        "by the image; an idle timeout read with a built-in default; and the browser path "
+        "it hands the servers it runs, which the image sets for tools that look for Chrome.",
+        names=(
+            "CHROME_PATH",
+            "CLOUD_AGENT_MCP_ADMISSIONS_DIR",
+            "CLOUD_AGENT_MCP_IDLE_S",
+            "CLOUD_AGENT_MCP_SLOTS_DIR",
+            "CLOUD_AGENT_MCP_STATE_DIR",
+        ),
+    ),
+    Family(
+        "internal",
         "Image-internal override of the member process reaper's source path; the image "
         "supplies the default.",
         names=("AGENT_MEMBER_PROCESS_REAPER_SOURCE",),

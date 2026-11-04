@@ -15,6 +15,7 @@ from cloud_agent_shared.protocol_compat import (
     ORIGIN_PLACEHOLDER,
     TOKEN_PLACEHOLDER,
 )
+from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_SERVER_NAME, SANDBOX_MCP_URL
 
 from .events import RAW, NormalizedEvent
 
@@ -261,6 +262,10 @@ class RuntimeMCPConfig:
     base_url: str = ""
     #: The ``mcp``-scoped token. Never the inference credential.
     credential: str = ""
+    #: Whether the run also reaches the sandbox's MCP gateway, as the server
+    #: ``sandbox`` (cloud_agent_shared.sandbox_mcp). The gateway checks the
+    #: same credential, so every dialect's one header serves both servers.
+    sandbox: bool = False
 
 
 EMPTY_RUNTIME_MCP_CONFIG = RuntimeMCPConfig()
@@ -372,7 +377,10 @@ class AgentRuntime:
                 "MCP was requested but no relay credential was minted for this run"
             )
         base = config.base_url.rstrip("/").removesuffix("/v1")
-        return {MERGED_MCP_SERVER_NAME: f"{base}/v1/agent/mcp"}
+        endpoints = {MERGED_MCP_SERVER_NAME: f"{base}/v1/agent/mcp"}
+        if config.sandbox:
+            endpoints[SANDBOX_MCP_SERVER_NAME] = SANDBOX_MCP_URL
+        return endpoints
 
     @classmethod
     def _mcp_endpoints(

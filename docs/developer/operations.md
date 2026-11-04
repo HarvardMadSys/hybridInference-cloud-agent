@@ -1210,6 +1210,35 @@ and `self-test` in a sandbox to check a host; `/run/agent-browser/daemon.log`
 has the service's log. A retained container created from an image without the
 browser has none until it is recreated.
 
+## Sandbox MCP servers
+
+An MCP connection can run in each chat's sandbox (location `sandbox`) instead
+of behind the relay, so it reaches the task's `localhost`, its files and the
+sandbox browser. The Playwright and Chrome DevTools presets drive that browser.
+The [design](../agents/specs/2026-11-02-computer-use-base-capability.md#in-sandbox-mcp-servers-phase-2)
+explains it.
+
+- **What may run there.** One exactly pinned package started by `npx` or `uvx`,
+  with no secret, mount or working directory. A server that needs a
+  credential stays remote: the sandbox also runs the repository's code.
+- **How it runs.** Before it launches a member's CLI, the host writes the
+  slot's admission as root, then starts the image's MCP gateway,
+  `cloud-agent-mcp`, as `agent-mcp` (uid 10003) on
+  `http://127.0.0.1:47801/mcp`. Last, it starts the slot's runner as
+  `agent-mcp-<slot>` (uid 12001 + slot), which runs that slot's servers. The
+  CLI reaches them as the MCP server `sandbox` with its relay token. A server
+  can affect only its own slot. A failed step is logged and leaves the chat
+  without those tools, not without its turn.
+- **Changes.** Turning a server off, adding one or changing its version takes
+  effect at the next turn, which starts a new CLI that resumes the session.
+- **No approval step.** The relay's per-tool policies do not apply: a sandbox
+  server can do what the agent's shell can.
+- **Where to look.** `/run/agent-mcp/gateway.log` records the methods each
+  slot called, readable as `agent-mcp`. A slot's runner logs its servers'
+  starts and stops in `/run/agent-mcp-slots/<slot>/runner.log`, and each
+  server's own output is in `/run/agent-mcp-slots/<slot>/<alias>.log`, readable
+  as `agent-mcp-<slot>`. Admissions are in `/run/agent-mcp-admissions`.
+
 ## Before a job can run for real
 
 Complete host provisioning, network checks, enrollment, and credentials before

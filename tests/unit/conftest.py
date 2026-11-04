@@ -1,4 +1,5 @@
-"""No unit test reaches real Docker through the network guard's long-lived helper."""
+"""No unit test reaches real Docker through the network guard's long-lived helper,
+and every unit test starts on a host that has just started."""
 
 from __future__ import annotations
 
@@ -6,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host import network_guard_helper
+from cloud_agent_host import network_guard_helper, sandbox_mcp
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -36,3 +37,14 @@ def _no_real_network_helper(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(network_guard_helper, "remove_helper", remove)
     yield
     assert not attempts, f"a test reached real Docker for the guard's long-lived helper: {attempts}"
+
+
+@pytest.fixture(autouse=True)
+def _a_freshly_started_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forget which slots the sandbox MCP admission knew to be clean.
+
+    It is process state, so without this one test's launches decide whether
+    the next test's launch revokes, and an exact sequence of execs depends on
+    the order the tests ran in.
+    """
+    monkeypatch.setattr(sandbox_mcp, "_known_clean", set())

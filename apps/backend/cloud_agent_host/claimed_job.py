@@ -14,6 +14,7 @@ from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 from cloud_agent_shared.model_connections import ModelConnectionAccess
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
+from cloud_agent_shared.sandbox_mcp import SandboxMcpServer, parse_sandbox_mcp_servers
 from cloud_agent_shared.ssh_access import SshAccess
 
 
@@ -94,6 +95,9 @@ class ClaimedJob:
     # because the sandbox reaches them through this service's MCP-only relay
     # rather than directly.
     mcp_bindings: list[str] = field(default_factory=list)
+    # MCP servers the user chose to run inside the sandbox, with their launch
+    # (cloud_agent_shared.sandbox_mcp). No secret: those stay remote.
+    sandbox_mcp_servers: tuple[SandboxMcpServer, ...] = ()
     # The CLI version the control plane stamped on this attempt, resolved from
     # the thread's pin, the deployment's selection, or this host's default.
     # ``None`` from a control plane that predates selection — the image's
@@ -154,6 +158,7 @@ class ClaimedJob:
             clone_token=body.get("clone_token") or None,
             github_token=body.get("github_token") or None,
             mcp_bindings=list(body.get("mcp_bindings") or []),
+            sandbox_mcp_servers=parse_sandbox_mcp_servers(body.get("sandbox_mcp_servers")),
             runtime_version=body.get("runtime_version") or None,
             thread_sandbox=(
                 dict(body["thread_sandbox"])

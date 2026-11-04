@@ -25,6 +25,7 @@ from cloud_agent_shared.model_connections import (  # noqa: TC001 — Pydantic r
 from cloud_agent_shared.plugins import (
     SandboxPlugin,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent_shared.sandbox_mcp import MAX_SANDBOX_MCP_SERVERS, SandboxMcpServer
 from cloud_agent_shared.sandbox_restore import CheckpointRestore, RestoreFormatVersion
 from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
 from cloud_agent_shared.ssh_access import (
@@ -340,6 +341,15 @@ class WorkerClaimResponse(BaseModel):
             "Aliases of the MCP connections this job may reach through the control-plane "
             "relay. The runner passes them to the runtime adapter; it never learns their "
             "addresses or their credentials."
+        ),
+    )
+    sandbox_mcp_servers: list[SandboxMcpServer] = Field(
+        default_factory=list,
+        max_length=MAX_SANDBOX_MCP_SERVERS,
+        description=(
+            "MCP servers the owner chose to run inside the sandbox, next to the agent, "
+            "with their pinned launch. The host admits them to the sandbox's MCP gateway "
+            "for the member that runs this job. They carry no secret."
         ),
     )
     metadata: dict[str, Any] | None = None

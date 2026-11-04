@@ -2695,6 +2695,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             # (``compatible_with``). Only a process opened below receives one.
             mcp_base_url=mcp_url if job.mcp_bindings else "",
             mcp_credential="",
+            sandbox_mcp_servers=job.sandbox_mcp_servers if job.mcp_bindings else (),
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
             **model_connection_launch(job),
