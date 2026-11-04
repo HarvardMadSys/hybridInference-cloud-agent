@@ -395,8 +395,9 @@ describe('Command Executions and File Activity in the one-flow layout', () => {
   it('opens a command and a file operation with the page callbacks', async () => {
     const { onOpenPoint, onOpenTurn } = show();
     const commands = await vi.waitFor(() => card('Command Executions'));
-    const list = within(commands).getByRole('list', { name: 'Command Executions' });
-    const first = within(list).getAllByRole('listitem')[0];
+    // The card's heading renders before its executions have loaded.
+    const list = await within(commands).findByRole('list', { name: 'Command Executions' });
+    const first = (await within(list).findAllByRole('listitem'))[0];
     fireEvent.click(within(first).getByRole('button', { expanded: false }));
     const details = within(first).getByLabelText('Execution details');
     fireEvent.click(within(details).getByRole('button', { name: 'Open step' }));
