@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class JobStreamState:
-    """The current turn state and publication URL an event stream needs."""
+    """The current turn state and pull-request URL an event stream needs."""
 
     state: str
     published_pr_url: str | None

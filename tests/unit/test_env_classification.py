@@ -559,14 +559,14 @@ def test_registering_a_deployment_variable_fails() -> None:
         inventory.Family(
             f.disposition,
             f.reason,
-            tuple(n for n in f.names if n != "AGENT_PUBLISH_BASE_BRANCH"),
+            tuple(n for n in f.names if n != "AGENT_REPO_ALLOWLIST"),
             f.prefixes,
         )
         for f in inventory.FAMILIES
     ]
-    moved.append(inventory.Family("deployment", "x", names=("AGENT_PUBLISH_BASE_BRANCH",)))
+    moved.append(inventory.Family("deployment", "x", names=("AGENT_REPO_ALLOWLIST",)))
     assert registry_mismatches(moved) == [
-        "AGENT_PUBLISH_BASE_BRANCH is registered but not classified admin"
+        "AGENT_REPO_ALLOWLIST is registered but not classified admin"
     ]
 
 

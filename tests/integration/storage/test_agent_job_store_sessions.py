@@ -8,7 +8,6 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401 - pyt
     Storage,
     _claim,
     _create_job,
-    _request_publication,
     _reserve_shared_chat,
     append_follow_up,
     asyncio,
@@ -491,18 +490,14 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
         from_states=("running",),
         to_state="succeeded",
     )
-    await _request_publication(store, source)
     await store.conversation_commands.set_thread_archived(
         job_id=source["id"], user_id="user-1", archived=True
     )
-    pending = await store.conversation_queries.list_sessions(user_id="user-1", archived=True)
-    assert pending["sessions"][0]["delete_block_reason"] == "publication_pending"
-    assert await store.conversation_commands.delete_sessions(
-        thread_ids=[source["thread_id"]], user_id="user-1"
-    ) == {"error": "publication_pending"}
+    # Nothing the platform publishes holds a finished chat back any more.
+    idle = await store.conversation_queries.list_sessions(user_id="user-1", archived=True)
+    assert idle["sessions"][0]["delete_block_reason"] is None
     sibling = await _create_job(store, task_prompt="forked sibling")
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE agent_sandbox_snapshots SET state = 'published'")
         await conn.execute(
             "UPDATE agent_jobs SET state = 'succeeded', "
             "native_turn_no = COALESCE(native_turn_no, turn_no), fork_source_job_id = $2 WHERE id = $1",

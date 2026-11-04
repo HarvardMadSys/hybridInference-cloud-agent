@@ -53,15 +53,6 @@ from cloud_agent.ports.sandbox import SandboxRepository
 from cloud_agent.ports.session_fork import SessionForkRepository
 from cloud_agent.ports.settings import SettingsRepository
 from cloud_agent.ports.skills import SkillRepository
-from cloud_agent.ports.snapshot import (
-    SnapshotBaseImportRepository,
-    SnapshotCaptureRepository,
-    SnapshotPublicationRepository,
-    SnapshotPublishWorkerRepository,
-    SnapshotReapingRepository,
-    SnapshotRepository,
-    SnapshotRequestRepository,
-)
 from cloud_agent.ports.source_control import SourceControlRepository
 from cloud_agent.ports.ssh_servers import SshServerRepository
 from cloud_agent.ports.team_admin import TeamAdminQueries
@@ -113,13 +104,6 @@ __all__ = [
     "SessionForkRepository",
     "SettingsRepository",
     "SkillRepository",
-    "SnapshotBaseImportRepository",
-    "SnapshotCaptureRepository",
-    "SnapshotPublicationRepository",
-    "SnapshotPublishWorkerRepository",
-    "SnapshotReapingRepository",
-    "SnapshotRepository",
-    "SnapshotRequestRepository",
     "SourceControlRepository",
     "SshServerRepository",
     "TeamAdminQueries",

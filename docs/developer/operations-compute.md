@@ -577,7 +577,7 @@ if checkpoints do.
 
 While the hold is in place the Host claims nothing. Every 15 seconds the
 control plane asks it to stop each idle group, as an administrator's stop
-would; a group with a running turn, operation, snapshot or open terminal is
+would; a group with a running turn, operation or open terminal is
 left for the next pass, so running turns are never interrupted. The stop
 stores the group's final checkpoint, and once that checkpoint covers the group
 it becomes `cold` at once, without waiting for the Host to be removed. Each

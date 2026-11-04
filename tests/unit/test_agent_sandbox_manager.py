@@ -7,7 +7,6 @@ import base64
 import contextlib
 import functools
 import gc
-import hashlib
 import json
 import logging
 import os
@@ -28,10 +27,7 @@ from tests.support.owners import launch_connection
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient
 from cloud_agent.schemas import RetainedSandboxStop
-from cloud_agent_host import (
-    base_bundle_request as base_bundle_request_mod,
-    sandbox_manager as sandbox_manager_mod,
-)
+from cloud_agent_host import sandbox_manager as sandbox_manager_mod
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ChatSandboxManager,
@@ -79,12 +75,6 @@ from cloud_agent_host.terminal_session import (
     _TerminalSession,
 )
 from cloud_agent_host.tool_windows import ToolMark
-from cloud_agent_shared.git.base_bundle_stream import (
-    BASE_BUNDLE_CONTENT_TYPE,
-    BASE_BUNDLE_STREAM_CAPABILITY,
-    LEGACY_BASE_BUNDLE_CONTENT_TYPE,
-    encode_base_bundle_metadata,
-)
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 
 
@@ -489,11 +479,6 @@ class _SharedSupervisor:
         self.calls.append(("backend", thread_id))
         self.network_proved_at = network_proved_at
         return self.workspace_backend
-
-    def capture_snapshot(self, thread_id: str, *, capture, start_seq: int | None = None):
-        self.calls.append(("snapshot", thread_id))
-        self.start_seqs.append(start_seq)
-        return {"patch": "diff --git a/a.txt b/a.txt\n"}
 
     def pending_questions(self, thread_id: str, *, owner: str):
         self.calls.append(("questions", thread_id, owner))
@@ -966,7 +951,8 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
 
     assert denied.status_code == 401
     assert health.json()["ok"] is True
-    assert BASE_BUNDLE_STREAM_CAPABILITY in health.json()["capabilities"]
+    # The trusted publisher's base import is gone, and so is its wire format.
+    assert "base-bundle-stream-v1" not in health.json()["capabilities"]
     rows = listed.json()["sandboxes"]
     assert len(rows) == 1
     assert rows[0]["shared_live"] is True
@@ -1645,24 +1631,11 @@ def test_a_crash_an_older_sandbox_manager_answers_as_plain_text_still_names_the_
 
 
 @pytest.mark.asyncio
-async def test_shared_registration_snapshot_and_base_import_keep_identity():
+async def test_shared_registration_keeps_identity_and_removed_publication_routes_are_gone():
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
     headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
     identity = _identity()
-    bundle = b"trusted-git-bundle"
-    commit_sha = "b" * 40
-    prefix = encode_base_bundle_metadata({**identity, "snapshot_id": 9, "commit_sha": commit_sha})
-
-    async def streamed_bundle():
-        # Fragment the frame header and combine the metadata tail with bundle
-        # bytes so neither side can depend on HTTP chunk boundaries.
-        yield prefix[:3]
-        yield prefix[3:-2]
-        yield prefix[-2:] + bundle[:4]
-        yield bundle[4:]
-
-    import_headers = {**headers, "Content-Type": BASE_BUNDLE_CONTENT_TYPE}
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1676,473 +1649,15 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
             json={**identity, "snapshot_id": 9, "workspace_epoch": 12, "base_sha": "a" * 40},
         )
         imported = await client.post(
-            "/shared-sandboxes/athr_source/import-base",
-            headers=import_headers,
-            content=streamed_bundle(),
+            "/shared-sandboxes/athr_source/import-base", headers=headers, content=b"bundle"
         )
 
-    patch = "diff --git a/a.txt b/a.txt\n"
     assert registered.status_code == 200
     assert registered.json()["sandbox_id"] == "asbx_shared"
-    assert captured.json()["content_sha256"] == hashlib.sha256(patch.encode()).hexdigest()
-    assert imported.json()["workspace_head_preserved"] is True
-    assert supervisor.imports == [
-        (
-            bundle,
-            commit_sha,
-            {
-                "GIT_CONFIG_COUNT": "1",
-                "GIT_CONFIG_KEY_0": "safe.directory",
-                "GIT_CONFIG_VALUE_0": "/workspace",
-            },
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_base_import_accepts_old_control_plane_json_during_rollout():
-    """A new host incrementally accepts the exact previous JSON request."""
-    supervisor = _SharedSupervisor()
-    app = _app(supervisor)
-    bundle = b"legacy-trusted-git-bundle"
-    commit_sha = "b" * 40
-    legacy = json.dumps(
-        {
-            **_identity(),
-            "snapshot_id": 9,
-            "commit_sha": commit_sha,
-            "bundle_b64": base64.b64encode(bundle).decode("ascii"),
-        },
-        separators=(",", ":"),
-    ).encode("ascii")
-    marker = legacy.index(b',"bundle_b64":"')
-
-    async def old_request():
-        # TCP/ASGI chunks need not preserve the old client's JSON field boundary.
-        yield legacy[: marker + 5]
-        yield legacy[marker + 5 : marker + 19]
-        yield legacy[marker + 19 : -3]
-        yield legacy[-3:]
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        imported = await client.post(
-            "/shared-sandboxes/athr_source/import-base",
-            headers={
-                "X-Agent-Workspace-Token": "sandbox-manager-secret",
-                "Content-Type": LEGACY_BASE_BUNDLE_CONTENT_TYPE,
-            },
-            content=old_request(),
-        )
-
-    assert imported.status_code == 200, imported.text
-    assert imported.json()["workspace_head_preserved"] is True
-    assert supervisor.imports[0][:2] == (bundle, commit_sha)
-
-
-@pytest.mark.asyncio
-async def test_base_import_refuses_over_limit_before_consuming_the_stream_tail(monkeypatch):
-    supervisor = _SharedSupervisor()
-    app = _app(supervisor)
-    identity = _identity()
-    prefix = encode_base_bundle_metadata({**identity, "snapshot_id": 9, "commit_sha": "b" * 40})
-    monkeypatch.setattr(base_bundle_request_mod, "DEFAULT_MAX_BASE_BUNDLE_BYTES", 8)
-    consumed_tail = False
-
-    async def oversized():
-        nonlocal consumed_tail
-        yield prefix
-        yield b"12345678"
-        yield b"9"
-        consumed_tail = True
-        yield b"must-not-be-consumed"
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        response = await client.post(
-            "/shared-sandboxes/athr_source/import-base",
-            headers={
-                "X-Agent-Workspace-Token": "sandbox-manager-secret",
-                "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
-            },
-            content=oversized(),
-        )
-
-    assert response.status_code == 413
-    assert response.json()["detail"] == "base bundle exceeds the import limit"
-    assert consumed_tail is False
+    # The platform no longer captures or publishes a workspace: the agent does.
+    assert captured.status_code in {404, 405}
+    assert imported.status_code in {404, 405}
     assert supervisor.imports == []
-
-
-@pytest.mark.asyncio
-async def test_legacy_base_import_refuses_over_limit_before_consuming_the_tail(monkeypatch):
-    supervisor = _SharedSupervisor()
-    app = _app(supervisor)
-    metadata = json.dumps(
-        {**_identity(), "snapshot_id": 9, "commit_sha": "b" * 40},
-        separators=(",", ":"),
-    ).encode("ascii")
-    prefix = metadata[:-1] + b',"bundle_b64":"'
-    monkeypatch.setattr(base_bundle_request_mod, "DEFAULT_MAX_BASE_BUNDLE_BYTES", 8)
-    consumed_tail = False
-
-    async def oversized():
-        nonlocal consumed_tail
-        yield prefix
-        yield base64.b64encode(b"123456789")
-        consumed_tail = True
-        yield b'"}'
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        response = await client.post(
-            "/shared-sandboxes/athr_source/import-base",
-            headers={
-                "X-Agent-Workspace-Token": "sandbox-manager-secret",
-                "Content-Type": LEGACY_BASE_BUNDLE_CONTENT_TYPE,
-            },
-            content=oversized(),
-        )
-
-    assert response.status_code == 413
-    assert response.json()["detail"] == "base bundle exceeds the import limit"
-    assert consumed_tail is False
-    assert supervisor.imports == []
-
-
-@pytest.mark.asyncio
-async def test_a_refused_snapshot_patch_keeps_its_final_status(monkeypatch):
-    """A patch that is not exact UTF-8 is refused for good, not retried.
-
-    The snapshot coordinator marks a capture that answered 502 dirty and
-    retries one that answered 503, so redacting the refusal's detail must not
-    turn it into a host failure.
-    """
-    supervisor = _SharedSupervisor()
-    supervisor.capture_snapshot = (  # type: ignore[method-assign]
-        lambda _thread_id, *, capture, **_kwargs: capture(object())
-    )
-
-    def refuse(*_args, **_kwargs):
-        raise HTTPException(status_code=502, detail="workspace patch is not exact UTF-8 text")
-
-    # The workspace holds its base; only the patch is refused.
-    monkeypatch.setattr(sandbox_manager_mod, "_commit_missing", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(sandbox_manager_mod, "_run_git", refuse)
-    app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        captured = await client.post(
-            "/shared-sandboxes/athr_source/snapshot",
-            headers=headers,
-            json={**_identity(), "snapshot_id": 9, "workspace_epoch": 12, "base_sha": "a" * 40},
-        )
-
-    assert captured.status_code == 502
-    assert captured.json()["detail"] == "workspace patch is not exact UTF-8 text"
-
-
-_HERMETIC_GIT_ENV = {
-    "PATH": "/usr/bin:/bin:/usr/local/bin",
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_CONFIG_SYSTEM": "/dev/null",
-    "GIT_AUTHOR_NAME": "Test",
-    "GIT_AUTHOR_EMAIL": "t@example.com",
-    "GIT_COMMITTER_NAME": "Test",
-    "GIT_COMMITTER_EMAIL": "t@example.com",
-}
-
-
-def _hermetic_git(args: list[str], cwd) -> str:
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        env=_HERMETIC_GIT_ENV,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-
-
-def _workspace_with_imported_bases(
-    tmp_path, monkeypatch, *, publications: int = 1
-) -> SimpleNamespace:
-    """A workspace that imported its published bases the way the host does.
-
-    The runner's shallow detached checkout, then per publication an edit, the
-    capture, the trusted publisher's commit and base bundle, and
-    :meth:`ChatSandboxManager.import_base_bundle` unbundling it with its exec
-    run here. No ref in the workspace names a published commit. Returns the
-    workspace, the origin's ``file://`` URL, the base the workspace started
-    from, the published commits in order, and the import.
-    """
-    from cloud_agent.publisher import publish_patch
-    from cloud_agent_host import chat_sandbox
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    source = tmp_path / "source"
-    source.mkdir()
-    _hermetic_git(["init", "-q", "--initial-branch=main", "."], source)
-    (source / "app.py").write_text("x = 0\n")
-    _hermetic_git(["add", "-A"], source)
-    _hermetic_git(["commit", "-qm", "init"], source)
-    base = _hermetic_git(["rev-parse", "HEAD"], source).strip()
-    origin = tmp_path / "origin.git"
-    _hermetic_git(["clone", "-q", "--bare", str(source), str(origin)], tmp_path)
-    _hermetic_git(["config", "uploadpack.allowAnySHA1InWant", "true"], origin)
-
-    workspace = tmp_path / "workspace"
-    _hermetic_git(["init", "-q", str(workspace)], tmp_path)
-    _hermetic_git(["fetch", "-q", "--depth", "2", f"file://{origin}", base], workspace)
-    _hermetic_git(["checkout", "-q", "--detach", "FETCH_HEAD"], workspace)
-
-    activation_tmpfs = tmp_path / "activation"
-    activation_tmpfs.mkdir()
-    monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(activation_tmpfs))
-    manager = ChatSandboxManager(ContainerBackend(image="img"))
-
-    def exec_here(_spec, argv, *, env, workdir, timeout_s, stdin):
-        return subprocess.run(
-            argv,
-            cwd=workspace,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), **env},
-            stdin=stdin,
-            capture_output=True,
-            timeout=timeout_s,
-            check=False,
-        )
-
-    monkeypatch.setattr(manager, "exec_capture", exec_here)
-
-    def import_base(bundle, commit: str) -> None:
-        manager.import_base_bundle(SimpleNamespace(), bundle, commit=commit, env={})
-
-    published: list[str] = []
-    current = base
-    for number in range(1, publications + 1):
-        (workspace / "app.py").write_text(f"x = {number}\n")
-        captured = sandbox_manager_mod._run_git(
-            ProcessBackend(acknowledged_unsafe=True), str(workspace), current, exact_patch=True
-        )
-        result = publish_patch(
-            job_id=f"ajob_gc{number}",
-            branch_id="athr_source",
-            patch=captured["patch"],
-            clone_url=f"file://{origin}",
-            base_sha=current,
-            commit_message=f"agent: x = {number}",
-            include_base_bundle=True,
-        )
-        assert result.base_bundle
-        import_base(result.base_bundle, result.commit_sha)
-        result.base_bundle.close()
-        published.append(result.commit_sha)
-        current = result.commit_sha
-    refs = _hermetic_git(["for-each-ref"], workspace)
-    assert not any(commit in refs for commit in published)
-    # The agent keeps working in its own Git state.
-    (workspace / "app.py").write_text(f"x = {publications + 1}\n")
-    return SimpleNamespace(
-        workspace=str(workspace),
-        origin=f"file://{origin}",
-        base=base,
-        published=published,
-        import_base=import_base,
-    )
-
-
-def _prune_unreferenced_objects(workspace: str) -> None:
-    """Three weeks on: age every pack past the default window and run ``git gc``."""
-    three_weeks_ago = time.time() - 21 * 24 * 3600
-    packs = os.path.join(workspace, ".git", "objects", "pack")
-    for name in os.listdir(packs):
-        os.utime(os.path.join(packs, name), (three_weeks_ago, three_weeks_ago))
-    _hermetic_git(["gc", "--quiet"], workspace)
-
-
-def _holds(workspace: str, commit: str) -> bool:
-    return (
-        subprocess.run(
-            ["git", "cat-file", "-e", commit],
-            cwd=workspace,
-            env=_HERMETIC_GIT_ENV,
-            capture_output=True,
-            check=False,
-        ).returncode
-        == 0
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pruned", [False, True], ids=["kept", "pruned"])
-async def test_a_capture_whose_base_git_pruned_asks_for_it_again(tmp_path, monkeypatch, pruned):
-    """A published base that Git pruned is refused as missing, not as a bad patch.
-
-    The import writes no ref, by design, so three weeks on any default
-    ``git gc`` prunes the published commit. ``read-tree`` then fails with the
-    same 502 as a refused patch, which fails the snapshot, and every later
-    request, cut from the same base, failed alike. The capture now tells the
-    two apart, so the control plane can import the base again and retry.
-    """
-    from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
-
-    setup = _workspace_with_imported_bases(tmp_path, monkeypatch)
-    workspace, [published] = setup.workspace, setup.published
-    if pruned:
-        _prune_unreferenced_objects(workspace)
-        assert not _holds(workspace, published), "git gc must have pruned the published base"
-
-    supervisor = _SharedSupervisor()
-    supervisor.capture_snapshot = (  # type: ignore[method-assign]
-        lambda _thread_id, *, capture, **_kwargs: capture(ProcessBackend(acknowledged_unsafe=True))
-    )
-    monkeypatch.setattr(sandbox_manager_mod, "CHAT_WORKDIR", workspace)
-    app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        captured = await client.post(
-            "/shared-sandboxes/athr_source/snapshot",
-            headers=headers,
-            json={**_identity(), "snapshot_id": 9, "workspace_epoch": 12, "base_sha": published},
-        )
-
-    if pruned:
-        assert captured.status_code == 409
-        assert captured.json() == {"detail": SNAPSHOT_BASE_MISSING}
-    else:
-        assert captured.status_code == 200
-        assert "-x = 1\n+x = 2\n" in captured.json()["patch"]
-
-
-@pytest.mark.asyncio
-async def test_the_import_retry_brings_back_a_base_git_pruned_with_the_one_before_it(
-    tmp_path, monkeypatch
-):
-    """Git prunes every published commit in one pass; the retry imports the newest again.
-
-    Two publications, then three weeks and a ``git gc``: both published
-    commits are gone, since no ref names either. A bundle of the second that
-    needs the first in the workspace, as the retry used to fetch, can never be
-    unbundled there again. It is cut from the base the workspace started from
-    instead, which the workspace's own history keeps, and the capture of the
-    published base works again after the import.
-    """
-    from cloud_agent import publish_worker, sandbox_manager_routing
-    from cloud_agent.publish_worker import GitHubCredential
-
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "o/n")
-    setup = _workspace_with_imported_bases(tmp_path, monkeypatch, publications=2)
-    first, second = setup.published
-    _prune_unreferenced_objects(setup.workspace)
-    assert not _holds(setup.workspace, first)
-    assert not _holds(setup.workspace, second)
-
-    class _LocalOrigin(GitHubCredential):
-        def clone_url(self, repo: str) -> str:
-            assert repo == "o/n"
-            return setup.origin
-
-    class _Host:
-        async def import_shared_base(self, _row, *, commit_sha: str, bundle):
-            await asyncio.to_thread(setup.import_base, bundle, commit_sha)
-            return {"ok": True}
-
-    async def route(_store, job_id: str) -> _Host:
-        assert job_id == "ajob_gc2"
-        return _Host()
-
-    outcomes: list[tuple[str, int, str]] = []
-
-    async def failed(*, snapshot_id: int, detail: str, delay_s: float | None = None) -> None:
-        outcomes.append(("failed", snapshot_id, detail))
-
-    async def completed(
-        *, snapshot_id: int, commit_sha: str, generation: int, container_id: str | None
-    ) -> bool:
-        outcomes.append(("completed", snapshot_id, commit_sha))
-        return True
-
-    async def fenced(*, sandbox_id: str) -> tuple[str, int | None]:
-        return "stopped", 3
-
-    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
-    store = SimpleNamespace(
-        snapshot=SimpleNamespace(
-            fence_base_import_start=fenced,
-            record_snapshot_base_import_failure=failed,
-            complete_snapshot_base_import=completed,
-        ),
-        host_pool=None,
-        source_control=None,
-    )
-    pending = {
-        "snapshot_id": 12,
-        "sandbox_id": "asbx_gc",
-        "anchor_job_id": "ajob_gc2",
-        "repo": "o/n",
-        "user_id": "u1",
-        "published_commit_sha": second,
-        # The second publication was cut from the first: what the retry used.
-        "base_sha": first,
-        "origin_base_sha": setup.base,
-        "generation": 1,
-        "container_id": "container-gc",
-    }
-
-    imported = await publish_worker._retry_base_import(
-        store,  # type: ignore[arg-type]
-        pending,
-        credential=_LocalOrigin("local-test-token"),
-        app_credentials=None,
-    )
-
-    assert outcomes == [("completed", 12, second)], outcomes
-    assert imported is True
-    assert _holds(setup.workspace, second)
-    captured = sandbox_manager_mod._run_git(
-        ProcessBackend(acknowledged_unsafe=True), setup.workspace, second, exact_patch=True
-    )
-    assert "-x = 2\n+x = 3\n" in captured["patch"]
-
-
-@pytest.mark.asyncio
-async def test_base_import_resolves_its_workspace_off_the_event_loop(monkeypatch):
-    """The supervisor's metadata lock is never waited on by the event loop."""
-    supervisor = _SharedSupervisor()
-    loop_thread = threading.current_thread()
-    callers: list[threading.Thread] = []
-    resolve = supervisor.backend
-
-    def backend(thread_id: str):
-        callers.append(threading.current_thread())
-        return resolve(thread_id)
-
-    monkeypatch.setattr(supervisor, "backend", backend)
-    app = _app(supervisor)
-    headers = {
-        "X-Agent-Workspace-Token": "sandbox-manager-secret",
-        "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
-    }
-    prefix = encode_base_bundle_metadata({**_identity(), "snapshot_id": 9, "commit_sha": "b" * 40})
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        imported = await client.post(
-            "/shared-sandboxes/athr_source/import-base",
-            headers=headers,
-            content=prefix + b"trusted-git-bundle",
-        )
-
-    assert imported.status_code == 200
-    assert callers and all(caller is not loop_thread for caller in callers)
 
 
 @pytest.mark.asyncio

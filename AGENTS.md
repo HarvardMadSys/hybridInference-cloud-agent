@@ -6,8 +6,9 @@ agent. Read this first.
 ## 1. What this is
 
 Cloud Agent runs coding agents (Claude Code, Codex, pi, OpenCode, Kilo) in
-sandboxed containers against a user's repository and, when the owner asks,
-publishes results as pull requests.
+sandboxed containers against a user's repository. When the owner asks, the
+agent pushes a branch and opens a pull request itself, as that owner, through
+the platform's GitHub relay.
 
 The extraction from the HybridInference monorepo
 (`HarvardMadSys/hybridInference`) is complete: production cut over on
@@ -23,12 +24,12 @@ work tracks in this repository's issues and pull requests.
 apps/
 ├── backend/
 │   ├── cloud_agent/           control plane (FastAPI): API, auth adapter,
-│   │                          scheduler, publishing, storage
+│   │                          scheduler, MCP and GitHub relays, storage
 │   ├── cloud_agent_host/      host agent: runner, sandbox, runtimes, sandbox manager
 │   ├── cloud_agent_shared/    vocabulary both images ship: capability strings,
 │   │   │                      protocol versions, pins, sandbox network, shared errors,
 │   │   │                      and the operation-profiling collector both sides run
-│   │   └── git/               the patch gate and the source-archive builders
+│   │   └── git/               workspace branch names and the source-archive builders
 │   ├── migrations/            Alembic migrations (agent-owned database only)
 │   └── openapi.json           the committed snapshot of this service's OpenAPI
 └── frontend/                  Next.js user UI + admin dashboard
@@ -46,20 +47,20 @@ database stamped with the chain that predates it.
 
 | Module | What it owns |
 |---|---|
-| `apps/backend/cloud_agent/app.py` | The two listeners: the main API and the MCP-only one |
+| `apps/backend/cloud_agent/app.py` | The three listeners: the main API, the MCP-only one and the GitHub relay |
 | `apps/backend/cloud_agent/api/` | One router module per surface — jobs, hosts, admin, session, MCP relay |
 | `apps/backend/cloud_agent/schemas/` | Domain-organized wire models, explicitly exported by `cloud_agent.schemas` |
 | `apps/backend/cloud_agent/application/` | Flows that run without a request: job admission and creation, native Fork materialization, residency credentials |
 | `apps/backend/cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
-| `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, queue and goal recovery, shared-workspace snapshot capture |
-| `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, publication |
+| `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, queue and goal recovery, sandbox deletion, notifications and maintenance |
+| `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, pull-request records |
 | `apps/backend/cloud_agent/runtime_usage.py`, `ledger.py`, `admin_usage.py`, `grant_usage.py` | What agents reported about their model calls, per job and summed for the Usage pages; no cost or quota ([usage](docs/developer/operations.md#usage)) |
 | `apps/backend/cloud_agent/agent_access.py` | The admission decision (`agent.use`, `agent.admin`) every protected request reads |
 | `apps/backend/cloud_agent/identity_namespace.py` | Binds an empty database to the account system once, and refuses a Gateway-era one (`--check` reads it without writing) |
 | `apps/backend/cloud_agent/accounts/`, `application/owner_termination.py` | The account system: sign-in, sessions, the waiting list, the account directory, retired-configuration refusal, and stopping a revoked account's work ([guide](docs/developer/local-accounts.md)) |
 | `apps/backend/cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
 | `apps/backend/cloud_agent/mcp/runtime.py` | Process-local MCP host, fenced session maintenance, and shutdown |
-| `apps/backend/cloud_agent/publisher.py`, `publish_worker.py`, `source_control.py` | Branch and draft-PR publication, and the GitHub/GitLab credentials behind it |
+| `apps/backend/cloud_agent/github_relay_policy.py`, `api/github_relay.py`, `source_control.py` | The GitHub relay and its policy, and the GitHub/GitLab credentials behind them |
 | `apps/backend/cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
 | `apps/backend/cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
 | `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
@@ -262,18 +263,18 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   branch deletion, tags, GraphQL and repository administration. A member
   shares the owner's identity, not their token: commits are authored as the
   owner, and the owner's token, refresh token and the App's private key stay
-  in the control plane. Pushes through the relay do not pass the trusted
-  publisher's patch gate; repository branch protection and GitHub rules still
-  apply ([design](docs/agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md)).
+  in the control plane. Nothing on the platform scans what goes through the
+  relay; repository branch protection, GitHub's push protection and the
+  repository's CI still apply ([design](docs/agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md)).
 - **Owner-provided environment credentials.** An owner may deliberately inject
   personal variables and Secrets through a frozen environment binding. Repository
   code, dependencies and the agent can read them, send them through the existing
   public egress, or write them into files/model context. These are user-supplied
   credentials, not platform credentials. The platform encrypts stored values,
-  keeps Secrets write-only, filters setup/runtime phases, masks known values in
-  durable output and scans trusted snapshot/publication additions, including
-  binary content. These controls do not prevent deliberate exfiltration or direct
-  Git pushes. Same-owner Fork inherits the binding; the only cross-owner
+  keeps Secrets write-only, filters setup/runtime phases and masks known values
+  in durable output. Nothing on the platform scans what an agent pushes; GitHub's
+  push protection and the repository's CI are the only checks on a push. These
+  controls do not prevent deliberate exfiltration. Same-owner Fork inherits the binding; the only cross-owner
   sharing is a team's environment, below. Reserved platform/host variable names and the existing fixed
   network and member credential boundaries still apply. An owner's
   `OPENAI_*`/`ANTHROPIC_*` variables supplied through an environment binding never
@@ -306,7 +307,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   the runner's durable output: a key reaches a member only when that member's
   own turn starts, from that turn's claim, and a push mid-turn only takes
   access away, so every key in a sandbox is one its running turn masks.
-  Snapshot and publication scanning do not look for them. The control plane
+  The control plane
   dials a server only when its owner runs a check, under the same
   public-address rules, an hourly per-owner limit, and a 64 KB cap on what it
   reads back. See the
@@ -323,13 +324,11 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   activation tmpfs, never in argv, and the runner masks it in durable output.
   Repository code, dependencies and the agent can read and exfiltrate it
   through the existing public egress, as with owner environment credentials.
-  Trusted snapshot and publication paths scan the exact sandbox group's used
-  key history, including rotations and same-owner Fork members. An encrypted
-  scanning copy is recorded only when a key is bound to a residency and kept
-  with the sandbox group record, even after connection deletion; execution
-  paths never select it. It remains a real provider secret, and deletion here
-  does not revoke it upstream. Other groups' keys never enter this scan;
-  exceeding its bounded history fails closed. Login and Agent admission are
+  An encrypted scanning copy is still recorded when a key is bound to a
+  residency and kept with the sandbox group record, even after connection
+  deletion, but nothing reads it since the workspace snapshot scan was
+  removed; execution paths never select it. It remains a real provider
+  secret, and deletion here does not revoke it upstream. Login and Agent admission are
   the account system's. Nothing is saved unverified, and there is no manual
   declaration of APIs: creating a connection, and an edit that changes its
   key or Base URL or adds models, verifies the models it would list inside the

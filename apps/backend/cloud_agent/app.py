@@ -412,9 +412,10 @@ def create_mcp_app() -> FastAPI:
         title="Cloud Agent — MCP relay",
         description="The only surface a sandbox may reach",
         version="0.1.0",
-        # No reaper and no publisher: they belong to the control-plane process,
-        # and a second copy would renew every grant twice and race the same
-        # publish. This listener still maintains its own upstream MCP sockets.
+        # No reaper and no maintenance loops: they belong to the control-plane
+        # process, and a second copy would renew every grant twice and race the
+        # other's passes. This listener still maintains its own upstream MCP
+        # sockets.
         lifespan=lambda app: lifespan(app, background=False),
         dependencies=[Depends(refuse_unstorable_parameters)],
         # Never, whatever the main listener does: a sandbox reaches this one,
@@ -453,8 +454,8 @@ def create_github_relay_app() -> FastAPI:
         title="Cloud Agent — GitHub relay",
         description="git and gh in a sandbox, as the conversation's owner",
         version="0.1.0",
-        # No reaper and no publisher, as for the MCP relay; but the GitHub App's
-        # credentials, which renew an owner's GitHub token.
+        # No reaper and no maintenance loops, as for the MCP relay; but the
+        # GitHub App's credentials, which renew an owner's GitHub token.
         lifespan=lambda app: lifespan(app, background=False, source_control=True),
         **_NO_DOCS,
     )

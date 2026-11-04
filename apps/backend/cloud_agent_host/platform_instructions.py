@@ -9,6 +9,7 @@ project settings are untrusted launch input), so the agent is told to read them.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -41,7 +42,9 @@ def platform_instructions(launch: ResidentLaunch) -> str:
         "Your commits are authored by that user already (GIT_AUTHOR_* is set); do "
         "not change the author.",
     ]
-    if launch.git_coauthor:
+    # Claude Code adds the trailer itself (``claude_attribution``); asked to as
+    # well, it would write it twice.
+    if launch.git_coauthor and launch.runtime_id != "claude-code":
         lines += [
             "End every commit message with this trailer, after a blank line:",
             f"`Co-Authored-By: {launch.git_coauthor}`",
@@ -66,6 +69,34 @@ def platform_instructions(launch: ResidentLaunch) -> str:
         "administration (settings, webhooks, secrets, branch protection).",
     ]
     return "\n".join(lines) + "\n"
+
+
+def with_platform_instructions(
+    runtime_id: str, argv: list[str], env: dict[str, str], instructions: str
+) -> tuple[list[str], dict[str, str]]:
+    """Hand ``instructions`` to one CLI the way that CLI takes extra system instructions.
+
+    Each was checked against its pinned release:
+
+    - Claude Code and pi: ``--append-system-prompt``, appended last so the slots
+      a resident session finds by index stay where they are.
+    - Codex: the ``developer_instructions`` config key, as a ``-c`` override
+      before the ``app-server`` subcommand (a JSON string is a TOML basic string).
+    - OpenCode and Kilo: their config's ``instructions`` file list, which the
+      image's ``<name>-freeinference`` wrapper writes from
+      ``<NAME>_FREEINFERENCE_INSTRUCTIONS`` beside the config it already writes.
+    """
+    if not instructions:
+        return argv, env
+    if runtime_id in {"claude-code", "pi"}:
+        return [*argv, "--append-system-prompt", instructions], env
+    if runtime_id == "codex" and "app-server" in argv:
+        at = argv.index("app-server")
+        override = ["-c", f"developer_instructions={json.dumps(instructions)}"]
+        return [*argv[:at], *override, *argv[at:]], env
+    if runtime_id in {"opencode", "kilo"}:
+        return argv, {**env, f"{runtime_id.upper()}_FREEINFERENCE_INSTRUCTIONS": instructions}
+    return argv, env
 
 
 def claude_attribution(launch: ResidentLaunch) -> dict[str, dict[str, str]]:

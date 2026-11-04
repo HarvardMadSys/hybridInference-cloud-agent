@@ -46,7 +46,11 @@ from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
 from cloud_agent_host.member_paths import write_member_github_trust
 from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
-from cloud_agent_host.platform_instructions import claude_attribution, platform_instructions
+from cloud_agent_host.platform_instructions import (
+    claude_attribution,
+    platform_instructions,
+    with_platform_instructions,
+)
 from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
@@ -976,9 +980,7 @@ class ResidentTransportFactory:
                 self._prepare_runtime_helpers(spec, launch)
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
-            if runtime_id == "claude-code" and instructions:
-                # Last, so the slots the resident session finds by index stay put.
-                argv = [*argv, "--append-system-prompt", instructions]
+            argv, env = with_platform_instructions(runtime_id, argv, env, instructions)
             return self._manager.spawn(
                 spec,
                 argv,

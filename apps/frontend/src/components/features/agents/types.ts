@@ -396,25 +396,14 @@ export interface AgentJob {
   workspaceShared?: boolean;
   nativeState?: 'new' | 'ready' | 'fork_preparing' | 'lost';
   nativeForkAvailable?: boolean;
-  workspacePublicationState?:
-    | 'pending'
-    | 'capturing'
-    | 'captured'
-    | 'publishing'
-    | 'published'
-    | 'failed';
-  /** The newest publication found nothing to publish and opened no PR. */
-  workspacePublicationUnchanged?: boolean;
-  /** The pull request the conversation's workspace was last published to. */
+  /** The newest pull request this conversation's agent opened. */
   workspacePrUrl?: string;
-  /** The workspace holds turns not yet published, or its last publication failed. */
-  workspaceUnpublishedChanges?: boolean;
   workspaceEpoch?: number;
   /** Wall time of the turn's newest attempt (legacy/default view). */
   durationMs?: number;
   /** Host-measured consumption for the newest attempt (legacy/default view). */
   resources?: TurnResources;
-  /** e.g. "draft PR #1044" once published. */
+  /** e.g. "draft PR #1044" once the agent opened one. */
   prLabel?: string;
   prUrl?: string;
   threadId?: string;

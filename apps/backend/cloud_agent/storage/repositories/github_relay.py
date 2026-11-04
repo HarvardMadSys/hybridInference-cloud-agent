@@ -72,8 +72,13 @@ class PostgresGitHubRelayRepository:
         base_ref: str,
         draft: bool,
     ) -> None:
-        """Insert the pull request once; a repeat report keeps the first row."""
-        async with self._pool.acquire() as conn:
+        """Insert the pull request once, and name it on the turn that opened it.
+
+        A repeat report keeps the first row. The turn's ``published_pr_url``
+        keeps the first pull request it opened; writing it bumps the job's
+        revision, which is what tells the owner's open tabs to read it.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 """
                 INSERT INTO agent_thread_pull_requests
@@ -90,6 +95,15 @@ class PostgresGitHubRelayRepository:
                 head_ref,
                 base_ref,
                 draft,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_jobs SET published_pr_url = $2, updated_at = NOW()
+                WHERE id = $1 AND thread_id = $3 AND published_pr_url IS NULL
+                """,
+                job_id,
+                url,
+                thread_id,
             )
 
     async def list_pull_requests(self, *, thread_id: str, limit: int = 20) -> list[dict[str, Any]]:

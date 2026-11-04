@@ -12,7 +12,8 @@ sandboxes.
 Users give tasks from a web interface. Enrolled hosts run Claude Code, Codex,
 pi, OpenCode, or Kilo against the repository, each in its own native session
 inside a sandbox that survives between turns. The control plane schedules the
-work, streams it to the browser, and publishes the result as a pull request.
+work and streams it to the browser; when asked, the agent opens a pull request
+as its owner.
 Accounts are Cloud Agent's own, admitted through a waiting list, and every task
 runs on a model connection its owner adds with their own provider key (for
 example a FreeInference key).
@@ -29,10 +30,10 @@ example a FreeInference key).
   replaying a transcript.
 - **Fork.** Branch a chat into a second chat that shares the workspace and runs
   in parallel with its own process and credentials.
-- **Pull requests.** When the owner asks, never on its own, the platform
-  publishes a workspace to its branch as a draft pull request, after a secret
-  scan and path checks; asking again updates it. Agents can also push
-  and open pull requests themselves with a short-lived, repository-scoped token.
+- **Pull requests.** Ask in the chat and the agent commits, pushes a branch and
+  opens the pull request itself, as you. Its git and `gh` reach GitHub through
+  a relay that keeps your GitHub token in the control plane and lets the agent
+  act only on the conversation's repository.
   **Review** starts an independent reviewer; **Watch PR and merge** follows
   checks and reviews until the pull request merges.
 - **Reusable environments.** Configure a repository's variables, secrets, setup
@@ -97,12 +98,14 @@ the checks for each area.
 ```mermaid
 flowchart TD
     Browser[Browser] --> Web[Next.js web app and BFF]
-    Web --> Control[Control plane: API, scheduling, publication]
+    Web --> Control[Control plane: API, scheduling, relays]
     Control --> Database[(Agent-owned PostgreSQL)]
     Host[Enrolled host: runner and sandbox manager] <-->|Claims, heartbeats, workspace| Control
     Host -->|Container lifecycle| Sandbox[Retained sandbox group: shared workspace, native CLI sessions]
     Sandbox -->|The owner's provider key, over public HTTPS| Provider[The owner's model provider]
     Sandbox -->|Scoped tool credential via relay| MCP[Control plane MCP-only listener]
+    Sandbox -->|git and gh with a placeholder credential| GitHubRelay[Control plane GitHub relay]
+    GitHubRelay -->|The owner's GitHub token| GitHub[GitHub]
     Sandbox -->|TCP 80 and 443 under host rules| Public[Public IPv4 destinations]
 ```
 

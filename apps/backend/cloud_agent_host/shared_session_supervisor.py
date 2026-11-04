@@ -3518,108 +3518,6 @@ class SharedChatSessionSupervisor:
             if group.environment_owner == activation_owner and group.environment_cancel:
                 group.environment_cancel.set()
 
-    def capture_snapshot(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
-        self,
-        thread_id: str,
-        *,
-        capture: Callable[[RetainedChatBackend], dict[str, Any]],
-        start_seq: int | None = None,
-    ) -> dict[str, Any]:
-        """Run one bounded Git capture while all existing writers are stopped.
-
-        The metadata lock is held only while installing/removing the barrier.
-        Docker exec and Git work happen outside it, so status/read paths stay
-        responsive.  New turns, forks, terminals, and mutating sandbox manager
-        operations observe ``snapshotting`` and wait/retry.  A normal idle
-        stop is not a reason to abandon publication: start that exact retained
-        container, capture it, and arm its ordinary idle deadline again.
-        """
-        with self._lock:
-            group, _ = self._member(thread_id)
-        self._recover_start_archive_completion(group)
-        with self._lock:
-            group, _ = self._member(thread_id)
-            self._require_mutation_admission(group)
-            if not self._is_quiescent(group):
-                raise SessionBusy("shared workspace still has active mutations")
-            # The barrier goes up first, so Docker can be asked without the lock.
-            group.snapshotting = True
-            group.idle_deadline = None
-            lifecycle_generation = group.lifecycle_generation
-            slots = [member.resident_slot_id for member in group.members.values()]
-        try:
-            current = self._manager.inspect(group.spec.container_name)
-            with self._lock:
-                if current is None:
-                    raise RetainedChatLost("shared sandbox container is missing")
-                self._accept_inspection_locked(group, current)
-                expected_container_id = group.inspection.container_id
-                if current.running:
-                    # The barrier keeps the group from stopping under it.
-                    self._join_run_locked(group, start_seq)
-        except BaseException:
-            with self._lock:
-                group.snapshotting = False
-                self._arm_idle_if_quiescent(group)
-                self._condition.notify_all()
-            raise
-
-        manifest: str | None = None
-        capture_error: BaseException | None = None
-        result: dict[str, Any] | None = None
-        try:
-            if not current.running:
-                started, _proved = self._start_group(group, start_seq=start_seq)
-                with self._lock:
-                    if group.stopping or group.lifecycle_generation != lifecycle_generation:
-                        raise SessionLeaseLost(
-                            "shared sandbox lifecycle changed while starting snapshot capture"
-                        )
-                    group.inspection = started
-            manifest = self._manager.freeze_shared_writers(
-                group.spec,
-                slot_ids=slots,
-                token=secrets.token_hex(16),
-                expected_container_id=expected_container_id,
-            )
-            result = capture(RetainedChatBackend(self._manager, group.spec))
-        except BaseException as exc:
-            capture_error = exc
-        thaw_error: BaseException | None = None
-        identity_error: BaseException | None = None
-        if manifest is not None:
-            try:
-                self._require_current_inspection(group)
-            except BaseException as exc:
-                identity_error = exc
-            try:
-                self._manager.thaw_shared_writers(
-                    group.spec,
-                    slot_ids=slots,
-                    manifest=manifest,
-                    expected_container_id=expected_container_id,
-                )
-            except BaseException as exc:
-                thaw_error = exc
-            try:
-                self._require_current_inspection(group)
-            except BaseException as exc:
-                if identity_error is None:
-                    identity_error = exc
-        with self._lock:
-            group.snapshotting = False
-            self._arm_idle_if_quiescent(group)
-            self._condition.notify_all()
-        if thaw_error is not None:
-            raise thaw_error
-        if identity_error is not None:
-            raise identity_error
-        if capture_error is not None:
-            raise capture_error
-        if result is None:
-            raise SandboxError("shared snapshot capture returned no result")
-        return result
-
     def _require_initial_archive_admission(
         self,
         group: _Group,
@@ -3678,8 +3576,7 @@ class SharedChatSessionSupervisor:
     ) -> dict[str, Any]:
         """Capture the pre-prompt workspace owned by one fresh activation.
 
-        Unlike a publication snapshot, this boundary deliberately permits the
-        addressed activation lease: the runner has completed checkout/setup
+        This boundary deliberately permits the addressed activation lease: the runner has completed checkout/setup
         but has not created a resident CLI process or admitted its prompt.
         Every other writer remains excluded, and setup descendants are frozen
         while Docker copies the workspace.

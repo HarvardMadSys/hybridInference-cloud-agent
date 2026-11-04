@@ -55,7 +55,6 @@ from cloud_agent.storage.repositories.sandbox import PostgresSandboxRepository
 from cloud_agent.storage.repositories.session_fork import PostgresSessionForkRepository
 from cloud_agent.storage.repositories.settings import PostgresSettingsRepository
 from cloud_agent.storage.repositories.skills import PostgresSkillRepository
-from cloud_agent.storage.repositories.snapshot import PostgresSnapshotRepository
 from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
 from cloud_agent.storage.repositories.ssh_servers import PostgresSshServerRepository
 from cloud_agent.storage.repositories.team_admin import PostgresTeamAdminQueries
@@ -100,7 +99,6 @@ __all__ = [
     "PostgresSessionForkRepository",
     "PostgresSettingsRepository",
     "PostgresSkillRepository",
-    "PostgresSnapshotRepository",
     "PostgresSourceControlRepository",
     "PostgresSshServerRepository",
     "PostgresTeamAdminQueries",

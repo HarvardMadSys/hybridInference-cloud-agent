@@ -107,31 +107,6 @@ SETTINGS: tuple[Setting, ...] = (
         0.1,
         300,
     ),
-    _numeric(
-        "publish_poll_seconds",
-        "Publication retry interval (seconds)",
-        "Publication",
-        15.0,
-        0.1,
-        3600,
-    ),
-    # The longest an idle publisher that is told about new work sleeps. It
-    # wakes sooner for a notification or the earliest publication/base import
-    # retry.
-    _numeric(
-        "publish_idle_seconds",
-        "Publication idle check interval (seconds)",
-        "Publication",
-        30.0,
-        0.1,
-        3600,
-    ),
-    _numeric(
-        "publish_git_timeout_s", "Publication Git timeout (seconds)", "Publication", 120.0, 0.1, 300
-    ),
-    _numeric(
-        "publish_pr_timeout_s", "Pull request API timeout (seconds)", "Publication", 30.0, 0.1, 300
-    ),
     Setting(
         "mcp_registry_url",
         "MCP registry URL",
@@ -308,7 +283,7 @@ SETTINGS: tuple[Setting, ...] = (
         "Source control",
         "",
         env="AGENT_REPO_ALLOWLIST",
-        description="Comma-separated owner/repository entries or owner/* rules. Every admitted user may have the platform clone and publish to these with this deployment's GitHub credentials, without connecting GitHub. Applies to new repository access decisions.",
+        description="Comma-separated owner/repository entries or owner/* rules. Every admitted user may have the platform clone these with this deployment's GitHub App, without connecting GitHub. Applies to new repository access decisions.",
     ),
     Setting("github_app_id", "GitHub App ID", "Source control", "", env="AGENT_GITHUB_APP_ID"),
     Setting(
@@ -392,35 +367,6 @@ SETTINGS: tuple[Setting, ...] = (
         ),
     ),
     Setting(
-        "github_publish_token",
-        "GitHub publication token",
-        "Publication",
-        "",
-        env="AGENT_GITHUB_TOKEN",
-        secret=True,
-    ),
-    Setting(
-        "publish_base_branch",
-        "Default pull request base branch",
-        "Publication",
-        "dev",
-        env="AGENT_PUBLISH_BASE_BRANCH",
-    ),
-    Setting(
-        "git_author_name",
-        "Commit author name",
-        "Publication",
-        "HybridInference Agent",
-        env="AGENT_GIT_AUTHOR_NAME",
-    ),
-    Setting(
-        "git_author_email",
-        "Commit author email",
-        "Publication",
-        "agent@localhost",
-        env="AGENT_GIT_AUTHOR_EMAIL",
-    ),
-    Setting(
         "mcp_public_base_url",
         "MCP OAuth callback base URL",
         "MCP",
@@ -482,15 +428,6 @@ SETTINGS: tuple[Setting, ...] = (
     # The longest an idle usage collector waits on its wake-up before looking
     # anyway.
     _numeric("ledger_idle_s", "Usage idle check interval (seconds)", "Operations", 30.0, 1, 300),
-    # The longest an idle coordinator that is told about new work sleeps. It
-    # wakes sooner for a notification or the earliest capture retry; this is
-    # for what announces nothing, such as a capture the reaper found stalled.
-    _numeric(
-        "snapshot_idle_s", "Snapshot idle check interval (seconds)", "Operations", 30.0, 1, 300
-    ),
-    _numeric(
-        "snapshot_capture_interval_s", "Snapshot interval (seconds)", "Operations", 5.0, 0.1, 300
-    ),
     _numeric(
         "capacity_history_retention_s",
         "Capacity history retention (seconds)",

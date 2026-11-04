@@ -967,7 +967,6 @@ async def test_session_mutations_use_explicit_owner_snapshot(
     [
         ("not_found", 404),
         ("fork_in_progress", 409),
-        ("publication_pending", 409),
     ],
 )
 async def test_session_delete_conflicts_have_actionable_types(

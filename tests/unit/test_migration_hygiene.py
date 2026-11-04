@@ -60,6 +60,14 @@ KNOWN_ORPHANS: dict[str, str] = {
         "created by 0040_pr_merge_archive; the feature was removed in #736 and "
         "the table was left behind. Dropping it is a one-line migration."
     ),
+    "agent_sandbox_snapshots": (
+        "the platform publisher was removed in #1103; dropped by a migration in the "
+        "release after it"
+    ),
+    "agent_snapshot_jobs": (
+        "the platform publisher was removed in #1103; dropped by a migration in the "
+        "release after it"
+    ),
     "agent_mcp_catalog_cache": (
         "created by 0014_mcp_catalog_cache and written by 0061 in SQL only; the "
         "runtime reads agent_mcp_catalog_snapshots instead, so no Python reader "

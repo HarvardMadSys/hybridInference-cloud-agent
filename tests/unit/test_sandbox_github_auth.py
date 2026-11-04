@@ -177,7 +177,11 @@ def test_claude_is_told_how_github_works_here_and_names_the_co_author():
     assert argv[:2] == ["claude", "-p"]
     assert argv[-2] == "--append-system-prompt"
     assert "`gh api repos/owner/repo/pulls" in argv[-1]
-    assert "Co-Authored-By: FreeInference <" in argv[-1]
+    # Claude's own attribution adds the trailer; the instructions do not ask twice.
+    assert "Co-Authored-By:" not in argv[-1]
+    pi, pi_calls, _ = _context("pi")
+    pi.spawn_live(["pi-freeinference"], pi.base_env)
+    assert "Co-Authored-By: FreeInference <" in pi_calls[0]["argv"][-1]
     assert calls[1]["hooks"]["attribution"] == {
         "commit": "Co-Authored-By: FreeInference <9+freeinference[bot]@users.noreply.github.com>",
         "pr": "",

@@ -568,9 +568,9 @@ describe('sidebar navigation interactions', () => {
     api.projects.mockClear();
     vi.useFakeTimers();
 
-    for (const kind of ['usage', 'mcp', 'queue', 'publication'] as const) {
+    for (const kind of ['usage', 'mcp', 'queue'] as const) {
       act(() => {
-        receiveHint(kind, kind === 'queue' || kind === 'publication' ? 'thread-a' : 'a');
+        receiveHint(kind, kind === 'queue' ? 'thread-a' : 'a');
         vi.advanceTimersByTime(PUSH_BATCH_MS);
       });
       expect(api.list).not.toHaveBeenCalled();

@@ -4,7 +4,6 @@ const CATEGORY_NAMES = new Map([
   ['Accounts', 'Identity & access'],
   ['Sign-in', 'Identity & access'],
   ['Security', 'Identity & access'],
-  ['Publication', 'Source control'],
   ['Attachments', 'Content'],
   ['Skills', 'Content'],
   ['Task titles', 'Content'],
@@ -54,7 +53,7 @@ const SETTING_GROUPS: SettingGroup[] = [
       'github_app_client_secret',
       'github_app_private_key',
       'github_app_install_url',
-      'github_publish_token',
+      'github_coauthor',
       'github_api_url',
       'github_reload_interval_s',
       'github_repository_cache_s',
@@ -68,18 +67,6 @@ const SETTING_GROUPS: SettingGroup[] = [
       'gitlab_client_secret',
       'gitlab_redirect_uri',
       'gitlab_request_timeout_s',
-    ],
-  },
-  {
-    title: 'Pull requests',
-    keys: [
-      'publish_base_branch',
-      'git_author_name',
-      'git_author_email',
-      'publish_poll_seconds',
-      'publish_idle_seconds',
-      'publish_git_timeout_s',
-      'publish_pr_timeout_s',
     ],
   },
   {
@@ -144,12 +131,7 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'Usage and history',
-    keys: [
-      'ledger_idle_s',
-      'snapshot_idle_s',
-      'snapshot_capture_interval_s',
-      'capacity_history_retention_s',
-    ],
+    keys: ['ledger_idle_s', 'capacity_history_retention_s'],
   },
   {
     title: 'Goals',

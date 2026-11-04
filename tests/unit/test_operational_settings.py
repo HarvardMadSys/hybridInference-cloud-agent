@@ -11,7 +11,6 @@ import pytest
 from cloud_agent import capacity_history, entitlement, operational_health, settings
 from cloud_agent.api import mcp_connections
 from cloud_agent.storage.repositories import host_pool
-from cloud_agent.workers import snapshots
 
 
 def test_oauth_callbacks_and_repository_access_use_current_settings(monkeypatch):
@@ -52,15 +51,6 @@ async def test_background_workers_pick_up_interval_changes_between_passes(monkey
         if len(delays) == 2:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr(snapshots, "number_setting", lambda key: interval)
-    monkeypatch.setattr(snapshots, "asyncio", SimpleNamespace(sleep=tick))
-    monkeypatch.setattr(snapshots, "_capture_due_shared_snapshot", AsyncMock(return_value=False))
-    with pytest.raises(asyncio.CancelledError):
-        await snapshots.coordinate_shared_snapshots(SimpleNamespace())
-    assert delays == [5.0, 12.0]
-
-    delays.clear()
-    interval = 5.0
     monkeypatch.setattr(operational_health, "number_setting", lambda key: interval)
     monkeypatch.setattr(
         operational_health,

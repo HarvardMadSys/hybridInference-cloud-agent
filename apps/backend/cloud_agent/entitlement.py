@@ -3,9 +3,8 @@
 The design gives the platform the security boundary and grades credentials by
 blast radius. Without a check here both gradings leak in the same way: the job
 carries a repository *the requester chose*, and the platform later mints a real
-installation token for that string — a read token for the runner to clone with,
-and a write token for the publisher to push with. Neither asks whose repository
-it is. A user could therefore name any repository the App happens to be
+installation token for that string, a read token for the runner to clone
+with. It does not ask whose repository it is. A user could therefore name any repository the App happens to be
 installed on, have the platform clone it into a sandbox, and read the contents
 back through their own job's events and retained workspace. That is a confused
 deputy: the requester supplies the target, the platform supplies the authority.
@@ -16,13 +15,12 @@ either of two independent grounds:
 - **The user's own GitHub connection.** They authorized the App, and GitHub,
   asked as them, says they can push to the repository.
 - **The deployment allowlist** (``AGENT_REPO_ALLOWLIST``). It is not per user:
-  every user the Gateway admits to Cloud Agent may have the platform clone and
-  publish to every listed repository, with the App's installation token or the
-  deployment's ``AGENT_GITHUB_TOKEN``, without connecting GitHub at all. It
+  every user admitted to Cloud Agent may have the platform clone every listed
+  repository with the App's installation token, without connecting GitHub. It
   belongs to repositories every such user may work on.
 
 It runs when a job or follow-up is created and again before every credential is
-minted or used for it (claim, publication, base import, pull-request archiving),
+minted or used for it (claim, base import, pull-request archiving),
 so a row written while the allowlist was wider, or before a connection was
 lost, cannot produce a token now.
 
@@ -49,8 +47,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# `owner/name`, the only shape GitHub uses and the only one the publisher and
-# runner know how to handle. Also keeps a leading `-` out of git's argv.
+# `owner/name`, the only shape GitHub uses and the only one the runner knows
+# how to handle. Also keeps a leading `-` out of git's argv.
 REPO_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
 _REPO_RE = re.compile(REPO_PATTERN)
 

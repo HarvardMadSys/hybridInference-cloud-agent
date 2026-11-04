@@ -209,18 +209,7 @@ services:
       AGENT_OPERATION_PROFILING_DEPLOYMENT: ${AGENT_OPERATION_PROFILING_DEPLOYMENT:-default}
       AGENT_ALERT_WEBHOOK_URL: ${AGENT_ALERT_WEBHOOK_URL:-}
       AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-untrusted-kata-v1}
-      # --- Publishing and source control ------------------------------------
-      # The only component that holds a git credential, which is precisely what
-      # keeps the sandbox credential-free. Unset means this deployment never
-      # publishes — it starts anyway rather than refusing.
-      AGENT_GITHUB_TOKEN: ${AGENT_GITHUB_TOKEN:-}
-      # `:-dev` and not `:-`. Compose passes an empty string as a *set*
-      # variable, and `os.getenv(name, "dev")` returns that empty string rather
-      # than the default — so a blank here silently means "open the PR against
-      # a branch called ''". Same for the API base below.
-      AGENT_PUBLISH_BASE_BRANCH: ${AGENT_PUBLISH_BASE_BRANCH:-dev}
-      AGENT_GIT_AUTHOR_NAME: ${AGENT_GIT_AUTHOR_NAME:-}
-      AGENT_GIT_AUTHOR_EMAIL: ${AGENT_GIT_AUTHOR_EMAIL:-}
+      # --- Source control ---------------------------------------------------
       AGENT_REPO_ALLOWLIST: ${AGENT_REPO_ALLOWLIST:-}
       # The GitHub App and GitLab OAuth behind Integrations. Optional as a
       # group: a deployment that configures neither simply offers no

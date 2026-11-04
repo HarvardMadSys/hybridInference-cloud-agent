@@ -3204,7 +3204,7 @@ class ChatSandboxManager:
         commit: str,
         env: dict[str, str] | None = None,
     ) -> None:
-        """Import publisher-base objects without changing workspace Git state.
+        """Import a follow-up's base objects without changing workspace Git state.
 
         The bundle crosses stdin into activation tmpfs and is removed before
         this command returns. ``git bundle unbundle`` adds objects only: it

@@ -59,7 +59,6 @@ from cloud_agent.storage.repositories import (
     PostgresSessionForkRepository,
     PostgresSettingsRepository,
     PostgresSkillRepository,
-    PostgresSnapshotRepository,
     PostgresSourceControlRepository,
     PostgresSshServerRepository,
     PostgresTeamAdminQueries,
@@ -112,7 +111,6 @@ if TYPE_CHECKING:
         SessionForkRepository,
         SettingsRepository,
         SkillRepository,
-        SnapshotRepository,
         SourceControlRepository,
         SshServerRepository,
         TeamAdminQueries,
@@ -128,7 +126,7 @@ if TYPE_CHECKING:
 class Storage:
     """Every persistence capability this service has, assembled over one pool."""
 
-    def __init__(self, pool: asyncpg.Pool) -> None:  # noqa: PLR0915 — one line per capability.
+    def __init__(self, pool: asyncpg.Pool) -> None:
         """Build one implementation per capability against the caller's pool."""
         #: Admin read models. Still concrete: they are bounded projections for
         #: one console, not a capability any other caller asks for, and they
@@ -179,7 +177,6 @@ class Storage:
         self.settings: SettingsRepository = PostgresSettingsRepository(pool)
         self.skills: SkillRepository = PostgresSkillRepository(pool)
         self.attachments: AttachmentRepository = PostgresAttachmentRepository(pool)
-        self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
         self.ssh_servers: SshServerRepository = PostgresSshServerRepository(pool)
         self.model_connections: ModelConnectionRepository = PostgresModelConnectionRepository(pool)

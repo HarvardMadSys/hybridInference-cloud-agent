@@ -184,7 +184,7 @@ implementation lives under `job-detail/`:
 | `JobDetailHeader` | Page header and conversation actions |
 | `JobTranscript` | Transcript projection and navigation |
 | `JobComposer`, `useJobComposerSettings` | Message input and composer settings |
-| `RunOutcome`, `GitPanel` | Outcome, publication, and Git interaction |
+| `RunOutcome`, `GitPanel` | Outcome, pull request, and Git interaction |
 | `JobDetailSidePanels`, `LazyPanels` | Workspace/inspector rendering and lazy loading |
 | `useJobDetailPanels` | Panel selection, focus, resizing, and retained panel state |
 | `useJobConversation` | Turn navigation, transcript scrolling, and reading position |

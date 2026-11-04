@@ -72,8 +72,8 @@ _DELETION_RETRY_EXHAUSTION_BATCH = 50
 _DELETION_RETRY_BASE_SECONDS = 60
 _DELETION_RETRY_MAX_SECONDS = 60 * 60
 
-#: Work a stop or deletion must wait for: a member turn or Fork, a running job,
-#: or a workspace snapshot on its way to publication. ``$1`` is the sandbox.
+#: Work a stop or deletion must wait for: a member turn or Fork, or a running
+#: job. ``$1`` is the sandbox.
 _GROUP_WORK_PENDING_SQL = """
 SELECT EXISTS (
     SELECT 1 FROM agent_thread_sandbox_memberships m
@@ -84,10 +84,6 @@ SELECT EXISTS (
             WHERE j.thread_id = m.thread_id AND j.state = 'running'
         )
     )
-) OR EXISTS (
-    SELECT 1 FROM agent_sandbox_snapshots s
-    WHERE s.sandbox_id = $1
-      AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
 )
 """
 
@@ -2443,9 +2439,8 @@ class PostgresSandboxRepository:
                     "SELECT base_sha FROM agent_jobs WHERE id = $1",
                     job_id,
                 )
-            # A turn boundary publishes nothing: the platform never pushes on its
-            # own. The owner's publication request opens the next snapshot and
-            # enters every turn settled since the last one in it.
+            # A turn boundary publishes nothing: the platform never pushes.
+            # Whatever reaches GitHub, the agent pushed through the GitHub relay.
             group = await conn.fetchrow(
                 f"""
                     UPDATE agent_sandboxes g

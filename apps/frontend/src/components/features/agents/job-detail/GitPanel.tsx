@@ -373,7 +373,7 @@ export function GitPanel({
               </div>
             ) : (
               <p className="text-xs text-gray-400 dark:text-gray-500">
-                Pull request not published yet.
+                No pull request yet. Ask the agent to open one.
               </p>
             )}
           </section>

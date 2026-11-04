@@ -9,10 +9,10 @@ const snapshot: AgentAdminSettings = {
   revision: 1,
   definitions: [
     {
-      key: 'github_publish_token',
-      label: 'GitHub publication token',
-      description: 'Credential used to publish pull requests.',
-      category: 'Publication',
+      key: 'control_signing_secret',
+      label: 'Control signing secret',
+      description: 'Credential used to sign control requests.',
+      category: 'Security',
       kind: 'string',
       default: 'private-default-value',
       secret: true,
@@ -45,8 +45,8 @@ const snapshot: AgentAdminSettings = {
       secret: false,
     },
   ],
-  values: { github_publish_token: null, 'future.setting': 73129 },
-  secret_configured: { github_publish_token: true },
+  values: { control_signing_secret: null, 'future.setting': 73129 },
+  secret_configured: { control_signing_secret: true },
   bootstrap: [
     {
       key: 'AGENT_DATABASE_URL',
@@ -81,20 +81,20 @@ function items(over: Partial<Parameters<typeof buildSettingsSearchItems>[0]> = {
 describe('settings search', () => {
   it('searches merged and original application categories, related groups, and descriptions', () => {
     const catalog = items();
-    const token = catalog.find((item) => item.applicationKey === 'github_publish_token');
-    expect(searchSettingsItems(catalog, 'source control publication')).toEqual([token]);
-    expect(searchSettingsItems(catalog, 'github credential requests')).toEqual([token]);
+    const token = catalog.find((item) => item.applicationKey === 'control_signing_secret');
+    expect(searchSettingsItems(catalog, 'identity access security')).toEqual([token]);
+    expect(searchSettingsItems(catalog, 'encryption keys credential requests')).toEqual([token]);
     expect(token).toMatchObject({
-      tab: 'application-Source%20control',
-      targetId: 'application-setting-github_publish_token',
-      section: 'Source control',
+      tab: 'application-Identity%20%26%20access',
+      targetId: 'application-setting-control_signing_secret',
+      section: 'Identity & access',
     });
   });
 
   it('normalizes case, underscores, and punctuation and requires every query token', () => {
     const catalog = items();
-    expect(searchSettingsItems(catalog, '  GITHUB_PUBLISH.TOKEN  ')).toEqual([
-      catalog.find((item) => item.id === 'application:github_publish_token'),
+    expect(searchSettingsItems(catalog, '  CONTROL_SIGNING.SECRET  ')).toEqual([
+      catalog.find((item) => item.id === 'application:control_signing_secret'),
     ]);
     expect(searchSettingsItems(catalog, 'AGENT_TERMINAL_MAX_SESSIONS sandbox')).toEqual([
       catalog.find((item) => item.id === 'host:terminal_max_sessions'),

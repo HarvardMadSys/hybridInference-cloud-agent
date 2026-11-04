@@ -34,17 +34,10 @@ export type {
   AgentJobApi,
   McpBindingInputApi,
   AgentPluginInputApi,
-  AgentThreadPublicationApi,
   CreateAgentJobRequest,
 } from './agents/jobs';
 
-export {
-  getAgentJob,
-  createAgentJob,
-  cancelAgentJob,
-  forkAgentJob,
-  publishAgentThread,
-} from './agents/jobs';
+export { getAgentJob, createAgentJob, cancelAgentJob, forkAgentJob } from './agents/jobs';
 
 export type {
   AgentNotificationJobApi,

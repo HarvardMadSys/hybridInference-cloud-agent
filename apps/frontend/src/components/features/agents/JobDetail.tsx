@@ -8,14 +8,12 @@ import { JobDetailHeader } from './job-detail/JobDetailHeader';
 import { JobDetailProviders } from './job-detail/JobDetailProviders';
 import { JobDetailSidePanels } from './job-detail/JobDetailSidePanels';
 import { JobTranscript } from './job-detail/JobTranscript';
-import { hasPublishableWorkspaceChanges } from './job-detail/RunOutcome';
 import { ContextView, TrajectoryView } from './job-detail/LazyPanels';
 import { inheritedFrom, useJobComposerSettings } from './job-detail/useJobComposerSettings';
 import { useJobConversation } from './job-detail/useJobConversation';
 import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
 import { useT } from '@/components/providers';
-import { publishAgentThread } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
 import { APIError } from '@/lib/utils/errors';
 
@@ -49,7 +47,6 @@ import { useThreadComposerSsh } from './ssh/useComposerSsh';
 import { createRecordedOutputsSelector } from './recordedTurnOutputs';
 import { useTranscriptPresentation } from './transcriptPresentation';
 import type { AgentJob } from './types';
-import { isActiveWorkspacePublicationState } from './useAgentJobs';
 import { useComposerDraftStore } from './useComposerDraft';
 import { usePendingMessages } from './usePendingMessages';
 import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
@@ -185,7 +182,6 @@ export function JobDetail({
   const sendRequestedRef = useRef(false);
   const watchPrRequestedRef = useRef(false);
   const [watchPrAcceptedJobId, setWatchPrAcceptedJobId] = useState<string | null>(null);
-  const [publishRequested, setPublishRequested] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const runActions = useJobRunActions({ job, userId, onReload, onError: setActionError });
   const { stopping, forking, stop, forkFrom, canForkWorkspace, canForkCurrent, canReview } =
@@ -575,11 +571,6 @@ export function JobDetail({
     },
   });
   const watchPrPrompt = watchPullRequestPrompt(job);
-  // These live fields describe the entire conversation/workspace. Other
-  // thread rows can retain older pending/running values after it settles.
-  const publicationState =
-    job.workspacePublicationState ?? latestQuestionTurn?.workspace_publication_state;
-  const publicationPending = Boolean(publicationState && publicationState !== 'published');
   const conversationBusy =
     job.conversationState !== undefined
       ? isActiveConversationState(job.conversationState)
@@ -589,7 +580,6 @@ export function JobDetail({
   const canWatchPr = Boolean(
     userId &&
     (job.prUrl ?? job.workspacePrUrl) &&
-    !job.workspaceUnpublishedChanges &&
     isSuccessful &&
     !isActive &&
     !isArchived &&
@@ -597,7 +587,6 @@ export function JobDetail({
     !submitting &&
     !mcp.saving &&
     !ssh.saving &&
-    !publicationPending &&
     watchPrAcceptedJobId !== job.id &&
     queue.loaded &&
     queue.latestJobId &&
@@ -606,37 +595,6 @@ export function JobDetail({
     !queue.resuming &&
     !conversationBusy,
   );
-
-  // The platform publishes only when the owner asks: Create PR, then Update PR.
-  // The newest turn offers it once the workspace has Git changes and nothing
-  // runs there; a request already on its way shows as the publication state.
-  const canPublish = Boolean(
-    userId &&
-    hasPublishableWorkspaceChanges(job) &&
-    !parentTurn &&
-    !isActive &&
-    !contextLost &&
-    !publishRequested &&
-    !isActiveWorkspacePublicationState(publicationState) &&
-    !conversationBusy,
-  );
-
-  // A request stays closed until the page reads the publication it started.
-  useEffect(() => setPublishRequested(false), [publicationState, job.id]);
-
-  async function publish() {
-    if (!canPublish) return;
-    setPublishRequested(true);
-    setActionError(null);
-    try {
-      await publishAgentThread(threadId);
-      onReload?.();
-    } catch (cause: unknown) {
-      if (!composerMounted.current) return;
-      setPublishRequested(false);
-      setActionError(cause instanceof Error ? cause.message : t('publish.sendFailed'));
-    }
-  }
 
   async function watchPr() {
     const latestJobId = queue.latestJobId;
@@ -651,7 +609,7 @@ export function JobDetail({
       // selections belong to the owner's next message and stay in place.
       // The server replays this receipt under the thread lock, including for
       // another tab viewing a different turn of the same conversation. Fresh
-      // requests refuse atomically if its queue or published boundary changes.
+      // requests refuse atomically if its queue changes.
       const result = await submitThreadMessage(
         threadId,
         { prompt: watchPrPrompt, require_idle: true, expected_latest_job_id: latestJobId },
@@ -790,7 +748,6 @@ export function JobDetail({
                     recordedOutputs={recordedOutputs}
                     onReview={canReview ? openReview : undefined}
                     onWatchPr={canWatchPr ? () => void watchPr() : undefined}
-                    onPublish={canPublish ? () => void publish() : undefined}
                   />
                 </SubagentLinks.Provider>
               )}

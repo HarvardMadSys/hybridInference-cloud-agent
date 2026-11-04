@@ -2,7 +2,7 @@
 
 These values describe the attempt handed to a host before execution begins.
 They depend on shared plugin validation, without loading the runner's sandbox,
-process, heartbeat, or publication orchestration.
+process, or heartbeat orchestration.
 """
 
 from __future__ import annotations

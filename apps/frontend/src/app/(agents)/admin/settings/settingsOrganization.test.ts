@@ -25,7 +25,6 @@ describe('application settings organization', () => {
     ['Sign-in', 'Identity & access'],
     ['Security', 'Identity & access'],
     ['Source control', 'Source control'],
-    ['Publication', 'Source control'],
     ['Attachments', 'Content'],
     ['Skills', 'Content'],
     ['Task titles', 'Content'],
@@ -55,12 +54,12 @@ describe('application settings organization', () => {
     expect(applicationSettingGroup(field)).toBe('General');
   });
 
-  it('groups provider credentials together across source control and publication', () => {
+  it('groups the GitHub App and the agents’ commit co-author together', () => {
     const app = definition('github_app_id', 'Source control');
-    const publication = definition('github_publish_token', 'Publication');
-    expect(applicationCategory(app)).toBe(applicationCategory(publication));
+    const coauthor = definition('github_coauthor', 'Source control');
+    expect(applicationCategory(app)).toBe(applicationCategory(coauthor));
     expect(applicationSettingGroup(app)).toBe('GitHub');
-    expect(applicationSettingGroup(publication)).toBe('GitHub');
+    expect(applicationSettingGroup(coauthor)).toBe('GitHub');
   });
 
   it.each([

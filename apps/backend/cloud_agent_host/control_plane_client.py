@@ -612,8 +612,8 @@ class ControlPlane:
         """Drive the fenced terminal transition, after the attempt's events.
 
         ``base_sha`` reports the commit the agent actually worked from. A job
-        may be submitted without one, and the publisher cannot apply a patch
-        without knowing its base — so the runner, which resolves it when it
+        may be submitted without one, and the conversation's follow-up turns
+        start from that commit — so the runner, which resolves it when it
         checks the repository out, is the component that knows.
 
         Every event the attempt reported is delivered first, so the error a

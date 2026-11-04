@@ -169,21 +169,7 @@ def _message_refused(result: dict[str, Any]) -> HTTPException:
                     "type": "conversation_changed",
                     "message": (
                         "A chat sharing this workspace changed or is still busy. Wait for "
-                        "all chats' messages and workspace publication to finish, then "
-                        "refresh and try again."
-                    ),
-                }
-            },
-        )
-    if error == "unpublished_changes":
-        return HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "unpublished_changes",
-                    "message": (
-                        "This workspace has changes that are not in its pull request. "
-                        "Update the pull request, then try again."
+                        "all chats' messages to finish, then refresh and try again."
                     ),
                 }
             },
@@ -465,9 +451,8 @@ async def submit_thread_message(
 
     ``require_idle`` binds a fresh action to ``expected_latest_job_id`` and
     refuses it with ``conversation_changed`` if any chat sharing the workspace
-    has a live turn or waiting message, a Fork is active, or a publication is
-    unfinished at the locked write, and with ``unpublished_changes`` if a turn
-    settled since the workspace was last published. An accepted idle-only
+    has a live turn or waiting message or a Fork is active at the locked write.
+    An accepted idle-only
     action creates its turn in that same transaction without entering the
     pending queue.
     """

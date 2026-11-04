@@ -364,8 +364,8 @@ class PostgresModelConnectionRepository:
         """Stamp the residency with its connection revision, under the connection's row lock.
 
         In the same transaction, remember the key revision as handed to this
-        sandbox group, as its scan-only copy, so the group's trusted snapshots
-        and publications are refused if they carry it later.
+        sandbox group, as its scan-only copy, so a scan of the group's content
+        can look for it later.
 
         A local owner whose access has ended gets no binding, and so no key:
         the statement is the fence, as for establishing the residency itself,

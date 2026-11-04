@@ -1072,9 +1072,8 @@ class PostgresAttemptCommands:
                     "UPDATE agent_jobs SET terminal_resume_pending = FALSE WHERE id = $1",
                     job_id,
                 )
-                # Native-session continuity is ready at settlement. Group
-                # snapshot publication is asynchronous and never gates the
-                # next message in this shared workspace.
+                # Native-session continuity is ready at settlement, so the
+                # next message in this shared workspace need not wait.
                 if not (
                     sandbox_transition is not None
                     and sandbox_transition["context_status"] == "lost"
@@ -1600,9 +1599,8 @@ class PostgresAttemptCommands:
         For each expired ``running`` attempt: mark it ``superseded``, append an
         ``attempt_superseded`` control event, then decide the job's fate —
         requeue while attempts remain, ``cancelled`` if cancellation was
-        pending, ``failed`` once ``max_attempts`` is exhausted. Publication is
-        a snapshot's lifecycle, not the job's, so no job is ever caught
-        mid-publish here. Returns a summary per reaped attempt.
+        pending, ``failed`` once ``max_attempts`` is exhausted. Returns a
+        summary per reaped attempt.
 
         Each attempt is reaped in a transaction of its own. One the database
         refuses -- a deadlock against a live writer -- stays expired for the

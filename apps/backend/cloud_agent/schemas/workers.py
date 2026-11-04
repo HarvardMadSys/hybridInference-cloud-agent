@@ -522,9 +522,8 @@ class WorkerFinishRequest(BaseModel):
         max_length=255,
         description=(
             "Branch to work from. Resolved to a commit at creation and stored as "
-            "base_sha — a branch moves, and the publisher applies onto a pinned commit. "
-            "The draft PR targets this branch; jobs that name none target the "
-            "deployment default."
+            "base_sha, because a branch moves and the conversation works from one "
+            "commit. Jobs that name none start from the repository's default branch."
         ),
     )
     base_sha: str | None = Field(
@@ -532,8 +531,8 @@ class WorkerFinishRequest(BaseModel):
         pattern=r"^[0-9a-fA-F]{7,64}$",
         description=(
             "The commit the agent actually worked from. Recorded only when the job "
-            "did not already carry one — the publisher cannot apply a patch without "
-            "knowing its base, and a job may be submitted without naming a commit."
+            "did not already carry one: a job may be submitted without naming a "
+            "commit, and its follow-ups start from this one."
         ),
     )
 

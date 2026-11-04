@@ -16,7 +16,7 @@ If you only need a local product check without provider keys, start with the
 The local smoke creates the first administrator with the setup code the
 control plane logs, signs in with the account session, reads administration,
 and checks that nothing runs before the owner connects a model. It does not
-test live provider behavior or GitHub publication; this staging runbook
+test live provider behavior or GitHub pull requests; this staging runbook
 checks those boundaries separately.
 
 Earlier runs of this checklist, from the 2026-08 extraction, are kept as a
@@ -27,10 +27,10 @@ the retired Gateway sign-in and do not show that any current deployment passes.
 
 A completed, passing run proves account sign-up and verification, waiting-list
 approval, administration, a verified model connection, enrollment, sandbox
-execution on the owner's connection, and GitHub publication for the recorded
-revision and environment. A successful job alone does not prove publication:
-the owner asks for it, and the publisher then processes an immutable workspace
-snapshot asynchronously.
+execution on the owner's connection, and a pull request the agent opened as
+the owner, for the recorded revision and environment. A successful job alone
+does not prove the pull request: the agent pushes and opens one through the
+GitHub relay only when the owner asks.
 
 The run does not cover concurrency, host loss, or every isolation boundary.
 Use [deployment reliability](deployment-reliability.md) and
@@ -50,9 +50,10 @@ Use [deployment reliability](deployment-reliability.md) and
 - [ ] Have a mail transport the deployment may use for test addresses you
       control (or turn email verification off for the run), and a provider API
       key the test account may spend.
-- [ ] Choose a disposable GitHub repository and configure write/PR permission
-      through the deployment's supported GitHub App or publishing credential.
-      Record its base branch. Do not use a repository others depend on.
+- [ ] Choose a disposable GitHub repository with the deployment's GitHub App
+      installed on it, that the test account's connected GitHub account may
+      push to, and configure the GitHub relay. Record its base branch. Do not
+      use a repository others depend on.
 
 ## 1. Configure
 
@@ -140,11 +141,11 @@ activation after the host publishes readiness in section 4.
 - [ ] Confirm events stream to the browser and at least one model/tool call
       succeeds, and that the run's usage footer shows reported tokens and says
       the provider bills it.
-- [ ] Confirm the turn succeeds with the expected file change. Nothing is
-      published until you ask: choose **Create PR** in the conversation, wait
-      for the publication to finish, and open the real **draft pull request**.
-      Check target branch, author and diff; record its URL. Execution success
-      alone is insufficient.
+- [ ] Confirm the turn succeeds with the expected file change. Then ask the
+      agent in the conversation to open a pull request, and open the real
+      **draft pull request** it links. Check that you are the author of the
+      pull request and its commits, the target branch and the diff; record its
+      URL. Execution success alone is insufficient.
 - [ ] List files and open a terminal on the retained workspace through the app.
 
 ## 6. The parts that only fail later

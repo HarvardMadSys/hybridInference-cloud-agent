@@ -34,9 +34,9 @@ MAX_THREAD_ATTACHMENT_BYTES = DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES - 4 * 1024 * 1024
 MAX_THREAD_ATTACHMENT_FILES = 200
 
 
-#: Where the sandbox sees them. Outside the worktree on purpose: the publish
-#: path stages the workspace with ``git add -A -N``, so an upload written into
-#: it would be committed and appear in the draft pull request.
+#: Where the sandbox sees them. Outside the worktree on purpose: an upload
+#: written into it would show as a change, and an agent's ``git add -A``
+#: would commit it into the pull request.
 SANDBOX_UPLOAD_DIR = "/uploads"
 
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:[\\/]")

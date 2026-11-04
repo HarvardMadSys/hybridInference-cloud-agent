@@ -19,6 +19,31 @@ After migrating, start the main control-plane listener with its existing
 complete environment: it imports newly registered settings once, as described
 in [Admin Settings](operations.md#admin-settings).
 
+## Agents open their own pull requests
+
+The platform no longer publishes workspaces. There is no **Create PR** or
+**Update PR** button, no `POST /v1/agent/threads/{thread_id}/publish`, no
+workspace snapshot and no `agent/<thread>` branch. When the owner asks, the
+agent commits, pushes a branch and opens the pull request itself, as the
+owner, through [the GitHub relay](operations.md#the-github-relay); without
+the relay configured, agents cannot push. **Watch PR and merge** has the agent
+use git and `gh api` REST calls itself. Follow-up turns always start from the
+conversation's own base. Pull requests the publisher opened before this
+release stay on GitHub as they are, and nothing pushes to their `agent/…`
+branches again.
+
+The control plane no longer reads `AGENT_GITHUB_TOKEN`,
+`AGENT_PUBLISH_BASE_BRANCH`, `AGENT_GIT_AUTHOR_NAME` or
+`AGENT_GIT_AUTHOR_EMAIL`, and Admin → Settings has no Publication group. Delete
+those lines from the control plane's `.env`. Commits are authored as the
+conversation's owner, with `AGENT_GITHUB_COAUTHOR` as co-author.
+
+The publisher's tables (`agent_sandbox_snapshots`, `agent_snapshot_jobs`,
+`agent_pr_archive_checks`) and `agent_jobs.published_commit_sha` stay in the
+schema, unused: this release neither reads nor writes them, and a migration in
+the next release drops them. This release is an ordinary rolling deploy, and
+rolling back to the previous release needs no downgrade and loses nothing.
+
 ## Shorter `.env` files
 
 The example `.env` files now hold only what Admin cannot manage: the database

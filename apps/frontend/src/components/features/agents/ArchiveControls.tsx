@@ -17,7 +17,6 @@ export const ARCHIVE_FOCUS =
 /** Why the server refused to archive or delete a selected session. */
 export const SESSION_ERROR_KEYS = {
   fork_in_progress: 'archive.forkInProgress',
-  publication_pending: 'archive.publicationPending',
   not_found: 'archive.sessionNotFound',
 } as const;
 

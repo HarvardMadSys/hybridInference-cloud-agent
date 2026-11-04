@@ -1,6 +1,6 @@
 # Agent 自己开 PR：GitHub 中继与用户署名
 
-日期：2026-11-04。状态：已决定，分三个 PR 实现（见第 9 节）。
+日期：2026-11-04。状态：已决定，在一个 PR（#1103）里实现（见第 9 节）。
 
 设计核对基线：远端 `dev`，提交 `1e064e169`。
 
@@ -103,14 +103,14 @@ GraphQL（`api.github.com/graphql`）：**第一版拒绝**，返回 403 并提�
 - **凭据和变量。** credential helper 用只在调用时生效的 `GIT_CONFIG_*` 变量配置，不写进共享的 `.git`；`GH_TOKEN` 是中继占位凭据，`GH_REPO` 是对话的仓库。
 - **commit 署名。**
   - `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` 和 `GIT_COMMITTER_*` 设成用户的 GitHub 名字和 noreply 邮箱 `<id>+<login>@users.noreply.github.com`，来自 `agent_github_accounts`。
-  - agent 在 commit message 末尾写 `Co-Authored-By: FreeInference <bot 邮箱>`。bot 邮箱是 `<bot 用户 id>+<app-slug>[bot]@users.noreply.github.com`，GitHub 能把它和 App 的头像对应起来。Claude 运行时用成员私有配置里的 `attribution` 设置自动加；其他运行时第一版不自动加（见第 6 节）。
+  - agent 在 commit message 末尾写 `Co-Authored-By: FreeInference <bot 邮箱>`。bot 邮箱是 `<bot 用户 id>+<app-slug>[bot]@users.noreply.github.com`，GitHub 能把它和 App 的头像对应起来。Claude 运行时用成员私有配置里的 `attribution` 设置自动加；其他四个运行时由平台说明要求 agent 自己加上（见第 6 节）。
 - **签名 commit。** sandbox 里没有用户的签名密钥。要求签名 commit 的分支保护会拒绝这些 push，这是已知限制。
 - **已有工作区。** `origin` 在新建工作区时记录；这一版之前创建、一直保留的工作区没有它，平台说明告诉 agent 缺了就自己加上。
 - **CI 文件。** push 修改 `.github/workflows/` 需要 App 的 `workflows` 权限。第一版不申请，这类 push 会被 GitHub 拒绝；以后要开再单独决定。
 
 ## 6. 给 agent 的平台说明
 
-平台现在不给 agent 任何平台级说明。新增一段简短说明（`cloud_agent_host/platform_instructions.py`），只在成员有仓库和中继占位凭据时才给。Claude 运行时用 `--append-system-prompt` 传入，不写进共享工作区；Claude 自带的 commit 署名设置（`attribution`）写进成员私有的 settings，改成平台的 co-author。内容：
+平台原来不给 agent 任何平台级说明。新增一段简短说明（`cloud_agent_host/platform_instructions.py`），只在成员有仓库和中继占位凭据时才给，五个运行时都给，都不写进共享工作区（见本节末尾）。内容：
 
 - 这个工作区的 `origin` 是什么仓库，`git push`、`gh api` 以用户本人的身份生效，只能写这个仓库。
 - commit 作者已经设好，不要改；commit message 末尾加 `Co-Authored-By` 那一行。
@@ -120,7 +120,13 @@ GraphQL（`api.github.com/graphql`）：**第一版拒绝**，返回 403 并提�
 
 **仓库自己的设置不会自动生效。** Claude 运行时是用 `--setting-sources user` 启动的：共享工作区里仓库的 project/local 设置被当作不可信的启动输入，所以仓库的 `.claude/settings.json` hook（比如本仓库的 pre-PR 检查）和仓库 CLAUDE.md 都不会自动加载。这正是平台说明要明确叫 agent 自己去读并照做的原因。
 
-**第一版只覆盖 Claude 运行时。** Codex、OpenCode、Kilo、pi 的平台说明和 co-author 设置各有各的注入方式，后续补上；在那之前，这些运行时照样能 push 和开 PR（凭据和署名由环境变量提供），只是不会主动知道 GraphQL 的限制和平台约定。
+**五个运行时都拿到平台说明。** 注入方式各不相同，由 `with_platform_instructions` 统一处理：
+
+- Claude Code 和 pi：`--append-system-prompt`。
+- Codex：在 `app-server` 前用 `-c` 覆盖 `developer_instructions` 配置项（已在 0.145.0 二进制的配置 schema 里核对过）。
+- OpenCode 和 Kilo：`deploy/sandbox/{opencode,kilo}-freeinference` 包装脚本从 `<NAME>_FREEINFERENCE_INSTRUCTIONS` 读出说明，写成文件，加进它们配置里的 `instructions` 文件列表。
+
+co-author 那一行：Claude 通过 `attribution` 设置自动加（写进成员私有的 settings，改成平台的 co-author）；其他四个运行时没有对应设置，由平台说明要求 agent 在 commit message 末尾自己加上。
 
 ## 7. 删除和改造
 
@@ -129,9 +135,9 @@ GraphQL（`api.github.com/graphql`）：**第一版拒绝**，返回 403 并提�
 - `publish_worker.py`、`publisher.py`、`pr_titles.py`、`storage/_sql/snapshot_title_context.py`。
 - 共享快照捕获：`workers/snapshots.py`、`workers/background_wake.py`、`ports/snapshot.py`、`storage/repositories/snapshot.py`，以及 lifespan 里的接线。
 - `POST /threads/{id}/publish`。
-- sandbox manager 的 `/snapshot`、`/import-base` 端点及其客户端，`base_bundle_request.py`、`base_bundle_stream.py`、`environment_snapshot.py`（名字像环境快照，实际只服务共享快照），supervisor 的 `capture_snapshot` 和 `snapshotting` 屏障，`SNAPSHOT_BASE_MISSING`。
-- `patch_gate.py` 除 `branch_name_for` 以外的部分。
-- 设置 `AGENT_GITHUB_TOKEN`、`AGENT_PUBLISH_BASE_BRANCH`、git 作者名和 `AGENT_GIT_AUTHOR_EMAIL`。
+- sandbox manager 的 `/snapshot`、`/import-base` 端点及其客户端，`base_bundle_request.py`、`base_bundle_stream.py`、`environment_snapshot.py`（名字像环境快照，实际只服务共享快照，`AGENT_SECRET_PATTERN_*` 也随它去掉），supervisor 的 `capture_snapshot` 和 `snapshotting` 屏障，`SNAPSHOT_BASE_MISSING`。
+- `patch_gate.py` 整个删除；runner 还要用的 `branch_name_for` 挪到 `cloud_agent_shared/git/branches.py`。
+- 设置 `AGENT_GITHUB_TOKEN`、`AGENT_PUBLISH_BASE_BRANCH`、`AGENT_GIT_AUTHOR_NAME`、`AGENT_GIT_AUTHOR_EMAIL`，以及发布和快照循环的各项间隔与超时；Admin 设置里不再有 Publication 分组。
 - sandbox 的 installation token（`_claim_credentials.py` 的第二个 token 和 `resident_transport.py` 的 `GH_TOKEN` 注入）。runner 克隆用的只读 token 保留。
 - 前端：Create PR / Update PR 按钮、发布状态和提示、`publish.*` 文案。
 
@@ -141,14 +147,21 @@ GraphQL（`api.github.com/graphql`）：**第一版拒绝**，返回 403 并提�
 - `import_base_bundle` 和 runner 的 `_import_retained_base`：续接对话时导入 base 用。
 - `github_app.py`：克隆 token、分支、`resolve_ref` 和仓库授权都要用。
 - 环境快照（`agent_environment_snapshots`）：和发布无关。
+- `agent_jobs.published_pr_url`：中继把这一轮开的 PR 写进去。
+
+**有意留着、以后再清理的：**
+
+- 发布流程的表和列：`agent_sandbox_snapshots`、`agent_snapshot_jobs`、早已没人读的 `agent_pr_archive_checks`，它们的触发器和函数（包括 `publication` 推送用的 `agent_sandbox_snapshots_publication_changed`），`agent_sandboxes`、`agent_thread_sandbox_memberships`、`agent_jobs` 上唤醒快照循环的触发器，以及只有发布流程写的 `agent_jobs.published_commit_sha`。这一版的代码既不读也不写它们，由下一版的迁移删除（见第 9 节）。
+- `agent_sandboxes.snapshot_state`、`published_base_sha` 两列，以及读它们的守卫。没有东西再写它们，`snapshot_state` 永远是 idle，守卫不会再拦任何操作。
+- `agent_model_connection_scan_keys`：绑定 residency 时仍然写入扫描用的密钥副本，但快照扫描删掉以后已经没有读取方，成了只写的表。停止写入和删表放到后续 PR。
+- `agent_attempts`、`agent_attempt_ledger` 上的 `ledger` 后台唤醒触发器：监听它们的 `background_wake.py` 已经删掉，触发器只是空发通知。
 
 **改造：**
 
-- `workspace_pr_url`、`published_pr_url` 的读取方（`_sql/sandbox.py`、`_sql/sessions.py` 的 done 状态、`adapt.ts`、`recordedTurnOutputs.ts`、`sidebarRecordChanges.ts`、`RunDetails.tsx`、`execution_queries.py`、`threads.py`）改读 `agent_thread_pull_requests`。Fork 不继承原对话的 PR 记录。
-- 停止或删除对话时等待快照的检查（`_GROUP_WORK_PENDING_SQL`、`publication_pending`）删掉；`snapshot_state` 只剩守卫用途，跟着删。
+- `workspace_pr_url`、`published_pr_url` 的读取方（`_sql/sandbox.py`、`_sql/sessions.py` 的 done 状态、`adapt.ts`、`recordedTurnOutputs.ts`、`sidebarRecordChanges.ts`、`RunDetails.tsx`、`execution_queries.py`、`threads.py`）改读 `agent_thread_pull_requests`。job 的 `published_pr_url` 是这一轮开的 PR，`workspace_pr_url` 是对话最新的 PR。Fork 不继承原对话的 PR 记录。
+- 停止或删除对话时等待快照的检查（`_GROUP_WORK_PENDING_SQL` 里的快照条件、`publication_pending`）删掉。
 - 续接对话的 base 不再随发布前移，每轮都用对话最初的 base；工作区 diff 视图对比的是整个对话的改动。
-- Watch PR 的提示词去掉"sandbox 没有凭据"和"等用户点 Update PR"，改成 agent 直接 push 到 PR 分支；它的 `require_idle` 不再检查快照状态。Code review 的提示词保留"用本地 git 审查"，去掉"没有凭据"。
-- `publication` 推送类型和触发器 `agent_sandbox_snapshots_publication_changed` 跟着表一起删。
+- Watch PR 的提示词去掉"sandbox 没有凭据"和"等用户点 Update PR"，改成 agent 自己用 git 和 `gh api` REST 调用读 PR、push 到 PR 分支、合并；它的 `require_idle` 不再检查快照状态。Code review 的提示词保留"用本地 git 审查"，去掉"没有凭据"。
 
 ## 8. 放弃的东西
 
@@ -158,9 +171,9 @@ GraphQL（`api.github.com/graphql`）：**第一版拒绝**，返回 403 并提�
 
 ## 9. 交付
 
-1. **PR 1：新路径。** 本文；GitHub 中继 listener、隧道、hosts 和 CA；中继 token；用户署名和 co-author；平台说明；`agent_thread_pull_requests` 和它的写入；去掉 sandbox 的 installation token。旧按钮这一步还在，两条路短暂并存。
-2. **PR 2：删除旧路径。** 第 7 节的删除和改造。这一步合并后，用户看到的就是新模式。
-3. **PR 3：删表。** PR 2 上线后，用迁移删除 `agent_sandbox_snapshots`、`agent_snapshot_jobs`、触发器、`agent_sandboxes` 的 `snapshot_state` / `published_base_sha`，以及早已没人读的 `agent_pr_archive_checks`。分两步是为了回滚安全：旧版本的代码还在读这些表。
+一个 PR（#1103）：本文；GitHub 中继 listener、隧道、hosts 和 CA；中继 token；用户署名和 co-author；五个运行时的平台说明；`agent_thread_pull_requests` 和它的写入；去掉 sandbox 的 installation token；第 7 节的删除和改造。这个 PR 只加 `0112_thread_pull_requests` 一个迁移，是普通的滚动部署。
+
+**删表放到 #1103 之后的下一版**，用单独的迁移做。原因是滚动升级：迁移在替换 API 之前执行，上一版每次读 job 都要读 `agent_jobs.published_commit_sha`，它的发布流程也要用快照表，同一版里删表会让还在运行的上一版出错（CI 的 `scripts/check_rolling_upgrade.py` 会拦下）。所以这一版只是不再读写它们；回滚到上一版不需要降级，也不丢任何东西。等下一版上线时，已经没有会读这些表的版本在运行，再删表和列。
 
 GitHub 上要手动做的：App 改名（生产 `FreeInference`，staging `FreeInference Staging`），换成终端图标头像；如果 slug 跟着变，同步更新 `AGENT_GITHUB_APP_INSTALL_URL`。
 

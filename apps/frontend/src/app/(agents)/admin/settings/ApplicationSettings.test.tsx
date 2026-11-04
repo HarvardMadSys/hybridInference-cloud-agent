@@ -212,8 +212,8 @@ function organizedSnapshot(): AgentAdminSettings {
     ],
     ['trust_proxy_headers', 'Security', 'Trust forwarded client addresses', 'boolean', false],
     ['github_app_id', 'Source control', 'GitHub App ID', 'string', '123'],
-    ['publish_base_branch', 'Publication', 'Default pull request base branch', 'string', 'dev'],
-    ['publish_git_timeout_s', 'Publication', 'Publication Git timeout', 'integer', 120],
+    ['github_coauthor', 'Source control', 'Agent commit co-author', 'string', 'Agent'],
+    ['github_request_timeout_s', 'Source control', 'GitHub request timeout', 'integer', 30],
   ];
   const definitions: AdminSettingDefinition[] = fields.map(
     ([key, category, label, kind, value]) => ({
@@ -430,7 +430,7 @@ describe('application settings', () => {
       ['gateway_authorize_url', 'Sign-in', 'Sign-in authorization URL'],
       ['session_cookie_secure', 'Security', 'Require HTTPS session cookies'],
       ['github_app_id', 'Source control', 'GitHub App ID'],
-      ['publish_base_branch', 'Publication', 'Default pull request base branch'],
+      ['github_coauthor', 'Source control', 'Agent commit co-author'],
       ['attachments.max_files', 'Attachments', 'Maximum upload file count'],
       ['skills.max_selected', 'Skills', 'Maximum selected skills'],
       ['task_titles.max_chars', 'Task titles', 'Maximum task title length'],
@@ -469,7 +469,7 @@ describe('application settings', () => {
     expect(screen.getByRole('heading', { name: 'Session security', level: 4 })).toBeVisible();
     for (const [category, labels] of [
       ['Identity & access', ['Sign-in authorization URL', 'Require HTTPS session cookies']],
-      ['Source control', ['GitHub App ID', 'Default pull request base branch']],
+      ['Source control', ['GitHub App ID', 'Agent commit co-author']],
       [
         'Content',
         ['Maximum upload file count', 'Maximum selected skills', 'Maximum task title length'],
@@ -489,15 +489,15 @@ describe('application settings', () => {
     await loadedField('Application name');
     selectCategory('Source control');
     const appId = editField('GitHub App ID');
-    const timeout = editField('Publication Git timeout');
+    const timeout = editField('GitHub request timeout');
     expect(appId).toBeVisible();
-    expect(editField('Default pull request base branch')).toBeVisible();
+    expect(editField('Agent commit co-author')).toBeVisible();
     expect(timeout).toBeVisible();
     fireEvent.change(appId, { target: { value: '456' } });
     fireEvent.change(timeout, { target: { value: '180' } });
     selectCategory('Appearance');
     selectCategory('Source control');
-    expect(editField('Publication Git timeout')).toBe(timeout);
+    expect(editField('GitHub request timeout')).toBe(timeout);
     expect(timeout).toHaveValue(180);
     expect(appId).toHaveValue('456');
     expect(write).not.toHaveBeenCalled();
@@ -505,14 +505,14 @@ describe('application settings', () => {
 
   it('focuses an initially linked field from a merged original category without a disclosure', async () => {
     read.mockResolvedValue(organizedSnapshot());
-    window.history.replaceState(null, '', '#application-setting-publish_git_timeout_s');
+    window.history.replaceState(null, '', '#application-setting-trust_proxy_headers');
     render(<ApplicationSettings />);
-    const input = await screen.findByLabelText('Publication Git timeout');
+    const input = await screen.findByLabelText('Trust forwarded client addresses');
     await waitFor(() => expect(input).toHaveFocus());
     expect(input).toBeVisible();
     expect(input.closest('details')).toBeNull();
-    expect(screen.getByRole('region', { name: 'Source control' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Source control' })).toHaveAttribute(
+    expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Identity & access' })).toHaveAttribute(
       'aria-pressed',
       'true',
     );

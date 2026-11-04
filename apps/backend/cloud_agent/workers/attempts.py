@@ -28,7 +28,6 @@ if TYPE_CHECKING:
         SandboxRepository,
         SessionForkRepository,
         SkillRepository,
-        SnapshotReapingRepository,
         SourceControlRepository,
     )
 
@@ -52,11 +51,6 @@ class _Reaping(Protocol):
     sandbox: SandboxRepository
     session_fork: SessionForkRepository
     skills: SkillRepository
-
-    @property
-    def snapshot(self) -> SnapshotReapingRepository:
-        """Snapshot persistence needed by this flow."""
-        ...
 
 
 #: How often the reaper looks for expired leases and stalled publishes.
@@ -214,7 +208,7 @@ async def _cleanup_failed_session_fork(
                     )
 
 
-async def _run_attempt_reaper(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+async def _run_attempt_reaper(
     store: _Reaping,
     *,
     interval_seconds: float = REAP_INTERVAL_S,
@@ -269,33 +263,8 @@ async def _run_attempt_reaper(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                 )
         except Exception:
             logger.warning("Agent attempt reaper pass failed", exc_info=True)
-        # Stalled captures, publishes and Forks each in a try of their own: they
-        # recover different workspaces, so one that fails on every pass must
-        # not stop the others -- or the attempt pass above -- from running.
-        try:
-            stalled_captures = await store.snapshot.reap_stalled_sandbox_snapshot_captures()
-            if stalled_captures:
-                logger.warning(
-                    "agent_snapshot_captures_stalled",
-                    extra={
-                        "event": "agent_snapshot_captures_stalled",
-                        "snapshot_ids": stalled_captures,
-                    },
-                )
-        except Exception:
-            logger.warning("Stalled snapshot capture reaper pass failed", exc_info=True)
-        try:
-            stalled_snapshot_publishes = await store.snapshot.reap_stalled_snapshot_publishes()
-            if stalled_snapshot_publishes:
-                logger.warning(
-                    "agent_snapshot_publishes_stalled",
-                    extra={
-                        "event": "agent_snapshot_publishes_stalled",
-                        "snapshot_ids": stalled_snapshot_publishes,
-                    },
-                )
-        except Exception:
-            logger.warning("Stalled snapshot publish reaper pass failed", exc_info=True)
+        # Stalled Forks in a try of their own: one that fails on every pass
+        # must not stop the attempt pass above from running.
         try:
             stalled_session_forks = await store.session_fork.reap_stalled_session_forks()
             if stalled_session_forks:

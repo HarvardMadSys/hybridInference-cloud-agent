@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-04 03:37-0500\n"
+"POT-Creation-Date: 2026-11-04 08:18-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -60,10 +60,61 @@ msgstr ""
 "Settings](operations.md#admin-settings)。"
 
 #: ../developer/upgrade-notes.md:22
+msgid "Agents open their own pull requests"
+msgstr "Agent 自己开 pull request"
+
+#: ../developer/upgrade-notes.md:24
+#, python-brace-format
+msgid ""
+"The platform no longer publishes workspaces. There is no **Create PR** or"
+" **Update PR** button, no `POST /v1/agent/threads/{thread_id}/publish`, "
+"no workspace snapshot and no `agent/<thread>` branch. When the owner "
+"asks, the agent commits, pushes a branch and opens the pull request "
+"itself, as the owner, through [the GitHub relay](operations.md#the-"
+"github-relay); without the relay configured, agents cannot push. **Watch "
+"PR and merge** has the agent use git and `gh api` REST calls itself. "
+"Follow-up turns always start from the conversation's own base. Pull "
+"requests the publisher opened before this release stay on GitHub as they "
+"are, and nothing pushes to their `agent/…` branches again."
+msgstr ""
+"平台不再发布工作区。没有 **Create PR** 或 **Update PR** 按钮，没有 `POST "
+"/v1/agent/threads/{thread_id}/publish`，没有工作区快照，也没有 `agent/<thread>` "
+"分支。所有者要开 pull request 时，agent 以所有者的身份，经 [GitHub 中继](operations.md#the-"
+"github-relay) 自己提交、推送分支并开 pull request；没有配置中继，agent 就推送不了。**Watch PR and "
+"merge** 让 agent 自己用 git 和 `gh api` 的 REST 调用。后续轮次总是从对话自己的 base "
+"开始。这个版本之前由发布器开的 pull request 原样留在 GitHub 上，之后不会再有东西推送到它们的 `agent/…` 分支。"
+
+#: ../developer/upgrade-notes.md:35
+msgid ""
+"The control plane no longer reads `AGENT_GITHUB_TOKEN`, "
+"`AGENT_PUBLISH_BASE_BRANCH`, `AGENT_GIT_AUTHOR_NAME` or "
+"`AGENT_GIT_AUTHOR_EMAIL`, and Admin → Settings has no Publication group. "
+"Delete those lines from the control plane's `.env`. Commits are authored "
+"as the conversation's owner, with `AGENT_GITHUB_COAUTHOR` as co-author."
+msgstr ""
+"控制平面不再读取 "
+"`AGENT_GITHUB_TOKEN`、`AGENT_PUBLISH_BASE_BRANCH`、`AGENT_GIT_AUTHOR_NAME` "
+"和 `AGENT_GIT_AUTHOR_EMAIL`，Admin → Settings 里也不再有 Publication "
+"分组。把这几行从控制平面的 `.env` 里删掉。commit 的作者是对话的所有者，`AGENT_GITHUB_COAUTHOR` 是共同作者。"
+
+#: ../developer/upgrade-notes.md:41
+msgid ""
+"The publisher's tables (`agent_sandbox_snapshots`, `agent_snapshot_jobs`,"
+" `agent_pr_archive_checks`) and `agent_jobs.published_commit_sha` stay in"
+" the schema, unused: this release neither reads nor writes them, and a "
+"migration in the next release drops them. This release is an ordinary "
+"rolling deploy, and rolling back to the previous release needs no "
+"downgrade and loses nothing."
+msgstr ""
+"发布器的表（`agent_sandbox_snapshots`、`agent_snapshot_jobs`、`agent_pr_archive_checks`）和"
+" `agent_jobs.published_commit_sha` 仍留在 schema "
+"里，但已经没人用：这个版本既不读也不写它们，下一个版本的迁移会删掉它们。这个版本是普通的滚动部署；回滚到上一个版本不需要降级，也不会丢失任何东西。"
+
+#: ../developer/upgrade-notes.md:47
 msgid "Shorter `.env` files"
 msgstr "更短的 `.env` 文件"
 
-#: ../developer/upgrade-notes.md:24
+#: ../developer/upgrade-notes.md:49
 msgid ""
 "The example `.env` files now hold only what Admin cannot manage: the "
 "database connection, the root keys, the recovery token, container wiring,"
@@ -75,7 +126,7 @@ msgstr ""
 "管不了的东西：数据库连接、根密钥、应急管理员口令和容器之间的连接方式；主机上还有隧道、主机身份和沙箱边界。其余的值都在 Admin → "
 "Settings 里设置，只针对某一台服务器的在 Servers 页面设置。缺少必填设置时，Admin 页面顶部会直接写出缺的是哪一项。"
 
-#: ../developer/upgrade-notes.md:30
+#: ../developer/upgrade-notes.md:55
 msgid ""
 "An existing `.env` keeps working unchanged. The first start of a release "
 "that registers a setting imports that setting's value from the "
@@ -127,7 +178,7 @@ msgstr "部署配置里托管主机的环境文件"
 msgid "`AGENT_HOST_SLOTS`, `AGENT_SHARED_RESIDENT_CAPACITY`"
 msgstr "`AGENT_HOST_SLOTS`、`AGENT_SHARED_RESIDENT_CAPACITY`"
 
-#: ../developer/upgrade-notes.md:41
+#: ../developer/upgrade-notes.md:66
 msgid ""
 "`AGENT_COMPUTE_SECRET_KEY` is imported the same way: once stored, saved "
 "compute credentials decrypt with the stored key and a different value in "
@@ -139,9 +190,13 @@ msgid ""
 "`AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own copy of "
 "the credential."
 msgstr ""
-"`AGENT_COMPUTE_SECRET_KEY` 也是这样导入的：存进数据库后，已保存的 compute 凭据都用数据库里的那把密钥解密，`.env` 里换成别的值也会被忽略，所以这一行同样可以删掉。`deploy.sh` 不再写这一行：新部署的控制平面会在第一次启动时把这把密钥生成到设置里。要和数据库一起备份的是设置的根密钥（`AGENT_SETTINGS_ENCRYPTION_KEY`，或者充当根密钥的 `AGENT_SESSION_SECRET`）。每台主机上的 `AGENT_SANDBOX_MANAGER_TOKEN` 要保留：那是主机自己持有的一份凭据。"
+"`AGENT_COMPUTE_SECRET_KEY` 也是这样导入的：存进数据库后，已保存的 compute "
+"凭据都用数据库里的那把密钥解密，`.env` 里换成别的值也会被忽略，所以这一行同样可以删掉。`deploy.sh` "
+"不再写这一行：新部署的控制平面会在第一次启动时把这把密钥生成到设置里。要和数据库一起备份的是设置的根密钥（`AGENT_SETTINGS_ENCRYPTION_KEY`，或者充当根密钥的"
+" `AGENT_SESSION_SECRET`）。每台主机上的 `AGENT_SANDBOX_MANAGER_TOKEN` "
+"要保留：那是主机自己持有的一份凭据。"
 
-#: ../developer/upgrade-notes.md:50
+#: ../developer/upgrade-notes.md:75
 msgid ""
 "`ADMIN_TOKEN` is optional: the first administrator of a new deployment "
 "signs in with the one-time setup code. An existing deployment can keep it"
@@ -152,9 +207,11 @@ msgid ""
 " it stops with the names of any missing required value rather than "
 "generate one."
 msgstr ""
-"`ADMIN_TOKEN` 现在是可选的：新部署的第一位管理员用一次性设置码登录。已有的部署可以留着它当后门。`deploy.sh` 现在会为全新安装生成数据库密码和 DSN、账号密钥和设置的根密钥。已经有值的绝不替换，有 `AGENT_SESSION_SECRET` 时绝不再加一把设置密钥；如果部署根目录以前部署过，缺了必填值时它会停下来并列出缺的是哪几项，而不是替你生成。"
+"`ADMIN_TOKEN` 现在是可选的：新部署的第一位管理员用一次性设置码登录。已有的部署可以留着它当后门。`deploy.sh` "
+"现在会为全新安装生成数据库密码和 DSN、账号密钥和设置的根密钥。已经有值的绝不替换，有 `AGENT_SESSION_SECRET` "
+"时绝不再加一把设置密钥；如果部署根目录以前部署过，缺了必填值时它会停下来并列出缺的是哪几项，而不是替你生成。"
 
-#: ../developer/upgrade-notes.md:58
+#: ../developer/upgrade-notes.md:83
 msgid ""
 "The web app is now served only at the root of its own hostname, with the "
 "API at `/api` on the same origin; mounting it under a path prefix such as"
@@ -168,13 +225,19 @@ msgid ""
 "`cloud-agent`. A distribution that resolves releases must accept one "
 "without the `/agents` web image before deploying it."
 msgstr ""
-"Web 应用现在只挂在自己主机名的根路径下，API 在同源的 `/api`；把它挂在别的网站某个路径前缀（比如 `/agents`）下的做法已经去掉了，发版里也不再带 `web-agents` 镜像。控制平面 `.env` 里的 `AGENT_WEB_BASE_PATH`、`AGENT_WEB_API_URL` 和 `AGENT_DEPLOYMENT_SHA` 可以删掉（`deploy.sh` 会自己导出要部署的提交）。`AGENT_WEB_BASE_PATH` 留空没有影响；如果还有值，`deploy.sh` 和发版部署脚本会停下来，因为这个值现在已经不起作用了。`AGENT_NETWORK_NAME` 也可以删，除非另一套服务的反向代理是用 `cloud-agent` 以外的名字加入这个网络的。负责解析发版的发行版，要先改成接受没有 `/agents` Web 镜像的发版，才能部署它。"
+"Web 应用现在只挂在自己主机名的根路径下，API 在同源的 `/api`；把它挂在别的网站某个路径前缀（比如 "
+"`/agents`）下的做法已经去掉了，发版里也不再带 `web-agents` 镜像。控制平面 `.env` 里的 "
+"`AGENT_WEB_BASE_PATH`、`AGENT_WEB_API_URL` 和 `AGENT_DEPLOYMENT_SHA` "
+"可以删掉（`deploy.sh` 会自己导出要部署的提交）。`AGENT_WEB_BASE_PATH` "
+"留空没有影响；如果还有值，`deploy.sh` 和发版部署脚本会停下来，因为这个值现在已经不起作用了。`AGENT_NETWORK_NAME` "
+"也可以删，除非另一套服务的反向代理是用 `cloud-agent` 以外的名字加入这个网络的。负责解析发版的发行版，要先改成接受没有 "
+"`/agents` Web 镜像的发版，才能部署它。"
 
-#: ../developer/upgrade-notes.md:48
+#: ../developer/upgrade-notes.md:94
 msgid "Four values moved into Admin in this release:"
 msgstr "本次发布有四个值搬进了 Admin："
 
-#: ../developer/upgrade-notes.md:50
+#: ../developer/upgrade-notes.md:96
 msgid ""
 "**Live streams per account** (`AGENT_MAX_STREAMS_PER_USER`) and **Serve "
 "API documentation** (`AGENT_API_DOCS`), in Admin → Settings → Operations."
@@ -184,7 +247,7 @@ msgstr ""
 "documentation**（`AGENT_API_DOCS`），在 Admin → Settings → Operations "
 "里。两者改了都不用重启。"
 
-#: ../developer/upgrade-notes.md:53
+#: ../developer/upgrade-notes.md:99
 msgid ""
 "**Agent package registry** (`AGENT_RUNTIME_REGISTRY_URL`), in Admin → "
 "Settings → Agent versions. Hosts receive it on every heartbeat. Until "
@@ -195,7 +258,7 @@ msgstr ""
 "Settings → Agent versions "
 "里。主机每次心跳都会收到它。在所有在线主机都报告用上它之前，同一个标签页会列出还没用上的主机，agent 升级按钮也不能点。"
 
-#: ../developer/upgrade-notes.md:57
+#: ../developer/upgrade-notes.md:103
 msgid ""
 "**Turn lease** (`AGENT_LEASE_TTL`), for every server or one, from the "
 "admin pages. Each host imports its own value once from its next "
@@ -204,17 +267,17 @@ msgstr ""
 "**Turn lease**（`AGENT_LEASE_TTL`），可以在 admin "
 "页面里给所有服务器统一设置，也可以只给某一台设置。每台主机会在下一次心跳时把自己原来的值导入一次。"
 
-#: ../developer/upgrade-notes.md:60
+#: ../developer/upgrade-notes.md:106
 msgid ""
 "On a deployment that skipped the releases where these settings were "
 "added, an old value is still imported once rather than lost."
 msgstr "如果某个部署跳过了新增这些设置的那几个发布，旧值也照样会导入一次，不会丢。"
 
-#: ../developer/upgrade-notes.md:63
+#: ../developer/upgrade-notes.md:109
 msgid "Independent accounts cutover"
 msgstr "独立账号切换"
 
-#: ../developer/upgrade-notes.md:65
+#: ../developer/upgrade-notes.md:111
 msgid ""
 "This release removes HybridInference Gateway sign-in, admission and "
 "inference. Cloud Agent keeps its own accounts, and every task runs on a "
@@ -230,7 +293,7 @@ msgstr ""
 "保留自己的账号，每个任务都运行在其所有者用自己的服务商密钥添加的模型连接上。早期版本的数据库以 Gateway 所有者 ID 为键，而这些 ID "
 "不属于任何账号，因此不会被升级、转换或映射：本版本从一个**新的空数据库**开始，旧数据库原样保留，作为归档和回滚来源。用户需要重新注册、通过等候名单申请，并重新添加模型连接。旧的任务、连接和身份都不会迁移。"
 
-#: ../developer/upgrade-notes.md:74
+#: ../developer/upgrade-notes.md:120
 msgid ""
 "**Archive the old deployment.** Drain it, stop every writer, and take a "
 "custom-format `pg_dump` of the old Agent database with its checksum, the "
@@ -241,11 +304,11 @@ msgstr ""
 "**归档旧部署。** 排空它，停止所有写入方，对旧的 Agent 数据库做一份自定义格式的 "
 "`pg_dump`，连同校验和、旧配置和根密钥一起保存。保留旧数据库本身；不要删除、降级或重新绑定它。可以选择以只读方式确认它正是本版本会拒绝的数据库："
 
-#: ../developer/upgrade-notes.md:84
+#: ../developer/upgrade-notes.md:130
 msgid "It exits non-zero, names this runbook, and changes nothing."
 msgstr "它以非零状态退出，指出本操作手册，并且不做任何改动。"
 
-#: ../developer/upgrade-notes.md:86
+#: ../developer/upgrade-notes.md:132
 msgid ""
 "**Create a new, empty Agent database** and point `AGENT_DATABASE_URL` at "
 "it. The same check must now report an empty database that will be bound "
@@ -256,7 +319,7 @@ msgstr ""
 "指向它。同一检查此时必须报告这是一个空数据库，会在首次启动时绑定。`deploy/control-plane/deploy.sh` "
 "会在迁移之前以只读方式运行它，检查拒绝时就停止。"
 
-#: ../developer/upgrade-notes.md:91
+#: ../developer/upgrade-notes.md:137
 msgid ""
 "**Give the deployment its own secrets**, none of them shared with the "
 "Gateway or with another environment: `AGENT_LOCAL_SESSION_SECRET`, "
@@ -269,7 +332,7 @@ msgstr ""
 "或其他环境共用：`AGENT_LOCAL_SESSION_SECRET`、`AGENT_SETTINGS_ENCRYPTION_KEY`、`AGENT_CONTROL_TOKEN_SECRET`、`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`（每个至少"
 " 32 个随机字节，`openssl rand -hex 32`），以及一个单独的 `ADMIN_TOKEN`。主机用新的注册令牌重新注册。"
 
-#: ../developer/upgrade-notes.md:98
+#: ../developer/upgrade-notes.md:144
 msgid ""
 "**Remove every Gateway variable.** The control plane and `deploy.sh` "
 "refuse `AGENT_AUTH_MODE`, `GATEWAY_*` (issuer, JWKS, authorize, base URL,"
@@ -289,7 +352,7 @@ msgstr ""
 "`AGENT_TUNNEL_*`。设置 `AGENT_WEB_BASE_URL`（所有邮件链接的基础地址）和 "
 "`AGENT_PUBLIC_API_URL`（本 API 的公开地址，以前由 `AGENT_SESSION_REDIRECT_URI` 提供）。"
 
-#: ../developer/upgrade-notes.md:109
+#: ../developer/upgrade-notes.md:155
 msgid ""
 "**Mail.** An existing SMTP transport, such as the one HybridInference "
 "sends with, may be reused: set `AGENT_SMTP_HOST`, `AGENT_SMTP_PORT` "
@@ -305,7 +368,7 @@ msgstr ""
 " 和 `AGENT_SMTP_FROM`，绝不写进仓库。共享的只是传输：邮件中的每个链接都基于 `AGENT_WEB_BASE_URL` "
 "构造，并用本部署自己的 `AGENT_LOCAL_SESSION_SECRET` 签名，账号数据属于本数据库。"
 
-#: ../developer/upgrade-notes.md:118
+#: ../developer/upgrade-notes.md:164
 msgid ""
 "**Initial administrators.** List the verified addresses of the people who"
 " administer the deployment in `AGENT_LOCAL_ADMIN_EMAILS` (`admin-"
@@ -331,7 +394,7 @@ msgstr ""
 "cloud_agent.accounts.bootstrap_admin`（[首个管理员](local-accounts.md#the-"
 "first-administrator)）。"
 
-#: ../developer/upgrade-notes.md:132
+#: ../developer/upgrade-notes.md:178
 msgid ""
 "**Deploy and verify.** Run the usual deployment. Then: sign-up sends a "
 "verification link at `AGENT_WEB_BASE_URL`; an administrator approves an "
@@ -345,7 +408,7 @@ msgstr ""
 "的验证链接；管理员能批准申请；申请人能添加模型连接并运行任务。模型连接默认开启。如果希望等每台主机和每个控制平面副本都运行本版本后再接受新轮次，就在部署前设置"
 " `AGENT_MODEL_CONNECTIONS_ENABLED=false`，等它们全部升级后再取消设置。"
 
-#: ../developer/upgrade-notes.md:140
+#: ../developer/upgrade-notes.md:186
 msgid ""
 "**Rollback.** Before the new deployment has taken writes that matter, "
 "stop it and redeploy the previous release against the archived database "
@@ -356,11 +419,11 @@ msgstr ""
 "**回滚。** "
 "在新部署还没有产生重要的写入之前，停止它，并针对从未改动过的归档数据库和配置重新部署上一个版本。有了新的写入之后，请保留新数据库：其中的账号旧版本无法读取，两个数据库也永远不会合并。"
 
-#: ../developer/upgrade-notes.md:146
+#: ../developer/upgrade-notes.md:192
 msgid "Conversation history read contract"
 msgstr "对话历史读取协议"
 
-#: ../developer/upgrade-notes.md:148
+#: ../developer/upgrade-notes.md:194
 #, python-brace-format
 msgid ""
 "This release changes `GET /v1/agent/jobs/{job_id}/thread` to "
@@ -377,7 +440,7 @@ msgstr ""
 " 条轮次或消息记录，`limit` 最大为 100，序列化响应最多为 512 KiB。`current_job_id` "
 "独立于分页标识最新轮次；设置 `anchor=true` 则从选中的 job 开始读取。"
 
-#: ../developer/upgrade-notes.md:156
+#: ../developer/upgrade-notes.md:202
 msgid ""
 "Pass `next_cursor` as `cursor` to load older history explicitly. For "
 "refreshes, retain older pages and pass `sync_cursor` as `after`; follow "
@@ -393,7 +456,7 @@ msgstr ""
 "null。这样会重读末尾两个仍可能变化的轮次，避免尚未提交的写入落在新分配的 ID 之前而被漏掉。消息按 ID 合并，job 按 ID "
 "和版本合并，保留轮次顺序，并将每轮的起始提示放在回复和轮中消息之前。每次请求都会检查游标属于当前所有者且对话未被删除。"
 
-#: ../developer/upgrade-notes.md:164
+#: ../developer/upgrade-notes.md:210
 #, python-brace-format
 msgid ""
 "Messages longer than 4,096 Unicode characters carry `content_truncated` "
@@ -415,11 +478,11 @@ msgstr ""
 "/v1/agent/threads/{thread_id}/messages`；省略队列快照不代表队列为空。这只改变面向所有者的读取 "
 "API，不影响运行时会话恢复或转录回放。"
 
-#: ../developer/upgrade-notes.md:175
+#: ../developer/upgrade-notes.md:221
 msgid "Recent migrations"
 msgstr "近期迁移"
 
-#: ../developer/upgrade-notes.md:177
+#: ../developer/upgrade-notes.md:223
 msgid "Newest first."
 msgstr "新的排在前面。"
 
@@ -442,8 +505,8 @@ msgid ""
 "request. Nothing reads it before this release, so the previous release "
 "runs unchanged beside it. A downgrade drops the table."
 msgstr ""
-"新增 `agent_thread_pull_requests` 表：记录对话里的 agent 通过 GitHub "
-"中继开出的 PR，每个对话的每个 PR 一行。这个版本之前没有代码读它，所以上一个版本可以照常并行运行。降级时删除这张表。"
+"新增 `agent_thread_pull_requests` 表：记录对话里的 agent 通过 GitHub 中继开出的 PR，每个对话的每个"
+" PR 一行。这个版本之前没有代码读它，所以上一个版本可以照常并行运行。降级时删除这张表。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0111_mcp_sandbox_location`"
@@ -457,7 +520,10 @@ msgid ""
 "`agent_mcp_connections_location_check`. No row changes. A downgrade "
 "restores the three-location constraint, and refuses while any sandbox "
 "connection exists rather than deleting it."
-msgstr "让 MCP 连接可以运行在任务沙箱里：`agent_mcp_connections.location` 的检查约束在 `remote`、`managed-worker` 和 `user-connector` 之外，新增允许 `sandbox`，约束统一命名为 `agent_mcp_connections_location_check`。不改动任何数据行。降级会恢复原来只允许三种位置的约束；只要还存在沙箱连接，降级就会被拒绝，而不是删掉这些连接。"
+msgstr ""
+"让 MCP 连接可以运行在任务沙箱里：`agent_mcp_connections.location` 的检查约束在 `remote"
+"`、`managed-worker` 和 `user-connector` 之外，新增允许 `sandbox`，约束统一命名为 "
+"`agent_mcp_connections_location_check`。不改动任何数据行。降级会恢复原来只允许三种位置的约束；只要还存在沙箱连接，降级就会被拒绝，而不是删掉这些连接。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0110_host_late_settings`"
@@ -1167,7 +1233,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:230
+#: ../developer/upgrade-notes.md:278
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -1179,11 +1245,11 @@ msgstr ""
 "backwards-compatible)中。独立账号版本之前的数据库，无论处于哪条迁移链，都不会被升级；见[切换说明"
 "](#independent-accounts-cutover)。"
 
-#: ../developer/upgrade-notes.md:235
+#: ../developer/upgrade-notes.md:283
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:237
+#: ../developer/upgrade-notes.md:285
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"
