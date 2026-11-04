@@ -9037,6 +9037,13 @@
             "title": "Signup Enabled",
             "type": "boolean"
           },
+          "terms_by_locale": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Terms By Locale",
+            "type": "object"
+          },
           "terms_text": {
             "default": "",
             "title": "Terms Text",
@@ -42675,7 +42682,7 @@
     },
     "/v1/agent/site-config": {
       "get": {
-        "description": "Return only the allowlisted site identity.",
+        "description": "Return only the allowlisted site identity and the deployment's public site content.",
         "operationId": "site_config_v1_agent_site_config_get",
         "responses": {
           "200": {

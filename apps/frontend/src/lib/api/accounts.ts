@@ -78,6 +78,8 @@ export interface AuthOptions {
   turnstile_site_key: string;
   terms_url: string;
   terms_text: string;
+  /** The deployment's own Terms files by locale; when present they replace the two above. */
+  terms_by_locale?: Record<string, string>;
   setup_required: boolean;
   max_accounts_per_browser: number;
 }
