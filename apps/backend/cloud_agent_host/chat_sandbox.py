@@ -1576,12 +1576,12 @@ class ChatSandboxManager:
 
     def ensure_codex_mcp_policy(self, spec: ChatSandboxSpec, base_url: str) -> None:
         """Allow only this deployment's relay before starting a Codex member."""
-        from cloud_agent_host.codex_mcp import INSTALL_POLICY, SANDBOX_MCP_URL, relay_endpoint
+        from cloud_agent_host.codex_mcp import install_policy_argv, relay_endpoint
 
         endpoint = relay_endpoint(base_url)
         result = self.exec_capture(
             spec,
-            ["/usr/bin/python3", "-I", "-c", INSTALL_POLICY, endpoint, SANDBOX_MCP_URL],
+            install_policy_argv(endpoint),
             workdir="/",
             timeout_s=20,
             user_uid=0,

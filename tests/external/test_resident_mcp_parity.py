@@ -46,7 +46,7 @@ from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.codex_mcp import INSTALL_POLICY
+from cloud_agent_host.codex_mcp import install_policy_argv
 from cloud_agent_host.docker_engine import run_docker
 from cloud_agent_host.drivers import LaunchContext, TurnInput, get_driver
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION, ensure_kilo_runtime
@@ -323,11 +323,7 @@ def _resident_turns(
         "--user",
         "0:0",
         container,
-        "python3",
-        "-I",
-        "-c",
-        INSTALL_POLICY,
-        relay + "/v1/agent/mcp",
+        *install_policy_argv(relay + "/v1/agent/mcp", python="python3"),
     )
     _docker(
         "exec",

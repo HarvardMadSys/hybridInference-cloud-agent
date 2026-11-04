@@ -34,6 +34,15 @@ def relay_endpoint(base_url: str) -> str:
     return base_url.rstrip("/").removesuffix("/v1") + "/v1/agent/mcp"
 
 
+def install_policy_argv(endpoint: str, python: str = "/usr/bin/python3") -> list[str]:
+    """The guest-root command that installs the policy for ``endpoint``.
+
+    The one place that knows what the script takes, so a caller cannot run it
+    with a different set of arguments than the host does.
+    """
+    return [python, "-I", "-c", INSTALL_POLICY, endpoint, SANDBOX_MCP_URL]
+
+
 # Executed as guest root by the trusted host, never through repository code.
 # Both directories and an existing policy must be root-owned and unwritable by
 # members. Atomic replacement also makes simultaneous member launches safe.
