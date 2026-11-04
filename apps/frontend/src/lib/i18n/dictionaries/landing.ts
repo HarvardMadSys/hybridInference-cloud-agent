@@ -1,6 +1,9 @@
 // The signed-out home page, and the drawing of the app it plays.
 
+import { siteFooterEn, siteFooterZh } from './siteFooter';
+
 export const landingEn = {
+  ...siteFooterEn,
   'landing.nav': 'Account',
   'landing.signIn': 'Sign in',
   'landing.signUp': 'Sign up',
@@ -141,6 +144,7 @@ export const landingEn = {
 } as const;
 
 export const landingZh: Record<keyof typeof landingEn, string> = {
+  ...siteFooterZh,
   'landing.nav': '账号',
   'landing.signIn': '登录',
   'landing.signUp': '注册',
