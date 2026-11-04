@@ -5,10 +5,11 @@
 - 参照：HybridInference `refs/codex/env-inventory-reference`（`3098cb9f`）中的
   `apps/backend/serving/config/app_config_registry.py`、
   `tests/unit/config/test_app_config_registry.py`、`tests/unit/config/test_no_raw_env_reads.py`
-- 性质：盘点 + 门禁实现。本 PR 不迁移任何产品设置，不改默认值、安全策略或网络策略。
+- 性质：盘点 + 门禁实现。文中的「本 PR」指盘点这一步：它不迁移任何产品设置，不改默认值、安全策略或网络策略。
+  文中的数字和附录都以上面的基线为准。之后在这套门禁上精简 `.env` 的设计见
+  [精简 `.env`：网页能管的都不留在 `.env`](2026-11-03-slim-env.zh-CN.md)，分类表此后随代码更新。
 - 实现：`tests/support/env_scan.py`（扫描器）、`tests/support/env_inventory.py`（分类表）、
   `tests/unit/test_env_classification.py`（门禁）、`tests/unit/test_env_scan.py`（扫描器自测）
-- 验证记录：[2026-10-29-env-inventory-gates.md](../reviews/2026-10-29-env-inventory-gates.md)
 
 ## 1. 结论
 
