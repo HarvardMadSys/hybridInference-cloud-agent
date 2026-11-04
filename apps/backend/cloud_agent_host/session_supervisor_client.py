@@ -487,6 +487,7 @@ class SessionSupervisorClient:
                     "environment": launch.environment.model_dump(mode="json")
                     if launch.environment
                     else None,
+                    "sandbox_mcp_servers": [server.wire() for server in launch.sandbox_mcp_servers],
                 },
                 "profiling": profiling,
             },

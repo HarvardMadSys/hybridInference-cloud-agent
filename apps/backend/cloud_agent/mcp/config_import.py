@@ -46,7 +46,7 @@ from cloud_agent.mcp.models import (
 #: chooses a location on its own: a ``command`` from somebody's laptop means
 #: "their machine", and reading that as the control plane's own filesystem is
 #: the mistake the design calls out by name.
-DraftLocation = Literal["remote", "managed-worker", "user-connector"]
+DraftLocation = Literal["remote", "managed-worker", "user-connector", "sandbox"]
 
 _SECRET_NAME = re.compile(
     r"authorization|authentication|\bauth\b|token|secret|key|password|passwd|credential"

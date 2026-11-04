@@ -57,7 +57,7 @@ from cloud_agent.api.mcp_thread_bindings import (
 )
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp import config_import, github_oauth, launch, oauth
+from cloud_agent.mcp import config_import, github_oauth, launch, oauth, sandbox_servers as sandbox
 from cloud_agent.mcp.errors import (
     McpConnectionCreateConflict,
     McpCredentialWriteRejected,
@@ -120,7 +120,7 @@ def _templates() -> list[dict[str, Any]]:
     if available:
         github["auth_kind"] = AuthKind.OAUTH.value
         github["notes"] = ["Choose the GitHub account and repositories your agents can access."]
-    return templates
+    return [*templates, *(dict(template) for template in sandbox.TEMPLATES)]
 
 
 #: Which template simplifications this deployment offers. Templates are a
@@ -574,8 +574,14 @@ async def create_connection(
         transport=transport, location=location, url=body.url, launch=body.launch
     )
     auth_kind, auth_config = _build_auth(body.auth_kind, body.header_name, body.header_scheme)
+    if refusal := sandbox.refusal(
+        location, auth_kind, secret=bool(body.secret or body.env_secrets)
+    ):
+        raise _bad_request(refusal)
     template = body.template if body.template else None
-    if template is not None and template not in {item["name"] for item in _TEMPLATES}:
+    if template is not None and template not in {
+        t["name"] for t in (*_TEMPLATES, *sandbox.TEMPLATES)
+    }:
         # An unknown template is refused rather than stored as free text: the
         # column means "which preset this came from", and a value that names
         # nothing makes the provenance unreadable.
@@ -748,6 +754,8 @@ async def update_connection(
     auth_kind = body.auth_kind
     if auth_kind is not None:
         auth_kind = _parse_auth_kind(auth_kind).value
+        if refusal := sandbox.refusal(location, auth_kind, secret=False):
+            raise _bad_request(refusal)
 
     updated = await job_store.mcp.update_mcp_connection(
         connection_id=connection_id,
@@ -900,6 +908,9 @@ async def _diagnose(
     )
     if loaded_row is None:
         raise _not_found("no such MCP connection")
+    if loaded_row.get("location") == ExecutionLocation.SANDBOX.value:
+        # Nothing here can reach it, and an unreachable verdict would stop it.
+        return TestResult(ok=True, message=sandbox.TEST_MESSAGE)
     row = loaded_row
 
     async def record_status(
@@ -2093,6 +2104,8 @@ def _prepare_import_draft(
             else "",
         }
     secrets = _import_secrets(draft, body)
+    if refusal := sandbox.refusal(parsed_location, draft.auth_kind, secret=bool(secrets)):
+        raise _bad_request(f"{draft.label}: {refusal}")
     access_token_ciphertext = None
     auth_config_patch = None
     sealed_launch_spec = None

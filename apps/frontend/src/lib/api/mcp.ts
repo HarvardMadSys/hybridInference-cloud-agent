@@ -24,7 +24,8 @@ const API_BASE = config.apiBase;
 export type McpTransport = 'streamable-http' | 'http-sse' | 'stdio';
 
 /** Where a stdio server actually runs. */
-export type McpLocation = 'remote' | 'managed-worker' | 'user-connector';
+/** `sandbox`: inside each chat's own sandbox, next to the agent (pinned packages, no secrets). */
+export type McpLocation = 'remote' | 'managed-worker' | 'user-connector' | 'sandbox';
 
 /** How a connection authenticates to its server. */
 export type McpAuthKind = 'none' | 'static' | 'oauth';
@@ -76,6 +77,9 @@ export interface McpTemplateApi {
   notes: string[];
   documentation_url?: string;
   browser_sign_in_available?: boolean;
+  /** A sandbox preset: a pinned stdio server run in each chat's sandbox, no URL. */
+  location?: McpLocation;
+  launch?: { command: string; args: string[] };
 }
 
 /** Public metadata from the official MCP Registry, never an installed connection. */

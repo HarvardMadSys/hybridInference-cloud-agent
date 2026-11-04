@@ -1186,6 +1186,32 @@ and `self-test` in a sandbox to check a host; `/run/agent-browser/daemon.log`
 has the service's log. A retained container created from an image without the
 browser has none until it is recreated.
 
+## Sandbox MCP servers
+
+An MCP connection can run in each chat's sandbox (location `sandbox`) instead
+of behind the relay, so it reaches the task's `localhost`, its files and the
+sandbox browser. The Playwright and Chrome DevTools presets drive that browser.
+The [design](../agents/specs/2026-11-02-computer-use-base-capability.md#in-sandbox-mcp-servers-phase-2)
+explains it.
+
+- **What may run there.** One exactly pinned package started by `npx` or `uvx`,
+  with no secret, mount or working directory. A server that needs a
+  credential stays remote: the sandbox also runs the repository's code.
+- **How it runs.** The image's MCP gateway, `cloud-agent-mcp`, runs as its own
+  user, `agent-mcp` (uid 10003), and serves every member's servers on
+  `http://127.0.0.1:47801/mcp`. The host admits a member's servers before it
+  launches the member's CLI, which reaches them as the MCP server `sandbox`
+  with its relay token. A failed admission is logged and leaves the chat
+  without those tools, not without its turn.
+- **Changes.** Turning a server off, adding one or changing its version takes
+  effect at the next turn, which starts a new CLI that resumes the session.
+- **No approval step.** The relay's per-tool policies do not apply: a sandbox
+  server can do what the agent's shell can.
+- **Where to look.** `/run/agent-mcp/gateway.log` in the sandbox records each
+  server's start and stop and the methods each slot called; each server's own
+  output is in `/run/agent-mcp/logs/<slot>-<alias>.log`. Both are readable
+  only as `agent-mcp`.
+
 ## Before a job can run for real
 
 Complete host provisioning, network checks, enrollment, and credentials before

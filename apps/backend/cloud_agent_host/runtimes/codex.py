@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from cloud_agent_host.sandbox import RUNTIME_BIN_ROOT
 from cloud_agent_shared.runtime_catalog import CODEX
+from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_SERVER_NAME
 
 from .base import (
     COMPAT_ORIGIN,
@@ -241,10 +242,18 @@ class CodexRuntime(AgentRuntime):
         endpoints = self.relay_urls(config, model_base_url=model_base_url)
         entries = []
         for name, url in endpoints.items():
+            # The sandbox gateway is optional: a server the user chose that
+            # fails to start must not stop the turn, and its first start may
+            # install a package.
+            startup = (
+                "required = false, startup_timeout_sec = 180"
+                if name == SANDBOX_MCP_SERVER_NAME
+                else "required = true, startup_timeout_sec = 30"
+            )
             entries.append(
                 f"{name} = {{ url = {json.dumps(url)}, "
                 f'bearer_token_env_var = "{MCP_TOKEN_ENV}", '
-                "required = true, startup_timeout_sec = 30, tool_timeout_sec = 1560 }"
+                f"{startup}, tool_timeout_sec = 1560 }}"
             )
         return ["-c", "mcp_servers = { " + ", ".join(entries) + " }"]
 

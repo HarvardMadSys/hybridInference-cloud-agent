@@ -1,0 +1,1073 @@
+#!/usr/bin/python3 -I
+"""The sandbox's MCP gateway: user-selected stdio MCP servers, next to the agent.
+
+A user can choose to run an MCP server *in the sandbox* (location ``sandbox``)
+instead of behind the platform relay: it then sees the task's ``localhost``,
+its files and the sandbox's browser. The trusted host decides which servers a
+member may use; this gateway runs them and presents them to the member's
+agent CLI as one Streamable HTTP MCP server, ``sandbox``, the way the relay
+presents the remote ones as ``session``.
+
+Why a gateway, and not a stdio entry in each CLI's config:
+
+- It runs as its own user (``agent-mcp``), which no member's turn-end reap
+  scans. A server a CLI spawned as the member would be killed at the end of
+  any turn in which it started.
+- Every runtime already speaks HTTP MCP to the relay, so each needs one more
+  URL, not a stdio client of its own (pi's bridge has none).
+- The URL is fixed (``http://127.0.0.1:47801/mcp``), so Codex's root-owned
+  allowlist names it once for every member.
+
+The host admits a member's servers before it launches the member's CLI::
+
+    cloud-agent-mcp admit <slot> < {"token_sha256": ..., "servers": [...]}
+
+The token is the member's MCP credential, the one its CLI already sends to the
+relay, so every runtime reaches both servers with one header. The gateway
+keeps only its SHA-256: a server it runs, as the same user, cannot read a
+member's credential back. A request is served for the member whose admission
+matches its bearer token, and only with that member's servers. Each
+admitted server starts on first use, one process per member and server, and
+stops after the idle timeout. Tools are presented as ``<alias>__<tool>``, as
+the relay names them. Only tools are forwarded; the gateway offers the
+servers no client capabilities (roots, sampling, elicitation), so they never
+ask the agent anything.
+
+A server's arguments and environment may name ``${CLOUD_AGENT_BROWSER_CDP}``,
+replaced at start with the sandbox browser's CDP URL (``cloud-agent-browser
+start``): a template can bind Playwright MCP to the managed browser without
+knowing its token.
+
+Installs run with npm's ``ignore-scripts`` on, so a package's install hooks do
+not run. The host has already refused a package without an exact version.
+
+It runs isolated (``-I``), like the other helpers in this image, and uses the
+standard library only.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import signal
+import stat
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+PORT = 47801
+HOST = "127.0.0.1"
+ENDPOINT = f"http://{HOST}:{PORT}/mcp"
+SERVER_NAME = "sandbox"
+NAMESPACE_SEPARATOR = "__"
+#: The relay's limit for a presented name (cloud_agent.mcp.protocol): a CLI
+#: prefixes ``mcp__<server>__``, and ``sandbox`` is as long as ``session``.
+MAX_PRESENTED_NAME = 64 - len("mcp__sandbox__")
+MAX_SLOTS = 128
+MAX_SERVERS = 16
+MAX_REQUEST_BYTES = 8 * 1024 * 1024
+MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+MAX_HEAD_BYTES = 16 * 1024
+#: A server that has served no call for this long is stopped; the next call starts it.
+DEFAULT_IDLE_S = 900.0
+#: How long a server may take to install and answer ``initialize``.
+START_TIMEOUT_S = 180.0
+#: One tool call. Browser actions and builds can be slow; the CLIs allow 26 minutes.
+CALL_TIMEOUT_S = 1500.0
+PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+BROWSER_PLACEHOLDER = "${CLOUD_AGENT_BROWSER_CDP}"
+BROWSER_LAUNCHER = "/usr/local/bin/cloud-agent-browser"
+#: The commands a sandbox server may start with, as the host's launch policy
+#: allows them (cloud_agent.mcp.launch). Checked again here: the gateway runs
+#: nothing else, whatever an admission says.
+ALLOWED_COMMANDS = frozenset({"npx", "uvx"})
+#: As the relay's alias pattern (cloud_agent_shared.sandbox_mcp.ALIAS_PATTERN).
+_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
+_NAME_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+WORKSPACE = "/workspace"
+
+
+class GatewayError(Exception):
+    """A failure this command reports on stderr with exit status 1."""
+
+
+# --------------------------------------------------------------------------
+# Paths and admissions
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Paths:
+    state: str
+
+    @property
+    def admissions(self) -> str:
+        return os.path.join(self.state, "admissions")
+
+    @property
+    def logs(self) -> str:
+        return os.path.join(self.state, "logs")
+
+    @property
+    def record(self) -> str:
+        return os.path.join(self.state, "gateway.json")
+
+    @property
+    def lock(self) -> str:
+        return os.path.join(self.state, "gateway.lock")
+
+    @property
+    def log(self) -> str:
+        return os.path.join(self.state, "gateway.log")
+
+    def admission(self, slot: int) -> str:
+        return os.path.join(self.admissions, f"{slot}.json")
+
+
+def resolve_paths(environ: dict[str, str] | None = None) -> Paths:
+    env = os.environ if environ is None else environ
+    home = env.get("HOME") or os.path.expanduser("~")
+    return Paths(
+        state=env.get("CLOUD_AGENT_MCP_STATE_DIR") or os.path.join(home, ".cloud-agent-mcp")
+    )
+
+
+def ensure_private_dir(path: str) -> None:
+    """Create ``path`` 0700, and refuse one this UID does not own."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise GatewayError(f"{path} is not a directory owned by this user")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
+def write_private(path: str, data: str) -> None:
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, data.encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+@dataclass(frozen=True)
+class ServerSpec:
+    """One admitted server: what it is called and how it starts."""
+
+    alias: str
+    command: str
+    args: tuple[str, ...]
+    env: tuple[tuple[str, str], ...]
+
+    @property
+    def digest(self) -> str:
+        body = json.dumps([self.command, self.args, self.env], separators=(",", ":"))
+        return hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class Admission:
+    slot: int
+    token_sha256: str
+    servers: tuple[ServerSpec, ...]
+
+
+def parse_admission(slot: int, document: Any) -> Admission:
+    """Validate what the host sent; anything unexpected refuses the whole admission."""
+    if not 0 <= slot < MAX_SLOTS:
+        raise GatewayError("slot is out of range")
+    if not isinstance(document, dict) or set(document) != {"token_sha256", "servers"}:
+        raise GatewayError("an admission is {token_sha256, servers}")
+    digest = document["token_sha256"]
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise GatewayError("token_sha256 must be 64 lowercase hex digits")
+    raw_servers = document["servers"]
+    if not isinstance(raw_servers, list) or len(raw_servers) > MAX_SERVERS:
+        raise GatewayError(f"servers must be a list of at most {MAX_SERVERS}")
+    servers: list[ServerSpec] = []
+    for raw in raw_servers:
+        if not isinstance(raw, dict) or set(raw) - {"alias", "command", "args", "env"}:
+            raise GatewayError("a server is {alias, command, args, env}")
+        alias, command = raw.get("alias"), raw.get("command")
+        args, env = raw.get("args", []), raw.get("env", {})
+        if not isinstance(alias, str) or not _ALIAS.match(alias) or NAMESPACE_SEPARATOR in alias:
+            raise GatewayError(f"invalid alias {alias!r}")
+        if command not in ALLOWED_COMMANDS:
+            raise GatewayError(f"{alias}: the command must be one of {sorted(ALLOWED_COMMANDS)}")
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+            raise GatewayError(f"{alias}: args must be strings")
+        if not isinstance(env, dict) or not all(
+            isinstance(key, str) and _ENV_NAME.match(key) and isinstance(value, str)
+            for key, value in env.items()
+        ):
+            raise GatewayError(f"{alias}: env must map variable names to strings")
+        servers.append(ServerSpec(alias, command, tuple(args), tuple(sorted(env.items()))))
+    if len({server.alias for server in servers}) != len(servers):
+        raise GatewayError("aliases must be distinct")
+    return Admission(slot, digest, tuple(servers))
+
+
+def admission_document(admission: Admission) -> dict[str, Any]:
+    return {
+        "token_sha256": admission.token_sha256,
+        "servers": [
+            {
+                "alias": server.alias,
+                "command": server.command,
+                "args": list(server.args),
+                "env": dict(server.env),
+            }
+            for server in admission.servers
+        ],
+    }
+
+
+def token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+class Admissions:
+    """Every member's admission, reread from disk when a file changes."""
+
+    def __init__(self, paths: Paths) -> None:
+        self.paths = paths
+        self._cache: dict[int, tuple[float, Admission | None]] = {}
+
+    def _load(self, slot: int) -> Admission | None:
+        path = self.paths.admission(slot)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            self._cache.pop(slot, None)
+            return None
+        cached = self._cache.get(slot)
+        if cached is not None and cached[0] == info.st_mtime_ns:
+            return cached[1]
+        admission = None
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+            with (
+                contextlib.suppress(OSError, ValueError, GatewayError),
+                open(path, encoding="utf-8") as handle,
+            ):
+                admission = parse_admission(slot, json.load(handle))
+        self._cache[slot] = (info.st_mtime_ns, admission)
+        return admission
+
+    def for_token(self, token: str) -> Admission | None:
+        if not token:
+            return None
+        digest = token_digest(token)
+        try:
+            names = os.listdir(self.paths.admissions)
+        except OSError:
+            return None
+        found = None
+        for name in names:
+            stem = name.removesuffix(".json")
+            if not stem.isdigit() or name == stem:
+                continue
+            admission = self._load(int(stem))
+            # Compare every one, in constant time: which slot matched must not
+            # show in how long the answer took.
+            if admission is not None and hmac.compare_digest(admission.token_sha256, digest):
+                found = admission
+        return found
+
+
+# --------------------------------------------------------------------------
+# Naming, as the relay presents names (cloud_agent.mcp.protocol.presented_name)
+# --------------------------------------------------------------------------
+
+_HASH_NAMESPACE = "mcp_h"
+_DIGEST_HEX = 32
+
+
+def sanitize_name(raw: str) -> str:
+    cleaned = _NAME_SAFE.sub("_", (raw or "").strip()).strip("_")
+    return cleaned or "tool"
+
+
+def presented_name(alias: str, capability: str) -> str:
+    candidate = f"{sanitize_name(alias)}{NAMESPACE_SEPARATOR}{sanitize_name(capability)}"
+    if (
+        candidate == f"{alias}{NAMESPACE_SEPARATOR}{capability}"
+        and NAMESPACE_SEPARATOR not in alias
+        and alias != _HASH_NAMESPACE
+        and len(candidate) <= MAX_PRESENTED_NAME
+    ):
+        return candidate
+    digest = hashlib.sha256(json.dumps([alias, capability]).encode()).hexdigest()[:_DIGEST_HEX]
+    prefix = f"{_HASH_NAMESPACE}{NAMESPACE_SEPARATOR}"
+    budget = MAX_PRESENTED_NAME - len(prefix) - len(digest) - len(NAMESPACE_SEPARATOR)
+    return f"{prefix}{candidate[:budget]}{NAMESPACE_SEPARATOR}{digest}"
+
+
+# --------------------------------------------------------------------------
+# One stdio MCP server
+# --------------------------------------------------------------------------
+
+
+def browser_endpoint() -> str:
+    """The sandbox browser's CDP URL, starting Chromium if needed."""
+    try:
+        result = subprocess.run(
+            [BROWSER_LAUNCHER, "start"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GatewayError(f"the sandbox browser is unavailable: {exc}") from exc
+    if result.returncode != 0 or not result.stdout.startswith("ws://"):
+        raise GatewayError("the sandbox browser is unavailable: " + result.stderr.strip()[-300:])
+    return result.stdout.strip()
+
+
+def server_argv_env(spec: ServerSpec, home: str) -> tuple[list[str], dict[str, str]]:
+    """The process a spec starts, with placeholders filled in."""
+    values = [spec.command, *spec.args, *(value for _, value in spec.env)]
+    cdp = browser_endpoint() if any(BROWSER_PLACEHOLDER in value for value in values) else ""
+
+    def fill(value: str) -> str:
+        return value.replace(BROWSER_PLACEHOLDER, cdp) if cdp else value
+
+    env = {
+        "PATH": SANDBOX_PATH,
+        "HOME": home,
+        "LANG": "C.UTF-8",
+        # No install hook of any package runs, here or in its dependencies.
+        "npm_config_ignore_scripts": "true",
+        "npm_config_yes": "true",
+        "npm_config_update_notifier": "false",
+        "npm_config_fund": "false",
+        "npm_config_audit": "false",
+        "CHROME_PATH": os.environ.get("CHROME_PATH", "/usr/bin/chromium"),
+    }
+    env.update({key: fill(value) for key, value in spec.env})
+    return [spec.command, *(fill(arg) for arg in spec.args)], env
+
+
+class Backend:
+    """A running stdio server: newline-delimited JSON-RPC on its stdin/stdout."""
+
+    def __init__(self, spec: ServerSpec, slot: int, paths: Paths) -> None:
+        self.spec = spec
+        self.slot = slot
+        self.paths = paths
+        self.process: asyncio.subprocess.Process | None = None
+        self.pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self.next_id = 1
+        self.reader_task: asyncio.Task[None] | None = None
+        self.started: asyncio.Future[None] | None = None
+        self.last_used = time.monotonic()
+        self.tools: list[dict[str, Any]] | None = None
+        self.lock = asyncio.Lock()
+
+    @property
+    def alive(self) -> bool:
+        return self.process is not None and self.process.returncode is None
+
+    async def ensure(self) -> None:
+        async with self.lock:
+            if self.alive and self.started is not None and self.started.done():
+                self.started.result()
+                return
+            await self._start()
+
+    async def _start(self) -> None:
+        self.stop()
+        home = os.environ.get("HOME") or os.path.expanduser("~")
+        argv, env = await asyncio.to_thread(server_argv_env, self.spec, home)
+        os.makedirs(self.paths.logs, mode=0o700, exist_ok=True)
+        log_path = os.path.join(self.paths.logs, f"{self.slot}-{self.spec.alias}.log")
+        log = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=log,
+                env=env,
+                cwd=WORKSPACE if os.path.isdir(WORKSPACE) else "/",
+                limit=MAX_MESSAGE_BYTES,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise GatewayError(f"{self.spec.alias}: cannot start {argv[0]}: {exc}") from exc
+        finally:
+            os.close(log)
+        _log(f"server started: slot {self.slot} {self.spec.alias} pid {self.process.pid}")
+        loop = asyncio.get_running_loop()
+        self.started = loop.create_future()
+        self.reader_task = loop.create_task(self._read(self.process))
+        self.tools = None
+        try:
+            result = await self._request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSIONS[0],
+                    # None: a server must never ask the agent for roots,
+                    # sampling or input through this gateway.
+                    "capabilities": {},
+                    "clientInfo": {"name": "cloud-agent-mcp", "version": "1"},
+                },
+                timeout=START_TIMEOUT_S,
+            )
+            if "protocolVersion" not in result:
+                raise GatewayError(f"{self.spec.alias}: initialize returned no protocolVersion")
+            await self._notify("notifications/initialized")
+        except BaseException as exc:
+            self.started.set_exception(
+                exc if isinstance(exc, GatewayError) else GatewayError(f"{self.spec.alias}: {exc}")
+            )
+            self.started.exception()  # retrieved: the caller sees it via ensure()
+            self.stop()
+            raise
+        self.started.set_result(None)
+
+    async def _read(self, process: asyncio.subprocess.Process) -> None:
+        assert process.stdout is not None
+        try:
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if "method" in message and "id" in message:
+                    # A request from the server. Only ping is answered: the
+                    # gateway offered no client capability for anything else.
+                    reply: dict[str, Any] = {"jsonrpc": "2.0", "id": message["id"]}
+                    if message["method"] == "ping":
+                        reply["result"] = {}
+                    else:
+                        reply["error"] = {"code": -32601, "message": "not supported"}
+                    await self._write(reply)
+                    continue
+                future = self.pending.pop(message.get("id"), None) if "id" in message else None
+                if future is not None and not future.done():
+                    future.set_result(message)
+        except (ConnectionError, asyncio.LimitOverrunError, ValueError):
+            pass
+        finally:
+            for future in self.pending.values():
+                if not future.done():
+                    future.set_exception(GatewayError(f"{self.spec.alias}: the server exited"))
+            self.pending.clear()
+
+    async def _write(self, message: dict[str, Any]) -> None:
+        process = self.process
+        if process is None or process.stdin is None or process.returncode is not None:
+            raise GatewayError(f"{self.spec.alias}: the server is not running")
+        process.stdin.write(json.dumps(message, separators=(",", ":")).encode() + b"\n")
+        with contextlib.suppress(ConnectionError):
+            await process.stdin.drain()
+
+    async def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        message: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            message["params"] = params
+        await self._write(message)
+
+    async def _request(self, method: str, params: dict[str, Any], *, timeout: float) -> Any:
+        request_id = self.next_id
+        self.next_id += 1
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self.pending[request_id] = future
+        await self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        try:
+            reply = await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            self.pending.pop(request_id, None)
+            with contextlib.suppress(GatewayError):
+                await self._notify(
+                    "notifications/cancelled", {"requestId": request_id, "reason": "timed out"}
+                )
+            raise GatewayError(f"{self.spec.alias}: {method} timed out") from None
+        if "error" in reply:
+            error = reply["error"] if isinstance(reply["error"], dict) else {}
+            raise RemoteError(error.get("code", -32603), str(error.get("message", "error")))
+        return reply.get("result", {})
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        await self.ensure()
+        if self.tools is None:
+            tools: list[dict[str, Any]] = []
+            cursor = None
+            for _ in range(50):
+                params = {"cursor": cursor} if cursor else {}
+                result = await self._request("tools/list", params, timeout=START_TIMEOUT_S)
+                tools.extend(tool for tool in result.get("tools", []) if isinstance(tool, dict))
+                cursor = result.get("nextCursor")
+                if not cursor:
+                    break
+            self.tools = tools
+        self.last_used = time.monotonic()
+        return self.tools
+
+    async def call_tool(self, name: str, arguments: Any) -> Any:
+        await self.ensure()
+        self.last_used = time.monotonic()
+        try:
+            return await self._request(
+                "tools/call", {"name": name, "arguments": arguments or {}}, timeout=CALL_TIMEOUT_S
+            )
+        finally:
+            self.last_used = time.monotonic()
+
+    def stop(self) -> None:
+        process, self.process = self.process, None
+        if self.reader_task is not None:
+            self.reader_task.cancel()
+            self.reader_task = None
+        if process is not None and process.returncode is None:
+            # The whole session: npx and uvx run the server as a child.
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGTERM)
+            _log(f"server stopped: slot {self.slot} {self.spec.alias} pid {process.pid}")
+        self.started = None
+        self.tools = None
+
+
+class RemoteError(Exception):
+    """A JSON-RPC error a server returned, passed on to the client as it is."""
+
+    def __init__(self, code: Any, message: str) -> None:
+        super().__init__(message)
+        self.code = code if isinstance(code, int) else -32603
+        self.message = message
+
+
+# --------------------------------------------------------------------------
+# The gateway
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class HttpRequest:
+    method: str
+    path: str
+    headers: dict[str, str]
+    body: bytes = b""
+
+
+@dataclass
+class HttpResponse:
+    status: str
+    body: bytes = b""
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+def _log(line: str) -> None:
+    print(f"cloud-agent-mcp: {line}", file=sys.stderr, flush=True)
+
+
+def _rpc_result(request_id: Any, result: Any) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+class Gateway:
+    def __init__(self, paths: Paths, *, idle_s: float) -> None:
+        self.paths = paths
+        self.idle_s = idle_s
+        self.admissions = Admissions(paths)
+        self.backends: dict[tuple[int, str, str], Backend] = {}
+        #: Servers already started ahead of their member's first request.
+        self.warmed: set[tuple[int, str, str]] = set()
+        self.stopping: asyncio.Event | None = None
+
+    # -- HTTP -------------------------------------------------------------
+
+    async def handle(self, request: HttpRequest) -> HttpResponse:
+        if request.path.split("?", 1)[0] != "/mcp":
+            return HttpResponse("404 Not Found")
+        if request.headers.get("host", "") not in (f"{HOST}:{PORT}", f"localhost:{PORT}"):
+            return HttpResponse("403 Forbidden")
+        authorization = request.headers.get("authorization", "")
+        token = authorization[7:].strip() if authorization[:7].lower() == "bearer " else ""
+        admission = self.admissions.for_token(token)
+        if admission is None:
+            return HttpResponse("401 Unauthorized", headers={"WWW-Authenticate": "Bearer"})
+        if request.method == "DELETE":
+            return HttpResponse("200 OK")
+        if request.method == "GET":
+            # No server-initiated stream: the tool list does not change while
+            # a CLI holds it, because a changed admission restarts the CLI.
+            return HttpResponse("405 Method Not Allowed", headers={"Allow": "POST, DELETE"})
+        if request.method != "POST":
+            return HttpResponse("405 Method Not Allowed", headers={"Allow": "POST, DELETE"})
+        try:
+            message = json.loads(request.body)
+        except ValueError:
+            return self._json(_rpc_error(None, -32700, "parse error"))
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            return self._json(_rpc_error(None, -32600, "one JSON-RPC 2.0 message per request"))
+        if "id" not in message:
+            return HttpResponse("202 Accepted")  # notifications, responses: nothing to do
+        method = message.get("method")
+        _log(f"slot {admission.slot}: {method if isinstance(method, str) else '?'}")
+        reply = await self.dispatch(admission, message)
+        response = self._json(reply)
+        if message.get("method") == "initialize":
+            response.headers["Mcp-Session-Id"] = secrets.token_urlsafe(16)
+        return response
+
+    @staticmethod
+    def _json(message: dict[str, Any]) -> HttpResponse:
+        return HttpResponse(
+            "200 OK",
+            json.dumps(message, separators=(",", ":")).encode(),
+            {"Content-Type": "application/json"},
+        )
+
+    # -- MCP --------------------------------------------------------------
+
+    async def dispatch(self, admission: Admission, message: dict[str, Any]) -> dict[str, Any]:
+        request_id, method = message["id"], message.get("method")
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        try:
+            if method == "initialize":
+                asked = params.get("protocolVersion")
+                version = asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0]
+                return _rpc_result(
+                    request_id,
+                    {
+                        "protocolVersion": version,
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": SERVER_NAME, "version": "1"},
+                        "instructions": (
+                            "MCP servers the user chose to run inside this sandbox, next to "
+                            "the task. Each tool is named <server>__<tool>."
+                        ),
+                    },
+                )
+            if method == "ping":
+                return _rpc_result(request_id, {})
+            if method == "tools/list":
+                return _rpc_result(request_id, {"tools": await self.list_tools(admission)})
+            if method == "tools/call":
+                name = params.get("name")
+                if not isinstance(name, str):
+                    return _rpc_error(request_id, -32602, "tools/call needs a name")
+                return _rpc_result(
+                    request_id, await self.call_tool(admission, name, params.get("arguments"))
+                )
+            return _rpc_error(request_id, -32601, f"method not found: {method}")
+        except RemoteError as exc:
+            return _rpc_error(request_id, exc.code, exc.message)
+        except GatewayError as exc:
+            return _rpc_error(request_id, -32603, str(exc))
+
+    def backend(self, admission: Admission, spec: ServerSpec) -> Backend:
+        key = (admission.slot, spec.alias, spec.digest)
+        backend = self.backends.get(key)
+        if backend is None:
+            backend = self.backends[key] = Backend(spec, admission.slot, self.paths)
+        return backend
+
+    async def list_tools(self, admission: Admission) -> list[dict[str, Any]]:
+        async def one(spec: ServerSpec) -> list[dict[str, Any]]:
+            try:
+                tools = await self.backend(admission, spec).list_tools()
+            except (GatewayError, RemoteError) as exc:
+                # One broken server must not take the others' tools away.
+                _log(f"tools/list failed: slot {admission.slot} {spec.alias}: {exc}")
+                return []
+            presented = []
+            for tool in tools:
+                name = tool.get("name")
+                if isinstance(name, str):
+                    presented.append({**tool, "name": presented_name(spec.alias, name)})
+            return presented
+
+        lists = await asyncio.gather(*(one(spec) for spec in admission.servers))
+        return [tool for tools in lists for tool in tools]
+
+    async def call_tool(self, admission: Admission, presented: str, arguments: Any) -> Any:
+        for spec in admission.servers:
+            backend = self.backend(admission, spec)
+            for tool in await backend.list_tools():
+                if presented_name(spec.alias, str(tool.get("name"))) == presented:
+                    return await backend.call_tool(tool["name"], arguments)
+        raise RemoteError(-32602, f"unknown tool: {presented}")
+
+    # -- lifecycle --------------------------------------------------------
+
+    def retire(self) -> None:
+        """Stop servers that sat idle, or that their member's admission dropped."""
+        now = time.monotonic()
+        for key, backend in list(self.backends.items()):
+            slot, alias, digest = key
+            admission = self.admissions._load(slot)
+            admitted = admission is not None and any(
+                spec.alias == alias and spec.digest == digest for spec in admission.servers
+            )
+            if not admitted or (backend.alive and now - backend.last_used > self.idle_s):
+                backend.stop()
+                if not admitted:
+                    del self.backends[key]
+                    self.warmed.discard(key)
+
+    def warm(self) -> None:
+        """Start each newly admitted server now, so a CLI's first tool list is quick.
+
+        The first start of a server may install its package; the host admits
+        a member before it starts the member's CLI, and the CLI lists tools as
+        it starts.
+        """
+        try:
+            names = os.listdir(self.paths.admissions)
+        except OSError:
+            return
+        for name in names:
+            stem = name.removesuffix(".json")
+            if name == stem or not stem.isdigit():
+                continue
+            admission = self.admissions._load(int(stem))
+            for spec in admission.servers if admission else ():
+                key = (admission.slot, spec.alias, spec.digest)
+                if key in self.warmed:
+                    continue
+                self.warmed.add(key)
+                asyncio.get_running_loop().create_task(self._warm_one(admission, spec))
+
+    async def _warm_one(self, admission: Admission, spec: ServerSpec) -> None:
+        try:
+            await self.backend(admission, spec).list_tools()
+        except (GatewayError, RemoteError) as exc:
+            _log(f"warm-up failed: slot {admission.slot} {spec.alias}: {exc}")
+
+    async def _watch(self) -> None:
+        retire_every = min(30.0, max(1.0, self.idle_s / 4))
+        last_retire = time.monotonic()
+        while True:
+            await asyncio.sleep(1.0)
+            self.warm()
+            if time.monotonic() - last_retire >= retire_every:
+                last_retire = time.monotonic()
+                self.retire()
+
+    async def _serve_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            request = await read_http_request(reader)
+            if request is None:
+                response = HttpResponse("400 Bad Request")
+            else:
+                response = await self.handle(request)
+            writer.write(encode_http_response(response))
+            await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    async def run(self, ready_fd: int | None) -> int:
+        loop = asyncio.get_running_loop()
+        self.stopping = asyncio.Event()
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            loop.add_signal_handler(signum, self.stopping.set)
+        try:
+            server = await asyncio.start_server(
+                self._serve_connection, HOST, PORT, limit=MAX_HEAD_BYTES, reuse_address=True
+            )
+        except OSError as exc:
+            _report(ready_fd, f"error cannot listen on {HOST}:{PORT}: {exc}\n")
+            return 1
+        write_private(
+            self.paths.record,
+            json.dumps({"pid": os.getpid(), "endpoint": ENDPOINT, "started_at": int(time.time())}),
+        )
+        watcher = loop.create_task(self._watch())
+        _report(ready_fd, f"ok {ENDPOINT}\n")
+        _log(f"serving {ENDPOINT}")
+        try:
+            await self.stopping.wait()
+            return 0
+        finally:
+            watcher.cancel()
+            server.close()
+            for backend in self.backends.values():
+                backend.stop()
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.paths.record)
+
+
+def _report(ready_fd: int | None, line: str) -> None:
+    if ready_fd is None:
+        return
+    with contextlib.suppress(OSError):
+        os.write(ready_fd, line.encode())
+        os.close(ready_fd)
+
+
+async def read_http_request(reader: asyncio.StreamReader) -> HttpRequest | None:
+    head = await reader.readuntil(b"\r\n\r\n")
+    try:
+        text = head.decode("latin-1")
+    except UnicodeDecodeError:
+        return None
+    lines = text.split("\r\n")
+    parts = lines[0].split(" ")
+    if len(parts) != 3 or not parts[2].startswith("HTTP/1."):
+        return None
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if not line:
+            continue
+        name, sep, value = line.partition(":")
+        if not sep:
+            return None
+        headers[name.strip().lower()] = value.strip()
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        body = await _read_chunked(reader)
+    else:
+        try:
+            length = int(headers.get("content-length", "0"))
+        except ValueError:
+            return None
+        if not 0 <= length <= MAX_REQUEST_BYTES:
+            return None
+        body = await reader.readexactly(length) if length else b""
+    return HttpRequest(parts[0], parts[1], headers, body)
+
+
+async def _read_chunked(reader: asyncio.StreamReader) -> bytes:
+    body = bytearray()
+    while True:
+        size_line = await reader.readuntil(b"\r\n")
+        size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
+        if size == 0:
+            await reader.readuntil(b"\r\n")
+            return bytes(body)
+        if len(body) + size > MAX_REQUEST_BYTES:
+            raise ConnectionError("request too large")
+        body += await reader.readexactly(size)
+        await reader.readexactly(2)
+
+
+def encode_http_response(response: HttpResponse) -> bytes:
+    headers = {
+        **response.headers,
+        "Content-Length": str(len(response.body)),
+        "Connection": "close",
+        "Cache-Control": "no-store",
+    }
+    head = f"HTTP/1.1 {response.status}\r\n" + "".join(
+        f"{name}: {value}\r\n" for name, value in headers.items()
+    )
+    return head.encode() + b"\r\n" + response.body
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+
+def read_record(paths: Paths) -> dict[str, Any] | None:
+    try:
+        with open(paths.record, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _is_gateway(pid: Any) -> bool:
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            return False
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            argv = handle.read().split(b"\0")
+    except OSError:
+        return False
+    return b"_serve" in argv and any(arg.endswith(b"cloud-agent-mcp") for arg in argv)
+
+
+def running_record(paths: Paths) -> dict[str, Any] | None:
+    record = read_record(paths)
+    return record if record is not None and _is_gateway(record.get("pid")) else None
+
+
+def service_start(paths: Paths, *, idle_s: float) -> dict[str, Any]:
+    ensure_private_dir(paths.state)
+    ensure_private_dir(paths.admissions)
+    lock = os.open(paths.lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        record = running_record(paths)
+        if record is not None:
+            return record
+        return _spawn(paths, idle_s=idle_s)
+    finally:
+        os.close(lock)
+
+
+def _spawn(paths: Paths, *, idle_s: float) -> dict[str, Any]:
+    # A gateway that was not running served nobody: the admissions it left
+    # are for CLIs that are gone, whose tokens must not open the new one.
+    for name in os.listdir(paths.admissions):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(os.path.join(paths.admissions, name))
+    ready_r, ready_w = os.pipe()
+    log = os.open(paths.log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    try:
+        subprocess.Popen(  # this script, re-executed isolated
+            [sys.executable, "-I", os.path.abspath(__file__), "_serve", str(ready_w), str(idle_s)],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            pass_fds=(ready_w,),
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        os.close(log)
+        os.close(ready_w)
+    with os.fdopen(ready_r, "rb") as ready:
+        line = ready.readline().decode(errors="replace").strip()
+    if not line.startswith("ok "):
+        raise GatewayError(line.removeprefix("error ") or f"the gateway exited; see {paths.log}")
+    record = running_record(paths)
+    if record is None:
+        raise GatewayError("the gateway started but left no record")
+    return record
+
+
+def service_stop(paths: Paths) -> bool:
+    record = running_record(paths)
+    if record is None:
+        return False
+    pid = record["pid"]
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _is_gateway(pid):
+        time.sleep(0.1)
+    if _is_gateway(pid):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    return True
+
+
+def admit(paths: Paths, slot: int, document: Any, *, idle_s: float) -> Admission:
+    """Replace one member's admission, and make sure the gateway serves it.
+
+    An empty server list removes the admission instead: the member's CLI is
+    then told of no sandbox server, and must not reach one an earlier launch
+    of the same slot was given.
+    """
+    admission = parse_admission(slot, document)
+    if not admission.servers:
+        revoke(paths, slot)
+        return admission
+    # First: a gateway that starts forgets every admission before this one.
+    service_start(paths, idle_s=idle_s)
+    ensure_private_dir(paths.state)
+    ensure_private_dir(paths.admissions)
+    write_private(paths.admission(slot), json.dumps(admission_document(admission)))
+    return admission
+
+
+def revoke(paths: Paths, slot: int) -> bool:
+    try:
+        os.unlink(paths.admission(slot))
+    except FileNotFoundError:
+        return False
+    return True
+
+
+USAGE = """usage: cloud-agent-mcp <command>   (the platform's; run as agent-mcp)
+
+  service start|stop     run or end the gateway on http://127.0.0.1:47801/mcp
+  admit <slot>           replace a member's admitted servers, and serve them;
+                         JSON on stdin: {"token_sha256": "...",
+                         "servers": [{alias, command, args, env}]}; no servers
+                         removes the admission
+  revoke <slot>          remove a member's admission
+  status                 print the gateway's state as JSON
+"""
+
+
+def _idle_s() -> float:
+    try:
+        value = float(os.environ.get("CLOUD_AGENT_MCP_IDLE_S", DEFAULT_IDLE_S))
+    except ValueError:
+        return DEFAULT_IDLE_S
+    return value if value > 0 else DEFAULT_IDLE_S
+
+
+def _slot(raw: str) -> int:
+    if not raw.isdigit():
+        raise GatewayError("a slot is a number")
+    return int(raw)
+
+
+def main(argv: list[str]) -> int:
+    command, rest = (argv[1] if len(argv) > 1 else ""), argv[2:]
+    paths = resolve_paths()
+    try:
+        if command == "_serve":
+            ready_fd = int(rest[0])
+            os.set_inheritable(ready_fd, False)
+            # Servers write into the shared workspace and artifacts directory,
+            # where every member reads what they write.
+            os.umask(0o007)
+            return asyncio.run(Gateway(paths, idle_s=float(rest[1])).run(ready_fd))
+        if command == "service" and rest == ["start"]:
+            print(service_start(paths, idle_s=_idle_s())["endpoint"])
+            return 0
+        if command == "service" and rest == ["stop"]:
+            print("stopped" if service_stop(paths) else "not running")
+            return 0
+        if command == "admit" and len(rest) == 1:
+            try:
+                document = json.loads(sys.stdin.read(1 << 20))
+            except ValueError as exc:
+                raise GatewayError("the admission is not JSON") from exc
+            admission = admit(paths, _slot(rest[0]), document, idle_s=_idle_s())
+            print(f"admitted {len(admission.servers)} server(s) for slot {admission.slot}")
+            return 0
+        if command == "revoke" and len(rest) == 1:
+            print("revoked" if revoke(paths, _slot(rest[0])) else "not admitted")
+            return 0
+        if command == "status" and not rest:
+            record = running_record(paths) or {}
+            print(json.dumps({"running": bool(record), "endpoint": ENDPOINT, **record}, indent=2))
+            return 0
+    except GatewayError as exc:
+        print(f"cloud-agent-mcp: {exc}", file=sys.stderr)
+        return 1
+    print(USAGE, file=sys.stderr, end="")
+    return 64 if command not in ("-h", "--help", "help") else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

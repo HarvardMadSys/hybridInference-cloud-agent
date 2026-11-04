@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0109_local_account_parity`. The supported deployment scripts run migrations
+`0110_mcp_sandbox_location`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -137,6 +137,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0110_mcp_sandbox_location` | Lets an MCP connection run inside the task sandbox: the `agent_mcp_connections.location` check constraint admits `sandbox` beside `remote`, `managed-worker` and `user-connector`, under the stable name `agent_mcp_connections_location_check`. No row changes. A downgrade restores the three-location constraint, and refuses while any sandbox connection exists rather than deleting it. |
 | `0109_local_account_parity` | Local accounts only. Splits `agent_local_password_logins` into sign-in identities (email, login name, phone) and optional password credentials, carrying every account over with its verification time and hash (a verified email is recorded as verified by its link, the only way `0108_local_accounts` had); adds the access view every SQL gate reads, the `deleted` account state with the account's name, note, language and sign-in and deletion times, phone codes, browser sessions, sign-in events, the signup domain list, first-run setup and administrator mail to accounts. It touches only the account tables. A downgrade restores the email-and-password table and drops the new tables, with the sign-in events and mail history in them; it refuses while any account signs in some other way or is deleted, rather than dropping that account. |
 | `0108_local_accounts` | Creates the tables accounts use: accounts, password sign-in, waiting-list admissions, server-side sessions, emailed tokens, abuse counters, access terminations and the account identity marker. It changes no existing row and locks no existing table. A downgrade drops them, and with them every account. |
 | `0107_attempt_context_profiles` | Adds the `agent_attempt_context_profiles` table, a rebuildable cache of each attempt's context profile (request sizes, compactions and content-size estimates derived from its stored events) behind the Context view and the Usage page's context insights. It scans and rewrites nothing; profiles are derived lazily when an owner reads them, and a stale or differently versioned row is rebuilt from the event ledger. A downgrade drops only the cache. |

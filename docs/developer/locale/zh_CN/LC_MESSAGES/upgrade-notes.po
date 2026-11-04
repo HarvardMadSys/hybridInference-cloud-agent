@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 22:44-0400\n"
+"POT-Creation-Date: 2026-11-04 04:04-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0109_local_account_parity`. The supported deployment scripts run "
+"`0110_mcp_sandbox_location`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0109_local_account_parity`。官方支持的部署脚本会在替换 API "
+"`0110_mcp_sandbox_location`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)中。"
 
@@ -169,7 +169,16 @@ msgid ""
 "(`agent_local_setup_pending`) at `/setup/administrator`, or use `python "
 "-m cloud_agent.accounts.bootstrap_admin` ([first administrator](local-"
 "accounts.md#the-first-administrator))."
-msgstr "**初始管理员。** 把负责管理本部署的人员已验证的邮箱地址列在 `AGENT_LOCAL_ADMIN_EMAILS` 中（`admin-one@example.org,admin-two@example.org` 只是占位符；生产环境只列出它的两位管理员，预发环境使用自己的名单）。这个名单和所有账号设置一样，只在首次启动时导入一次；此后在 **管理 → 设置 → 账号** 中编辑，而不是在环境变量中。列出的账号只有在其地址被证明之后——即点击了发到该地址的链接——才会被批准并成为管理员。第一个注册的人不会得到任何授权。另外，或者对于第一位管理员，可以在 `/setup/administrator` 用控制平面启动时记录的设置代码（`agent_local_setup_pending`）兑换，或使用 `python -m cloud_agent.accounts.bootstrap_admin`（[首个管理员](local-accounts.md#the-first-administrator)）。"
+msgstr ""
+"**初始管理员。** 把负责管理本部署的人员已验证的邮箱地址列在 `AGENT_LOCAL_ADMIN_EMAILS` 中（`admin-"
+"one@example.org,admin-two@example.org` "
+"只是占位符；生产环境只列出它的两位管理员，预发环境使用自己的名单）。这个名单和所有账号设置一样，只在首次启动时导入一次；此后在 **管理 → 设置"
+" → 账号** "
+"中编辑，而不是在环境变量中。列出的账号只有在其地址被证明之后——即点击了发到该地址的链接——才会被批准并成为管理员。第一个注册的人不会得到任何授权。另外，或者对于第一位管理员，可以在"
+" `/setup/administrator` "
+"用控制平面启动时记录的设置代码（`agent_local_setup_pending`）兑换，或使用 `python -m "
+"cloud_agent.accounts.bootstrap_admin`（[首个管理员](local-accounts.md#the-"
+"first-administrator)）。"
 
 #: ../developer/upgrade-notes.md:91
 msgid ""
@@ -180,7 +189,10 @@ msgid ""
 "control-plane replica runs this release, set "
 "`AGENT_MODEL_CONNECTIONS_ENABLED=false` before deploying and unset it "
 "once they all do."
-msgstr "**部署并验证。** 按常规流程部署。然后确认：注册会发送指向 `AGENT_WEB_BASE_URL` 的验证链接；管理员能批准申请；申请人能添加模型连接并运行任务。模型连接默认开启。如果希望等每台主机和每个控制平面副本都运行本版本后再接受新轮次，就在部署前设置 `AGENT_MODEL_CONNECTIONS_ENABLED=false`，等它们全部升级后再取消设置。"
+msgstr ""
+"**部署并验证。** 按常规流程部署。然后确认：注册会发送指向 `AGENT_WEB_BASE_URL` "
+"的验证链接；管理员能批准申请；申请人能添加模型连接并运行任务。模型连接默认开启。如果希望等每台主机和每个控制平面副本都运行本版本后再接受新轮次，就在部署前设置"
+" `AGENT_MODEL_CONNECTIONS_ENABLED=false`，等它们全部升级后再取消设置。"
 
 #: ../developer/upgrade-notes.md:99
 msgid ""
@@ -269,17 +281,18 @@ msgid "What it changes"
 msgstr "改了什么"
 
 #: ../developer/upgrade-notes.md
-msgid "`0108_local_accounts`"
-msgstr "`0108_local_accounts`"
+msgid "`0110_mcp_sandbox_location`"
+msgstr "`0110_mcp_sandbox_location`"
 
 #: ../developer/upgrade-notes.md
 msgid ""
-"Creates the tables accounts use: accounts, password sign-in, waiting-list"
-" admissions, server-side sessions, emailed tokens, abuse counters, access"
-" terminations and the account identity marker. It changes no existing row"
-" and locks no existing table. A downgrade drops them, and with them every"
-" account."
-msgstr "创建账号所用的表：账号、密码登录、等候名单准入、服务器端会话、邮件令牌、滥用计数、访问终止以及账号身份标记。它不修改任何现有行，也不锁定任何现有表。降级会删除这些表，所有账号也随之删除。"
+"Lets an MCP connection run inside the task sandbox: the "
+"`agent_mcp_connections.location` check constraint admits `sandbox` beside"
+" `remote`, `managed-worker` and `user-connector`, under the stable name "
+"`agent_mcp_connections_location_check`. No row changes. A downgrade "
+"restores the three-location constraint, and refuses while any sandbox "
+"connection exists rather than deleting it."
+msgstr "让 MCP 连接可以运行在任务沙箱里：`agent_mcp_connections.location` 的检查约束在 `remote`、`managed-worker` 和 `user-connector` 之外，新增允许 `sandbox`，约束统一命名为 `agent_mcp_connections_location_check`。不改动任何数据行。降级会恢复原来只允许三种位置的约束；只要还存在沙箱连接，降级就会被拒绝，而不是删掉这些连接。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0109_local_account_parity`"
@@ -306,6 +319,19 @@ msgstr ""
 "账号状态及账号的名称、备注、语言、登录和删除时间，以及手机验证码、浏览器会话、登录事件、注册域名列表、首次设置和发给账号的管理员邮件。它只涉及账号表。降级会恢复邮箱加密码的表并删除新表，连同其中的登录事件和邮件历史；只要有账号通过其他方式登录或已被删除，降级就会拒绝，而不是删除该账号。"
 
 #: ../developer/upgrade-notes.md
+msgid "`0108_local_accounts`"
+msgstr "`0108_local_accounts`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Creates the tables accounts use: accounts, password sign-in, waiting-list"
+" admissions, server-side sessions, emailed tokens, abuse counters, access"
+" terminations and the account identity marker. It changes no existing row"
+" and locks no existing table. A downgrade drops them, and with them every"
+" account."
+msgstr "创建账号所用的表：账号、密码登录、等候名单准入、服务器端会话、邮件令牌、滥用计数、访问终止以及账号身份标记。它不修改任何现有行，也不锁定任何现有表。降级会删除这些表，所有账号也随之删除。"
+
+#: ../developer/upgrade-notes.md
 msgid "`0107_attempt_context_profiles`"
 msgstr "`0107_attempt_context_profiles`"
 
@@ -319,10 +345,8 @@ msgid ""
 "differently versioned row is rebuilt from the event ledger. A downgrade "
 "drops only the cache."
 msgstr ""
-"新增 `agent_attempt_context_profiles` 表。它是每次尝试的上下文画像缓存（请求大小、压缩事件，"
-"以及根据已存事件估算的内容大小），供会话的上下文视图和用量页的上下文洞察读取，随时可以重建。"
-"迁移不扫描、不改写任何数据；画像在所有者查看时才按需生成，过期或版本不同的行会从事件账本重新生成。"
-"回滚只删除这张缓存表。"
+"新增 `agent_attempt_context_profiles` "
+"表。它是每次尝试的上下文画像缓存（请求大小、压缩事件，以及根据已存事件估算的内容大小），供会话的上下文视图和用量页的上下文洞察读取，随时可以重建。迁移不扫描、不改写任何数据；画像在所有者查看时才按需生成，过期或版本不同的行会从事件账本重新生成。回滚只删除这张缓存表。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0106_user_model_connections`"
@@ -344,7 +368,17 @@ msgid ""
 "waiting message or resident member names one, finished conversations "
 "included ([owner model connections](operations.md#owner-model-"
 "connections))."
-msgstr "新增 `agent_model_connections`、`agent_model_connection_checks` 和 `agent_model_connection_scan_keys` 三张表，用于所有者自己的推理端点（Chat Completions、Responses 或 Anthropic Messages）；新增可空的来源列 `agent_jobs.model_connection_id` 和 `agent_pending_messages.model_connection_id`；以及单独的 `agent_model_connection_residencies` 表，把常驻成员的进程绑定到某一 residency 代次下的一个连接修订（单独成表，以便正在运行的上一版本针对成员表的预编译语句继续有效）。不改写任何数据。除非 `AGENT_MODEL_CONNECTIONS_ENABLED` 设为 `0`、`false` 或 `no`，否则连接都会被准入。只要存在任何连接，或任何轮次、等待中的消息或常驻成员引用了某个连接（包括已结束的对话），降级就会拒绝（[所有者模型连接](operations.md#owner-model-connections)）。"
+msgstr ""
+"新增 `agent_model_connections`、`agent_model_connection_checks` 和 "
+"`agent_model_connection_scan_keys` 三张表，用于所有者自己的推理端点（Chat "
+"Completions、Responses 或 Anthropic Messages）；新增可空的来源列 "
+"`agent_jobs.model_connection_id` 和 "
+"`agent_pending_messages.model_connection_id`；以及单独的 "
+"`agent_model_connection_residencies` 表，把常驻成员的进程绑定到某一 residency "
+"代次下的一个连接修订（单独成表，以便正在运行的上一版本针对成员表的预编译语句继续有效）。不改写任何数据。除非 "
+"`AGENT_MODEL_CONNECTIONS_ENABLED` 设为 `0`、`false` 或 "
+"`no`，否则连接都会被准入。只要存在任何连接，或任何轮次、等待中的消息或常驻成员引用了某个连接（包括已结束的对话），降级就会拒绝（[所有者模型连接](operations.md"
+"#owner-model-connections)）。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0105_job_event_usage_summary`"
@@ -951,7 +985,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:187
+#: ../developer/upgrade-notes.md:189
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -963,11 +997,11 @@ msgstr ""
 "backwards-compatible)中。独立账号版本之前的数据库，无论处于哪条迁移链，都不会被升级；见[切换说明"
 "](#independent-accounts-cutover)。"
 
-#: ../developer/upgrade-notes.md:192
+#: ../developer/upgrade-notes.md:194
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:194
+#: ../developer/upgrade-notes.md:196
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"

@@ -266,12 +266,17 @@ export function McpImportStep({
                           label: 'Your computer (requires a connected MCP connector)',
                         },
                         { value: 'managed-worker', label: 'Cloud worker' },
+                        {
+                          value: 'sandbox',
+                          label: 'Each chat’s sandbox (pinned npx or uvx package, no secrets)',
+                        },
                       ]}
                     />
                   </label>
                   <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                     Commands run where you choose. Files and packages on your computer are not
-                    automatically available in the cloud.
+                    automatically available in the cloud. In the sandbox, a server sees the task’s
+                    files, its localhost and the sandbox browser, and its tools need no approval.
                   </p>
                 </div>
               ) : null}
