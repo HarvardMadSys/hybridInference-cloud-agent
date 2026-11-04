@@ -21,7 +21,6 @@ it is collected.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, TypeVar
 
 from fastapi import HTTPException
@@ -41,10 +40,15 @@ _RETRY_AFTER_S = 5
 
 
 def max_streams_per_user() -> int:
-    """Return the configured ceiling; a missing or unusable value is the default."""
-    raw = (os.environ.get(ENV_MAX_STREAMS_PER_USER) or "").strip()
+    """Return the saved ceiling (``streams.max_per_user``), read on every acquire.
+
+    Before a process adopts its first settings snapshot the registry reads the
+    environment; a value it cannot use there is the default, as it always was.
+    """
+    from cloud_agent.settings import integer_setting
+
     try:
-        configured = int(raw) if raw else DEFAULT_MAX_STREAMS_PER_USER
+        configured = integer_setting("streams.max_per_user")
     except ValueError:
         return DEFAULT_MAX_STREAMS_PER_USER
     return configured if configured > 0 else DEFAULT_MAX_STREAMS_PER_USER

@@ -15176,6 +15176,22 @@
             ],
             "description": "Optional host CPU / memory / retained-container observation, taken on the runner's own clock within the last five minutes. A runner that does not collect it simply omits the field, and one whose block is unusable has the block dropped rather than the heartbeat refused."
           },
+          "config_reports": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "maxProperties": 8,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Non-numeric configuration this host uses now, by name: runtime_registry_url is the npm registry its next agent download uses (empty for the public registry). Unknown names are dropped.",
+            "title": "Config Reports"
+          },
           "launch_error": {
             "anyOf": [
               {
@@ -15444,6 +15460,19 @@
             },
             "title": "Runtime Downloads",
             "type": "array"
+          },
+          "runtime_registry_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The npm registry this deployment downloads agent versions from; empty is the public registry. Absent from a control plane that does not manage it, in which case the host keeps its own environment value.",
+            "title": "Runtime Registry Url"
           },
           "sandbox_archive_settings": {
             "anyOf": [
@@ -20116,6 +20145,14 @@
       "RuntimeUpgradesResponse": {
         "description": "Every agent the Settings page can update.",
         "properties": {
+          "registry_waiting_on": {
+            "description": "Online servers, by host name, that do not yet report downloading from the saved agent package registry. No update starts until this is empty.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Registry Waiting On",
+            "type": "array"
+          },
           "runtimes": {
             "items": {
               "$ref": "#/components/schemas/RuntimeUpgradeItem"

@@ -53,6 +53,8 @@ HOST_COLUMN_NAMES = (
     "settings_applied",
     "settings_local",
     "sandbox_archive_settings_applied_revision",
+    # What the host says it uses for configuration that is not a number.
+    "config_reports",
 )
 
 

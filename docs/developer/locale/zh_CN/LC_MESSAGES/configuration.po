@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-03 00:34-0500\n"
+"POT-Creation-Date: 2026-11-03 23:41-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -247,7 +247,7 @@ msgstr ""
 
 #: ../../ENVIRONMENT.md:85
 msgid ""
-"Run `alembic upgrade head` (through `0109_local_account_parity`) before "
+"Run `alembic upgrade head` (through `0110_host_late_settings`) before "
 "starting this release; the [upgrade notes](docs/developer/upgrade-"
 "notes.md) say what each recent migration changes. The main control-plane "
 "listener then initializes the settings document once from its existing "
@@ -255,7 +255,7 @@ msgid ""
 "same saved values."
 msgstr ""
 "启动这个版本之前，先运行 `alembic upgrade head`（升级到 "
-"`0109_local_account_parity`）；每个近期迁移改了什么，见[升级说明](docs/developer/upgrade-"
+"`0110_host_late_settings`）；每个近期迁移改了什么，见[升级说明](docs/developer/upgrade-"
 "notes.md)。之后，主控制平面监听器会根据现有环境变量，将设置文档初始化一次。MCP 专用监听器会等这份文档准备好，并使用同样的已保存值。"
 
 #: ../../ENVIRONMENT.md:91
@@ -286,7 +286,7 @@ msgstr "给这台服务器单独保存的覆盖值；"
 msgid "the global value saved by an administrator;"
 msgstr "管理员保存的全局值；"
 
-#: ../../ENVIRONMENT.md:103 ../../ENVIRONMENT.md:425
+#: ../../ENVIRONMENT.md:103 ../../ENVIRONMENT.md:432
 msgid "the built-in default."
 msgstr "内置默认值。"
 
@@ -1067,7 +1067,8 @@ msgid ""
 "domain list (Admin → Users → Sign-up policy) is approved at once; with an"
 " empty list, every verified account is."
 msgstr ""
-"新增。`manual`（默认）：每个账号都等待管理员审核。`domains`：已证明邮箱的域名在注册域名名单（Admin → Users 中的“注册策略与登录记录”）中的已验证账号会被立即批准；名单为空时，所有已验证账号都会被批准。"
+"新增。`manual`（默认）：每个账号都等待管理员审核。`domains`：已证明邮箱的域名在注册域名名单（Admin → Users "
+"中的“注册策略与登录记录”）中的已验证账号会被立即批准；名单为空时，所有已验证账号都会被批准。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_LOCAL_SIGNUP_ADMIN_NOTIFY` / `AGENT_LOCAL_SIGNUP_NOTIFY_EMAILS`"
@@ -1519,15 +1520,18 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"Defaults to off. Set to `true` on a development stack to serve `/docs`, "
-"`/redoc` and `/openapi.json` on the main API. Off, none of the three is "
-"served: the schema is unauthenticated, and the two pages load scripts "
-"from a CDN at a floating version. The MCP-only listener never serves "
-"them."
+"*Initial import.* Saved as **Serve API documentation** in Admin → "
+"Settings → Operations and read on every request, so turning it on or off "
+"needs no restart. Defaults to off; turn it on only on a development "
+"stack. On, the main API serves `/docs`, `/redoc` and `/openapi.json`; "
+"off, none of the three is served: the schema is unauthenticated, and the "
+"two pages load scripts from a CDN at a floating version. The MCP-only "
+"listener never serves them. An unusable value imports as off."
 msgstr ""
-"默认关闭。在开发环境里设成 `true`，主 API 就会提供 `/docs`、`/redoc` 和 "
-"`/openapi.json`。关闭时三个都不提供：schema 不需要认证就能访问，而那两个页面会从 CDN 加载没有锁定版本的脚本。MCP "
-"专用监听器在任何情况下都不提供它们。"
+"*首次导入。* 保存为 Admin → Settings → Operations 中的 **Serve API "
+"documentation**，每个请求都会读取，所以打开或关闭都不需要重启。默认关闭；只在开发环境里打开。打开时主 API 提供 "
+"`/docs`、`/redoc` 和 `/openapi.json`；关闭时三个都不提供：schema 不需要认证就能访问，而那两个页面会从 "
+"CDN 加载没有锁定版本的脚本。MCP 专用监听进程从不提供它们。无法使用的值导入为关闭。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_MAX_STREAMS_PER_USER`"
@@ -1535,16 +1539,19 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"Default `24`. How many live-update streams (the change stream and job "
-"event streams) one account may hold open on one control-plane process; "
-"one more answers 429 with `Retry-After`, which the web app backs off on. "
-"A browser tab holds one change stream and one stream per conversation it "
-"is watching. A missing, non-numeric or non-positive value uses the "
-"default."
+"*Initial import.* Saved as **Live streams per account** in Admin → "
+"Settings → Operations (default `24`) and read each time a stream opens. "
+"How many live-update streams (the change stream and job event streams) "
+"one account may hold open on one control-plane process; one more answers "
+"429 with `Retry-After`, which the web app backs off on. A browser tab "
+"holds one change stream and one stream per conversation it is watching. A"
+" missing, non-numeric or non-positive value imports the default."
 msgstr ""
-"默认 `24`。一个账号在一个控制平面进程上，最多能同时开多少条实时更新流（变更流和任务事件流）；超出的那一条会收到带 `Retry-After`"
-" 的 429，Web "
-"应用会据此稍后重试。一个浏览器标签页会占一条变更流，外加它正在查看的每个对话各一条。值缺失、不是数字或不是正数时，都按默认值处理。"
+"*首次导入。* 保存为 Admin → Settings → Operations 中的 **Live streams per "
+"account**（默认 "
+"`24`），每次打开流时读取。一个账号在一个控制平面进程上最多能同时开多少条实时更新流（变更流和任务事件流）；超出的那一条会收到带 `Retry-"
+"After` 的 "
+"429，网页应用会据此退避。一个浏览器标签页持有一条变更流，外加它正在查看的每个对话一条流。缺失、非数字或非正数的值导入为默认值。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_TRUST_PROXY_HEADERS`"
@@ -1573,14 +1580,22 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"The npm registry the admin Settings page asks for each agent's latest "
-"release, and checks a requested version against. Default "
-"`https://registry.npmjs.org`. Set the same value on the hosts, which "
-"download from it. An unreachable registry shows on the page and blocks "
-"updating; nothing else depends on it."
+"*Initial import.* Saved as **Agent package registry** in Admin → Settings"
+" → Agent versions; empty is the public registry "
+"`https://registry.npmjs.org`. The Settings page lists versions from the "
+"saved value, and every heartbeat answer tells each host to download from "
+"it; each host reports the registry its next download uses. Until every "
+"online host reports the saved registry, the Agent versions tab names the "
+"hosts still missing it and an update is refused. On a host, this variable"
+" is only the registry used before its first heartbeat answer. An "
+"unreachable registry shows on the page and blocks updating; nothing else "
+"depends on it."
 msgstr ""
-"管理员设置页面用来查询每个 agent 最新版本、并核对指定版本是否存在的 npm 仓库，默认 "
-"`https://registry.npmjs.org`。主机也要设成同样的值，因为主机会从这里下载。仓库访问不了时，页面上会显示出来，并且无法升级；除此之外没有别的功能依赖它。"
+"*首次导入。* 保存为 Admin → Settings → Agent versions 中的 **Agent package "
+"registry**；留空表示公共 registry "
+"`https://registry.npmjs.org`。设置页按保存值列出版本，每次心跳应答都告诉每台主机从它下载；每台主机上报下一次下载使用的"
+" registry。在所有在线主机都上报保存的 registry 之前，Agent versions 标签页会列出还没用上的主机，更新也会被拒绝。在主机上，这个变量只是收到第一次心跳应答之前使用的 "
+"registry。registry 不可达时页面会显示并阻止更新，其他功能不受影响。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_DEPLOYMENT_SHA`"
@@ -2095,10 +2110,45 @@ msgstr ""
 "从不持有服务商密钥。手动设置它们不会启动任何东西：启动器只在需要转换的成员前运行。"
 
 #: ../../ENVIRONMENT.md:409
+msgid "Web search"
+msgstr "网页搜索"
+
+#: ../developer/configuration.md:1
+msgid "`WEB_SEARCH_PROVIDER`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"*Optional initial import.* Provider behind the built-in `web_search` "
+"tool: `auto` (default), `serper`, `brave` or `parallel`. Saved in Admin →"
+" Settings → Web search; an existing deployment imports it once on upgrade"
+" if it was never saved. The supported control-plane Compose file does not"
+" pass it: set it in Admin Settings, or pass it through an override for "
+"the import."
+msgstr ""
+"*可选的首次导入。* 内置 `web_search` 工具背后的提供方：`auto`（默认）、`serper`、`brave` 或 "
+"`parallel`。保存在 Admin → Settings → Web "
+"search；已有部署如果从未保存过它，会在升级时导入一次。受支持的控制平面 Compose 文件不传递它：请在 Admin Settings "
+"中设置，或通过 override 文件传递以便导入。"
+
+#: ../developer/configuration.md:1
+msgid "`SERPER_API_KEY` / `BRAVE_SEARCH_API_KEY` / `PARALLEL_API_KEY`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"*Optional initial import.* Provider keys for the built-in `web_search` "
+"tool, stored encrypted in Admin → Settings → Web search and never sent to"
+" a sandbox. Imported once, as above."
+msgstr ""
+"*可选的首次导入。* 内置 `web_search` 工具的提供方密钥，加密保存在 Admin → Settings → Web "
+"search，从不发送到沙箱。导入一次，同上。"
+
+#: ../../ENVIRONMENT.md:416
 msgid "Sandbox settings from the admin pages"
 msgstr "在管理页面上设置的沙箱参数"
 
-#: ../../ENVIRONMENT.md:411
+#: ../../ENVIRONMENT.md:418
 msgid ""
 "Host settings can be set from the admin pages instead of in each host's "
 "`.env`, including `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`, "
@@ -2118,15 +2168,15 @@ msgstr ""
 "/admin/agent/host-settings`）；在 **Servers** 页面某台服务器的详情里设置的值，只对那一台生效（`PUT "
 "/admin/agent/runner-hosts/<host>/settings`）。每一项设置，主机按以下优先级取值，从高到低："
 
-#: ../../ENVIRONMENT.md:423
+#: ../../ENVIRONMENT.md:430
 msgid "the value set for that server;"
 msgstr "单独给这台服务器设置的值；"
 
-#: ../../ENVIRONMENT.md:424
+#: ../../ENVIRONMENT.md:431
 msgid "the value set for every server;"
 msgstr "给所有服务器设置的值；"
 
-#: ../../ENVIRONMENT.md:427
+#: ../../ENVIRONMENT.md:434
 msgid ""
 "The control plane sends complete effective values, including defaults, on"
 " each heartbeat. Host environment values apply only before the first "
@@ -2139,7 +2189,7 @@ msgstr ""
 "控制平面每次心跳都会下发完整的最终生效值，默认值也包括在内。主机上的环境变量只在第一次拿到设置之前生效，之后仍会作为本地的诊断值显示出来。清除单台服务器的值，会退回到全局值或内置默认值；清除全局值，会退回到内置默认值。管理员能设置的上下限写在"
 " `cloud_agent_shared/host_settings.py` 里，它们只是防止手误填错，并不代表机器的实际容量。"
 
-#: ../../ENVIRONMENT.md:434
+#: ../../ENVIRONMENT.md:441
 msgid ""
 "Container CPU, memory, and disk settings apply to new sandbox groups. "
 "Resuming a chat or forking it preserves the group's original limits; all "
@@ -2156,7 +2206,7 @@ msgstr ""
 "`AGENT_SANDBOX_CPU_MILLICORES=2000`、`AGENT_SANDBOX_MEMORY_MIB=4096` 和 "
 "`AGENT_SANDBOX_DISK_MIB=0`。"
 
-#: ../../ENVIRONMENT.md:442
+#: ../../ENVIRONMENT.md:449
 msgid ""
 "A positive disk limit sets Docker's `--storage-opt size=<MiB>M` on the "
 "writable layer, including the workspace, caches, and installed files. It "
@@ -2182,7 +2232,7 @@ msgstr ""
 "的服务器照样接不受信任的任务，只是控制平面和 runner 会记录警告，Servers 页面也会在它旁边显示 **No container "
 "disk quota**。runner 现有的存储证明仍然测量的是主机的文件系统，而不是每个沙箱的配额。"
 
-#: ../../ENVIRONMENT.md:457
+#: ../../ENVIRONMENT.md:464
 msgid ""
 "The same cards also manage workspace and terminal resource limits. These "
 "additional environment names supply initial local values only:"
@@ -2280,7 +2330,7 @@ msgstr ""
 msgid "4 concurrent viewers per terminal."
 msgstr "每个终端最多 4 人同时查看。"
 
-#: ../../ENVIRONMENT.md:474
+#: ../../ENVIRONMENT.md:481
 msgid ""
 "Workspace commands and Git inspection are also bounded in number, by the "
 "Sandbox Manager rather than by a setting: at most 16 run at once on one "
@@ -2290,7 +2340,7 @@ msgstr ""
 "工作区命令和 Git 查看的并发数量也有上限，这个上限由 Sandbox Manager 自己决定，不是设置项：一台主机上最多同时跑 16 "
 "个，一个对话最多 4 个，用的是它们专用的线程池；再多一个就直接返回 429，不会排队等着。"
 
-#: ../../ENVIRONMENT.md:479
+#: ../../ENVIRONMENT.md:486
 msgid ""
 "The values ride the heartbeat answer, so a host applies a change within "
 "one heartbeat (about 30 seconds) with no redeploy. Nothing running is "
@@ -2309,11 +2359,11 @@ msgstr ""
 "`.env` 里的值；主机确认之前，页面上会把这个值显示为 *applying*。更早版本的 runner（没有声明 `host-"
 "settings-v1`）在重新部署之前，会一直用自己 `.env` 里的值，页面上也会注明这一点。"
 
-#: ../../ENVIRONMENT.md:488
+#: ../../ENVIRONMENT.md:495
 msgid "Optional compute-resource management"
 msgstr "可选：计算资源管理"
 
-#: ../../ENVIRONMENT.md:490
+#: ../../ENVIRONMENT.md:497
 msgid ""
 "These values belong only to the stable main control plane, not its MCP-"
 "only listener, any Host, or any sandbox. See [the compute "
@@ -2433,18 +2483,18 @@ msgstr ""
 "`/v1/compute/node-registrations`，并且只有该地址是 HTTPS 时才使用。只走 "
 "HTTPS：节点发送一次性令牌之前，会先检查控制平面的证书。两个都没有时，就无法创建“自己登记密钥”的节点。"
 
-#: ../../ENVIRONMENT.md:504
+#: ../../ENVIRONMENT.md:511
 msgid ""
 "Without this configuration the existing Host management remains "
 "available; resource creation requires configured credentials and "
 "deployment profiles."
 msgstr "没有这些配置时，现有的 Host 管理功能照样能用；只是要新建资源，必须先配好凭据和部署配置。"
 
-#: ../../ENVIRONMENT.md:507
+#: ../../ENVIRONMENT.md:514
 msgid "Repository environments"
 msgstr "仓库环境"
 
-#: ../../ENVIRONMENT.md:509
+#: ../../ENVIRONMENT.md:516
 msgid ""
 "Reusable repository environments are available by default. There is no "
 "feature switch or initial environment-variable import. A legacy "
@@ -2459,7 +2509,7 @@ msgstr ""
 "这个值，都会被忽略。设置页面、创建任务时的选择，以及工作区的 Environment 标签页，始终都会出现。`/config` "
 "也始终会返回环境相关的限制。"
 
-#: ../../ENVIRONMENT.md:511
+#: ../../ENVIRONMENT.md:518
 msgid ""
 "A task with no configured variables or scripts uses the base environment "
 "without environment preparation. Configured workspaces still require an "
@@ -2469,15 +2519,15 @@ msgstr ""
 "没有配置任何变量或脚本的任务，直接用基础环境，不做环境准备。配置过的工作区仍然需要支持环境功能的 runner 和 sandbox "
 "manager；所有者授权、加密和执行隔离照常生效。"
 
-#: ../../ENVIRONMENT.md:513
+#: ../../ENVIRONMENT.md:520
 msgid "Host agent (`cloud_agent_host`)"
 msgstr "主机 agent（`cloud_agent_host`）"
 
-#: ../../ENVIRONMENT.md:515
+#: ../../ENVIRONMENT.md:522
 msgid "The stack's own identity"
 msgstr "这套主机服务自己的身份"
 
-#: ../../ENVIRONMENT.md:517
+#: ../../ENVIRONMENT.md:524
 msgid ""
 "Read by `deploy/host/deploy.sh` and `deploy/host/sandbox_host.sh` rather "
 "than by compose, because they name the stack rather than configure it."
@@ -2563,7 +2613,7 @@ msgstr ""
 "部署脚本等待两边并行上线完成的时间，默认 900 秒。主机在等待冷启动的推理、MCP 和控制端点时，用的也是这个上限；控制平面部署在等待一次按确切"
 " SHA 的新心跳和反向 sandbox manager 探测时，同样用它。这是防止上线卡死的看门狗，不是对话或会话的超时。"
 
-#: ../../ENVIRONMENT.md:528
+#: ../../ENVIRONMENT.md:535
 msgid "Scheduling"
 msgstr "调度"
 
@@ -2592,11 +2642,22 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"Attempt lease horizon, default 120 seconds. See [lease "
+"Attempt lease horizon, default 120 seconds. *Host bootstrap.* Set as "
+"**Turn lease** for all servers or one server from the admin pages (41–900"
+" seconds), which win over this value from the next heartbeat; each claim "
+"asks for the value in effect and the turn renews with the lease it was "
+"claimed with. A host imports this value once into its own server setting "
+"on the first heartbeat that reports it. Inference grant TTL is "
+"independent: `grants.GRANT_TTL_S = RENEWAL_INTERVAL_S × "
+"RENEWAL_HEADROOM_PASSES = 30 × 4 = 120 seconds`. Changing the lease "
+"horizon does not change grant lifetime. See [lease "
 "troubleshooting](docs/developer/runner-lease-troubleshooting.md)."
 msgstr ""
-"attempt 租约的时长，默认 120 秒。见[租约问题排查](docs/developer/runner-lease-"
-"troubleshooting.md)。"
+"尝试租约的时长，默认 120 秒。*主机引导值。* 可以在管理页面上为所有服务器或单台服务器设置为 **Turn lease**（41–900 "
+"秒），从下一次心跳起优先于这个值；每次认领使用当时生效的值，回合按认领时的租约续期。主机在第一次上报这个值的心跳中，会把它导入为自己这台服务器的设置，只导入一次。推理授权的"
+" TTL 与它无关：`grants.GRANT_TTL_S = RENEWAL_INTERVAL_S × "
+"RENEWAL_HEADROOM_PASSES = 30 × 4 = 120 seconds`。改变租约时长不会改变授权寿命。见 "
+"[租约排障](docs/developer/runner-lease-troubleshooting.md)。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_TIMEOUT_S`"
@@ -2630,7 +2691,7 @@ msgstr ""
 "兑换，这台机器跑的每个轮次都共用它。注册完成后，以凭据为准，再改这个值也不会给环境改名。如果只想在显示时把几个环境归到一组，又不想改变已有的身份，就用"
 " `AGENT_PHYSICAL_HOST`。"
 
-#: ../../ENVIRONMENT.md:537
+#: ../../ENVIRONMENT.md:544
 msgid "Sandbox Manager, runtime and reporting"
 msgstr "Sandbox Manager、运行时与上报"
 
@@ -3427,7 +3488,7 @@ msgstr ""
 "都不读，因为一个自己并不掌握的名字，它们也没法据此做什么。值缺失或格式不对时，会退回到 "
 "`default`，而不是拒绝启动；格式不对时还会记一条警告，写明被拒绝的值，因为退回之后，它就和 `default` 共用同一个命名空间了。"
 
-#: ../../ENVIRONMENT.md:579
+#: ../../ENVIRONMENT.md:586
 msgid ""
 "The control-plane, host and local Compose files pass optional profiling "
 "overrides through to their respective producers. An empty MODE reaches "
@@ -3440,7 +3501,7 @@ msgstr ""
 "为空时，会交给共用的解析器处理，效果和不设置一样：不用任何配置就能使用 Admin 控制。常规的 schema "
 "迁移照常执行。只有互相独立的部署共用一个数据库时，才需要设置部署命名空间。"
 
-#: ../../ENVIRONMENT.md:585
+#: ../../ENVIRONMENT.md:592
 msgid ""
 "Collection starts Disabled on a fresh database. The Admin Enable/Disable "
 "button controls the persisted run without editing configuration or "
@@ -3466,7 +3527,7 @@ msgstr ""
 "execution profile 分开统计。2026-09-18 在本地复测的结果是，每次合成启动，采集器自身大约花 30 "
 "微秒；这个数字不包括真实的容器、sandbox manager、网络或数据库。"
 
-#: ../../ENVIRONMENT.md:599
+#: ../../ENVIRONMENT.md:606
 msgid ""
 "Two benchmarks answer two different questions, and neither substitutes "
 "for the other. `scripts/bench_startup_profiling_overhead.py` measures the"
@@ -3488,11 +3549,11 @@ msgstr ""
 "`max(10 ms, baseline p95 × 1%)` 预算得出的结论。引用其中任何一个的结果之前，先看一下脚本里的 "
 "`what`/`not_what` 说明。"
 
-#: ../../ENVIRONMENT.md:611
+#: ../../ENVIRONMENT.md:618
 msgid "Physical servers and execution environments"
 msgstr "物理服务器和执行环境"
 
-#: ../../ENVIRONMENT.md:613
+#: ../../ENVIRONMENT.md:620
 msgid ""
 "`AGENT_RUNNER_HOST` identifies one enrolled execution environment. When "
 "two stacks on the same physical server talk to one control plane, they "
@@ -3503,7 +3564,7 @@ msgstr ""
 "`AGENT_RUNNER_HOST` 标识一个已注册的执行环境。同一台物理服务器上的两套服务连同一个控制平面时，它们的名字、凭据、状态目录和 "
 "sandbox manager 地址都要不一样。不要为了把某个环境保留的对话并到另一个环境里，去给已有的环境改名或重新注册。"
 
-#: ../../ENVIRONMENT.md:618
+#: ../../ENVIRONMENT.md:625
 msgid ""
 "`AGENT_PHYSICAL_HOST` names the physical server for the admin inventory. "
 "Give all environments on that server the same name, unique within the "
@@ -3518,7 +3579,7 @@ msgstr ""
 " 默认用主机的短主机名；直接用 Compose 部署时，必须显式设置。runner 在注册时和每次心跳中都会带上它，保存为 "
 "`labels.physical_host`。旧版 runner 不带这个值也没关系，已有的元数据不会被清掉。不需要数据库迁移。"
 
-#: ../../ENVIRONMENT.md:625
+#: ../../ENVIRONMENT.md:632
 msgid ""
 "The Servers table shows the executor matching the new-chat execution "
 "policy on each physical server. Production Compose defaults to "
@@ -3532,7 +3593,7 @@ msgstr ""
 "kata-v1`；本地 Compose 的 overlay 明确保持 `trusted-v1`。旧的执行器仍留在 API "
 "里，用于保留会话的归属，但不会再分配给新对话。每台物理服务器只保留一个用于放置新对话的执行器；多出来的旧部署，等它们保留的对话都用不着了，就应该退役。"
 
-#: ../../ENVIRONMENT.md:632
+#: ../../ENVIRONMENT.md:639
 msgid ""
 "The global sandbox location selector is always visible, including with "
 "one server. It shows Automatic or the exact selected Host identity; "
@@ -3555,7 +3616,7 @@ msgstr ""
 " 数量，也不是新旧部署加起来的总数。分组显示绝不会改动凭据、sandbox manager "
 "的路由或保留沙箱的归属。服务器名称来自上报的元数据；系统不会去猜运行时的后缀。"
 
-#: ../../ENVIRONMENT.md:644
+#: ../../ENVIRONMENT.md:651
 msgid ""
 "Set `AGENT_PHYSICAL_HOST` before host activation and use the coordinated "
 "release phases in [the rolling-update "
@@ -3568,7 +3629,7 @@ msgstr ""
 "#rolling-deployment-order)里协调好的发布阶段操作。先让正在跑的轮次结束，完成目标主机这一代的部署，并通过控制平面按确切 "
 "SHA 的就绪栅栏，然后再激活 API 和 Web 的新版本。已有的主机凭据和保留沙箱都原样保留。"
 
-#: ../../ENVIRONMENT.md:650
+#: ../../ENVIRONMENT.md:657
 msgid "Sandbox isolation (host agent reads, sandbox inherits)"
 msgstr "沙箱隔离（由主机 agent 读取，沙箱沿用）"
 
@@ -3900,11 +3961,11 @@ msgstr ""
 "Secrets 生成的 base64 匹配模式，这样一旦快照里多出了某个 Secret，就会被拒绝，而 Secret "
 "的内容不会离开沙箱。运维人员不要设置。"
 
-#: ../../ENVIRONMENT.md:676
+#: ../../ENVIRONMENT.md:683
 msgid "Kata runtime qualification generation"
 msgstr "Kata 运行时资格验证的代次"
 
-#: ../../ENVIRONMENT.md:678
+#: ../../ENVIRONMENT.md:685
 #, python-brace-format
 msgid ""
 "The supported host deployment mounts `/var/lib/freeinference/kata-"
@@ -3927,7 +3988,7 @@ msgstr ""
 "`updating`，重新运行安装脚本即可修复。这台主机上的所有部署看到的都是同一个代次，标记文件被原子替换时也一样。`--check` "
 "仍然只做验证，不做改动。"
 
-#: ../../ENVIRONMENT.md:688
+#: ../../ENVIRONMENT.md:695
 msgid ""
 "For an existing host, deployment verifies Kata and initializes only a "
 "missing marker through a short-lived, networkless runc container with "
@@ -3943,11 +4004,11 @@ msgstr ""
 "证据时，要做完整的探测；证据格式不对或正处于更新中时，一律拒绝。如果要原地更新运行时或配置，必须用官方的安装脚本，这样每个 runner "
 "都会在第一个文件被改动之前，就让资格验证失效。"
 
-#: ../../ENVIRONMENT.md:696
+#: ../../ENVIRONMENT.md:703
 msgid "Complete local stack database recovery"
 msgstr "完整本地环境的数据库恢复"
 
-#: ../../ENVIRONMENT.md:698
+#: ../../ENVIRONMENT.md:705
 msgid ""
 "`deploy/local/dev.sh` stores the local Postgres password and matching "
 "`AGENT_DATABASE_URL` in the gitignored `deploy/local/.env.local`. Back up"
@@ -3963,7 +4024,7 @@ msgstr ""
 "postgres`，脚本会拒绝生成新密码：PostgreSQL 只在初始化空的数据目录时才使用 "
 "`POSTGRES_PASSWORD`，所以新密码打不开旧的卷。"
 
-#: ../../ENVIRONMENT.md:706
+#: ../../ENVIRONMENT.md:713
 msgid ""
 "`up` builds the required images first. It and `start` then bring up only "
 "Postgres, wait for readiness, authenticate from the control-plane image "
@@ -3976,11 +4037,11 @@ msgstr ""
 "认证一次，再运行 Alembic，最后才启动其余的服务。如果认证失败，请把原来的 `AGENT_POSTGRES_PASSWORD` 和 "
 "`AGENT_DATABASE_URL` 找回来。脚本绝不会自动删除卷，也不会自动重置密码。"
 
-#: ../../ENVIRONMENT.md:713
+#: ../../ENVIRONMENT.md:720
 msgid "Claude inference retry policy"
 msgstr "Claude 推理请求的重试策略"
 
-#: ../../ENVIRONMENT.md:715
+#: ../../ENVIRONMENT.md:722
 msgid ""
 "The runtime adapter sets `CLAUDE_CODE_MAX_RETRIES=15` and "
 "`CLAUDE_CODE_RETRY_WATCHDOG=0` for each resident Claude Code process. "
@@ -4000,11 +4061,11 @@ msgstr ""
 "`AGENT_TIMEOUT_S`。重试进度会显示在对话里；重试次数用完时，这一轮会失败，但原生上下文会保留下来。重试间隔的上限和上线时的行为，见[运行时边界](docs/developer/operations.md"
 "#runtime-boundaries)。"
 
-#: ../../ENVIRONMENT.md:726
+#: ../../ENVIRONMENT.md:733
 msgid "Agent CLI version pins (image build)"
 msgstr "Agent CLI 的版本固定（构建镜像时）"
 
-#: ../../ENVIRONMENT.md:728
+#: ../../ENVIRONMENT.md:735
 msgid ""
 "The five default versions live in both `deploy/sandbox/Dockerfile.agent-"
 "sandbox` and `apps/backend/cloud_agent_shared/shared_protocol.py`. They "
@@ -4021,7 +4082,7 @@ msgstr ""
 "`shared-sandbox-v1`。所以它们是写在源码里的版本固定，不是每台主机 `.env` "
 "里的设置。有意修改某个默认版本时，两处要一起改，并重新跑一遍 agent 循环的一致性测试。"
 
-#: ../../ENVIRONMENT.md:737
+#: ../../ENVIRONMENT.md:744
 msgid ""
 "The Dockerfile still verifies every exact version against the installed "
 "binary at build time. A dist-tag (`latest`) or range (`^2.1`) fails the "
@@ -4031,7 +4092,7 @@ msgstr ""
 "构建时，Dockerfile 仍会把每个确切的版本号和实际装上的二进制逐一核对。写 dist-"
 "tag（`latest`）或版本范围（`^2.1`）都会让构建失败，这样镜像标签上写的版本，就不可能和镜像里实际的二进制对不上。"
 
-#: ../../ENVIRONMENT.md:741
+#: ../../ENVIRONMENT.md:748
 msgid ""
 "**Updating an agent without a rebuild.** Claude Code, Codex, OpenCode and"
 " pi can also be updated from the admin Settings page (_Agent versions_ → "
@@ -4055,10 +4116,12 @@ msgstr ""
 
 #: ../developer/configuration.md:1
 msgid ""
-"Host side of the control-plane row above: the npm registry a host "
-"downloads updated agents from. Default `https://registry.npmjs.org`."
+"Host side of the control-plane row above. A host downloads updated agents"
+" from the registry its heartbeat answer names; this value is only the "
+"registry it uses before its first answer. Default "
+"`https://registry.npmjs.org`."
 msgstr ""
-"和上面控制平面那一行对应的主机端设置：主机从哪个 npm 仓库下载升级的 agent。默认 "
+"和上面控制平面那一行对应的主机端设置。主机按心跳应答里指定的仓库下载升级的 agent；这个变量只决定它收到第一次应答之前用哪个仓库。默认 "
 "`https://registry.npmjs.org`。"
 
 #: ../developer/configuration.md:1
@@ -4075,7 +4138,7 @@ msgstr ""
 "下载这一步运行在哪个 Docker 网络上，默认 `bridge`。那里只运行 "
 "npm，并且禁用了安装脚本；软件包自己的脚本和检查，之后在没有网络的环境里运行。只有主机默认的网桥访问不到 npm 仓库时，才需要指定别的网络。"
 
-#: ../../ENVIRONMENT.md:757
+#: ../../ENVIRONMENT.md:764
 msgid ""
 "Each runtime takes a `*_EXTRA_VERSIONS` deployment setting — comma-"
 "separated, blank by default — naming **additional** versions the same "
@@ -4090,13 +4153,13 @@ msgstr ""
 " _Agent versions_ "
 "里选（`agent_runner_policy.runtime_versions`）。留空的话，镜像里就只有默认版本，所有部署一开始都是这样。"
 
-#: ../../ENVIRONMENT.md:764
+#: ../../ENVIRONMENT.md:771
 msgid ""
 "Every added version must be exact and its event stream must be compatible"
 " with its adapter in `cloud_agent_host/runtimes/`."
 msgstr "每个额外加的版本都必须是确切的版本号，并且它的事件流必须和 `cloud_agent_host/runtimes/` 里对应的适配器兼容。"
 
-#: ../../ENVIRONMENT.md:767
+#: ../../ENVIRONMENT.md:774
 msgid ""
 "`tests/external/test_runtime_stream_conformance.py` is the gate for that "
 "claim, and the way to point it at a candidate is to **put the version on "
@@ -4106,7 +4169,7 @@ msgstr ""
 "`tests/external/test_runtime_stream_conformance.py`；要让它测某个候选版本，办法是**把这个版本写到"
 " Dockerfile 的 `ARG` 行里**："
 
-#: ../../ENVIRONMENT.md:780
+#: ../../ENVIRONMENT.md:787
 msgid ""
 "The suite derives its parametrization from those `ARG` lines "
 "(`test_runtime_stream_conformance.py::_menu`, `_DOCKERFILE`), not from an"
@@ -4125,11 +4188,11 @@ msgstr ""
 "按确切版本拉取每个版本，对着一个模拟的模型服务商去驱动，所以测量的是真实的二进制；但测量依据的是**仓库里的** "
 "Dockerfile，所以候选版本必须先写进那一行 `ARG`。"
 
-#: ../../ENVIRONMENT.md:789
+#: ../../ENVIRONMENT.md:796
 msgid "Interpret a passing conformance run within these limits:"
 msgstr "一致性测试通过时，要在下面这些前提下理解它的意义："
 
-#: ../../ENVIRONMENT.md:791
+#: ../../ENVIRONMENT.md:798
 msgid ""
 "**`claude-code` only.** This is the one runtime with a stream-conformance"
 " suite; the other four have contract fixtures and their adapters' unit "
@@ -4139,7 +4202,7 @@ msgstr ""
 "**只针对 `claude-code`。** "
 "只有这个运行时有流一致性测试套件；其他四个只有契约夹具和各自适配器的单元测试，没有同等的关卡。所以目前给它们加版本，靠的是评审把关，而不是测试。"
 
-#: ../../ENVIRONMENT.md:795
+#: ../../ENVIRONMENT.md:802
 msgid ""
 "**It proves the parser, not the option.** A pass means the version's "
 "event shape is intelligible to our normalizer. It does not exercise the "
@@ -4148,7 +4211,7 @@ msgstr ""
 "**它证明的是解析器没问题，不是这个选项没问题。** "
 "测试通过，说明这个版本的事件结构能被我们的规范化程序读懂；但它并不会去跑已部署的镜像、沙箱，也不会去点那个下拉菜单。"
 
-#: ../../ENVIRONMENT.md:799
+#: ../../ENVIRONMENT.md:806
 msgid "Verify stream compatibility before offering a version to users."
 msgstr "把某个版本开放给用户之前，先确认它的事件流兼容。"
 
@@ -4192,11 +4255,11 @@ msgstr ""
 msgid "Extra `@kilocode/cli` versions."
 msgstr "额外的 `@kilocode/cli` 版本。"
 
-#: ../../ENVIRONMENT.md:809
+#: ../../ENVIRONMENT.md:816
 msgid "Web (`apps/frontend/`)"
 msgstr "Web（`apps/frontend/`）"
 
-#: ../../ENVIRONMENT.md:811
+#: ../../ENVIRONMENT.md:818
 msgid ""
 "Frontend configuration is public. Build-time routing settings enter the "
 "downloaded bundle and require a rebuild. Appearance settings are saved "
@@ -4207,11 +4270,11 @@ msgstr ""
 "前端配置都是公开的。构建时的路由设置会打进用户下载的前端包里，改了就要重新构建。外观设置通过 Admin → Settings 保存，Web "
 "服务器每次处理请求时读取。部署时间和发布版本信息仍然是运行时的环境元数据。这些公开的值里不能有 secret。"
 
-#: ../../ENVIRONMENT.md:817
+#: ../../ENVIRONMENT.md:824
 msgid "Build-time: the image variant"
 msgstr "构建时决定：镜像变体"
 
-#: ../../ENVIRONMENT.md:819
+#: ../../ENVIRONMENT.md:826
 msgid ""
 "A `NEXT_PUBLIC_*` variable is substituted into the bundle during `next "
 "build`. Each one must therefore be an `ARG` in `deploy/control-"
@@ -4226,7 +4289,7 @@ msgstr ""
 "下的一个键；这里的某一行如果缺了其中一个，这个变量就是运维人员哪里都能设、却什么都改变不了的摆设。每一行都写明了它对应的 compose "
 "参数，任何一行没写，`test_web_build_arguments_are_wired` 都会失败。改其中任何一个，都要重新构建。"
 
-#: ../../ENVIRONMENT.md:826
+#: ../../ENVIRONMENT.md:833
 msgid ""
 "The base path and API prefix must match the reverse proxy. The supported "
 "same-origin layouts use `AGENT_WEB_API_URL=<AGENT_WEB_BASE_PATH>/api`: "
@@ -4313,11 +4376,11 @@ msgstr ""
 msgid "Optional build identity."
 msgstr "可选的构建版本信息。"
 
-#: ../../ENVIRONMENT.md:841
+#: ../../ENVIRONMENT.md:848
 msgid "Runtime: the deployment's identity"
 msgstr "运行时决定：部署的身份信息"
 
-#: ../../ENVIRONMENT.md:843
+#: ../../ENVIRONMENT.md:850
 msgid ""
 "The main control plane imports the first eight appearance variables below"
 " when it initializes the settings document. Set them in its deployment "
@@ -4414,7 +4477,7 @@ msgstr ""
 "显示在部署页脚的、带时区的 ISO 时间戳。控制平面的部署脚本会把激活时间以 UTC 写入，健康检查通过后记到 `.deployed-at` "
 "里；再次部署同一个版本时，会保留原来的时间。手动启动 Compose 时，请填写实际的部署时间。留空就显示 `Not available`。"
 
-#: ../../ENVIRONMENT.md:861
+#: ../../ENVIRONMENT.md:868
 msgid ""
 "The web service also receives the existing `AGENT_DEPLOYMENT_SHA` for the"
 " footer's version: the first seven commit characters are visible, with "
@@ -4424,7 +4487,7 @@ msgstr ""
 "Web 服务还会拿到已有的 `AGENT_DEPLOYMENT_SHA`，用来在页脚显示版本：显示 commit 的前七位，鼠标悬停时显示完整的 "
 "commit。这两个值每次请求时都重新读取，和镜像是哪天构建的无关。"
 
-#: ../../ENVIRONMENT.md:866
+#: ../../ENVIRONMENT.md:873
 msgid ""
 "Saved URLs and booleans are validated before an admin update is "
 "committed. The standalone environment fallback validates them when "
@@ -4434,15 +4497,15 @@ msgstr ""
 "管理员提交更新之前，保存的 URL "
 "和布尔值都会先经过校验。单独运行、退回使用环境变量时，则在渲染页面时校验。已保存的公开外观信息，来自本服务自己的接口。"
 
-#: ../../ENVIRONMENT.md:870
+#: ../../ENVIRONMENT.md:877
 msgid "Infrastructure (not environment variables)"
 msgstr "基础设施（不是环境变量）"
 
-#: ../../ENVIRONMENT.md:872
+#: ../../ENVIRONMENT.md:879
 msgid "Recorded here as *what has to be decided*, not as anyone's actual answer."
 msgstr "这里记录的是*需要做出哪些决定*，而不是谁的实际选择。"
 
-#: ../../ENVIRONMENT.md:874
+#: ../../ENVIRONMENT.md:881
 msgid ""
 "**Domains**: one host for the web app and the control-plane API, the API "
 "under `/api` — e.g. `agents.example.org` and a staging sibling. The exact"
@@ -4453,7 +4516,7 @@ msgstr ""
 "`agents.example.org`，再加一个 staging 用的兄弟域名。具体的名字写在 overlay 里，以及 "
 "`AGENT_WEB_BASE_URL` 和 `AGENT_PUBLIC_API_URL` 中。"
 
-#: ../../ENVIRONMENT.md:877
+#: ../../ENVIRONMENT.md:884
 msgid ""
 "**What a sandbox reaches**: its MCP relay, the resolver in "
 "`AGENT_EGRESS_DNS_SERVER` and public IPv4 on TCP 80/443 — the same during"
@@ -4468,31 +4531,54 @@ msgstr ""
 "的监听器。沙箱在运行一轮时持有其所有者的服务商密钥；这一暴露是[已接受的](docs/agents/specs/2026-09-23-agent-"
 "public-egress-design.zh-CN.md)，并且仅限于所有者自己的密钥和配额。"
 
-#: ../../ENVIRONMENT.md:884
+#: ../../ENVIRONMENT.md:891
 msgid ""
 "**Sandbox image registry**: choose where hosts pull `AGENT_SANDBOX_IMAGE`"
 " before deploying them."
 msgstr "**沙箱镜像仓库**：部署主机之前，先定好主机从哪里拉取 `AGENT_SANDBOX_IMAGE`。"
 
-#: ../../ENVIRONMENT.md:886
+#: ../../ENVIRONMENT.md:893
 msgid "Adding a variable"
 msgstr "新增变量时"
 
-#: ../../ENVIRONMENT.md:888
+#: ../../ENVIRONMENT.md:895
 msgid "Add a row here, in the right section."
 msgstr "在这里对应的小节里加一行。"
 
-#: ../../ENVIRONMENT.md:889
+#: ../../ENVIRONMENT.md:896
 msgid "Note who provisions it and whether it differs per environment."
 msgstr "写明由谁提供，以及不同环境之间的值是否不同。"
 
-#: ../../ENVIRONMENT.md:890
+#: ../../ENVIRONMENT.md:897
 msgid "If it is a secret, say where it is stored — never the value itself."
 msgstr "如果是 secret，写明它存在哪里，但绝不要写出它的值。"
 
-#: ../../ENVIRONMENT.md:891
+#: ../../ENVIRONMENT.md:898
 msgid ""
 "The PR checklist enforces this; a new variable without a row is a review "
 "stop."
 msgstr "PR 检查清单会检查这一点；新增了变量却没有对应的一行，评审就不会通过。"
+
+#~ msgid ""
+#~ "The npm registry the admin Settings "
+#~ "page asks for each agent's latest "
+#~ "release, and checks a requested version"
+#~ " against. Default `https://registry.npmjs.org`. "
+#~ "Set the same value on the hosts,"
+#~ " which download from it. An "
+#~ "unreachable registry shows on the page"
+#~ " and blocks updating; nothing else "
+#~ "depends on it."
+#~ msgstr ""
+#~ "管理员设置页面用来查询每个 agent 最新版本、并核对指定版本是否存在的 npm "
+#~ "仓库，默认 "
+#~ "`https://registry.npmjs.org`。主机也要设成同样的值，因为主机会从这里下载。仓库访问不了时，页面上会显示出来，并且无法升级；除此之外没有别的功能依赖它。"
+
+#~ msgid ""
+#~ "Attempt lease horizon, default 120 "
+#~ "seconds. See [lease troubleshooting](docs/developer"
+#~ "/runner-lease-troubleshooting.md)."
+#~ msgstr ""
+#~ "attempt 租约的时长，默认 120 秒。见[租约问题排查](docs/developer"
+#~ "/runner-lease-troubleshooting.md)。"
 

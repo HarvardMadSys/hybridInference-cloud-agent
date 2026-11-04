@@ -97,6 +97,34 @@ function LackingNote({
   );
 }
 
+/**
+ * Servers an update waits for, named before anyone presses Update.
+ *
+ * A version listed from the saved registry might not download from another,
+ * so the server refuses an update until every online server reports the one
+ * saved under "Where agent versions come from".
+ */
+function RegistryWaitingNote({
+  waitingOn,
+  servers,
+}: {
+  waitingOn: string[];
+  servers: NamedHost[];
+}) {
+  if (waitingOn.length === 0) return null;
+  const names = new Map(servers.map(({ name, host }) => [host.host, name]));
+  const who =
+    waitingOn.length > NAMED_SERVERS
+      ? `${waitingOn.length} servers`
+      : waitingOn.map((host) => names.get(host) ?? host).join(' and ');
+  return (
+    <p className="mt-4 break-words text-sm leading-6 text-status-warning">
+      Updates wait until every online server downloads from the saved agent package registry. Not
+      yet: {who}.
+    </p>
+  );
+}
+
 /** What a rollback returns to, in words. */
 function previousLabel(previous: string | null): string {
   return previous ?? 'the server default';
@@ -112,11 +140,14 @@ function previousLabel(previous: string | null): string {
 export function UpdateControls({
   item,
   busy,
+  waiting = false,
   onUpdate,
   onRollback,
 }: {
   item: RuntimeUpgradeItem;
   busy: boolean;
+  /** A server is not yet on the saved package registry: nothing can download. */
+  waiting?: boolean;
   onUpdate: (runtime: string, version: string) => void;
   onRollback: (runtime: string, version: string | null) => void;
 }) {
@@ -151,7 +182,7 @@ export function UpdateControls({
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || waiting}
             onClick={() => onUpdate(item.runtime, upgrade.version)}
             className="ui-button ui-button-primary min-h-11"
           >
@@ -174,7 +205,7 @@ export function UpdateControls({
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || waiting}
             onClick={() => onUpdate(item.runtime, upgrade.version)}
             className="ui-button ui-button-primary min-h-11"
           >
@@ -198,7 +229,7 @@ export function UpdateControls({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || waiting}
             onClick={() => onUpdate(item.runtime, item.latest_version as string)}
             className="ui-button ui-button-primary min-h-11"
           >
@@ -253,6 +284,7 @@ function VersionRow({
   onUpdate,
   onRollback,
   releases,
+  waiting,
 }: {
   runtime: string;
   versions: string[];
@@ -266,6 +298,7 @@ function VersionRow({
   onRollback: (runtime: string, version: string | null) => void;
   /** npm's releases, for an agent the page can update. */
   releases?: RuntimeVersions;
+  waiting: boolean;
 }) {
   const [draft, setDraft] = useState(saved);
   const unavailable = saved !== '' && !versions.includes(saved);
@@ -339,7 +372,7 @@ function VersionRow({
           />
           <button
             type="submit"
-            disabled={busy || (downloads && updateBusy) || draft === saved}
+            disabled={busy || (downloads && (updateBusy || waiting)) || draft === saved}
             className="ui-button ui-button-primary min-h-11 min-w-16 shrink-0"
           >
             {downloads ? 'Download and switch' : 'Save'}
@@ -352,6 +385,7 @@ function VersionRow({
           <UpdateControls
             item={update}
             busy={busy || updateBusy}
+            waiting={waiting}
             onUpdate={onUpdate}
             onRollback={onRollback}
           />
@@ -368,6 +402,7 @@ export default function AgentVersions({
   busy,
   onChange,
   updates = null,
+  registryWaitingOn = [],
   updateBusy = false,
   updateError = null,
   onUpdate = () => {},
@@ -380,6 +415,8 @@ export default function AgentVersions({
   busy: boolean;
   onChange: (runtime: string, version: string) => void;
   updates?: RuntimeUpgradeItem[] | null;
+  /** Host names of online servers not yet on the saved agent package registry. */
+  registryWaitingOn?: string[];
   updateBusy?: boolean;
   updateError?: string | null;
   onUpdate?: (runtime: string, version: string) => void;
@@ -412,6 +449,7 @@ export default function AgentVersions({
             {updateError}
           </p>
         )}
+        <RegistryWaitingNote waitingOn={registryWaitingOn} servers={servers} />
         {entries.size === 0 ? (
           <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
             No server has reported available versions yet.
@@ -434,6 +472,7 @@ export default function AgentVersions({
                   onUpdate={onUpdate}
                   onRollback={onRollback}
                   releases={releases[runtime]}
+                  waiting={registryWaitingOn.length > 0}
                 />
               ))}
           </div>

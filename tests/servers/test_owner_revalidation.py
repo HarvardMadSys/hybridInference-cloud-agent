@@ -216,6 +216,12 @@ PUBLIC_ROUTES = {
     ("GET", "/v1/session/me"): "asks the directory for a fresh decision in its handler",
     ("POST", "/v1/agent/host/register"): "redeems a one-time enrollment token",
     ("POST", "/v1/compute/node-registrations"): "redeems a node's one-time registration token",
+    # The API description pages answer 404 unless an administrator turns the
+    # api_docs setting on; they read the setting, never a caller.
+    ("GET", "/openapi.json"): "the API schema, served only while api_docs is on",
+    ("GET", "/docs"): "the API reference page, served only while api_docs is on",
+    ("GET", "/docs/oauth2-redirect"): "the reference page's redirect, only while api_docs is on",
+    ("GET", "/redoc"): "the API reference page, served only while api_docs is on",
     ("GET", "/v1/agent/mcp/oauth/callback/{provider}"): (
         "finishes only the OAuth flow the signed-in account started"
     ),

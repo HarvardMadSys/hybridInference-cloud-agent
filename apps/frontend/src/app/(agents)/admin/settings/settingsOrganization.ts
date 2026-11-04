@@ -275,6 +275,20 @@ const SETTINGS_BY_KEY = new Map<string, string>(
   SETTING_GROUPS.flatMap(({ title, keys }) => keys.map((key) => [key, title] as const)),
 );
 
+/**
+ * Application settings categories shown on another tab rather than their own,
+ * because that tab already describes what they configure.
+ */
+export const HOSTED_CATEGORIES: ReadonlyMap<string, { tab: string; section: string }> = new Map([
+  ['Sandbox archives', { tab: 'sandbox', section: 'Sandbox' }],
+  ['Agent versions', { tab: 'versions', section: 'Agent versions' }],
+]);
+
+/** The settings tab that shows an application settings category. */
+export function applicationCategoryTab(category: string): string {
+  return HOSTED_CATEGORIES.get(category)?.tab ?? `application-${encodeURIComponent(category)}`;
+}
+
 export function applicationCategoryName(category: string): string {
   return CATEGORY_NAMES.get(category) ?? (category || 'General');
 }

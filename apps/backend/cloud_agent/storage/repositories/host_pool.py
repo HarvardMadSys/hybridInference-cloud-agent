@@ -29,6 +29,7 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
+from cloud_agent.host_settings_import import plan_settings_import
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import (
     archive_settings_payload,
@@ -71,9 +72,6 @@ from cloud_agent.storage._sql.runner_policy import (
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
 from cloud_agent_shared.host_settings import (
-    HOST_SETTINGS_BY_KEY,
-    RUNNER_SETTING_KEYS,
-    admin_values,
     reported_values,
 )
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
@@ -496,6 +494,7 @@ class PostgresHostPoolRepository:
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: Sequence[Mapping[str, Any]] | None = None,
+        config_reports: Mapping[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -560,6 +559,8 @@ class PostgresHostPoolRepository:
                 stays.
             runtime_downloads: This host's progress on each agent version it
                 was asked to hold, already validated. ``None`` leaves it.
+            config_reports: Non-numeric configuration the host says it uses
+                now, such as its npm registry. ``None`` leaves the report.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists
@@ -609,12 +610,14 @@ class PostgresHostPoolRepository:
                         WHEN $15 AND ($16::text IS NULL OR credential_hash = $16) THEN $14
                         ELSE sandbox_archive_settings_applied_revision
                     END,
-                    runtime_downloads = COALESCE($17::jsonb, runtime_downloads)
+                    runtime_downloads = COALESCE($17::jsonb, runtime_downloads),
+                    config_reports = COALESCE($18::jsonb, config_reports)
                 -- The credential the request authenticated with must still be
                 -- the row's: a beat delayed past a re-enrollment or a removal
                 -- must not mark the new machine online, or a removed one alive.
                 WHERE host = $1 AND ($16::text IS NULL OR credential_hash = $16)
-                RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
+                RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded,
+                    settings_late_imported
                 """,
                 host,
                 slots_total,
@@ -641,46 +644,39 @@ class PostgresHostPoolRepository:
                 None
                 if runtime_downloads is None
                 else json.dumps([dict(report) for report in runtime_downloads]),
+                None if config_reports is None else json.dumps(dict(config_reports)),
             )
             if row is None:
                 return None
-            if (
-                not row["settings_imported"]
-                and settings_local is not None
-                and (
-                    credential_hash is None
-                    or await conn.fetchval(
-                        "SELECT credential_hash = $2 FROM agent_runner_hosts WHERE host = $1",
-                        host,
-                        credential_hash,
-                    )
+            plan = plan_settings_import(
+                dict(row),
+                reported_values(dict(settings_local)) if settings_local is not None else None,
+                global_settings=global_settings,
+                global_exclusions=global_exclusions,
+                legacy_sandbox_manager_keys=_LEGACY_SANDBOX_MANAGER_KEYS,
+            )
+            if plan is not None and (
+                credential_hash is None
+                or await conn.fetchval(
+                    "SELECT credential_hash = $2 FROM agent_runner_hosts WHERE host = $1",
+                    host,
+                    credential_hash,
                 )
             ):
-                observed = reported_values(dict(settings_local)) or {}
-                previous = dict(load_json(row["settings_desired"]) or {})
-                excluded = global_exclusions | set(row["settings_import_excluded"])
-                imports = {
-                    key: value
-                    for key, value in admin_values(observed).items()
-                    if value != HOST_SETTINGS_BY_KEY[key].default
-                    and key not in previous
-                    and key not in global_settings
-                    and key not in excluded
-                }
-                expected = RUNNER_SETTING_KEYS | (
-                    _LEGACY_SANDBOX_MANAGER_KEYS if row["sandbox_manager_url"] else frozenset()
-                )
-                complete = expected <= observed.keys()
+                desired, complete, offered = plan
                 row = await conn.fetchrow(
                     f"""
                     UPDATE agent_runner_hosts
-                    SET settings_desired = $2::jsonb, settings_imported = $3
+                    SET settings_desired = $2::jsonb, settings_imported = $3,
+                        settings_late_imported = $4::text[]
                     WHERE host = $1
-                    RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
+                    RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded,
+                        settings_late_imported
                     """,
                     host,
-                    json.dumps({**previous, **imports}),
+                    json.dumps(desired),
                     complete,
+                    sorted(offered),
                 )
             if (
                 capacity is not None
@@ -1789,7 +1785,8 @@ class PostgresHostPoolRepository:
             rows = await conn.fetch(
                 """
                 SELECT host, status, (credential_hash IS NOT NULL) AS enrolled,
-                       runtime_versions, runtime_versions_available, runtime_downloads
+                       runtime_versions, runtime_versions_available, runtime_downloads,
+                       config_reports
                 FROM agent_runner_hosts
                 ORDER BY host
                 """
@@ -1804,6 +1801,7 @@ class PostgresHostPoolRepository:
                 "runtime_versions": load_json(row["runtime_versions"]) or {},
                 "runtime_versions_available": load_json(row["runtime_versions_available"]) or {},
                 "runtime_downloads": load_json(row["runtime_downloads"]) or [],
+                "config_reports": load_json(row["config_reports"]) or {},
             }
             for row in rows
         ]
@@ -2079,6 +2077,7 @@ class PostgresHostPoolRepository:
         host["settings_desired"] = load_json(host.get("settings_desired")) or {}
         host["settings_applied"] = load_json(host.get("settings_applied"))
         host["settings_local"] = load_json(host.get("settings_local"))
+        host["config_reports"] = load_json(host.get("config_reports")) or {}
         # Absent from most projections, so read with ``.get``: a row that never
         # selected the capacity columns must decode to "no observation", not
         # raise a KeyError on a path that has nothing to do with capacity.

@@ -11,9 +11,9 @@ const SECTIONS = [
   { key: 'activity', label: 'Activity', href: '/admin/activity' },
   { key: 'usage', label: 'Usage', href: '/admin/usage' },
   { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
-  { key: 'settings', label: 'Settings', href: '/admin/settings' },
   { key: 'database', label: 'Database', href: '/admin/database' },
   { key: 'audit', label: 'Audit log', href: '/admin/audit' },
+  { key: 'settings', label: 'Settings', href: '/admin/settings' },
 ] as const;
 
 export function AdminNavigation({

@@ -3319,13 +3319,16 @@ msgstr "公共 npm"
 
 #: ../developer/operations.md
 msgid ""
-"Registry a host downloads updated agents from. Set the same value on the "
-"control plane, which reads the latest release from it. pi updates come "
-"from `@earendil-works/pi-coding-agent`; a private mirror must carry that "
-"package as well as the image's `@mariozechner` one"
+"Registry a host downloads updated agents from before its first heartbeat "
+"answer. Afterwards the host uses **Agent package registry** in Admin → "
+"Settings → Agent versions, which the control plane also lists versions "
+"from. pi updates come from `@earendil-works/pi-coding-agent`; a private "
+"mirror must carry that package as well as the image's `@mariozechner` one"
 msgstr ""
-"主机下载升级版 agent 用的 npm 仓库。控制平面也要设成同样的值，它从这里读取最新版本。pi 的升级来自 `@earendil-works"
-"/pi-coding-agent`；如果用私有镜像源，除了镜像里用的 `@mariozechner` 那个包，也要包含这个包"
+"主机在收到第一次心跳应答之前，从这个 npm 仓库下载升级版 agent。之后改用 Admin → Settings → Agent "
+"versions 里的 **Agent package registry**，控制平面也从那里列出可用版本。pi 的升级来自 "
+"`@earendil-works/pi-coding-agent`；如果用私有镜像源，除了镜像里用的 `@mariozechner` "
+"那个包，也要包含这个包"
 
 #: ../developer/operations.md
 msgid "`AGENT_EGRESS_CHAT_NETWORK_POOL`"
