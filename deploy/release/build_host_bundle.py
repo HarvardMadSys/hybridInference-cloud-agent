@@ -63,6 +63,7 @@ HOST_FILES = (
     "deploy/sandbox/http-agent-live-bridge",
     "deploy/sandbox/claude-session-fork",
     "deploy/sandbox/member-process-reaper",
+    "deploy/sandbox/cloud-agent-browser",
     "deploy/sandbox/codex-requirements.toml",
 )
 _EXCLUDED_PART = re.compile(

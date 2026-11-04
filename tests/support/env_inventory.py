@@ -577,6 +577,17 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "internal",
+        "The sandbox image's browser service: its state, profile and artifact directories, "
+        "set by the image, and an idle timeout read with a built-in default.",
+        names=(
+            "CLOUD_AGENT_ARTIFACTS_DIR",
+            "CLOUD_AGENT_BROWSER_IDLE_S",
+            "CLOUD_AGENT_BROWSER_PROFILE",
+            "CLOUD_AGENT_BROWSER_STATE_DIR",
+        ),
+    ),
+    Family(
+        "internal",
         "Image-internal override of the member process reaper's source path; the image "
         "supplies the default.",
         names=("AGENT_MEMBER_PROCESS_REAPER_SOURCE",),

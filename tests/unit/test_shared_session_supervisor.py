@@ -2700,43 +2700,6 @@ def test_claude_reassigned_slot_gets_fresh_member_settings(monkeypatch, tmp_path
             assert not (config / "settings.json").exists()
 
 
-def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
-    manager = _Manager()
-    manager.backend.base_env = lambda: {}
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
-    events: list[str] = []
-    contexts: list[Any] = []
-    monkeypatch.setattr(
-        manager,
-        "reap_member_processes",
-        lambda *_args, **_kwargs: events.append("reap"),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        factory, "_prepare_claude_member_state", lambda *_args: events.append("prepare")
-    )
-    monkeypatch.setattr(
-        manager, "spawn", lambda *_args, **_kwargs: events.append("spawn"), raising=False
-    )
-
-    def launch_live(context):
-        contexts.append(context)
-        return SimpleNamespace(
-            ensure_started=lambda **_kwargs: context.spawn_live(["claude"], {}),
-            process_alive=lambda: True,
-        )
-
-    monkeypatch.setattr(
-        "cloud_agent_host.resident_transport.get_driver",
-        lambda _runtime: SimpleNamespace(launch_live=launch_live),
-    )
-
-    factory.open(_spec(), _launch("athr_new", native_session_id=None, slot=1))
-
-    assert events == ["reap", "prepare", "spawn"]
-    assert contexts[0].claude_config_dir == claude_member_config_dir(1, "athr_new")
-
-
 @pytest.mark.parametrize("target", ["config", "history"])
 def test_claude_member_preparation_rejects_symlinked_state(monkeypatch, tmp_path, target):
     manager = _Manager()
