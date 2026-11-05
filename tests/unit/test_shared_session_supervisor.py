@@ -3654,7 +3654,9 @@ def test_the_initial_archive_waits_out_a_lifecycle_check_begun_under_its_barrier
         admit(*args, **kwargs)
         group.lifecycle_check = object()
 
-    monkeypatch.setattr(supervisor._initial_archive, "_require_initial_archive_admission", admit_then_begin_a_check)
+    monkeypatch.setattr(
+        supervisor._initial_archive, "_require_initial_archive_admission", admit_then_begin_a_check
+    )
     supervisor.initial_archive_wait_s = 2.0
     waits = _waits_without_sleeping(monkeypatch, supervisor)
 
