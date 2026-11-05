@@ -84,7 +84,7 @@ F 在其他工作的间隙穿插进行。每个 PR 单独可回滚，并遵守"�
 
 ## 4. 术语
 
-AGENTS.md §6 写的是 "a job is the user's task"，这是错的：`agent_jobs` 带 `turn_no` 和 `parent_job_id`，迁移 0003 有 CHECK 约束规定第 1 轮没有 parent，所以一个 job 就是一轮。同一个对话在代码里叫 thread，在 port 名里叫 conversation，在 docstring 和界面上叫 chat，在 AGENTS.md 里叫 task。
+AGENTS.md §6 写的是 "a job is the user's task"，这是错的：`agent_jobs` 带 `turn_no` 和 `parent_job_id`，基线迁移有 CHECK 约束 `(turn_no = 1) = (parent_job_id IS NULL)`（`0001_schema_baseline.py:193`），所以一个 job 就是一轮。同一个对话在代码里叫 thread，在 port 名里叫 conversation，在 docstring 和界面上叫 chat，在 AGENTS.md 里叫 task。
 
 线上字段和表名不改，只统一文档和新代码里的叫法：
 
