@@ -67,10 +67,7 @@ from cloud_agent.mcp import (
     oauth_authorization,
     sandbox_servers as sandbox,
 )
-from cloud_agent.mcp.errors import (
-    McpConnectionCreateConflict,
-    McpCredentialWriteRejected,
-)
+from cloud_agent.mcp.errors import McpConnectionCreateConflict, McpCredentialWriteRejected
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
 from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS
 from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
@@ -674,7 +671,7 @@ async def import_connections(
     except config_import.ImportError_ as exc:
         raise _bad_request(str(exc)) from exc
     result = await pin_import(result)  # a bare package name, at its current release
-    result = _without_short_keys(result)
+    result = _without_short_keys(result, body.locations)
 
     preview = [draft.summary() for draft in result.drafts]
     if not body.save:
@@ -1775,7 +1772,9 @@ def _sealed_launch_spec(
     return spec
 
 
-def _without_short_keys(result: config_import.ImportResult) -> config_import.ImportResult:
+def _without_short_keys(
+    result: config_import.ImportResult, locations: dict[str, str]
+) -> config_import.ImportResult:
     """The paste, with each program whose pasted key is too short moved to ``rejected``.
 
     Reported with the other entries that could not become a draft, in the
@@ -1790,7 +1789,8 @@ def _without_short_keys(result: config_import.ImportResult) -> config_import.Imp
             for secret in draft.secrets
             if secret.target == "env" and secret.value is not None
         }
-        refusal = sandbox.short_key_refusal(_parse_location(draft.location), pasted)
+        location = _parse_location(locations.get(draft.label, draft.location))  # as at the save
+        refusal = sandbox.short_key_refusal(location, pasted)
         if refusal:
             rejected.append((draft.label, refusal))
         else:
