@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.usage.turn_report import JobUsageResponse, summarize_job_usage
 
 if TYPE_CHECKING:
@@ -68,8 +69,5 @@ async def get_job_usage(
     # conversation alike, and one 404 answers all three.
     usage = await job_usage_response(job_store, job_id=job_id, user_id=user["user_id"])
     if usage is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No such agent job: {job_id}")
     return usage

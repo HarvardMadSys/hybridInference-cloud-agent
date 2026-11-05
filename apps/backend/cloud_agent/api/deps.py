@@ -37,7 +37,7 @@ from cloud_agent.accounts.directory import (
     OwnerDirectoryError,
 )
 from cloud_agent.agent_access import AgentAccessDecision
-from cloud_agent.api.errors import AgentConfigurationError
+from cloud_agent.api.errors import AgentConfigurationError, typed_error
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control.source_control_runtime import (
@@ -442,14 +442,8 @@ async def local_session_owner(
 
 
 def _account_switched() -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "account_switched",
-                "message": "This browser switched to another account. Reload to continue.",
-            }
-        },
+    return typed_error(
+        409, "account_switched", "This browser switched to another account. Reload to continue."
     )
 
 
@@ -620,13 +614,5 @@ def require_store(store: _StoreT | None) -> _StoreT:
     with a different refusal keeps its own, so no response body changes.
     """
     if store is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "unavailable",
-                    "message": "Agent jobs require a configured database.",
-                }
-            },
-        )
+        raise typed_error(503, "unavailable", "Agent jobs require a configured database.")
     return store

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import HTTPException, Query
+from fastapi import Query
+
+from cloud_agent.api.errors import typed_error
 
 #: Shared by every list that filters by project, so the parameter reads alike.
 TemporaryFilter = Annotated[
@@ -22,13 +24,8 @@ TemporaryFilter = Annotated[
 def require_single_project_filter(repo: str | None, temporary: bool) -> None:
     """Refuse a filter naming a repository and the temporary workspaces at once."""
     if repo is not None and temporary:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": "repo and temporary cannot be combined: "
-                    "a temporary workspace has no repository.",
-                }
-            },
+        raise typed_error(
+            422,
+            "invalid_request",
+            "repo and temporary cannot be combined: a temporary workspace has no repository.",
         )

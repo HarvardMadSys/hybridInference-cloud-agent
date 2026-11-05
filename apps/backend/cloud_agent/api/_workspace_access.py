@@ -10,8 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-from fastapi import HTTPException
-
+from cloud_agent.api.errors import typed_error
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     hydrate_shared_sandbox_manager,
@@ -24,6 +23,8 @@ from cloud_agent.workspace_errors import (
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from fastapi import HTTPException
 
     from cloud_agent.ports import HostPoolRepository, SandboxRepository
     from cloud_agent.ports.sandbox import TerminalControlRoute
@@ -50,32 +51,20 @@ _RESTORE_STATES = frozenset({"cold", "restoring"})
 
 
 def _workspace_restoring() -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "workspace_restoring",
-                "message": (
-                    "This workspace is moving to another server. "
-                    "Send a message to continue the chat; the files return with it."
-                ),
-            }
-        },
+    return typed_error(
+        409,
+        "workspace_restoring",
+        "This workspace is moving to another server. "
+        "Send a message to continue the chat; the files return with it.",
     )
 
 
 def _workspace_host_removed() -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "workspace_unavailable",
-                "message": (
-                    "This workspace is on a server that has been removed. "
-                    "It is available again only if that server is added back."
-                ),
-            }
-        },
+    return typed_error(
+        409,
+        "workspace_unavailable",
+        "This workspace is on a server that has been removed. "
+        "It is available again only if that server is added back.",
     )
 
 
@@ -114,15 +103,7 @@ def _workspace_id(job: dict[str, Any]) -> str:
     """Address the chat member inside its retained shared container."""
     thread_id = job.get("thread_id")
     if not thread_id:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no retained workspace.",
-                }
-            },
-        )
+        raise typed_error(409, "workspace_unavailable", "This chat has no retained workspace.")
     return str(thread_id)
 
 
@@ -163,12 +144,8 @@ def _terminal_control_manager(route: TerminalControlRoute) -> SandboxManagerClie
 
 
 def _workspace_not_ready() -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "workspace_not_ready",
-                "message": "The workspace is temporarily locked while the agent prepares or saves it.",
-            }
-        },
+    return typed_error(
+        409,
+        "workspace_not_ready",
+        "The workspace is temporarily locked while the agent prepares or saves it.",
     )

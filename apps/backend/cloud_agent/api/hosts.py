@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_storage
+from cloud_agent.api.errors import typed_error
 from cloud_agent.application.sandbox_incidents import record_heartbeat_incidents
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
@@ -103,10 +104,7 @@ def _unauthorized(message: str) -> HTTPException:
     a disabled row, because distinguishing them tells an attacker which of
     those they achieved.
     """
-    return HTTPException(
-        status_code=401,
-        detail={"error": {"type": "unauthorized", "message": message}},
-    )
+    return typed_error(401, "unauthorized", message)
 
 
 async def authenticate_host(
@@ -163,10 +161,7 @@ def _checked_sandbox_manager_url(url: str | None) -> str | None:
     try:
         return validate_sandbox_manager_url(url)
     except SandboxManagerUrlRefused as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_sandbox_manager_url", "message": str(exc)}},
-        ) from exc
+        raise typed_error(400, "invalid_sandbox_manager_url", str(exc)) from exc
 
 
 @router.post("/register", response_model=HostRegisterResponse)
@@ -206,16 +201,10 @@ async def register_host(
         # One answer for expired, already-spent, never-issued and issued-for-
         # another-host: they are the same fact from the presenter's side — this
         # token is not usable here — and separating them says which happened.
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "type": "unauthorized",
-                    "message": (
-                        "This enrollment token is not valid for this host name. Issue a new one."
-                    ),
-                }
-            },
+        raise typed_error(
+            401,
+            "unauthorized",
+            "This enrollment token is not valid for this host name. Issue a new one.",
         )
     credential = mint_host_token(host=body.name)
     try:
@@ -231,39 +220,21 @@ async def register_host(
         )
     except StorageConflict as exc:
         if exc.code is ConflictCode.ENROLLMENT_TOKEN_REMOVED:
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "error": {
-                        "type": "unauthorized",
-                        "message": "This enrollment token is no longer valid. Issue a new one.",
-                    }
-                },
+            raise typed_error(
+                401, "unauthorized", "This enrollment token is no longer valid. Issue a new one."
             ) from exc
         if exc.code is ConflictCode.HOST_DRAIN_FENCED:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "type": "host_drain_fenced",
-                        "message": (
-                            "This host is held by an automated deployment drain. "
-                            "The enrollment token was consumed; release the drain "
-                            "and issue a new token before retrying."
-                        ),
-                    }
-                },
+            raise typed_error(
+                409,
+                "host_drain_fenced",
+                "This host is held by an automated deployment drain. "
+                "The enrollment token was consumed; release the drain "
+                "and issue a new token before retrying.",
             ) from exc
         if exc.code is not ConflictCode.RESOURCE_RETIRING:
             raise
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "resource_retiring",
-                    "message": "This resource is retiring; registration is closed.",
-                }
-            },
+        raise typed_error(
+            409, "resource_retiring", "This resource is retiring; registration is closed."
         ) from exc
     return HostRegisterResponse(
         host=host["host"],

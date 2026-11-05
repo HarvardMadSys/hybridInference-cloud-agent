@@ -35,6 +35,7 @@ from cloud_agent.api._owner_auth import (
 from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api._thread_history import message_response, thread_response
 from cloud_agent.api.deps import get_job_event_signal, get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.domain.thread_history import THREAD_DETAIL_CHARS, THREAD_PAGE_MAX, THREAD_PAGE_SIZE
 from cloud_agent.logging_utils import get_logger
@@ -142,10 +143,7 @@ async def get_agent_thread(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if thread is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No thread for {job_id}")
     return thread_response(thread)
 
 
@@ -190,10 +188,7 @@ async def get_agent_thread_stats(
     # answers the 404 itself; see get_agent_thread.
     result = await job_store.execution_queries.thread_stats(job_id=job_id, user_id=user["user_id"])
     if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No thread for {job_id}")
     return AgentThreadStatsResponse(thread_id=result["thread_id"], **asdict(result["stats"]))
 
 

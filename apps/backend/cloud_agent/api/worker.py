@@ -40,7 +40,7 @@ from cloud_agent.api.deps import (
     get_work_signal,
     require_store,
 )
-from cloud_agent.api.errors import as_http_exception
+from cloud_agent.api.errors import as_http_exception, typed_error
 from cloud_agent.application.model_connections import residency_credential
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import residency_ttl_s
@@ -246,42 +246,20 @@ async def verify_claiming_host(
                 host=claims["host"], credential_hash=credential_hash
             )
             if host is None:
-                raise HTTPException(
-                    status_code=401,
-                    detail={
-                        "error": {
-                            "type": "unauthorized",
-                            "message": "This host credential is no longer valid.",
-                        }
-                    },
-                )
+                raise typed_error(401, "unauthorized", "This host credential is no longer valid.")
             return {"host": host["host"], "credential_hash": credential_hash}
-    raise HTTPException(
-        status_code=401,
-        detail={
-            "error": {
-                "type": "unauthorized",
-                "message": "A valid enrolled host credential is required.",
-            }
-        },
-    )
+    raise typed_error(401, "unauthorized", "A valid enrolled host credential is required.")
 
 
 def _worker_claims(authorization: str | None) -> dict[str, Any]:
     """Parse and verify the worker capability token from the auth header."""
     token = authorization[7:] if authorization and authorization.startswith("Bearer ") else None
     if not token:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": {"type": "unauthorized", "message": "Missing worker token."}},
-        )
+        raise typed_error(401, "unauthorized", "Missing worker token.")
     try:
         claims = parse_worker_token(token)
     except InvalidAgentToken as exc:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": {"type": "unauthorized", "message": f"Invalid worker token: {exc}"}},
-        ) from exc
+        raise typed_error(401, "unauthorized", f"Invalid worker token: {exc}") from exc
     if claims.get("scope") != SCOPE_FULL:
         # Anything that is not the runner's full-scope control token. The one
         # narrower worker scope is ``mcp``, which the sandbox carries to reach
@@ -292,33 +270,18 @@ def _worker_claims(authorization: str | None) -> dict[str, Any]:
         # check is written positively rather than as "not full". A sandbox
         # credential arriving on the worker surface is what an escaped
         # credential looks like.
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": {
-                    "type": "insufficient_scope",
-                    "message": (
-                        "This credential may only be used for MCP relay calls, not for "
-                        "reporting job state."
-                    ),
-                }
-            },
+        raise typed_error(
+            403,
+            "insufficient_scope",
+            "This credential may only be used for MCP relay calls, not for reporting job state.",
         )
     return claims
 
 
 def _lease_lost() -> HTTPException:
     """The 409 every fenced worker write raises when its lease is gone."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "lease_lost",
-                "message": (
-                    "This attempt no longer holds the job lease; stop all work immediately."
-                ),
-            }
-        },
+    return typed_error(
+        409, "lease_lost", "This attempt no longer holds the job lease; stop all work immediately."
     )
 
 
@@ -332,17 +295,11 @@ def _turn_summary_conflict() -> HTTPException:
     measurement claiming an attempt whose window is already fixed. Retrying
     the same body will produce the same answer, so the message says so.
     """
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "turn_summary_conflict",
-                "message": (
-                    "This turn resource snapshot conflicts with the one already stored "
-                    "for this attempt; do not retry it."
-                ),
-            }
-        },
+    return typed_error(
+        409,
+        "turn_summary_conflict",
+        "This turn resource snapshot conflicts with the one already stored "
+        "for this attempt; do not retry it.",
     )
 
 
@@ -405,14 +362,8 @@ async def _worker_sandbox_manager(
     except SandboxManagerError as exc:
         raise _sandbox_manager_http_error(exc) from exc
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "The retained workspace owner is unavailable.",
-                }
-            },
+        raise typed_error(
+            503, "workspace_unavailable", "The retained workspace owner is unavailable."
         )
     return sandbox_manager
 
@@ -447,14 +398,10 @@ async def worker_claim(
     from cloud_agent.settings import setting_env
 
     if not (setting_env(ENV_SANDBOX_MANAGER_TOKEN) or "").strip():
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "The retained sandbox manager credential is not configured.",
-                }
-            },
+        raise typed_error(
+            503,
+            "workspace_unavailable",
+            "The retained sandbox manager credential is not configured.",
         )
     claim = await job_store.attempt_commands.claim_job(
         worker_id=body.worker_id,
@@ -495,20 +442,14 @@ async def worker_claim(
                 reason="claim_failed",
                 retry_after_seconds=30,
             )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "claim_failed",
-                    "message": (
-                        "This job's claim could not be prepared; it has been returned "
-                        "to the queue and no attempt was spent."
-                        if released
-                        else "This job's claim could not be prepared or returned to the "
-                        "queue; its lease decides what happens next."
-                    ),
-                }
-            },
+        raise typed_error(
+            503,
+            "claim_failed",
+            "This job's claim could not be prepared; it has been returned "
+            "to the queue and no attempt was spent."
+            if released
+            else "This job's claim could not be prepared or returned to the "
+            "queue; its lease decides what happens next.",
         ) from exc
     if isinstance(outcome, ClaimRefusal):
         # The refusal has already released or ended its claim.
@@ -534,14 +475,8 @@ async def worker_wait(
     host treats both the same way and polls.
     """
     if signal is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": {
-                    "type": "not_found",
-                    "message": "This listener does not signal work; poll the claim instead.",
-                }
-            },
+        raise typed_error(
+            404, "not_found", "This listener does not signal work; poll the claim instead."
         )
     token = await signal.wait(body.since, body.timeout_seconds, host=claiming_host["host"])
     return WorkerWaitResponse(token=token)
@@ -611,16 +546,10 @@ async def worker_record_measurement(
         str(body.record.get("producer") or "") != "runner"
         or str(body.record.get("operation") or "") != "attempt.startup"
     ):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "type": "measurement_rejected",
-                    "message": (
-                        "the worker endpoint accepts only runner-rooted attempt.startup records"
-                    ),
-                }
-            },
+        raise typed_error(
+            422,
+            "measurement_rejected",
+            "the worker endpoint accepts only runner-rooted attempt.startup records",
         )
     attempt_id = claims.get("attempt_id")
     generation = claims.get("lease_generation")
@@ -636,10 +565,7 @@ async def worker_record_measurement(
         raise _lease_lost()
     job = await job_store.conversation_queries.get_job(job_id)
     if job is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": "No such job."}},
-        )
+        raise typed_error(404, "not_found", "No such job.")
     attempt_sandbox = attempt.get("thread_sandbox")
     attempt_sandbox = attempt_sandbox if isinstance(attempt_sandbox, dict) else {}
     current_sandbox = job.get("thread_sandbox")
@@ -658,14 +584,10 @@ async def worker_record_measurement(
         # Payload-declared producer names are not trusted.  In-process control
         # plane records never call this endpoint, so every HTTP producer must
         # state the manifest against which its record is checked.
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "type": "measurement_rejected",
-                    "message": "a producer must state its experiment manifest with its record",
-                }
-            },
+        raise typed_error(
+            422,
+            "measurement_rejected",
+            "a producer must state its experiment manifest with its record",
         )
     result, reason = await persist_measurement(
         capability=job_store.operation_measurements,
@@ -685,10 +607,7 @@ async def worker_record_measurement(
             ),
         )
     if result == "rejected":
-        raise HTTPException(
-            status_code=422,
-            detail={"error": {"type": "measurement_rejected", "message": reason}},
-        )
+        raise typed_error(422, "measurement_rejected", reason)
     return WorkerMeasurementResponse(
         result=result, measurement_id=str(body.record.get("measurement_id") or "")
     )
@@ -751,10 +670,7 @@ async def worker_read_attachment(
     except AttachmentLeaseLost as exc:
         raise _lease_lost() from exc
     if found is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "upload_not_found", "message": "Upload not found."}},
-        )
+        raise typed_error(404, "upload_not_found", "Upload not found.")
     path, content, content_type = found
     return WorkerAttachmentContentResponse(
         id=attachment_id,
@@ -1224,15 +1140,7 @@ async def worker_suspend_terminals(
             job_id=job_id,
         )
     except SandboxManagerError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": exc.message,
-                }
-            },
-        ) from exc
+        raise typed_error(503, "workspace_unavailable", exc.message) from exc
     return WorkerAckResponse(ok=True)
 
 
@@ -1273,15 +1181,7 @@ async def worker_resume_terminals(
             job_id=job_id,
             lease_generation=claims["lease_generation"],
         )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": exc.message,
-                }
-            },
-        ) from exc
+        raise typed_error(503, "workspace_unavailable", exc.message) from exc
     try:
         event_id = await job_store.attempt_commands.append_event(
             attempt_id=claims["attempt_id"],
@@ -1348,18 +1248,12 @@ async def worker_release(
         # accepted a moment earlier. What changed is the turn, and an operator
         # reading this needs to know the work was not lost — it is either
         # running or already decided.
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "turn_not_releasable",
-                    "message": (
-                        "This turn cannot be returned to the queue: it has started, its "
-                        "lease has moved on, or it is no longer running. Nothing was "
-                        "changed; its lease decides what happens next."
-                    ),
-                }
-            },
+        raise typed_error(
+            409,
+            "turn_not_releasable",
+            "This turn cannot be returned to the queue: it has started, its "
+            "lease has moved on, or it is no longer running. Nothing was "
+            "changed; its lease decides what happens next.",
         )
     logger.info(
         "agent_turn_released",
@@ -1434,15 +1328,7 @@ async def worker_finish(
         raise _lease_lost()
     workspace_id = _workspace_id(job)
     if body.state not in TERMINAL_STATES:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": f"state must be one of {list(TERMINAL_STATES)}",
-                }
-            },
-        )
+        raise typed_error(400, "invalid_request", f"state must be one of {list(TERMINAL_STATES)}")
     fenced = await job_store.sandbox.fence_terminal_workspace(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
@@ -1466,15 +1352,7 @@ async def worker_finish(
                 job_id=job_id,
                 lease_generation=claims["lease_generation"],
             )
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "type": "workspace_unavailable",
-                        "message": exc.message,
-                    }
-                },
-            ) from exc
+            raise typed_error(503, "workspace_unavailable", exc.message) from exc
     # Read the turn's self-report before its outcome is committed, so both land
     # in the same transaction: a terminal turn is never one whose goal answer is
     # missing because the read happened to be scheduled after the write.
