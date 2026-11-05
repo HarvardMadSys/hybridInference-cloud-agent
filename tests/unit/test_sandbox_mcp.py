@@ -21,6 +21,7 @@ from cloud_agent.mcp.models import (
     ExecutionLocation,
     LaunchSpec,
     McpConnection,
+    Mount,
     ThreadBinding,
     Transport,
 )
@@ -82,10 +83,11 @@ def test_anything_else_is_refused(command, args, kind):
     assert refused.value.kind == kind
 
 
-def test_a_sandbox_server_takes_no_secret_mount_or_working_directory():
-    with pytest.raises(LaunchPlanError) as refused:
-        _plan("npx", "pkg@1.0.0", env={"TOKEN": "secret://TOKEN"})
-    assert refused.value.kind == "sandbox_secret"
+def test_a_sandbox_server_takes_keys_but_no_mount_or_working_directory():
+    keyed = _plan("npx", "pkg@1.0.0", env={"TOKEN": "secret://TOKEN", "HOME_URL": "${SITE}"})
+    assert keyed.env == {"TOKEN": "secret://TOKEN", "HOME_URL": "${SITE}"}
+    with pytest.raises(LaunchPlanError):
+        _plan("npx", "pkg@1.0.0", mounts=(Mount(source="docs", target="/workspace/mcp/docs"),))
     with pytest.raises(LaunchPlanError):
         _plan("npx", "pkg@1.0.0", cwd="/workspace")
     assert _plan("npx", "pkg@1.0.0", env={"MODE": "plain"}).env == {"MODE": "plain"}
@@ -100,13 +102,13 @@ def test_each_sandbox_template_passes_the_policy_it_is_held_to(template):
     assert "${CLOUD_AGENT_BROWSER_CDP}" in template["launch"]["args"]
 
 
-def test_credentials_are_refused_for_the_sandbox_only():
+def test_a_program_has_no_sign_in_only_environment_values():
     sandbox = ExecutionLocation.SANDBOX
-    assert sandbox_servers.refusal(sandbox, AuthKind.NONE, secret=False) is None
-    assert sandbox_servers.refusal(sandbox, AuthKind.STATIC, secret=False)
-    assert sandbox_servers.refusal(sandbox, AuthKind.OAUTH, secret=False)
-    assert sandbox_servers.refusal(sandbox, "none", secret=True)
-    assert sandbox_servers.refusal(ExecutionLocation.REMOTE, AuthKind.STATIC, secret=True) is None
+    assert sandbox_servers.refusal(sandbox, AuthKind.NONE) is None
+    assert sandbox_servers.refusal(sandbox, "none") is None
+    assert "environment values" in sandbox_servers.refusal(sandbox, AuthKind.STATIC)
+    assert sandbox_servers.refusal(sandbox, AuthKind.OAUTH)
+    assert sandbox_servers.refusal(ExecutionLocation.REMOTE, AuthKind.STATIC) is None
 
 
 # -- what a claim carries -------------------------------------------------------------
@@ -160,15 +162,20 @@ def test_a_claim_sends_sandbox_servers_to_the_host_and_the_rest_to_the_relay():
 
 
 def test_the_claim_schema_and_the_host_agree_on_the_servers():
-    wire = [PLAYWRIGHT.wire()]
+    wire = [PLAYWRIGHT.model_dump(mode="json")]
     field = WorkerClaimResponse.model_fields["sandbox_mcp_servers"]
     assert field.default_factory() == []
     assert parse_sandbox_mcp_servers(wire) == (PLAYWRIGHT,)
     assert parse_sandbox_mcp_servers(None) == ()
     with pytest.raises(ValueError):
         parse_sandbox_mcp_servers([*wire, *wire])
+    # A key is named in ``env`` and carried, by the claim alone, in ``secret_env``.
+    keyed = {**wire[0], "env": {"T": "secret://T"}, "secret_env": {"T": "v"}}
+    assert parse_sandbox_mcp_servers([keyed])[0].secret_env == {"T": "v"}
     with pytest.raises(ValueError):
         parse_sandbox_mcp_servers([{**wire[0], "env": {"T": "secret://T"}}])
+    with pytest.raises(ValueError):
+        parse_sandbox_mcp_servers([{**wire[0], "secret_env": {"T": "v"}}])
     with pytest.raises(ValueError):
         parse_sandbox_mcp_servers([{**wire[0], "command": "bash"}])
     assert hasattr(ClaimedJob, "__dataclass_fields__")
@@ -181,7 +188,7 @@ def test_a_shared_launch_carries_the_servers_only_with_mcp():
         "model": "m",
         "slot_id": 1,
         **launch_connection("claude-code"),
-        "sandbox_mcp_servers": [PLAYWRIGHT.wire()],
+        "sandbox_mcp_servers": [PLAYWRIGHT.model_dump(mode="json")],
     }
     with_mcp = resident_launch("t", SharedResidentLaunchConfig(**base, mcp_server_ids=["memory"]))
     without = resident_launch("t", SharedResidentLaunchConfig(**base))
@@ -240,9 +247,47 @@ def test_the_host_admits_as_root_then_starts_the_gateway_then_the_slots_runner()
     assert admit_kwargs["user_gid"] == 0
     assert json.loads(admit_kwargs["input_bytes"]) == {
         "token_sha256": hashlib.sha256(b"cred").hexdigest(),
-        "servers": [PLAYWRIGHT.wire()],
+        "servers": [PLAYWRIGHT.admission()],
     }
     assert b"cred" not in admit_kwargs["input_bytes"]
+    assert json.loads(manager.calls[2][1]["input_bytes"]) == {"secrets": {"playwright": {}}}
+
+
+def test_a_programs_keys_reach_its_runner_and_never_the_admission():
+    """Every slot can read the admission; only the slot's runner gets a value."""
+    keyed = SandboxMcpServer(
+        alias="search",
+        command="uvx",
+        args=("search-mcp==1.0.0", "--site", "${SITE_URL}"),
+        env={"API_KEY": "secret://API_KEY", "REGION": "${REGION}"},
+        secret_env={"API_KEY": "sealed-key"},
+    )
+    manager = _Manager()
+
+    assert sandbox_mcp.admit_sandbox_mcp(
+        manager,
+        _spec(),
+        slot_id=1,
+        credential="cred",
+        servers=(keyed,),
+        environment={"SITE_URL": "https://a.example", "REGION": "eu", "OTHER": "unrelated"},
+        mcp_base_url="https://cp.example/v1",
+    )
+
+    admission = manager.calls[0][1]["input_bytes"]
+    assert b"sealed-key" not in admission and b"https://a.example" not in admission
+    assert json.loads(admission)["report_url"] == "https://cp.example/v1/agent/mcp"
+    assert json.loads(admission)["servers"][0]["env"] == {
+        "API_KEY": "secret://API_KEY",
+        "REGION": "${REGION}",
+    }
+    assert manager.calls[1][1]["input_bytes"] is None  # the gateway gets nothing
+    assert json.loads(manager.calls[2][1]["input_bytes"]) == {
+        "secrets": {
+            "search": {"API_KEY": "sealed-key", "REGION": "eu", "SITE_URL": "https://a.example"}
+        }
+    }
+    assert "sealed-key" not in repr(keyed)
 
 
 def test_turning_servers_off_revokes_even_after_the_host_restarts(monkeypatch):
@@ -389,3 +434,45 @@ def test_every_dialect_reaches_the_gateway_with_the_relays_one_header():
     env: dict[str, str] = {}
     AgentRuntime._wrapper_mcp_env(CodexRuntime(), config, model_base_url="", env=env)
     assert json.loads(env["AGENT_MCP_SERVERS"])["sandbox"] == SANDBOX_MCP_URL
+
+
+# -- a program's keys, and package extras --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("args", "package"),
+    [
+        (("mcp-server-git[cli]==1.2.3",), "mcp-server-git[cli]"),
+        (("--from", "mcp-server-git[cli,http]==1.2.3", "mcp-git"), "mcp-server-git[cli,http]"),
+    ],
+)
+def test_a_pinned_package_may_name_its_extras(args, package):
+    """``pkg[extra]==1.2.3`` is exactly pinned; it was refused as unpinned."""
+    plan = _plan("uvx", *args)
+    assert (plan.install.package, plan.install.version) == (package, "1.2.3")
+
+
+def test_a_claim_carries_a_programs_keys_opened_and_only_its_own(monkeypatch):
+    from cloud_agent.mcp.registry import mcp_cipher
+
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "sandbox-mcp-test-key")
+    cipher = mcp_cipher()
+    launch = replace(
+        LaunchSpec(command="npx", args=("-y", "search-mcp@1.0.0"), env={"KEY": "secret://KEY"}),
+        sealed_env={"KEY": cipher.encrypt("the-key"), "UNUSED": cipher.encrypt("other")},
+    )
+    server = sandbox_servers.sandbox_mcp_server(
+        _resolved(ExecutionLocation.SANDBOX, launch=launch).connection, "search"
+    )
+    assert server is not None
+    assert server.secret_env == {"KEY": "the-key"}
+    assert "the-key" not in json.dumps(server.admission())
+
+    # A key named but never stored leaves the program out, rather than empty.
+    missing = replace(launch, sealed_env={})
+    assert (
+        sandbox_servers.sandbox_mcp_server(
+            _resolved(ExecutionLocation.SANDBOX, launch=missing).connection, "search"
+        )
+        is None
+    )

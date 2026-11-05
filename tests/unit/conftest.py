@@ -1,12 +1,15 @@
 """No unit test reaches real Docker through the network guard's long-lived helper,
-and every unit test starts on a host that has just started."""
+or a package registry through an import, and every unit test starts on a host
+that has just started."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 
+from cloud_agent.mcp import package_pins
 from cloud_agent_host import network_guard_helper, sandbox_mcp
 
 if TYPE_CHECKING:
@@ -48,3 +51,15 @@ def _a_freshly_started_host(monkeypatch: pytest.MonkeyPatch) -> None:
     the order the tests ran in.
     """
     monkeypatch.setattr(sandbox_mcp, "_known_clean", set())
+
+
+@pytest.fixture(autouse=True)
+def _no_package_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer every package lookup an import makes as an unreachable registry.
+
+    An import pins a bare package name to its current release
+    (``cloud_agent.mcp.package_pins``); a test that wants one found sets its
+    own ``package_pins.releases``.
+    """
+    unreachable = httpx.MockTransport(lambda _request: httpx.Response(503))
+    monkeypatch.setattr(package_pins, "releases", package_pins.Releases(transport=unreachable))

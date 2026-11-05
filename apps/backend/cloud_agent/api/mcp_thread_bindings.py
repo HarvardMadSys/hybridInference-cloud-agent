@@ -56,6 +56,9 @@ class BindingResponse(BaseModel):
 
     connection_id: int
     connection_label: str
+    #: ``sandbox`` for a program that runs with the agent: its calls are not
+    #: held for approval, so no per-tool policy is offered for it.
+    location: str = "remote"
     alias: str
     enabled: bool
     selection_pending: bool
@@ -259,6 +262,7 @@ async def _binding_views(
             BindingResponse(
                 connection_id=int(row["connection_id"]),
                 connection_label=resolved.connection.label,
+                location=resolved.connection.config.location.value,
                 alias=str(row["alias"]),
                 enabled=bool(row["enabled"]),
                 selection_pending=bool(row.get("selection_pending", False)),

@@ -1218,8 +1218,15 @@ The [design](../agents/specs/2026-11-02-computer-use-base-capability.md#in-sandb
 explains it.
 
 - **What may run there.** One exactly pinned package started by `npx` or `uvx`,
-  with no secret, mount or working directory. A server that needs a
-  credential stays remote: the sandbox also runs the repository's code.
+  with no mount or working directory. An import pins a bare package name, or a
+  tag such as `latest`, to the release the public registry names then
+  (`cloud_agent/mcp/package_pins.py`); a range, or a package the registry
+  cannot find, is refused. It may use the owner's credentials, as
+  any command the agent runs may: keys pasted with it are sealed at rest and
+  named `secret://NAME`, and `${NAME}` is filled from the chat's environment.
+  The host hands both only to the slot's runner, in a file only that runner's
+  user reads (`/run/agent-mcp-slots/<slot>/secrets.json`). The admission names
+  variables, never values.
 - **How it runs.** Before it launches a member's CLI, the host writes the
   slot's admission as root, then starts the image's MCP gateway,
   `cloud-agent-mcp`, as `agent-mcp` (uid 10003) on
@@ -1232,6 +1239,10 @@ explains it.
   effect at the next turn, which starts a new CLI that resumes the session.
 - **No approval step.** The relay's per-tool policies do not apply: a sandbox
   server can do what the agent's shell can.
+- **Tools in settings.** When a chat's CLI lists a slot's tools, the gateway
+  reports each server's list to the relay (JSON-RPC method
+  `cloud_agent/sandbox_tools`, with the member's relay token). The control
+  plane stores a list only when it changed, and the connection's card shows it.
 - **Where to look.** `/run/agent-mcp/gateway.log` records the methods each
   slot called, readable as `agent-mcp`. A slot's runner logs its servers'
   starts and stops in `/run/agent-mcp-slots/<slot>/runner.log`, and each

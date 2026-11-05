@@ -486,3 +486,112 @@ def test_the_gateway_trusts_only_the_slots_own_runner_socket(served, monkeypatch
                 await gateway.ask_runner(served, 0, {"op": "list"}, 10)
 
     asyncio.run(scenario())
+
+
+# -- a program's keys, and its tools reported to settings ---------------------------
+
+
+def _give_secrets(paths, slot, secrets, mode=0o600):
+    path = paths.runner_secrets(slot)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"secrets": secrets}, handle)
+    os.chmod(path, mode)
+    # A rewrite within one clock tick must still read as a change.
+    stamp = time.time_ns() + len(json.dumps(secrets))
+    os.utime(path, ns=(stamp, stamp))
+
+
+def test_keys_and_the_chats_environment_come_from_the_runners_own_file(served):
+    """The admission names a key; only the slot's runner file holds its value."""
+    spec = _server("files", "pkg@1.0.0", "--site", "${SITE}", env={"FAKE_VALUE": "secret://KEY"})
+    _admit(served, 0, spec)
+    _give_secrets(served, 0, {"files": {"KEY": "first-key", "SITE": "https://a.example"}})
+    assert "first-key" not in Path(served.admission(0)).read_text()
+
+    async def scenario():
+        runner = gateway.Runner(served, 0, idle_s=60)
+        try:
+            echoed = _text(await runner.call_tool("files__echo", {}))
+            assert echoed["env"] == "first-key"
+            assert echoed["args"] == ["pkg@1.0.0", "--site", "https://a.example"]
+            # A changed key restarts that server with the new value.
+            _give_secrets(served, 0, {"files": {"KEY": "second-key", "SITE": "https://a.example"}})
+            assert _text(await runner.call_tool("files__echo", {}))["env"] == "second-key"
+        finally:
+            _stop_all(runner)
+
+    asyncio.run(scenario())
+
+
+def test_a_secrets_file_another_user_could_read_is_ignored(served):
+    _admit(served, 0, _server("files", "pkg@1.0.0", env={"FAKE_VALUE": "secret://KEY"}))
+    _give_secrets(served, 0, {"files": {"KEY": "exposed"}}, mode=0o644)
+    assert gateway.Runner(served, 0, idle_s=60).secrets() == {}
+
+
+def test_the_runner_writes_the_hosts_secrets_privately(served, monkeypatch):
+    monkeypatch.setattr(gateway, "RUNNER_UID_BASE", os.getuid())
+    monkeypatch.setattr(gateway, "_running", lambda *_: {"pid": 1})
+    gateway.runner_start(served, 0, idle_s=60, secrets={"secrets": {"files": {"KEY": "v"}}})
+    info = os.stat(served.runner_secrets(0))
+    assert info.st_mode & 0o777 == 0o600
+    assert json.loads(Path(served.runner_secrets(0)).read_text()) == {
+        "secrets": {"files": {"KEY": "v"}}
+    }
+    with pytest.raises(gateway.GatewayError):
+        gateway.runner_start(served, 0, idle_s=60, secrets={"secrets": {"files": {"K": 1}}})
+
+
+def test_tools_are_reported_to_the_relay_once_per_change(paths, monkeypatch):
+    sent = []
+    outcomes = iter([False, True, True])
+
+    def post(url, token, body):
+        sent.append((url, token, json.loads(body)))
+        return next(outcomes)
+
+    monkeypatch.setattr(gateway, "_post_report", post)
+    admission = gateway.parse_admission(
+        0, {**_admission(_server()), "report_url": "https://cp.example/v1/agent/mcp"}
+    )
+    tools = {"files": [{"name": "echo"}]}
+
+    async def scenario():
+        gw = gateway.Gateway(paths)
+        for listed in (tools, tools, tools, {"files": []}):
+            gw.report(admission, TOKEN, listed)
+            await asyncio.gather(*gw._reports)
+
+    asyncio.run(scenario())
+    # The first report failed and is sent again; an unchanged one is not.
+    assert [body["params"]["servers"] for _, _, body in sent] == [tools, tools, {"files": []}]
+    url, token, body = sent[0]
+    assert (url, token) == ("https://cp.example/v1/agent/mcp", TOKEN)
+    assert body["method"] == gateway.REPORT_METHOD == "cloud_agent/sandbox_tools"
+
+
+@pytest.mark.parametrize(("reply", "accepted"), [({"result": {}}, True), ({"error": {}}, False)])
+def test_a_report_counts_only_when_the_relay_accepted_it(reply, accepted):
+    import http.server
+    import threading
+
+    class Relay(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, **reply}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Relay)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/v1/agent/mcp"
+        assert gateway._post_report(url, TOKEN, "{}") is accepted
+    finally:
+        server.shutdown()

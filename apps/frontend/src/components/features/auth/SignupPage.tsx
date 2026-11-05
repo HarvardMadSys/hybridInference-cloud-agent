@@ -2,10 +2,12 @@
 // Sign-up as HybridInference offers it: agree to the Terms, say who you are and
 // how you will use Cloud Agent, then create the account with an email and a
 // password, or with a phone number and a code. The use case goes with the
-// sign-up as the Agent application; signing up never grants Agent use.
+// sign-up as the Agent application; signing up never grants Agent use. The
+// Terms open in a dialog over the form, so reading them loses nothing typed,
+// and nothing is sent until they are agreed to.
 import Link from 'next/link';
-import { useCallback, useRef, useState, type FormEvent } from 'react';
-import { useT } from '@/components/providers/LocaleProvider';
+import { useCallback, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useLocale, useT } from '@/components/providers/LocaleProvider';
 import {
   signupAccount,
   signupPhone,
@@ -22,10 +24,11 @@ import {
 } from './AccountFrame';
 import { NewPasswordFields } from './NewPasswordFields';
 import { PhoneCodeFields } from './PhoneCodeFields';
-import { TermsConsent } from './TermsConsent';
+import { TermsConsent, useTermsConsent } from './TermsConsent';
+import { shownTerms } from './termsContent';
 import { TurnstileWidget } from './TurnstileWidget';
 import { validNewPassword } from './passwordPolicy';
-import { useAuthOptions } from './useAuthOptions';
+import { useAuthOptionsState } from './useAuthOptions';
 
 type SignupMethod = 'email' | 'phone';
 
@@ -214,6 +217,23 @@ function ProfileFields({
   );
 }
 
+function SignupUnavailable() {
+  const t = useT();
+  return (
+    <AccountFrame title={t('account.signup')}>
+      <AccountNotice error>{t('signup.optionsFailed')}</AccountNotice>
+      <button
+        type="button"
+        className="ui-button ui-button-secondary"
+        onClick={() => window.location.reload()}
+      >
+        {t('common.retry')}
+      </button>
+      <BackToLogin />
+    </AccountFrame>
+  );
+}
+
 function ActiveSignupForm({
   options,
   chosen,
@@ -225,8 +245,10 @@ function ActiveSignupForm({
   onMethod: (value: SignupMethod) => void;
   onDone: (method: SignupMethod, requiresApproval?: boolean) => void;
 }) {
-  const t = useT();
-  const [accepted, setAccepted] = useState(false);
+  const { locale, t } = useLocale();
+  const terms = useMemo(() => shownTerms(options, locale), [options, locale]);
+  const consent = useTermsConsent(terms);
+  const accepted = consent.agreed;
   const [userName, setUserName] = useState('');
   const [useCase, setUseCase] = useState('');
   const [email, setEmail] = useState('');
@@ -296,9 +318,23 @@ function ActiveSignupForm({
     }
   }
 
+  /** Why this form cannot be sent yet. The button waits too; this holds for any submit. */
+  function submitProblem(): string | null {
+    if (!consent.agreed) return t('signup.termsRequired');
+    if (chosen === 'email' && needsCaptcha && !captcha) return t('signup.captchaRequired');
+    if (chosen === 'phone' && code.length !== 6) return t('signup.codeRequired');
+    return null;
+  }
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (submitting.current) return;
+    const problem = submitProblem();
+    if (problem) {
+      setError(problem);
+      if (!consent.agreed) consent.show();
+      return;
+    }
     void (chosen === 'email' ? submitEmail() : submitPhone());
   }
 
@@ -344,7 +380,7 @@ function ActiveSignupForm({
           onUserName={setUserName}
           onUseCase={setUseCase}
         />
-        <TermsConsent options={options} accepted={accepted} onAccepted={setAccepted} />
+        <TermsConsent consent={consent} />
         {needsCaptcha && (
           <TurnstileWidget
             siteKey={options.turnstile_site_key}
@@ -367,11 +403,12 @@ function ActiveSignupForm({
 
 export function SignupPage() {
   const t = useT();
-  const options = useAuthOptions();
+  const { options, loading } = useAuthOptionsState();
   const [method, setMethod] = useState<SignupMethod>('email');
   const [done, setDone] = useState<SignupMethod | null>(null);
   const [phoneRequiresApproval, setPhoneRequiresApproval] = useState(false);
 
+  if (!options && !loading) return <SignupUnavailable />;
   if (!options)
     return (
       <AccountFrame title={t('account.signup')}>

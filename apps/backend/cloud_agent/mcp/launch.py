@@ -93,12 +93,20 @@ MANAGED_ALLOWED_COMMANDS: frozenset[str] = frozenset(
 #: ``name==1.2.3``, ``name>=1,<2``. Compared as text; the installer decides
 #: what it means, and this only decides whether a version is present at all.
 _PINNED_NPM = re.compile(r"^(?P<name>(?:@[^/@]+/)?[^@/][^@]*)@(?P<version>[^@]+)$")
-_PINNED_PYPI = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)\s*(?:==|>=|~=)\s*(?P<version>.+)$")
+#: ``name[extra,...]`` is one package with optional parts: ``browser-use[cli]==0.7.10``.
+_PINNED_PYPI = re.compile(
+    r"^(?P<name>[A-Za-z0-9._-]+(?:\[[A-Za-z0-9._,-]+\])?)\s*(?:==|>=|~=)\s*(?P<version>.+)$"
+)
 #: An exact release: what a sandbox server must name, since the sandbox installs
 #: it at run time. ``latest``, ``^1.2`` or ``>=1`` would change under the user.
 _EXACT_VERSION = re.compile(
     r"^(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){1,3}(?:[-+.][0-9A-Za-z.-]+)?$"
 )
+
+
+def is_exact_release(version: str) -> bool:
+    """Whether ``version`` names one release, as a sandbox server's package must."""
+    return _EXACT_VERSION.match(version) is not None
 
 
 class LaunchPlanError(ValueError):
@@ -303,8 +311,10 @@ def _check_sandbox(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep:
 
     It runs next to repository code, behind the sandbox's MCP gateway, which
     starts only a package runner with one exactly pinned package. So: ``npx``
-    or ``uvx`` by name, an exact version, no mounts or working directory (it
-    already has the workspace), and no secret, which the repository could read.
+    or ``uvx`` by name, an exact version, and no mounts or working directory (it
+    already has the workspace). It may use credentials, as the agent's own
+    commands use the owner's environment: ``secret://NAME`` values sealed with
+    the connection, and ``${NAME}`` filled from the chat's environment.
     """
     if spec.command not in SANDBOX_MCP_COMMANDS:
         raise LaunchPlanError(
@@ -312,17 +322,10 @@ def _check_sandbox(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep:
         )
     if spec.mounts or spec.cwd:
         raise LaunchPlanError("a sandbox server runs in the workspace; it takes no mounts or cwd")
-    for name, value in spec.env.items():
-        if value.startswith("secret://"):
-            raise LaunchPlanError(
-                f"{name}: a sandbox server cannot be given a secret, because the sandbox also "
-                "runs the repository's code. Run a server that needs one as a remote connection.",
-                kind="sandbox_secret",
-            )
     install = _install_for(spec, argv)
     if install is None:  # pragma: no cover - npx and uvx are package runners
         raise LaunchPlanError("a sandbox server needs a package to run")
-    if not _EXACT_VERSION.match(install.version):
+    if not is_exact_release(install.version):
         raise LaunchPlanError(
             f"pin {install.package!r} to an exact release (for example "
             f"{install.package}@1.2.3), not {install.version!r}",
@@ -375,7 +378,8 @@ def _install_for(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep | None:
     if version is None:
         # Deliberately a refusal rather than a resolution: resolving here would
         # mean the install step and the run step could disagree, and the whole
-        # point of the split is that the version is decided once, by the user.
+        # point of the split is that the version is decided once, when it is
+        # saved. An import pins a bare name before it gets here (package_pins).
         raise LaunchPlanError(
             f"pin {package!r} to an exact version. A server that installs "
             f"{package!r} unpinned runs whatever the registry publishes next, in a "
@@ -469,6 +473,7 @@ __all__ = [
     "ManagedLaunchPolicy",
     "build_launch_plan",
     "declared_secret_names",
+    "is_exact_release",
     "resolve_env",
     "split_package_reference",
 ]

@@ -7,17 +7,29 @@ sandbox's MCP gateway (``deploy/sandbox/cloud-agent-mcp``) for that member,
 and the member's CLI reaches the gateway as one more MCP server, ``sandbox``,
 beside the relay's ``session``.
 
-Nothing here is a secret. A sandbox server gets no ``secret://`` value: the
-sandbox also runs repository code, so a credential the server needed would
-be one the repository could read. A server that needs one stays remote.
+A server may use credentials, as every command the agent runs may use the
+owner's environment:
+
+- **Its own keys**, pasted with its configuration, are stored sealed and named
+  in ``env`` as ``secret://NAME``; the claim carries their values in
+  ``secret_env``, decrypted for that claim only.
+- **The chat's environment**: ``${NAME}`` in ``args`` or ``env`` is filled on
+  the host from the member's environment values.
+
+Neither value goes into the gateway's admission, which every slot can read
+(:meth:`SandboxMcpServer.admission`). The host hands them to the slot's runner
+alone (``cloud_agent_host.sandbox_mcp``).
 """
 
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 #: The gateway's fixed loopback address, and the name the CLIs know it by.
 SANDBOX_MCP_URL = "http://127.0.0.1:47801/mcp"
@@ -36,6 +48,21 @@ MAX_SANDBOX_MCP_ENV = 64
 #: As ``cloud_agent.mcp.models.ALIAS_PATTERN``: the alias the relay would give it.
 ALIAS_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$"
 ENV_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+SECRET_PREFIX = "secret://"
+#: ``${NAME}``, filled from the chat's environment where the server starts.
+ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]{0,127})\}")
+MAX_SECRET_BYTES = 32768
+
+
+def environment_references(values: object) -> set[str]:
+    """The ``${NAME}`` names a server's arguments and environment refer to."""
+    texts = values if isinstance(values, (list, tuple)) else [values]
+    names: set[str] = set()
+    for text in texts:
+        if isinstance(text, str):
+            names.update(ENV_REFERENCE.findall(text))
+    names.discard(BROWSER_CDP_PLACEHOLDER[2:-1])
+    return names
 
 
 class SandboxMcpServer(BaseModel):
@@ -47,6 +74,11 @@ class SandboxMcpServer(BaseModel):
     command: Literal["npx", "uvx"]
     args: tuple[str, ...] = Field(default=(), max_length=MAX_SANDBOX_MCP_ARGS)
     env: dict[str, str] = Field(default_factory=dict, max_length=MAX_SANDBOX_MCP_ENV)
+    #: The values of ``env``'s ``secret://NAME`` entries. Never in a repr, and
+    #: never in the gateway's admission.
+    secret_env: dict[str, str] = Field(
+        default_factory=dict, max_length=MAX_SANDBOX_MCP_ENV, repr=False
+    )
 
     @field_validator("alias")
     @classmethod
@@ -64,22 +96,45 @@ class SandboxMcpServer(BaseModel):
 
     @field_validator("env")
     @classmethod
-    def _plain_env(cls, value: dict[str, str]) -> dict[str, str]:
+    def _env_names(cls, value: dict[str, str]) -> dict[str, str]:
         for name, item in value.items():
             if not re.fullmatch(ENV_NAME_PATTERN, name):
                 raise ValueError(f"{name!r} is not an environment variable name")
-            if item.startswith("secret://") or "\0" in item or len(item) > 4096:
-                raise ValueError(f"{name}: a sandbox MCP server takes no secret values")
+            if "\0" in item or len(item) > 4096:
+                raise ValueError(f"{name}: an environment value is too long or contains NUL")
         return value
 
-    def wire(self) -> dict[str, object]:
-        """What the gateway's admission names this server with."""
+    @model_validator(mode="after")
+    def _every_secret_has_its_value(self) -> SandboxMcpServer:
+        named = {
+            item.removeprefix(SECRET_PREFIX)
+            for item in self.env.values()
+            if item.startswith(SECRET_PREFIX)
+        }
+        if set(self.secret_env) != named:
+            raise ValueError(f"{self.alias}: secret values do not match its secret:// entries")
+        for name, item in self.secret_env.items():
+            if "\0" in item or len(item.encode()) > MAX_SECRET_BYTES:
+                raise ValueError(f"{self.alias}: the value of {name} is too long or contains NUL")
+        return self
+
+    def admission(self) -> dict[str, object]:
+        """What the gateway's admission names this server with: no secret value."""
         return {
             "alias": self.alias,
             "command": self.command,
             "args": list(self.args),
             "env": dict(sorted(self.env.items())),
         }
+
+    def runner_secrets(self, environment: Mapping[str, str]) -> dict[str, str]:
+        """The values only the slot's runner gets: its keys, and referenced environment.
+
+        The environment values are the chat's own that ``${NAME}`` names.
+        """
+        referenced = environment_references([*self.args, *self.env.values()])
+        values = {name: environment[name] for name in sorted(referenced) if name in environment}
+        return {**values, **self.secret_env}
 
 
 def parse_sandbox_mcp_servers(raw: object) -> tuple[SandboxMcpServer, ...]:
