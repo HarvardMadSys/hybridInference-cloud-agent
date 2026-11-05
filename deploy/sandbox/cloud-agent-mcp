@@ -78,10 +78,7 @@ import sys
 import time
 import urllib.request
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from typing import Any
 
 PORT = 47801
 HOST = "127.0.0.1"
@@ -569,12 +566,14 @@ class Backend:
         slot: int,
         paths: Paths,
         secrets: dict[str, str] | None = None,
-        member: Callable[[], str] | None = None,
+        member: str = "",
     ) -> None:
         self.spec = spec
         self.secrets = dict(secrets or {})
-        #: The digest of the credential of the member this slot serves now.
-        self.member = member or (lambda: "")
+        #: The digest of the credential of the member this server was started
+        #: for, fixed for its life: a slot's admission can pass to another
+        #: member, or be revoked, before the runner retires this server.
+        self.member = member
         self.slot = slot
         self.paths = paths
         self.process: asyncio.subprocess.Process | None = None
@@ -631,7 +630,9 @@ class Backend:
         _log(f"server started: slot {self.slot} {self.spec.alias} pid {self.process.pid}")
         loop = asyncio.get_running_loop()
         self.started = loop.create_future()
-        self.reader_task = loop.create_task(self._read(self.process))
+        # The reader journals this process's exit under this process's member,
+        # even when it runs after a later process started.
+        self.reader_task = loop.create_task(self._read(self.process, self.member))
         self.tools = None
         try:
             result = await self._request(
@@ -660,24 +661,25 @@ class Backend:
             raise
         self.started.set_result(None)
 
-    def _failed(self, phase: str, exit_code: int | None) -> None:
+    def _failed(self, phase: str, exit_code: int | None, member: str | None = None) -> None:
         """Journal a failure nobody asked for: a start that did not finish, or an exit.
 
-        It names the member it happened to by the digest of that member's
-        credential, as the slot's admission holds it now: a slot is reused, so
-        the host must not work out whose failure it was when it reads this.
+        It names the member it happened to by the digest of the credential the
+        server was started for, never the slot's admission now: a slot is
+        reused, so neither the runner when it writes this nor the host when it
+        reads it may work out whose failure it was from who holds the slot.
         """
         append_incident(
             self.paths.runner_incidents(self.slot),
             "mcp_server_failed",
-            member=self.member(),
+            member=self.member if member is None else member,
             alias=self.spec.alias,
             phase=phase,
             exit_code=exit_code if exit_code is not None and exit_code >= 0 else None,
             signal=-exit_code if exit_code is not None and exit_code < 0 else None,
         )
 
-    async def _read(self, process: asyncio.subprocess.Process) -> None:
+    async def _read(self, process: asyncio.subprocess.Process, member: str) -> None:
         assert process.stdout is not None
         try:
             while True:
@@ -725,7 +727,7 @@ class Backend:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(process.wait(), 2)
             _log(f"server exited: slot {self.slot} {self.spec.alias} status {process.returncode}")
-            self._failed("crashed", process.returncode)
+            self._failed("crashed", process.returncode, member)
 
     async def _write(self, message: dict[str, Any]) -> None:
         process = self.process
@@ -862,18 +864,26 @@ class Runner:
         self._secrets = (key, values)
         return values
 
-    def key(self, spec: ServerSpec) -> tuple[str, str]:
-        """A server, by what starts it: its spec and its secret values."""
+    def key(self, spec: ServerSpec, member: str | None = None) -> tuple[str, str]:
+        """A server, by what starts it and for whom: its spec, secret values and member.
+
+        A slot that passes to another member gets servers of its own, and the
+        previous member's are withdrawn ones, which :meth:`retire` stops: no
+        server outlives its member's admission to serve the next one.
+        """
         given = json.dumps(self.secrets().get(spec.alias, {}), sort_keys=True)
-        return spec.alias, hashlib.sha256((spec.digest + given).encode()).hexdigest()[:16]
+        who = self.member() if member is None else member
+        digest = hashlib.sha256((spec.digest + given + who).encode()).hexdigest()[:16]
+        return spec.alias, digest
 
     def backend(self, spec: ServerSpec) -> Backend:
-        key = self.key(spec)
+        member = self.member()
+        key = self.key(spec, member)
         backend = self.backends.get(key)
         if backend is None:
             secrets = self.secrets().get(spec.alias, {})
             backend = self.backends[key] = Backend(
-                spec, self.slot, self.paths, secrets, member=self.member
+                spec, self.slot, self.paths, secrets, member=member
             )
         return backend
 
