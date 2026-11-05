@@ -176,7 +176,9 @@ def _group_state(
 ) -> dict[str, Any]:
     """The fields of ``group`` a deletion's fences read. The caller holds the lock."""
     try:
-        bridge = supervisor.state.manager.network.network_for(group.spec) in group.inspection.networks
+        bridge = (
+            supervisor.state.manager.network.network_for(group.spec) in group.inspection.networks
+        )
     except Exception:
         bridge = None
     request = group.archive_request_id

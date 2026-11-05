@@ -205,7 +205,9 @@ def test_background_final_archive_failure_preserves_fence_and_retries():
         supervisor.list(background_recovery=True)
         with supervisor.state.condition:
             group = supervisor.state.members[spec.thread_id]
-            assert supervisor.state.condition.wait_for(lambda: group.lifecycle_check is None, timeout=2)
+            assert supervisor.state.condition.wait_for(
+                lambda: group.lifecycle_check is None, timeout=2
+            )
         assert attempts == ["archive"]
         assert supervisor.status(spec.thread_id).lifecycle_pending is True
         assert manager.items[spec.container_name].networks == ("agent-net",)
@@ -213,7 +215,9 @@ def test_background_final_archive_failure_preserves_fence_and_retries():
             supervisor.operation_opened(spec.thread_id)
         supervisor.list(background_recovery=True)
         with supervisor.state.condition:
-            assert supervisor.state.condition.wait_for(lambda: group.lifecycle_check is None, timeout=2)
+            assert supervisor.state.condition.wait_for(
+                lambda: group.lifecycle_check is None, timeout=2
+            )
         assert attempts == ["archive", "archive"]
         assert supervisor.status(spec.thread_id).lifecycle_pending is False
         assert manager.items[spec.container_name].networks == ()
