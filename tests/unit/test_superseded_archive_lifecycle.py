@@ -37,20 +37,23 @@ from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SandboxManagerError,
 )
 from cloud_agent.storage._sql.hosts import superseded_removal_request_id
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, ChatSandboxStatus
-from cloud_agent_host.group_archive_policy import ControllerArchivePolicy
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-from cloud_agent_host.sandbox_archive_s3 import (
+from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
+from cloud_agent_host.archive.sandbox_archive_s3 import (
     SandboxArchiveReceipt,
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
     checkpoint_object_key,
     lifecycle_object_key,
 )
-from cloud_agent_host.sandbox_archives import SandboxArchiveService
-from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointCapture, SandboxCheckpointStore
-from cloud_agent_host.sandbox_deletion_backup import SandboxDeletionBackupService
+from cloud_agent_host.archive.sandbox_archives import SandboxArchiveService
+from cloud_agent_host.archive.sandbox_checkpoints import (
+    SandboxCheckpointCapture,
+    SandboxCheckpointStore,
+)
+from cloud_agent_host.archive.sandbox_deletion_backup import SandboxDeletionBackupService
+from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, ChatSandboxStatus
+from cloud_agent_host.group_archive_policy import ControllerArchivePolicy
+from cloud_agent_host.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor

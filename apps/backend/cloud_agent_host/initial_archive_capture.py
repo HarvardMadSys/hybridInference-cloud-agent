@@ -13,7 +13,7 @@ import secrets
 import time
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.archive_failure_diagnostics import (
+from cloud_agent_host.archive.archive_failure_diagnostics import (
     _archive_failure_diagnostic,
     _record_archive_failure_diagnostics,
     _safe_error_type,

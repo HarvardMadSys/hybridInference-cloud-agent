@@ -17,7 +17,7 @@ import tarfile
 from dataclasses import dataclass
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Final, Protocol
 
-from cloud_agent_host.sandbox_checkpoint_store import SandboxCheckpointError
+from cloud_agent_host.archive.sandbox_checkpoint_store import SandboxCheckpointError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

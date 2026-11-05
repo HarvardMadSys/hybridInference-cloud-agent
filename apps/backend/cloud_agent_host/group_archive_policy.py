@@ -15,10 +15,10 @@ from typing import TYPE_CHECKING, Protocol
 from cloud_agent_host.chat_sandbox import SandboxRestoreFailed
 
 if TYPE_CHECKING:
+    from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
+    from cloud_agent_host.archive.sandbox_archives import SandboxArchiveService
+    from cloud_agent_host.archive.sandbox_checkpoints import CheckpointRestore
     from cloud_agent_host.chat_sandbox import ChatSandboxInspection, ChatSandboxSpec
-    from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-    from cloud_agent_host.sandbox_archives import SandboxArchiveService
-    from cloud_agent_host.sandbox_checkpoints import CheckpointRestore
     from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 

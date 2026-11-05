@@ -28,14 +28,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from concurrent.futures import ThreadPoolExecutor
 
+    from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
+    from cloud_agent_host.archive.sandbox_archives import SandboxArchiveService
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatBackend
     from cloud_agent_host.environment_preparation import EnvironmentPreparation
     from cloud_agent_host.manager_api.calls import _CommandSlots, _EndpointLifecycleCalls
     from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest
     from cloud_agent_host.manager_api.terminal_manager import _TerminalManager
     from cloud_agent_host.operation_call import SandboxManagerCall
-    from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-    from cloud_agent_host.sandbox_archives import SandboxArchiveService
     from cloud_agent_host.sandbox_incidents import SandboxIncidents
     from cloud_agent_host.shared_session_state import SharedSessionDescriptor
     from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor

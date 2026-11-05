@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from cloud_agent_host.archive_failure_diagnostics import (
+from cloud_agent_host.archive.archive_failure_diagnostics import (
     _safe_error_type,
 )
 from cloud_agent_host.chat_sandbox import (
@@ -60,6 +60,7 @@ from cloud_agent_shared.shared_protocol import INPUT_TURN_ENDED
 if TYPE_CHECKING:
     import builtins
 
+    from cloud_agent_host.archive.sandbox_checkpoints import CheckpointRestore
     from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
     from cloud_agent_host.group_registration import GroupRegistration
     from cloud_agent_host.member_window_census import MemberWindow
@@ -69,7 +70,6 @@ if TYPE_CHECKING:
         ResidentTransportFactory,
         ResidentTurn,
     )
-    from cloud_agent_host.sandbox_checkpoints import CheckpointRestore
     from cloud_agent_host.tool_windows import ToolMark
     from cloud_agent_shared.sandbox_manager_wire import ContextStatus
 

@@ -28,10 +28,10 @@ from tests.unit.test_sandbox_discard_diagnostics import (
 )
 from tests.unit.test_shared_session_supervisor import _members, _spec
 
-from cloud_agent_host.archive_failure_diagnostics import NETWORK_RELEASE_FAILURES
+from cloud_agent_host.archive.archive_failure_diagnostics import NETWORK_RELEASE_FAILURES
+from cloud_agent_host.archive.sandbox_deletion_backup import SandboxDeletionBackupService
 from cloud_agent_host.chat_sandbox_models import RetainedChatLost
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.sandbox_deletion_backup import SandboxDeletionBackupService
 from cloud_agent_host.session_lifecycle import SessionBusy
 from cloud_agent_shared.logging_utils import JsonLogFormatter
 
@@ -256,7 +256,7 @@ def test_a_clean_stop_logs_neither_failure(caplog):
 def test_every_release_failure_read_is_one_the_host_writes():
     source = "\n".join(
         path.read_text()
-        for path in _HOST_SOURCE.glob("*.py")
+        for path in _HOST_SOURCE.rglob("*.py")
         if path.name != "archive_failure_diagnostics.py"
     )
     sentences = [prefix for prefix, _category in NETWORK_RELEASE_FAILURES]

@@ -14,27 +14,27 @@ from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import pytest
 
-from cloud_agent_host import sandbox_archives
-from cloud_agent_host.chat_sandbox import (
-    ChatSandboxInspection,
-    ChatSandboxManager,
-    ChatSandboxSpec,
-    ChatSandboxStatus,
-    RetainedChatBackend,
-)
-from cloud_agent_host.sandbox_archive_bundle import SpooledSandboxArchive
-from cloud_agent_host.sandbox_archive_s3 import (
+from cloud_agent_host.archive import sandbox_archives
+from cloud_agent_host.archive.sandbox_archive_bundle import SpooledSandboxArchive
+from cloud_agent_host.archive.sandbox_archive_s3 import (
     ArchivePhase,
     SandboxArchiveAlreadyExists,
     SandboxArchiveReceipt,
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
 )
-from cloud_agent_host.sandbox_archives import (
+from cloud_agent_host.archive.sandbox_archives import (
     INITIAL_ARCHIVE_MARKER_FORMAT_VERSION,
     CaptureGate,
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
+)
+from cloud_agent_host.chat_sandbox import (
+    ChatSandboxInspection,
+    ChatSandboxManager,
+    ChatSandboxSpec,
+    ChatSandboxStatus,
+    RetainedChatBackend,
 )
 from cloud_agent_host.shared_session_state import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
@@ -43,7 +43,7 @@ from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent_host.sandbox_capture_gate import CaptureWaiter
+    from cloud_agent_host.archive.sandbox_capture_gate import CaptureWaiter
 
 _ACCOUNT = "123456789012"
 _REGION = "us-east-1"

@@ -25,14 +25,13 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.sandbox_archive_s3 import (
+from cloud_agent_host.archive.sandbox_archive_s3 import (
     SandboxArchiveReceipt,
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
     lifecycle_object_key,
 )
-from cloud_agent_host.sandbox_archives import (
+from cloud_agent_host.archive.sandbox_archives import (
     DEFAULT_ARCHIVE_SPOOL_BUDGET_BYTES,
     CaptureGate,
     SandboxArchiveService,
@@ -43,7 +42,8 @@ from cloud_agent_host.sandbox_archives import (
     encode_marker,
     safe_archive_error_type,
 )
-from cloud_agent_host.sandbox_initial_uploads import InitialUploadSpool, InitialUploadWorker
+from cloud_agent_host.archive.sandbox_initial_uploads import InitialUploadSpool, InitialUploadWorker
+from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 logger = logging.getLogger(__name__)
@@ -70,18 +70,18 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
+    from cloud_agent_host.archive.sandbox_checkpoints import (
+        CheckpointRestore,
+        SandboxCheckpointCapture,
+        SandboxCheckpointReceipt,
+    )
+    from cloud_agent_host.archive.sandbox_initial_uploads import SpooledInitialUpload
     from cloud_agent_host.chat_sandbox import (
         ChatSandboxInspection,
         ChatSandboxManager,
         ChatSandboxSpec,
         RetainedChatBackend,
     )
-    from cloud_agent_host.sandbox_checkpoints import (
-        CheckpointRestore,
-        SandboxCheckpointCapture,
-        SandboxCheckpointReceipt,
-    )
-    from cloud_agent_host.sandbox_initial_uploads import SpooledInitialUpload
     from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 

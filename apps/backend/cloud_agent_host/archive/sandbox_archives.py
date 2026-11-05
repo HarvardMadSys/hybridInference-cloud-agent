@@ -20,12 +20,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, cast
 
-from cloud_agent_host.sandbox_archive_bundle import (
+from cloud_agent_host.archive.sandbox_archive_bundle import (
     DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
     BoundedDigestWriter,
     spool_sandbox_archive,
 )
-from cloud_agent_host.sandbox_archive_s3 import (
+from cloud_agent_host.archive.sandbox_archive_s3 import (
     SandboxArchiveAlreadyExists,
     SandboxArchiveDeadlineExceeded,
     SandboxArchiveReceipt,
@@ -33,29 +33,29 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Uploader,
     is_sandbox_archive_conditional_conflict,
 )
-from cloud_agent_host.sandbox_capture_gate import CaptureGate, CaptureWaiter
+from cloud_agent_host.archive.sandbox_capture_gate import CaptureGate, CaptureWaiter
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
+    from cloud_agent_host.archive.sandbox_archive_bundle import ArchivePhase, SpooledSandboxArchive
+    from cloud_agent_host.archive.sandbox_checkpoints import (
+        CheckpointRestore,
+        SandboxCheckpointCapture,
+        SandboxCheckpointReceipt,
+    )
+    from cloud_agent_host.archive.sandbox_initial_uploads import (
+        InitialUploadReservation,
+        InitialUploadSpool,
+        SpooledInitialUpload,
+    )
     from cloud_agent_host.chat_sandbox import (
         ChatSandboxInspection,
         ChatSandboxManager,
         ChatSandboxSpec,
         RetainedChatBackend,
-    )
-    from cloud_agent_host.sandbox_archive_bundle import ArchivePhase, SpooledSandboxArchive
-    from cloud_agent_host.sandbox_checkpoints import (
-        CheckpointRestore,
-        SandboxCheckpointCapture,
-        SandboxCheckpointReceipt,
-    )
-    from cloud_agent_host.sandbox_initial_uploads import (
-        InitialUploadReservation,
-        InitialUploadSpool,
-        SpooledInitialUpload,
     )
     from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef

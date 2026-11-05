@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.sandbox_checkpoints import checkpoint_image_reference
+from cloud_agent_host.archive.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_shared.environment_snapshots import snapshot_image_reference
 from cloud_agent_shared.errors import SandboxError
 

@@ -15,7 +15,7 @@ import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.archive_failure_diagnostics import (
+from cloud_agent_host.archive.archive_failure_diagnostics import (
     _archive_failure_diagnostic,
 )
 from cloud_agent_host.chat_sandbox import (

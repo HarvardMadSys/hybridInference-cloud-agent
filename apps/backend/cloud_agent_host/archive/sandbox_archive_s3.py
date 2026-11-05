@@ -32,7 +32,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, Protocol, cast
 
-from cloud_agent_host.sandbox_archive_ranges import (
+from cloud_agent_host.archive.sandbox_archive_ranges import (
     RANGED_DOWNLOAD_MIN_BYTES,
     RangeMismatch,
     RangeTruncated,

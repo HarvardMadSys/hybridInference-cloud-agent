@@ -22,6 +22,7 @@ from httpx import ASGITransport, AsyncClient
 from tests.support.archive_policy import hooked_supervisor
 from tests.support.owners import launch_connection
 
+from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.chat_sandbox import (
     MEMBER_UID_BASE,
     ChatSandboxInspection,
@@ -48,7 +49,6 @@ from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.http_bridge import member as http_member
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_state import SharedMemberManifest, SharedSessionDescriptor

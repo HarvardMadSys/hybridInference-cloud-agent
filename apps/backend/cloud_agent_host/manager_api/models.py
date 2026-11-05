@@ -11,9 +11,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from cloud_agent_host.archive.sandbox_deletion_backup import MAX_ARCHIVE_BYTES
+
 # Pydantic resolves the field types at runtime.
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig  # noqa: TC001
-from cloud_agent_host.sandbox_deletion_backup import MAX_ARCHIVE_BYTES
 from cloud_agent_shared.environment import BoundEnvironment  # noqa: TC001
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef  # noqa: TC001
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values

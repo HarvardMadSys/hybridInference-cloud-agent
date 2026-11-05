@@ -30,8 +30,8 @@ from cloud_agent_shared.sandbox_manager_wire import member_manifest
 if TYPE_CHECKING:
     from starlette.datastructures import State
 
+    from cloud_agent_host.archive.sandbox_checkpoints import SandboxCheckpointStore
     from cloud_agent_host.manager_api.context import ManagerContext
-    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
 
 
 class SharedSessionRoutes:
