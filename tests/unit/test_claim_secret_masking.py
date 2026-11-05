@@ -259,4 +259,3 @@ def test_a_programs_short_key_does_not_blank_the_output():
     assert values == {}
     output = "Ran 12 tests in 1.0s"
     assert SecretRedactor(values).text(output) == output
-
