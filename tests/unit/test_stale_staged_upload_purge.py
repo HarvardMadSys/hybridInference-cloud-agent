@@ -42,7 +42,9 @@ class _Store(AllCapabilities):
     async def claim_wakeups(self, *, limit: int, thread_id: str | None = None) -> list[object]:
         return []
 
-    async def sweep_goal_scheduling(self) -> dict[str, list[object]]:
+    async def sweep_goal_scheduling(
+        self, *, arm_after_seconds: float, stalled_after_seconds: float
+    ) -> dict[str, list[object]]:
         return {"rearmed": [], "stalled": []}
 
     async def reap_expired(self, *, max_attempts: int) -> list[object]:

@@ -27,9 +27,14 @@ def wakeup_backoff(attempts: int) -> float:
     return min(backoff * math.pow(2, min(attempts - 1, 100)), max_backoff)
 
 
+def capped_backoff(seconds: float) -> float:
+    """``seconds``, but no longer than the longest backoff a wakeup waits."""
+    return min(seconds, number_setting("goals.wakeup_backoff_max_seconds"))
+
+
 def is_exhausted(attempts: int) -> bool:
     """Whether a wakeup has failed often enough to stop retrying it."""
     return attempts >= integer_setting("goals.max_wakeup_attempts")
 
 
-__all__ = ["is_exhausted", "wakeup_backoff"]
+__all__ = ["capped_backoff", "is_exhausted", "wakeup_backoff"]

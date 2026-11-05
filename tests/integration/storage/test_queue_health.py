@@ -18,11 +18,15 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.goals.models import GoalInput
+from cloud_agent.settings import number_setting
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent_host.sandbox import KATA_RUNTIME
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
+
+#: The queue age the queue monitor reads and hands the health query.
+QUEUE_ALERT_AFTER_S = number_setting("queue_alert_after_s")
 
 # AWS's documented example key pair, which no account accepts.
 _ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
@@ -151,36 +155,48 @@ async def test_queue_health_ignores_new_jobs_and_blocked_followups(pool, store):
         user_id=parent["user_id"],
         prompt="Later",
     )
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "queued"
-    ] == 0
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["queued"] == 0
     await _age(pool)
-    assert await store.host_pool.queue_health(expected_deployment_sha="test-deployment") == {
+    assert await store.host_pool.queue_health(
+        expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+    ) == {
         "queued": 1,
         "unavailable": 1,
         "running": 0,
     }
     await pool.execute("UPDATE agent_jobs SET cancel_requested = TRUE WHERE id = $1", parent["id"])
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "queued"
-    ] == 0
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["queued"] == 0
 
 
 async def test_missing_stale_wrong_generation_and_wrong_pin_are_not_serving(pool, store):
     await _create_job(store, execution_profile="untrusted-kata-v1")
     await _age(pool)
     await _host(store)
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "unavailable"
-    ] == 0
-    assert (await store.host_pool.queue_health(expected_deployment_sha="different"))[
-        "unavailable"
-    ] == 1
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 0
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="different", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 1
     await store.host_pool.register_host(host="other", credential_hash="other-test", slots_total=3)
     await pool.execute("UPDATE agent_runner_policy SET active_host = 'other' WHERE id")
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "unavailable"
-    ] == 1
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 1
 
 
 async def test_archive_policy_revision_is_part_of_queue_health_serving_capacity(pool, store):
@@ -203,9 +219,11 @@ async def test_archive_policy_revision_is_part_of_queue_health_serving_capacity(
         settings=policy,
     )
     assert first is not None and first["revision"] == 1
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "unavailable"
-    ] == 1
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 1
 
     await store.host_pool.record_host_heartbeat(
         host="runner-a",
@@ -214,18 +232,22 @@ async def test_archive_policy_revision_is_part_of_queue_health_serving_capacity(
         sandbox_archive_settings_applied_revision=1,
         sandbox_archive_settings_revision_reported=True,
     )
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "unavailable"
-    ] == 0
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 0
 
     second = await store.host_pool.set_sandbox_archive_settings(
         expected_revision=1,
         settings={**policy, "max_archive_bytes": 1024**3},
     )
     assert second is not None and second["revision"] == 2
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "unavailable"
-    ] == 1
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 1
 
     await pool.execute(
         "UPDATE agent_runner_policy SET sandbox_archive_settings = '{\"enabled\": true}'::jsonb"
@@ -236,16 +258,20 @@ async def test_archive_policy_revision_is_part_of_queue_health_serving_capacity(
         sandbox_archive_settings_applied_revision=2,
         sandbox_archive_settings_revision_reported=True,
     )
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "unavailable"
-    ] == 1
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 1
     await pool.execute("UPDATE agent_runner_policy SET active_host = NULL WHERE id")
     await pool.execute(
         "UPDATE agent_runner_hosts SET last_heartbeat_at = NOW() - INTERVAL '2 minutes'"
     )
-    assert (await store.host_pool.queue_health(expected_deployment_sha="test-deployment"))[
-        "unavailable"
-    ] == 1
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 1
 
 
 async def test_retained_owner_is_used_even_when_new_chats_are_pinned_elsewhere(pool, store):
@@ -255,15 +281,19 @@ async def test_retained_owner_is_used_even_when_new_chats_are_pinned_elsewhere(p
     await _age(pool)
     await store.host_pool.register_host(host="new-host", credential_hash="new", slots_total=3)
     await pool.execute("UPDATE agent_runner_policy SET active_host = 'new-host' WHERE id")
-    snapshot = await store.host_pool.queue_health(expected_deployment_sha="new-generation")
+    snapshot = await store.host_pool.queue_health(
+        expected_deployment_sha="new-generation", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+    )
     assert snapshot["queued"] == 1
     assert snapshot["unavailable"] == 0
     await pool.execute(
         "UPDATE agent_runner_hosts SET status = 'offline' WHERE host = 'shared-runner'"
     )
-    assert (await store.host_pool.queue_health(expected_deployment_sha="new-generation"))[
-        "unavailable"
-    ] == 1
+    assert (
+        await store.host_pool.queue_health(
+            expected_deployment_sha="new-generation", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+        )
+    )["unavailable"] == 1
 
 
 async def test_autoscaling_observes_only_new_groups_and_effective_free_slots(pool, store):

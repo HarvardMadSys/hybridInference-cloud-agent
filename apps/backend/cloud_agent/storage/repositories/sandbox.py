@@ -16,6 +16,12 @@ from uuid import uuid4
 
 from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.execution import TERMINAL_STATES
+from cloud_agent.domain.sandbox_deletion import (
+    DELETION_RETRY_MAX_ATTEMPTS,
+    DELETION_RETRY_WINDOW_SECONDS,
+    DeletionFailure,
+    decide_deletion_failure,
+)
 from cloud_agent.domain.sandbox_group import (
     DELETED_GROUP_STATES,
     DeletionState,
@@ -78,11 +84,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS = 0.25
-_DELETION_RETRY_MAX_ATTEMPTS = 8
-_DELETION_RETRY_WINDOW_SECONDS = 24 * 60 * 60
 _DELETION_RETRY_EXHAUSTION_BATCH = 50
-_DELETION_RETRY_BASE_SECONDS = 60
-_DELETION_RETRY_MAX_SECONDS = 60 * 60
 
 #: Work a stop or deletion must wait for: a member turn or Fork, or a running
 #: job. ``$1`` is the sandbox.
@@ -428,8 +430,8 @@ class PostgresSandboxRepository:
                 FROM spent s WHERE g.id = s.id
                 RETURNING g.*
                 """,
-                _DELETION_RETRY_MAX_ATTEMPTS,
-                _DELETION_RETRY_WINDOW_SECONDS,
+                DELETION_RETRY_MAX_ATTEMPTS,
+                DELETION_RETRY_WINDOW_SECONDS,
                 _DELETION_RETRY_EXHAUSTION_BATCH,
             )
             if exhausted:
@@ -507,8 +509,8 @@ class PostgresSandboxRepository:
                 """,
                 str(uuid4()),
                 ttl_seconds,
-                _DELETION_RETRY_MAX_ATTEMPTS,
-                _DELETION_RETRY_WINDOW_SECONDS,
+                DELETION_RETRY_MAX_ATTEMPTS,
+                DELETION_RETRY_WINDOW_SECONDS,
             )
             if row is None:
                 return None
@@ -1178,54 +1180,23 @@ class PostgresSandboxRepository:
                     retry_at=None,
                     terminal_reason="fence_lost",
                 )
-            retry_requested = group["deletion_state"] == "archived" or retain_pending
-            retry_count = int(group["deletion_retry_count"])
-            effective_retry_class = (
-                retry_class
-                if retry_class in {"transient", "permanent", "operator_action"}
-                else "operator_action"
-            )
-            automatic_retry_allowed = effective_retry_class == "transient"
             window_open = bool(
                 await conn.fetchval(
                     "SELECT $1::timestamptz > clock_timestamp() - make_interval(secs => $2)",
                     group["deletion_retry_started_at"],
-                    _DELETION_RETRY_WINDOW_SECONDS,
+                    DELETION_RETRY_WINDOW_SECONDS,
                 )
             )
-            retry_scheduled = (
-                retry_requested
-                and automatic_retry_allowed
-                and retry_count < _DELETION_RETRY_MAX_ATTEMPTS
-                and window_open
+            decision = decide_deletion_failure(
+                DeletionFailure(
+                    deletion_state=str(group["deletion_state"]),
+                    retry_count=int(group["deletion_retry_count"]),
+                    window_open=window_open,
+                    retain_pending=retain_pending,
+                    retry_class=retry_class,
+                    error=error,
+                )
             )
-            retry_budget_exhausted = (
-                retry_requested and automatic_retry_allowed and not retry_scheduled
-            )
-            automatic_retry_stopped = retry_requested and not retry_scheduled
-            if retry_scheduled:
-                delay_seconds = min(
-                    _DELETION_RETRY_BASE_SECONDS * (2 ** max(retry_count - 1, 0)),
-                    _DELETION_RETRY_MAX_SECONDS,
-                )
-                final_error = error[:400]
-            elif retry_budget_exhausted:
-                delay_seconds = None
-                final_error = (
-                    error[:300]
-                    + " Automatic deletion retry budget exhausted; an administrator can resume "
-                    "this request."
-                )
-            elif automatic_retry_stopped:
-                delay_seconds = None
-                final_error = (
-                    error[:300]
-                    + " Automatic retries stopped for this failure; an administrator can resume "
-                    "this request after resolving it."
-                )
-            else:
-                delay_seconds = None
-                final_error = error[:500]
             state = str(group["deletion_state"])
             await self._record_trajectory_event(
                 conn,
@@ -1234,14 +1205,14 @@ class PostgresSandboxRepository:
                 source="system",
                 actor_id="sandbox-deletion-worker",
                 from_state=state,
-                to_state=state if automatic_retry_stopped else "failed",
+                to_state=state if decision.retry_stopped else "failed",
                 details={
                     "request_id": request_id,
-                    "retry_scheduled": retry_scheduled,
-                    "retry_exhausted": retry_budget_exhausted,
-                    "retry_stopped": automatic_retry_stopped,
-                    "retry_class": effective_retry_class,
-                    "error": final_error[:500],
+                    "retry_scheduled": decision.retry_scheduled,
+                    "retry_exhausted": decision.retry_exhausted,
+                    "retry_stopped": decision.retry_stopped,
+                    "retry_class": decision.retry_class,
+                    "error": decision.error[:500],
                 },
             )
             updated = await conn.fetchrow(
@@ -1258,22 +1229,22 @@ class PostgresSandboxRepository:
                 RETURNING deletion_retry_at
                 """,
                 sandbox_id,
-                retry_scheduled,
-                final_error,
-                delay_seconds,
-                automatic_retry_stopped,
+                decision.retry_scheduled,
+                decision.error,
+                decision.delay_seconds,
+                decision.retry_stopped,
             )
             if attempt_correlation_id is not None:
                 await self._finish_deletion_attempt_in_transaction(
                     conn,
                     correlation_id=attempt_correlation_id,
-                    outcome="retrying" if retry_scheduled else "failed",
+                    outcome="retrying" if decision.retry_scheduled else "failed",
                     failure_code=(
-                        "retry_budget_exhausted" if retry_budget_exhausted else failure_code
+                        "retry_budget_exhausted" if decision.retry_exhausted else failure_code
                     ),
                     sandbox_manager_status=sandbox_manager_status,
-                    retry_class=effective_retry_class,
-                    retry_scheduled=retry_scheduled,
+                    retry_class=decision.retry_class,
+                    retry_scheduled=decision.retry_scheduled,
                     cleanup_outcome=cleanup_outcome,
                 )
             await self._audit_admin_deletion(
@@ -1285,20 +1256,11 @@ class PostgresSandboxRepository:
             )
             if updated is None:
                 raise RuntimeError("sandbox deletion failure transition lost its row")
-            terminal_reason = None
-            if retry_budget_exhausted:
-                terminal_reason = "retry_budget_exhausted"
-            elif not retry_scheduled:
-                terminal_reason = {
-                    "permanent": "permanent_failure",
-                    "operator_action": "operator_action_required",
-                    "transient": "retry_not_retained",
-                }[effective_retry_class]
             return DeletionFailureDecision(
                 recorded=True,
-                retry_scheduled=retry_scheduled,
+                retry_scheduled=decision.retry_scheduled,
                 retry_at=updated["deletion_retry_at"],
-                terminal_reason=terminal_reason,
+                terminal_reason=decision.terminal_reason,
             )
 
     @staticmethod
