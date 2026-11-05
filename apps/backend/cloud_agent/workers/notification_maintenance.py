@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from cloud_agent.workers.periodic import run_every, run_pass
 
-if TYPE_CHECKING:
-    from cloud_agent.ports import NotificationMaintenanceRepository
+
+class NotificationPruning(Protocol):
+    """Bounded retention of durable owner notification markers."""
+
+    async def prune_notification_changes(self, *, limit: int = 500) -> int:
+        """Delete at most the requested number of expired markers and return the count."""
+        ...
 
 
 NOTIFICATION_MAINTENANCE_INTERVAL_S = 60.0
@@ -16,7 +21,7 @@ NOTIFICATION_MAINTENANCE_BATCH_SIZE = 500
 
 
 async def run_notification_maintenance(
-    maintenance: NotificationMaintenanceRepository,
+    maintenance: NotificationPruning,
     *,
     interval_seconds: float = NOTIFICATION_MAINTENANCE_INTERVAL_S,
     deadline_seconds: float = NOTIFICATION_MAINTENANCE_DEADLINE_S,

@@ -5,9 +5,13 @@ delegate -- it holds one Postgres implementation per capability and names each
 one, so that a caller asks for the capability it needs rather than for the
 whole persistence surface.
 
-Each attribute is annotated with its *port*, so what a caller can reach through
-this object is the narrow Protocol and not the class behind it; swapping an
-implementation is an edit to one line here and to nothing else.
+Most attributes are annotated with their *port*, so what a caller can reach
+through this object is the narrow Protocol and not the class behind it;
+swapping an implementation is an edit to one line here and to nothing else.
+An aggregate whose port only mirrored its repository has lost that port: its
+attribute names the repository class, and each caller declares the narrow
+Protocol it uses, which the class satisfies structurally. Callers still never
+import the class.
 
 The repositories share the pool they are handed. A capability is therefore a
 second view of one connection pool, never a second pool, and the transaction
@@ -102,8 +106,6 @@ if TYPE_CHECKING:
         McpCatalogRepository,
         McpConnectionRepository,
         ModelConnectionRepository,
-        ModelPreferenceRepository,
-        NotificationMaintenanceRepository,
         OperationMeasurements,
         OwnerUsageQueries,
         OwnerWorkTermination,
@@ -120,7 +122,6 @@ if TYPE_CHECKING:
         TeamRepository,
         UserProfileRepository,
         WebSearchRepository,
-        WorkInsightsRepository,
     )
     from cloud_agent.ports.admin_queries import (
         AdminConversationQueries,
@@ -164,8 +165,10 @@ class Storage:
             pool
         )
         self.mcp_catalog: McpCatalogRepository = PostgresMcpCatalogRepository(pool)
-        self.model_preferences: ModelPreferenceRepository = PostgresModelPreferenceRepository(pool)
-        self.notification_maintenance: NotificationMaintenanceRepository = (
+        self.model_preferences: PostgresModelPreferenceRepository = (
+            PostgresModelPreferenceRepository(pool)
+        )
+        self.notification_maintenance: PostgresNotificationMaintenanceRepository = (
             PostgresNotificationMaintenanceRepository(pool)
         )
         self.owner_usage: OwnerUsageQueries = PostgresOwnerUsageRepository(pool)
@@ -183,7 +186,7 @@ class Storage:
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
         self.ssh_servers: SshServerRepository = PostgresSshServerRepository(pool)
         self.model_connections: ModelConnectionRepository = PostgresModelConnectionRepository(pool)
-        self.work_insights: WorkInsightsRepository = PostgresWorkInsightsRepository(pool)
+        self.work_insights: PostgresWorkInsightsRepository = PostgresWorkInsightsRepository(pool)
         self.agent_memory: AgentMemoryRepository = PostgresAgentMemoryRepository(pool)
         self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)
         self.teams: TeamRepository = PostgresTeamRepository(pool)

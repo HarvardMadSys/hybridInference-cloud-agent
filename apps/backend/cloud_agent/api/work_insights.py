@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, Response
 
@@ -11,14 +11,19 @@ from cloud_agent.api.deps import get_storage, require_store
 from cloud_agent.insights_cache import current_insights
 from cloud_agent.work_insights import ACTIVITY_LIMIT, WorkInsights
 
-if TYPE_CHECKING:
-    from cloud_agent.ports.work_insights import WorkInsightsRepository
-
 router = APIRouter(prefix="/v1/agent/insights", tags=["insights"])
 
 
+class RecentRequests(Protocol):
+    """The owner's own latest requests, which the insights are derived from."""
+
+    async def recent_requests(self, user_id: str, limit: int = 50) -> list[str]:
+        """The owner's latest eligible requests, newest first."""
+        ...
+
+
 class _InsightsStorage(Protocol):
-    work_insights: WorkInsightsRepository
+    work_insights: RecentRequests
 
 
 @router.get("", response_model=WorkInsights)

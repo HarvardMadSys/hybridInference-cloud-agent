@@ -1573,7 +1573,7 @@ async def test_config_offers_the_owners_connections_and_their_last_use_without_t
     async def last_on_connection(user_id: str) -> ModelPreferenceView:
         return ModelPreferenceView(last_model="gpt-4.1", last_model_connection_id=row["id"])
 
-    store.get_model_preference = last_on_connection  # type: ignore[method-assign]
+    store.model_preferences.get_model_preference.side_effect = last_on_connection
 
     class _DownDirectory(_FakeOwners):
         async def model_catalog_with_reasoning_efforts(self, user_id: str):
@@ -1620,7 +1620,7 @@ def _remembering(store: _TurnStorage, connection_id: str):
     async def preference(user_id: str) -> ModelPreferenceView:
         return ModelPreferenceView(last_model="glm-5.1", last_model_connection_id=connection_id)
 
-    store.get_model_preference = preference  # type: ignore[method-assign]
+    store.model_preferences.get_model_preference.side_effect = preference
 
 
 @pytest.mark.parametrize(
