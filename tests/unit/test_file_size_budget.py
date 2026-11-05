@@ -29,7 +29,7 @@ BASELINE = {
     "apps/backend/cloud_agent_host/sandbox_manager.py": 3228,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3403,
     "apps/backend/cloud_agent_host/drivers.py": 2856,
-    "apps/backend/cloud_agent/api/worker.py": 1969,
+    "apps/backend/cloud_agent/api/worker.py": 1588,
     "apps/backend/cloud_agent/storage/repositories/host_pool.py": 2267,
     "apps/backend/cloud_agent/application/compute_reconcile.py": 2245,
     "apps/backend/cloud_agent/api/mcp_connections.py": 2220,

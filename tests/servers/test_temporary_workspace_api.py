@@ -172,7 +172,7 @@ async def test_the_claim_carries_no_repository_credential(
             asked.append(repo)
             return "token"
 
-    _no_repository_check(monkeypatch, "cloud_agent.api.worker")
+    _no_repository_check(monkeypatch, "cloud_agent.application.turn_claim")
     app = _build_app(store)
     app.dependency_overrides[get_agent_app_credentials] = lambda: FakeApp()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -204,7 +204,7 @@ async def test_a_temporary_claim_receives_only_its_owners_durable_memories(
     mark = AsyncMock()
     monkeypatch.setattr(store, "task_memories", read, raising=False)
     monkeypatch.setattr(store, "mark_memories_used", mark, raising=False)
-    _no_repository_check(monkeypatch, "cloud_agent.api.worker")
+    _no_repository_check(monkeypatch, "cloud_agent.application.turn_claim")
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job = await _create_temporary(client)

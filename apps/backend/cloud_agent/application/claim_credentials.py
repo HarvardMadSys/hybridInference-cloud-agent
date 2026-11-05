@@ -13,8 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from fastapi import HTTPException
-
+from cloud_agent.domain.errors import Unavailable
 from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.logging_utils import get_logger
 
@@ -47,12 +46,11 @@ async def mint_clone_token(
 
     - an App that does not cover the repository is a settled answer: the turn
       goes ahead without a token;
-    - any other GitHub failure hands the claim back with 503, so no attempt is
-      spent.
+    - any other GitHub failure hands the claim back, so no attempt is spent.
 
     Raises:
-        HTTPException: 503 after releasing the claim when GitHub could not mint
-            a token for a reason other than the App not covering the repository.
+        Unavailable: after releasing the claim when GitHub could not mint a
+            token for a reason other than the App not covering the repository.
     """
     repo = claim["repo"]
     # A temporary workspace has no repository, so there is nothing to clone.
@@ -92,7 +90,7 @@ async def _hand_back(
     ever having started — the very outcome this exists to avoid, only slower.
 
     Raises:
-        HTTPException: 503, always, once the claim is released.
+        Unavailable: always, once the claim is released.
     """
     await attempt_commands.release_claim(
         job_id=claim["id"],
@@ -104,15 +102,8 @@ async def _hand_back(
         "agent_job_clone_token_error",
         extra={"event": "agent_job_clone_token_error", "job_id": claim["id"]},
     )
-    raise HTTPException(
-        status_code=503,
-        detail={
-            "error": {
-                "type": "credential_unavailable",
-                "message": (
-                    "Could not mint a repository credential for this job; it has "
-                    "been returned to the queue and no attempt was spent."
-                ),
-            }
-        },
+    raise Unavailable(
+        "credential_unavailable",
+        "Could not mint a repository credential for this job; it has "
+        "been returned to the queue and no attempt was spent.",
     ) from exc

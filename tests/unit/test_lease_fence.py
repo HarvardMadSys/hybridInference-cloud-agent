@@ -318,10 +318,10 @@ def test_the_starred_fence_dicts_do_carry_a_generation() -> None:
     """The two ``**fence`` call sites pass a dict that names the generation.
 
     A starred argument defeats the check above, so it needs its own: the dict
-    is built once in ``api/worker.py`` and must keep carrying all three fields.
+    is built once in ``application/turn_claim.py`` and must keep carrying all three fields.
     Dropping ``lease_generation`` from it would fence on attempt id alone.
     """
-    source = (BACKEND / "cloud_agent/api/worker.py").read_text(encoding="utf-8")
+    source = (BACKEND / "cloud_agent/application/turn_claim.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     fence_dicts = [
         node
