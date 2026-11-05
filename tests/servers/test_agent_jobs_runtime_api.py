@@ -40,8 +40,8 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
 from tests.servers.test_agent_jobs_mcp_api import _binding, _job_body
 from tests.support.owners import connection_claim, on_connection
 
-from cloud_agent import memory_tool
 from cloud_agent.application.follow_ups import PreparedFollowUp
+from cloud_agent.memory import memory_tool
 
 pytestmark = pytest.mark.asyncio
 

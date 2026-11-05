@@ -124,7 +124,7 @@ model connections. Nothing migrates old tasks, connections or identities.
    refuses, read-only:
 
    ```bash
-   AGENT_DATABASE_URL='<old database>' python -m cloud_agent.identity_namespace --check
+   AGENT_DATABASE_URL='<old database>' python -m cloud_agent.deployment.identity_namespace --check
    ```
 
    It exits non-zero, names this runbook, and changes nothing.

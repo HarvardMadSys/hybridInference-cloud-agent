@@ -22,7 +22,7 @@ from cloud_agent.application.model_connection_status import usable_runtimes
 from cloud_agent.application.model_connections import model_connections_enabled
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
-from cloud_agent.model_preference import resolve_connection_default
+from cloud_agent.profile.model_preference import resolve_connection_default
 from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary, ModelConnectionOption
 from cloud_agent.schemas.model_preferences import ModelPreferenceView
 from cloud_agent.source_control.entitlement import repos_for_user

@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi import HTTPException, Response
 
-from cloud_agent import site_content
 from cloud_agent.api import admin_settings, auth, site_config
+from cloud_agent.deployment import site_content
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -7,7 +7,7 @@ import json
 from collections import OrderedDict
 from threading import Lock
 
-from cloud_agent.work_insights import WorkInsights, build_insights
+from cloud_agent.insights.work_insights import WorkInsights, build_insights
 
 _cache: OrderedDict[tuple[str, bytes], WorkInsights] = OrderedDict()
 _lock = Lock()

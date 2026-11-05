@@ -56,7 +56,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, pull-request records |
 | `apps/backend/cloud_agent/usage/` (`runtime_usage.py`, `turn_report.py`, `admin_usage.py`, `sums.py`) | What agents reported about their model calls, per job and summed for the Usage pages; no cost or quota ([usage](docs/developer/operations.md#usage)) |
 | `apps/backend/cloud_agent/agent_access.py` | The admission decision (`agent.use`, `agent.admin`) every protected request reads |
-| `apps/backend/cloud_agent/identity_namespace.py` | Binds an empty database to the account system once, and refuses a Gateway-era one (`--check` reads it without writing) |
+| `apps/backend/cloud_agent/deployment/identity_namespace.py` | Binds an empty database to the account system once, and refuses a Gateway-era one (`--check` reads it without writing) |
 | `apps/backend/cloud_agent/accounts/`, `application/owner_termination.py` | The account system: sign-in, sessions, the waiting list, the account directory, retired-configuration refusal, and stopping a revoked account's work ([guide](docs/developer/local-accounts.md)) |
 | `apps/backend/cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
 | `apps/backend/cloud_agent/mcp/runtime.py` | Process-local MCP host, fenced session maintenance, and shutdown |

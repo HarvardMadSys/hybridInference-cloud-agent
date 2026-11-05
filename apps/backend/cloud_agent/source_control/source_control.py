@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
-from cloud_agent.credential_cipher import (
+from cloud_agent.crypto.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,

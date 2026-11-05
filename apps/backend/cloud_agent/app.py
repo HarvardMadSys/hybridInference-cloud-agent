@@ -191,7 +191,7 @@ def _install_environment_errors(app: FastAPI) -> None:
     """Answer every environment failure with its status code and no-store."""
     from fastapi.responses import JSONResponse
 
-    from cloud_agent.environments import (
+    from cloud_agent.environments.environments import (
         EnvironmentAccessRevoked,
         EnvironmentBusy,
         EnvironmentConflict,

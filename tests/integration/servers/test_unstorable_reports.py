@@ -139,7 +139,8 @@ async def _environment(api: Api, monkeypatch: pytest.MonkeyPatch) -> dict[str, A
     """An environment with a setup script and one saved command."""
     # The fixture's credential key, which the owner's connection key is stored under.
     monkeypatch.setattr(
-        "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="a" * 40)
+        "cloud_agent.environments.environment_source.resolve_test_commit",
+        AsyncMock(return_value="a" * 40),
     )
     api.app.include_router(environments.router)
     response = await api.client.post(

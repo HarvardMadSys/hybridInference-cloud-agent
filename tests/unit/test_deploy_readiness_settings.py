@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import deploy_readiness, settings
+from cloud_agent import settings
+from cloud_agent.deployment import deploy_readiness
 from cloud_agent.storage import assembly
 
 

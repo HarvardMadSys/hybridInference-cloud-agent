@@ -29,20 +29,23 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import httpx
 
-from cloud_agent import memory_tool
-from cloud_agent.agent_memory import claim_agent_memories
 from cloud_agent.application.claim_credentials import mint_clone_token
 from cloud_agent.application.model_connections import claim_model_connection
 from cloud_agent.application.sandbox_incidents import sandbox_notes
 from cloud_agent.application.ssh_servers import build_ssh_access, servers_for_thread, ssh_key_cipher
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.execution import FAILED, RUNNING
 from cloud_agent.domain.execution_profiles import ExecutionProfile
-from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
+from cloud_agent.environments.environments import (
+    EnvironmentAccessRevoked,
+    EnvironmentEncryptionError,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_for_thread
 from cloud_agent.mcp.sandbox_servers import split_bindings
+from cloud_agent.memory import memory_tool
+from cloud_agent.memory.agent_memory import claim_agent_memories
 from cloud_agent.owner_access import (
     AGENT_ACCESS_WITHDRAWN,
     AgentAccessUnavailable,

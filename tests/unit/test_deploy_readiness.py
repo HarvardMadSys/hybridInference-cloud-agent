@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent.deploy_readiness import shared_live_readiness
+from cloud_agent.deployment.deploy_readiness import shared_live_readiness
 from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,

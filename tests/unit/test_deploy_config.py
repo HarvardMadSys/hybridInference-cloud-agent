@@ -1073,7 +1073,7 @@ def test_target_commit_readiness_cannot_be_bypassed() -> None:
         assert "AGENT_SHARED_LIVE_SANDBOX" not in script
 
     control_script = (REPO_ROOT / "deploy/control-plane/deploy.sh").read_text()
-    assert "cloud_agent.deploy_readiness" in control_script
+    assert "cloud_agent.deployment.deploy_readiness" in control_script
     assert "--expected-deployment-sha" in control_script
 
 

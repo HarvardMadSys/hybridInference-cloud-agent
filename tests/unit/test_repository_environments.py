@@ -366,7 +366,7 @@ async def test_environment_repository_reads_without_app_installation_and_never_w
 
     import httpx
 
-    from cloud_agent import environment_source
+    from cloud_agent.environments import environment_source
     from cloud_agent.source_control.github_app import AppNotInstalled
 
     credentials = SimpleNamespace(token_for=AsyncMock(side_effect=AppNotInstalled("not installed")))
@@ -411,7 +411,7 @@ async def test_environment_metadata_size_limit_is_enforced_before_json(monkeypat
     import httpx
     from fastapi import HTTPException
 
-    from cloud_agent import environment_source
+    from cloud_agent.environments import environment_source
 
     factory = httpx.AsyncClient
     monkeypatch.setattr(
@@ -662,7 +662,7 @@ async def test_repository_metadata_uses_configured_github_api(monkeypatch):
 
     import httpx
 
-    from cloud_agent import environment_source
+    from cloud_agent.environments import environment_source
 
     urls = []
 

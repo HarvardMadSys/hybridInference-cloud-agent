@@ -366,7 +366,7 @@ asyncio.run(probe())'; then
   fi
 
   echo "Checking that this database belongs to the account system."
-  compose run --rm --no-deps migrate python -m cloud_agent.identity_namespace --check
+  compose run --rm --no-deps migrate python -m cloud_agent.deployment.identity_namespace --check
 
   echo "Applying the agent-owned database migrations before full startup."
   compose run --rm --no-deps migrate

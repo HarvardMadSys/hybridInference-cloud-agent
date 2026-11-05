@@ -2,8 +2,8 @@
 
 from fastapi import APIRouter, Response
 
+from cloud_agent.deployment.site_content import site_content
 from cloud_agent.settings import text_setting
-from cloud_agent.site_content import site_content
 
 router = APIRouter(prefix="/v1/agent")
 

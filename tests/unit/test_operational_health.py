@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import operational_health as health
+from cloud_agent.deployment import operational_health as health
 
 
 @pytest.mark.parametrize(

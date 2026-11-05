@@ -32,7 +32,7 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from cloud_agent.credential_cipher import (
+from cloud_agent.crypto.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,

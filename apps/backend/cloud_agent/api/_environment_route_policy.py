@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from cloud_agent.api._sensitive_routes import SensitiveRoute
-from cloud_agent.environments import (
+from cloud_agent.environments.environments import (
     EnvironmentAccessRevoked,
     EnvironmentBusy,
     EnvironmentConflict,

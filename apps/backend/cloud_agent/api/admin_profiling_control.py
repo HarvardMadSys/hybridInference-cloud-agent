@@ -52,7 +52,7 @@ from cloud_agent.domain.profiling_control import (
     ControlCommandResult,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.profiling_control_config import (
+from cloud_agent.profiling.profiling_control_config import (
     ENV_PROFILING_CONTROL_DEPLOYMENT,
     profiling_control_deployment,
 )

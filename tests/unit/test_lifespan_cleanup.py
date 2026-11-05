@@ -362,7 +362,7 @@ def _prepare(
         ),
         ("cloud_agent.workers.account_broadcasts.run_account_broadcasts", "account_broadcast_task"),
         ("cloud_agent.capacity_history.prune_host_capacity_history", "capacity_task"),
-        ("cloud_agent.operational_health.monitor_queue", "queue_monitor_task"),
+        ("cloud_agent.deployment.operational_health.monitor_queue", "queue_monitor_task"),
         ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
         monkeypatch.setattr(target, _idle(events, label))
@@ -440,7 +440,7 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "capacity": ("cloud_agent.capacity_history.prune_host_capacity_history", _boom(stage)),
         "agent_memory": ("cloud_agent.bootstrap.lifespan.maintain_agent_memories", _boom(stage)),
         "profiling_deployment": (
-            "cloud_agent.profiling_control_config.profiling_control_deployment",
+            "cloud_agent.profiling.profiling_control_config.profiling_control_deployment",
             _boom(stage),
         ),
         "profiling_service": (
@@ -455,7 +455,7 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
             "cloud_agent.workers.profiling_control.ProfilingPolicyWorker",
             lambda **_kwargs: _RaisingWorker(stage),
         ),
-        "queue_monitor": ("cloud_agent.operational_health.monitor_queue", _boom(stage)),
+        "queue_monitor": ("cloud_agent.deployment.operational_health.monitor_queue", _boom(stage)),
         "work_signal": ("cloud_agent.bootstrap.lifespan.WorkSignal", _boom(stage)),
         "job_event_signal": ("cloud_agent.bootstrap.lifespan.JobEventSignal", _boom(stage)),
         "owner_change_signal": ("cloud_agent.bootstrap.lifespan.OwnerChangeSignal", _boom(stage)),

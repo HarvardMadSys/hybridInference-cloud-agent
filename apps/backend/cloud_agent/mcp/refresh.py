@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import oauth
 from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS

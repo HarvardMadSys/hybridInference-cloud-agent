@@ -247,7 +247,7 @@ async def test_a_host_that_cannot_launch_on_a_connection_gets_the_claim_back(mon
 
 async def test_a_deployment_that_cannot_read_the_key_hands_the_claim_back(claim, monkeypatch):
     """The key's cipher is the operator's problem, never a verdict on the owner's turn."""
-    from cloud_agent.credential_cipher import CredentialCipherError
+    from cloud_agent.crypto.credential_cipher import CredentialCipherError
 
     store = _ClaimStore()
 
@@ -492,7 +492,7 @@ async def test_a_team_environment_its_owner_lost_fails_the_turn_before_any_crede
     """Leaving the team ends the chat's use of its Secrets; no host change helps."""
     from unittest.mock import AsyncMock
 
-    from cloud_agent.environments import EnvironmentAccessRevoked
+    from cloud_agent.environments.environments import EnvironmentAccessRevoked
 
     store = _ClaimStore()
     original_claim = store.claim_job

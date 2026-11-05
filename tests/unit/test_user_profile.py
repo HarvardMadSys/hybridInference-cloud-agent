@@ -11,7 +11,11 @@ import pytest
 from PIL import Image, PngImagePlugin
 from pydantic import ValidationError
 
-from cloud_agent.user_profile import MAX_PROFILE_IMAGE_BYTES, UpdateProfile, sanitize_profile_image
+from cloud_agent.profile.user_profile import (
+    MAX_PROFILE_IMAGE_BYTES,
+    UpdateProfile,
+    sanitize_profile_image,
+)
 
 
 def picture(format="PNG", size=(40, 20)):

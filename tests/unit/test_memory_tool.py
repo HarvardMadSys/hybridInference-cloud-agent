@@ -8,14 +8,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import memory_tool
-from cloud_agent.agent_memory import (
+from cloud_agent.domain.agent_memory import MemoryTask
+from cloud_agent.memory import memory_tool
+from cloud_agent.memory.agent_memory import (
     AgentMemoryDisabled,
     AgentMemoryFull,
     AgentMemoryNotFound,
     AgentMemoryTaskEnded,
 )
-from cloud_agent.domain.agent_memory import MemoryTask
 
 TASK = MemoryTask(user_id="alice", job_id="job-1", attempt_id=4, lease_generation=2)
 

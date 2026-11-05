@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.credential_cipher import (
+from cloud_agent.crypto.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,
@@ -94,7 +94,7 @@ def _credential_cipher(secret: str | None, *, domain: bytes) -> CredentialCipher
 def mcp_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher MCP connection credentials are stored under.
 
-    Raises :class:`~cloud_agent.credential_cipher.CredentialCipherError` when the
+    Raises :class:`~cloud_agent.crypto.credential_cipher.CredentialCipherError` when the
     service has no encryption key, which is the same condition that leaves
     source control unconfigured. Callers that only need to *list* templates
     treat that as "MCP is not configured here" rather than an error.

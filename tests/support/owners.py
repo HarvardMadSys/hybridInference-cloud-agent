@@ -25,7 +25,7 @@ from cloud_agent.accounts import tokens
 from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.application.model_connections import model_connection_cipher
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.accounts import AccountRecord
 from cloud_agent.ports.accounts import SessionOwner
 from cloud_agent_shared.model_connections import (

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
-from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.settings import setting_env
 
 ENV_COMPUTE_SECRET_KEY = "AGENT_COMPUTE_SECRET_KEY"

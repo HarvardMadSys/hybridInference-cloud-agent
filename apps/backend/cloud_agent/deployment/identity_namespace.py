@@ -7,7 +7,7 @@ refused with the cutover instructions: its owner ids name people in another
 identity system, and nothing here can prove which account each would become.
 There is no switch that adopts such a database.
 
-``python -m cloud_agent.identity_namespace --check`` answers the same question
+``python -m cloud_agent.deployment.identity_namespace --check`` answers the same question
 read-only, on any schema revision, before an operator migrates or starts
 anything against a database.
 """

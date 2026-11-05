@@ -7,7 +7,8 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from cloud_agent.agent_memory import (
+from cloud_agent.logging_utils import get_logger
+from cloud_agent.memory.agent_memory import (
     ACTIVE_LIMIT,
     ARCHIVE_RETENTION_DAYS,
     AgentMemoryConflict,
@@ -21,7 +22,6 @@ from cloud_agent.agent_memory import (
     memory_key,
     normalize_memory,
 )
-from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.fences import leased_attempt_sql
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency

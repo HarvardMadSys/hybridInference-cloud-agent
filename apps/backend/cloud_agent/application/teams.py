@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.domain.teams import INVITATION_TTL, TeamConflict, TeamForbidden, TeamNotFound
 from cloud_agent.owner_access import owner_may_use_agent
+from cloud_agent.profile.user_avatar import generate_user_avatar
 from cloud_agent.schemas import (
     AdminTeamAuditEvent,
     AdminTeamDetailResponse,
@@ -42,7 +43,6 @@ from cloud_agent.schemas import (
     TeamMemberResponse,
     TeamPerson,
 )
-from cloud_agent.user_avatar import generate_user_avatar
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

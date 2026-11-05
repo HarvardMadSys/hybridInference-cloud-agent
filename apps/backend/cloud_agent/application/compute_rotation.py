@@ -26,6 +26,7 @@ from pydantic import SecretStr
 from cloud_agent.application.compute_release import NEVER_CREATED, release_evidence
 from cloud_agent.application.compute_setup import load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
+from cloud_agent.deployment.operational_health import deliver_event
 from cloud_agent.domain.compute import (
     ComputeRefusal,
     discard_request_id,
@@ -33,7 +34,6 @@ from cloud_agent.domain.compute import (
     refused_for_capacity,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.operational_health import deliver_event
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import NodeObservation, ProviderError
 from cloud_agent.ports.external.host_bootstrap import (
