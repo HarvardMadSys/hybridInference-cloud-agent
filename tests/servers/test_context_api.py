@@ -360,8 +360,7 @@ async def test_timing_is_the_owners_and_says_no_request_log_was_recorded(app):
     assert body["active_ms"] == 0
     assert body["segments"] == []
     # Owners' own connections are not proxied: no request is ever timed.
-    assert body["gateway"] == "not_recorded"
-    assert body["requests"] == []
+    assert set(body["totals"]) == {"reasoning", "text", "toolarg", "tools", "unsplit"}
 
 
 @pytest.mark.parametrize(

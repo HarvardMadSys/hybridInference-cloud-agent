@@ -113,9 +113,8 @@ async def get_thread_context_timing(
 
     Read when the dashboard asks, never at settlement: the attempts' recorded
     spans and tool windows. No request log is recorded for an owner's own
-    model connection, so TTFT and generation stay "not recorded" and each
-    execution's model and harness time is reported together, not split.
-    Nothing is asked of a CLI.
+    model connection, so each execution's model and harness time is reported
+    together, not split. Nothing is asked of a CLI.
     """
     context_store: _ContextStorage = require_store(store)
     result = await context_store.context_queries.thread_context(
@@ -123,7 +122,7 @@ async def get_thread_context_timing(
     )
     if result is None:
         raise _not_found(job_id)
-    return assemble_timing(result["attempts"], [], gateway_gap=None, gateway_started=0)
+    return assemble_timing(result["attempts"])
 
 
 @router.get("/jobs/{job_id}/thread/context/dna", response_model=DnaBands)
