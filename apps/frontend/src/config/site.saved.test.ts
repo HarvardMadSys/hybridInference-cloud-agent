@@ -14,6 +14,31 @@ const saved = {
 };
 
 describe('saved public site settings', () => {
+  it('preserves HTTPS/inline portraits and drops unsupported image URLs without losing the member', () => {
+    for (const photoUrl of [
+      'https://example.org/ada.jpg',
+      'http://example.org/ada.jpg',
+      'javascript:alert(1)',
+      'data:image/jpeg;base64,/9j/2Q==',
+      'data:image/svg+xml;base64,PHN2Zy8+',
+      'data:image/jpeg;base64,not-base64!',
+      'data:image/jpeg;base64,',
+      'https://user:pass@example.org/ada.jpg',
+    ]) {
+      const config = parseSavedSiteConfig({
+        ...saved,
+        content: { team: [{ name: 'Ada', photoUrl }] },
+      });
+      const member = config.content?.team[0];
+      expect(member?.name).toBe('Ada');
+      expect(member?.photoUrl).toBe(
+        photoUrl === 'https://example.org/ada.jpg' || photoUrl === 'data:image/jpeg;base64,/9j/2Q=='
+          ? photoUrl
+          : undefined,
+      );
+    }
+  });
+
   it('reads a control plane that predates the documentation link as having none', () => {
     const { docsUrl: _omitted, contactUrl: _alsoOmitted, ...olderBranding } = saved.branding;
     const site = parseSavedSiteConfig({ ...saved, branding: olderBranding });

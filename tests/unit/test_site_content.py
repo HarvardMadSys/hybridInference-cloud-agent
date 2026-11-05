@@ -70,6 +70,36 @@ def test_a_changed_file_is_read_again(site_dir: Path) -> None:
     assert site_content.site_content().terms == {"en": "Second, longer."}
 
 
+async def test_site_config_publishes_a_configured_portrait(site_dir: Path) -> None:
+    (site_dir / "site.yaml").write_text(
+        "members:\n  - name: Ada\n    photo_url: https://example.org/ada.jpg\n"
+    )
+    published = (await site_config.site_config(Response()))["content"]
+    assert published["team"][0]["photoUrl"] == "https://example.org/ada.jpg"
+
+
+def test_inline_raster_photo_is_preserved_without_reencoding() -> None:
+    photo = "data:image/jpeg;base64,/9j/2Q=="
+    _, members = site_content.parse_site_yaml(f"members:\n  - name: Ada\n    photo_url: {photo}\n")
+    assert members[0].public()["photoUrl"] == photo
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.org/a.jpg",
+        "javascript:alert(1)",
+        "https://user:pass@example.org/a.jpg",
+        "data:image/svg+xml;base64,PHN2Zy8+",
+        "data:image/jpeg;base64,not-base64!",
+        "data:image/jpeg;base64,",
+    ],
+)
+def test_portraits_reject_unsafe_or_malformed_sources(url: str) -> None:
+    with pytest.raises(site_content.SiteContentError, match=r"members\[0\].photo_url"):
+        site_content.parse_site_yaml(f"members:\n  - name: Ada\n    photo_url: {url}\n")
+
+
 def test_blank_terms_file_counts_as_absent(site_dir: Path) -> None:
     (site_dir / "terms.en.txt").write_text("  \n\n")
     assert site_content.site_content().terms == {}

@@ -17,7 +17,7 @@ export function TermsPage() {
     .split(/\n\s*\n/)
     .filter((part) => part.trim());
   return (
-    <AccountFrame title={t('terms.title')}>
+    <AccountFrame title={t('terms.title')} layout="content">
       {!options ? (
         <p role="status">{t('common.loading')}</p>
       ) : options.terms_url ? (
