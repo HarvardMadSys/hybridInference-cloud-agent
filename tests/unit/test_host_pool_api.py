@@ -958,9 +958,7 @@ async def test_reenrollment_cannot_clear_an_active_deployment_fence(client):
     assert acquired[:2] == ("ok", HOST_ONLINE)
     assert acquired[2] != expected_epoch
     issued = await async_client.post(
-        "/admin/agent/runner-hosts/enroll-token",
-        json={"host": "runner-a"},
-        headers=ADMIN,
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
     )
     enroll_token = issued.json()["enroll_token"]
 
