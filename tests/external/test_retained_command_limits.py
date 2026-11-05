@@ -31,8 +31,8 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatBackend,
 )
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
+from cloud_agent_host.manager_api.workspace_commands import _run_sandbox
 from cloud_agent_host.sandbox import ContainerBackend, SandboxProcess, SandboxSpec
-from cloud_agent_host.sandbox_manager import _run_sandbox
 
 if TYPE_CHECKING:
     from pathlib import Path

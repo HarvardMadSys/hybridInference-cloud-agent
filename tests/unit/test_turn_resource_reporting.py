@@ -438,7 +438,7 @@ def test_the_sandbox_manager_and_the_runner_agree_about_where_the_summary_lives(
     key path and the consumer's read of it in one place.
     """
     from cloud_agent_host.guest_observer import GuestObservation
-    from cloud_agent_host.sandbox_manager import build_turn_resources
+    from cloud_agent_host.manager_api.turns import build_turn_resources
     from cloud_agent_host.shared_session_supervisor import SharedTurnTelemetry
     from cloud_agent_host.tool_windows import ToolWindowTracker
 

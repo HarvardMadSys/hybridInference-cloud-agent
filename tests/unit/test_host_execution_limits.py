@@ -23,8 +23,8 @@ from cloud_agent_host.bounded_output import (
     text_chunks,
 )
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
+from cloud_agent_host.manager_api.workspace_commands import _run_sandbox
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError, SandboxSpec
-from cloud_agent_host.sandbox_manager import _run_sandbox
 
 
 @pytest.mark.parametrize("failure", ["timeout", "output"])

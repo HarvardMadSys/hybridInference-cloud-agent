@@ -39,9 +39,9 @@ from tests.unit.test_shared_session_supervisor import (
     threading,
 )
 
+from cloud_agent_host.manager_api.models import SharedTurnRequest
 from cloud_agent_host.member_resources import CheckpointSchedule
 from cloud_agent_host.sandbox import KATA_RUNTIME
-from cloud_agent_host.sandbox_manager import SharedTurnRequest
 from cloud_agent_host.session_lifecycle import StaleStartFence
 
 

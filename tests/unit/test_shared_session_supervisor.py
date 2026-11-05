@@ -37,17 +37,15 @@ from cloud_agent_host.chat_sandbox_markers import (
     INITIAL_ARCHIVE_MARKER_ROOT,
 )
 from cloud_agent_host.drivers import DriverError, InputOutcome
-from cloud_agent_host.guest_observer import (
-    GuestObservation,
-    GuestObserverCursor,
-)
+from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
+from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransportFactory,
 )
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-from cloud_agent_host.sandbox_manager import SharedSandboxIdentityRequest, create_app
+from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
