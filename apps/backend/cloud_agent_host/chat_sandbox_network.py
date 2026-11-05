@@ -22,6 +22,7 @@ from cloud_agent_host.chat_network_disconnect import (
     forget_stopped_network,
     stopped_network_record,
 )
+from cloud_agent_host.chat_network_ownership import owned_bridge_endpoints, require_service_peers
 from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_each
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_GENERATION_LABEL,
@@ -884,7 +885,24 @@ class ChatSandboxNetwork:
     ) -> None:
         disconnect_endpoint(self, network, container_id, network_name=network_name)
 
-    def _release_owned_network(  # noqa: C901, PLR0912 complexity baseline, #771
+    def _release_sandbox(
+        self, spec: ChatSandboxSpec, expected_container_id: str | None
+    ) -> ChatSandboxInspection | None:
+        """The verified sandbox whose bridge is released: the exact stopped one, if named."""
+        if expected_container_id is None:
+            sandbox = self._containers.inspect(spec.container_name)
+            if sandbox is not None:
+                self._containers.exact.verify_identity(sandbox, spec)
+            return sandbox
+        exact = self._containers.exact.require_exact(spec, expected_container_id)
+        if exact.running:
+            raise SandboxError("chat sandbox restarted during network release")
+        named = self._containers.inspect(spec.container_name)
+        if named is not None and named.container_id != expected_container_id:
+            raise RetainedChatLost("sandbox identity changed during network release")
+        return exact
+
+    def _release_owned_network(
         self,
         network_name: str,
         spec: ChatSandboxSpec,
@@ -894,18 +912,7 @@ class ChatSandboxNetwork:
         expected_container_id: str | None = None,
     ) -> None:
         """Disconnect exact owned endpoints and delete one inactive bridge."""
-        sandbox: ChatSandboxInspection | None
-        if expected_container_id is not None:
-            sandbox = self._containers.exact.require_exact(spec, expected_container_id)
-            if sandbox.running:
-                raise SandboxError("chat sandbox restarted during network release")
-            named = self._containers.inspect(spec.container_name)
-            if named is not None and named.container_id != expected_container_id:
-                raise RetainedChatLost("sandbox identity changed during network release")
-        else:
-            sandbox = self._containers.inspect(spec.container_name)
-            if sandbox is not None:
-                self._containers.exact.verify_identity(sandbox, spec)
+        sandbox = self._release_sandbox(spec, expected_container_id)
         network = self._inspect_network(network_name)
         if network is None:
             if expected_container_id is not None and not only_if_sandbox_unattached:
@@ -919,39 +926,25 @@ class ChatSandboxNetwork:
             # name. Never let stale cleanup mutate the replacement.
             return
         network_ref = network_id or network_name
-        labels = network.get("Labels") or {}
-        if (
-            network.get("Driver") != "bridge"
-            or network.get("Internal") is not False
-            or labels.get(CHAT_NETWORK_LABEL) != "true"
-            or labels.get(CHAT_NAMESPACE_LABEL) != self.backend.sandbox_namespace
-            or labels.get(CHAT_NETWORK_SANDBOX_ID_LABEL) != spec.sandbox_id
-            or labels.get(CHAT_NETWORK_GENERATION_LABEL) != str(spec.generation)
-        ):
-            raise SandboxError("refusing to remove a network outside this chat/generation")
-        containers = network.get("Containers") or {}
-        if not isinstance(containers, dict):
-            raise SandboxError("Docker returned invalid group-network endpoints")
+        containers = owned_bridge_endpoints(
+            network, namespace=self.backend.sandbox_namespace, spec=spec
+        )
         sandbox_id = sandbox.container_id if sandbox is not None else None
         if only_if_sandbox_unattached and sandbox_id in containers:
             # Opportunistic orphan pruning must never detach a sandbox that
             # won the race and connected after the caller's first inspection.
             return
-        recorded_aliases = {
-            value.strip().lower().rstrip(".")
-            for value in str(labels.get(CHAT_NETWORK_SERVICES_LABEL) or "").split(",")
-            if value.strip()
-        }
         peers = [
             container_id
             for container_id in sorted(map(str, containers))
             if container_id != sandbox_id
         ]
-        peer_aliases = self._network_aliases_for(peers, network_name)
-        for container_id in peers:
-            endpoint_aliases = peer_aliases.get(container_id)
-            if not endpoint_aliases or not endpoint_aliases.intersection(recorded_aliases):
-                raise SandboxError(f"group network {network_name!r} contains an unexpected peer")
+        require_service_peers(
+            network_name,
+            network.get("Labels") or {},
+            peers,
+            self._network_aliases_for(peers, network_name),
+        )
         endpoint_ids = set(map(str, containers))
         # Network inspect omits stopped containers' saved network intent.
         if (
@@ -1275,18 +1268,10 @@ class ChatSandboxNetwork:
         # old same-name bridge was deleted and must be reconnected explicitly.
         return bool(current_id and recorded_id == current_id)
 
-    def _attach_to_group_network(  # noqa: PLR0912 complexity baseline, #771
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        snapshot: _GroupNetworkSnapshot | None = None,
-    ) -> ChatSandboxInspection:
-        expected = self.network_for(spec)
-        if snapshot is not None:
-            snapshot.network = None
-            snapshot.owners = {}
-            snapshot.addresses = None
-        sources = tuple(current.networks)
+    def _refuse_foreign_networks(
+        self, sources: tuple[str, ...], current: ChatSandboxInspection, expected: str
+    ) -> None:
+        """Refuse a retained chat attached to a live bridge other than its group's."""
         for source in sources:
             if source in (expected, CHAT_NULL_NETWORK):
                 continue
@@ -1300,6 +1285,20 @@ class ChatSandboxNetwork:
                 "bridge; a sandbox from before the single-network change needs the "
                 "one-time cleanup"
             )
+
+    def _attach_to_group_network(
+        self,
+        spec: ChatSandboxSpec,
+        current: ChatSandboxInspection,
+        snapshot: _GroupNetworkSnapshot | None = None,
+    ) -> ChatSandboxInspection:
+        expected = self.network_for(spec)
+        if snapshot is not None:
+            snapshot.network = None
+            snapshot.owners = {}
+            snapshot.addresses = None
+        sources = tuple(current.networks)
+        self._refuse_foreign_networks(sources, current, expected)
         if current.running:
             # A running Kata guest does not see network changes until it
             # restarts, so a running sandbox is never rewired underneath it.
