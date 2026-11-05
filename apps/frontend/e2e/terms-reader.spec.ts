@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 // Placeholder Terms, long enough to scroll: the deployment's own wording is
 // configuration, not part of this repository.
@@ -108,33 +108,75 @@ test('sign-up Terms are read to the end by keyboard and agreed to without leavin
   ]);
 });
 
+/**
+ * Whether a control is really there to see and use: inside the viewport, and
+ * what the page hit-tests at its centre (so neither clipped by a scrolling
+ * box nor covered), not merely present in the DOM.
+ */
+function onScreen(locator: Locator) {
+  return locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+    if (rect.top < 0 || rect.left < 0) return false;
+    if (rect.bottom > window.innerHeight || rect.right > window.innerWidth) return false;
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return Boolean(hit && (hit === element || element.contains(hit)));
+  });
+}
+
 for (const viewport of [
   { name: 'phone', width: 390, height: 844 },
-  // About a 1280×720 window at 200% zoom: the whole dialog scrolls instead.
+  // A 1280×720 window at 200% zoom.
   { name: 'zoomed', width: 640, height: 360 },
 ]) {
-  test(`the sign-up Terms dialog fits and reaches its end on a ${viewport.name} screen`, async ({
+  test(`the sign-up Terms dialog keeps its title and actions on a ${viewport.name} screen`, async ({
     page,
   }, info) => {
     await page.setViewportSize(viewport);
     await serve(page, []);
     await page.goto('/signup');
     const dialog = page.getByRole('dialog', { name: 'Terms of Service' });
+    const text = dialog.getByRole('region', { name: 'Terms of Service text' });
     const agree = dialog.getByRole('button', { name: 'Agree', exact: true });
+    const fixed = [
+      dialog.getByRole('heading', { name: 'Terms of Service' }),
+      dialog.getByRole('button', { name: 'Close' }),
+      dialog.getByRole('button', { name: 'Disagree', exact: true }),
+      agree,
+    ];
+    await expect(text).toBeFocused();
     await expect(agree).toBeDisabled();
-    const box = await dialog.boundingBox();
-    expect(box && box.x >= 0 && box.y >= 0).toBe(true);
-    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
-    expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
+    for (const control of fixed) expect(await onScreen(control)).toBe(true);
+    const box = (await dialog.boundingBox())!;
+    expect(box.x >= 0 && box.y >= 0).toBe(true);
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+    expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
     expect(await fitsWidth(page)).toBe(true);
+    // Only the text scrolls; the dialog itself never needs to.
+    expect(await dialog.evaluate((node) => node.scrollHeight <= node.clientHeight)).toBe(true);
     await page.screenshot({ path: info.outputPath(`terms-dialog-${viewport.name}.png`) });
-    await dialog.hover();
-    for (let turn = 0; turn < 40 && (await agree.isDisabled()); turn += 1)
-      await page.mouse.wheel(0, 900);
-    await agree.scrollIntoViewIfNeeded();
+
+    await page.keyboard.press('End');
     await expect(agree).toBeEnabled();
+    for (const control of fixed) expect(await onScreen(control)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`terms-dialog-${viewport.name}-end.png`) });
     await agree.click();
     await expect(page.getByText('You agreed to the Terms of Service.')).toBeVisible();
+  });
+
+  test(`the sign-up Terms dialog reaches its end by wheel on a ${viewport.name} screen`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await serve(page, []);
+    await page.goto('/signup');
+    const dialog = page.getByRole('dialog', { name: 'Terms of Service' });
+    const agree = dialog.getByRole('button', { name: 'Agree', exact: true });
+    await dialog.getByRole('region', { name: 'Terms of Service text' }).hover();
+    for (let turn = 0; turn < 60 && (await agree.isDisabled()); turn += 1)
+      await page.mouse.wheel(0, 600);
+    await expect(agree).toBeEnabled();
+    expect(await onScreen(agree)).toBe(true);
   });
 }
 

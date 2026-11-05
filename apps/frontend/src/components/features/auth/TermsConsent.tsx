@@ -79,10 +79,11 @@ export function useTermsConsent(terms: ShownTerms): TermsConsentState {
 
 /**
  * Calls `onReached` once the end of the text is on screen: scrolled to, or
- * there from the start because everything fits. The sentinel is observed
- * against the viewport, so whichever box scrolls (the text, or the whole
- * dialog on a short or zoomed screen) clips it. Without IntersectionObserver
- * the text box's own scroll position decides.
+ * there from the start because everything fits. Only the text box scrolls:
+ * the title and the actions stay put, compacted on a short or zoomed screen.
+ * The sentinel is observed against the viewport, so anything clipping it
+ * counts. Without IntersectionObserver the text box's own scroll position
+ * decides.
  */
 function useEndReached(
   box: RefObject<HTMLElement>,
@@ -165,7 +166,7 @@ function TermsDialog({ consent, scroll }: { consent: TermsConsentState; scroll: 
   }, [scroll]);
   if (typeof document === 'undefined') return null;
   return createPortal(
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-2 sm:p-6">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-2 sm:p-6 [@media(max-height:32rem)]:py-2">
       <button
         type="button"
         tabIndex={-1}
@@ -179,12 +180,12 @@ function TermsDialog({ consent, scroll }: { consent: TermsConsentState; scroll: 
         aria-modal="true"
         aria-labelledby={`${id}-title`}
         aria-describedby={`${id}-hint`}
-        className="relative flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface text-foreground shadow-card [@media(max-height:32rem)]:overflow-y-auto"
+        className="relative flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface text-foreground shadow-card"
       >
-        <div className="flex items-start justify-between gap-4 border-b border-border px-5 pb-4 pt-5 sm:px-8 sm:pt-6">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-5 pb-4 pt-5 sm:px-8 sm:pt-6 [@media(max-height:32rem)]:py-2.5">
           <h2
             id={`${id}-title`}
-            className="font-serif text-2xl font-semibold leading-tight tracking-[-0.02em] sm:text-[28px]"
+            className="font-serif text-2xl font-semibold leading-tight tracking-[-0.02em] sm:text-[28px] [@media(max-height:32rem)]:text-xl"
           >
             {t('terms.title')}
           </h2>
@@ -206,7 +207,7 @@ function TermsDialog({ consent, scroll }: { consent: TermsConsentState; scroll: 
           onScroll={(event) => {
             scroll.top = event.currentTarget.scrollTop;
           }}
-          className="ui-focus-ring min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 focus-visible:-outline-offset-2 focus-visible:outline-focus/50 sm:px-8 sm:py-6 [@media(max-height:32rem)]:flex-none [@media(max-height:32rem)]:overflow-visible"
+          className="ui-focus-ring min-h-[3rem] flex-1 overflow-y-auto overscroll-contain px-5 py-5 focus-visible:-outline-offset-2 focus-visible:outline-focus/50 sm:px-8 sm:py-6 [@media(max-height:32rem)]:py-3"
         >
           {terms.kind === 'text' ? (
             <DialogText terms={terms} />
@@ -217,8 +218,12 @@ function TermsDialog({ consent, scroll }: { consent: TermsConsentState; scroll: 
           )}
           <div ref={end} aria-hidden="true" className="h-px" />
         </div>
-        <div className="flex flex-col gap-3 border-t border-border bg-surface-muted/50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-8">
-          <p id={`${id}-hint`} aria-live="polite" className="text-[13px] leading-5 text-muted">
+        <div className="flex shrink-0 flex-col gap-3 border-t border-border bg-surface-muted/50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-8 [@media(max-height:32rem)]:gap-2 [@media(max-height:32rem)]:py-2.5">
+          <p
+            id={`${id}-hint`}
+            aria-live="polite"
+            className="text-[13px] leading-5 text-muted [@media(max-height:32rem)]:text-xs [@media(max-height:32rem)]:leading-4"
+          >
             {hintFor(consent, t)}
           </p>
           <div className="grid grid-cols-2 gap-2 sm:flex sm:shrink-0">
