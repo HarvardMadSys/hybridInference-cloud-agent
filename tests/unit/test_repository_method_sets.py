@@ -12,6 +12,7 @@ from types import FunctionType
 
 from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
+from cloud_agent.storage.repositories.mcp import PostgresMcpConnectionRepository
 
 
 def _methods(cls: type) -> set[str]:
@@ -89,4 +90,49 @@ def test_the_attempt_commands_keep_their_methods() -> None:
         "request_cancel",
         "sweep_queued_follow_ups",
         "transition",
+    }
+
+
+def test_the_mcp_connection_repository_keeps_its_methods() -> None:
+    assert _methods(PostgresMcpConnectionRepository) == {
+        "__init__",
+        "_apply_mcp_allow_group",
+        "_flush_remembered_approvals",
+        "_insert_mcp_connection",
+        "_lock_connection",
+        "_lock_invocation",
+        "_lock_oauth_flow",
+        "_mcp_connection",
+        "apply_pending_mcp_allow_rules",
+        "claim_mcp_invocation",
+        "claim_mcp_refresh",
+        "close_mcp_transport_session",
+        "consume_mcp_oauth_flow",
+        "create_mcp_connection",
+        "create_mcp_connections",
+        "create_mcp_invocation",
+        "create_mcp_oauth_flow",
+        "decide_mcp_invocation",
+        "disconnect_mcp_connection",
+        "expire_mcp_invocation",
+        "expire_mcp_invocations",
+        "find_approved_mcp_invocation",
+        "finish_mcp_invocation",
+        "get_mcp_capabilities",
+        "get_mcp_connection",
+        "get_mcp_invocation",
+        "list_mcp_bindings",
+        "list_mcp_connections",
+        "list_mcp_connectors",
+        "list_mcp_invocations",
+        "open_mcp_transport_session",
+        "reap_mcp_transport_sessions",
+        "release_mcp_refresh_claim",
+        "replace_mcp_bindings",
+        "save_mcp_capabilities",
+        "set_mcp_client_registration",
+        "set_mcp_connection_enabled",
+        "set_mcp_connection_status",
+        "set_mcp_credential",
+        "update_mcp_connection",
     }
