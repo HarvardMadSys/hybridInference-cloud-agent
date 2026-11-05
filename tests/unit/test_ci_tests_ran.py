@@ -246,4 +246,4 @@ def test_every_external_run_in_ci_fails_when_its_tests_skip() -> None:
                 assert readers, f"{job_name}: {step['name']!r} never checks its report"
                 assert f'"{report.group(1)}"' in readers[0], readers[0]
                 guarded.setdefault(job_name, []).append(step["name"])
-    assert {"test", "artifacts", "mcp", "compose"} <= set(guarded), guarded
+    assert {"test-docker", "artifacts", "mcp", "compose"} <= set(guarded), guarded
