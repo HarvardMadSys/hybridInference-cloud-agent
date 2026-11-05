@@ -538,7 +538,10 @@ export const en = {
   'settings.backToChats': 'Back to chats',
   'settings.collapseNavigation': 'Collapse settings navigation',
   'settings.expandNavigation': 'Expand settings navigation',
-  'settings.personalDescription': 'Manage your profile, default model, and notifications.',
+  'settings.personalDescription': 'Manage your profile and notifications.',
+  'settings.models.title': 'Models',
+  'settings.models.description':
+    'Your personal model connections: the provider API keys and models your tasks run on.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',

@@ -151,7 +151,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
         return route.fulfill({ json: saved });
       });
 
-      await page.goto('/settings/my-settings');
+      await page.goto('/settings/models');
       const region = page.getByRole('region', { name: text.region, exact: true });
       await page.getByRole('button', { name: text.add, exact: true }).click();
       const form = region.locator('form');
@@ -362,7 +362,7 @@ test.describe('verification without a protocol menu', () => {
         });
         return route.fulfill({ status: 201, json: saved });
       });
-      await page.goto('/settings/my-settings');
+      await page.goto('/settings/models');
       await page.getByRole('button', { name: 'Add connection', exact: true }).click();
       const form = page.getByRole('region', { name: 'Personal model connections' }).locator('form');
       await expect(form.getByRole('combobox')).toHaveCount(0);

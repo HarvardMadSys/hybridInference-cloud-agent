@@ -18,6 +18,7 @@ import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import { IntegrationsView } from './IntegrationsView';
 import { KeyboardShortcutsSettingsView } from '../settings/KeyboardShortcutsSettingsView';
 import { MemorySettingsView } from '../settings/MemorySettingsView';
+import { ModelsSettingsView } from '../settings/ModelsSettingsView';
 import { MySettingsView } from '../settings/MySettingsView';
 import { PluginsSettingsView } from '../settings/PluginsSettingsView';
 import { EnvironmentsSettingsView } from '../settings/EnvironmentsSettingsView';
@@ -36,7 +37,7 @@ import { listSkills } from '@/lib/api/skills';
 import { listSshServers } from '@/lib/api/sshServers';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
-// My Settings also lists personal model connections; this deployment offers none.
+// The Models page lists personal model connections; this deployment offers none.
 vi.mock('@/lib/api/modelConnections', () => ({
   MAX_MODELS: 8,
   listModelConnections: () =>
@@ -418,7 +419,7 @@ describe('IntegrationsView', () => {
     expect(within(section).getByRole('switch', { name: '启用记忆' })).toBeChecked();
     expect(within(section).queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的个人资料、默认模型和通知。')).toBeInTheDocument();
+    expect(screen.getByText('管理你的个人资料和通知。')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: '键盘快捷键' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '键盘快捷键' })).toBeInTheDocument();
   });
@@ -762,10 +763,17 @@ describe('IntegrationsView', () => {
   });
 });
 
-it('My Settings offers model connections and no default-model pin', async () => {
-  render(<MySettingsView />);
+it('the Models page offers model connections, and neither page has a default-model pin', async () => {
+  const { unmount } = render(<ModelsSettingsView />);
+  expect(screen.getByRole('heading', { level: 1, name: 'Models' })).toBeInTheDocument();
   await screen.findByRole('region', { name: 'Personal model connections' });
   expect(screen.queryByRole('region', { name: 'Default model' })).not.toBeInTheDocument();
+  unmount();
+  render(<MySettingsView />);
   expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
   expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
+  expect(
+    screen.queryByRole('region', { name: 'Personal model connections' }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'Default model' })).not.toBeInTheDocument();
 });

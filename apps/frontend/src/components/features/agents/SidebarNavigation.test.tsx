@@ -259,12 +259,12 @@ describe('sidebar navigation interactions', () => {
     expect(api.thread).not.toHaveBeenCalled();
   });
 
-  it('shows ten settings destinations without loading or polling chat lists', async () => {
+  it('shows eleven settings destinations without loading or polling chat lists', async () => {
     api.pathname = '/settings/plugins';
     vi.useFakeTimers();
     await act(async () => render(<AgentsSidebar settingsNavigation={{ backHref: '/a' }} />));
     const navigation = screen.getByRole('navigation', { name: 'Settings' });
-    expect(within(navigation).getAllByRole('link')).toHaveLength(10);
+    expect(within(navigation).getAllByRole('link')).toHaveLength(11);
     expect(within(navigation).getByRole('link', { name: 'My Settings' })).toHaveAttribute(
       'href',
       '/settings/my-settings',

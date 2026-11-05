@@ -397,7 +397,7 @@ describe('local account model onboarding', () => {
     render(<TaskComposer />);
     expect(await screen.findByRole('link', { name: 'Set up a model connection' })).toHaveAttribute(
       'href',
-      '/settings/my-settings#settings-connections',
+      '/settings/models',
     );
     expect(screen.getByText(/Your provider manages billing and usage limits/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
