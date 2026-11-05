@@ -75,18 +75,14 @@ def _inventoried_port_files() -> list[Path]:
 
 
 def _repository_files() -> list[Path]:
-    """One module per capability; together, the whole storage implementation.
+    """One module per capability that is still a single file.
 
-    A capability split by aggregate is a package whose modules each hold one
-    mixin of its repository, so their methods count here; the admin read models
-    are paired with their ports instead.
+    A capability split by aggregate is a package (``_repository_packages``),
+    counted once as a whole; the admin read models are paired with their
+    ports instead.
     """
     assert REPOSITORIES_DIR.is_dir(), REPOSITORIES_DIR
-    files = sorted(
-        p
-        for p in REPOSITORIES_DIR.rglob("*.py")
-        if p.name != "__init__.py" and ADMIN_REPOSITORIES_DIR not in p.parents
-    )
+    files = sorted(p for p in REPOSITORIES_DIR.glob("*.py") if p.name != "__init__.py")
     assert files, f"no repositories found under {REPOSITORIES_DIR}"
     return files
 
