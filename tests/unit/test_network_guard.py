@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import re
 import subprocess
 import sys
@@ -705,12 +706,23 @@ def test_a_verification_past_its_minute_takes_the_full_check(monkeypatch) -> Non
 
 
 def _aged(monkeypatch, guard: HostNetworkGuard, age_s: float) -> None:
-    """Make the guard's last verification ``age_s`` old."""
+    """Make the guard's last verification ``age_s`` old, as the guard measures it.
+
+    ``made + age_s`` alone is not that: the guard subtracts ``made`` back out,
+    and for some readings of the clock the rounding leaves the age a hair under
+    ``age_s`` (``(90.21929081049184 + 60.0) - 90.21929081049184`` is
+    ``59.999999999999986``), so a test at the boundary found the verification
+    still trusted on a few hosts' uptimes. Step the clock up to the first
+    reading the guard sees as ``age_s`` old.
+    """
     from cloud_agent_host import network_guard
 
     assert guard._verified_at is not None
     made = guard._verified_at
-    monkeypatch.setattr(network_guard.time, "monotonic", lambda: made + age_s)
+    now = made + age_s
+    while now - made < age_s:
+        now = math.nextafter(now, math.inf)
+    monkeypatch.setattr(network_guard.time, "monotonic", lambda: now)
 
 
 def test_an_activations_read_back_leaves_the_renewal_to_the_sweep(monkeypatch) -> None:
@@ -753,10 +765,22 @@ def test_an_activations_read_back_still_repairs_a_changed_table(monkeypatch) -> 
     assert nft.table("inet", guard.network.table)["rules"]["from_group"] > 0
 
 
-def test_an_activations_read_back_past_the_minute_takes_the_full_check(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "made",
+    [
+        pytest.param(None, id="this-hosts-clock"),
+        # A reading whose `+ 60` rounds the guard's measured age below a minute (CI run 41972401847).
+        pytest.param(90.21929081049184, id="rounding-clock"),
+    ],
+)
+def test_an_activations_read_back_past_the_minute_takes_the_full_check(
+    monkeypatch, made: float | None
+) -> None:
     nft = FakeNft()
     guard = _guard(nft)
     guard.ensure()
+    if made is not None:
+        guard._verified_at = made
     installs, calls = len(nft.transactions()), len(nft.calls)
     _aged(monkeypatch, guard, GUARD_RECHECK_S)
 

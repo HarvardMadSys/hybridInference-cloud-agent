@@ -1,8 +1,10 @@
 import { accountAdminEn, accountAdminZh } from './accountAdmin';
 import { accountParityEn, accountParityZh } from './accountParity';
+import { termsReaderEn, termsReaderZh } from './termsReader';
 
 export const accountsEn = {
   ...accountParityEn,
+  ...termsReaderEn,
   ...accountAdminEn,
   'common.loading': 'Loading…',
   'common.retry': 'Retry',
@@ -77,6 +79,7 @@ export const accountsEn = {
 
 export const accountsZh: Record<keyof typeof accountsEn, string> = {
   ...accountParityZh,
+  ...termsReaderZh,
   ...accountAdminZh,
   'common.loading': '加载中…',
   'common.retry': '重试',

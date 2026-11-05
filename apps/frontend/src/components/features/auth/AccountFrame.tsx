@@ -1,44 +1,40 @@
 'use client';
 import type { ReactNode } from 'react';
 import Link from 'next/link';
-import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { useT } from '@/components/providers/LocaleProvider';
-import { BrandMark } from '@/components/BrandMark';
-import { DeploymentFooter } from '@/components/DeploymentFooter';
+import { PublicPageFrame } from '@/components/PublicPageFrame';
 
 /**
- * The signed-out account pages: the app's mark (a way back to the home page),
- * then one form in a narrow column, in the home page's type. No card, no
- * motion: the form is the whole page.
+ * The public pages share the app's mark and footer. Account forms use a narrow,
+ * centered column; informational pages use a wider column starting at the top.
  */
 export function AccountFrame({
   title,
   description,
   steps,
+  layout = 'form',
   children,
 }: {
   title: string;
   description?: string;
   /** Where this page sits in a longer flow, shown above the title. */
   steps?: ReactNode;
+  layout?: 'form' | 'content';
   children: ReactNode;
 }) {
-  const { branding } = useSiteConfig();
   return (
-    <div className="flex min-h-screen flex-col bg-surface">
-      <header className="mx-auto flex h-16 w-full max-w-[1200px] items-center px-[18px] sm:px-7">
-        <Link
-          href="/"
-          className="ui-focus-ring inline-flex min-w-0 items-center gap-2.5 rounded-md text-sm font-semibold tracking-tight text-foreground"
+    <PublicPageFrame>
+      <main
+        className={`mx-auto w-full flex-1 px-[18px] pb-16 ${
+          layout === 'content'
+            ? 'max-w-[880px] pt-10 sm:px-7 sm:pt-14'
+            : 'flex max-w-[420px] flex-col justify-center pt-6'
+        }`}
+      >
+        <section
+          aria-labelledby="account-heading"
+          className={layout === 'form' ? 'account-form' : undefined}
         >
-          <BrandMark />
-          {/* The deployment's name is the page's h1, as the runtime site check
-              requires; the form's title is the section heading below it. */}
-          <h1 className="truncate">{branding.appName}</h1>
-        </Link>
-      </header>
-      <main className="mx-auto flex w-full max-w-[420px] flex-1 flex-col justify-center px-[18px] pb-16 pt-6">
-        <section aria-labelledby="account-heading" className="account-form">
           {steps}
           <h2
             id="account-heading"
@@ -50,8 +46,7 @@ export function AccountFrame({
           <div className="mt-7 space-y-5">{children}</div>
         </section>
       </main>
-      <DeploymentFooter />
-    </div>
+    </PublicPageFrame>
   );
 }
 

@@ -23,6 +23,8 @@ should refuse it before it gets here.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import threading
 from collections.abc import Mapping
@@ -46,7 +48,7 @@ _MAX_MEMBERS = 50
 _MAX_ROLES = 10
 _MAX_LABEL = 200
 _SITE_KEYS = {"source_url", "members"}
-_MEMBER_KEYS = {"name", "website", "badge", "roles"}
+_MEMBER_KEYS = {"name", "website", "photo_url", "badge", "roles"}
 
 logger = get_logger(__name__)
 
@@ -61,17 +63,21 @@ class TeamMember:
 
     name: str
     website: str = ""
+    photo_url: str = ""
     badge: dict[str, str] = field(default_factory=dict)
     roles: tuple[dict[str, str], ...] = ()
 
     def public(self) -> dict[str, object]:
         """The member as the site configuration publishes it."""
-        return {
+        result: dict[str, object] = {
             "name": self.name,
             "website": self.website,
             "badge": dict(self.badge),
             "roles": [dict(role) for role in self.roles],
         }
+        if self.photo_url:
+            result["photoUrl"] = self.photo_url
+        return result
 
 
 @dataclass(frozen=True)
@@ -99,6 +105,24 @@ def _text(value: object, where: str) -> str:
     if len(value) > _MAX_LABEL:
         raise SiteContentError(f"{where} is longer than {_MAX_LABEL} characters")
     return value.strip()
+
+
+def _photo_url(value: object, where: str) -> str:
+    """Public portraits use HTTPS or an inline raster, never executable image formats."""
+    if isinstance(value, str) and value.startswith(
+        ("data:image/jpeg;base64,", "data:image/png;base64,", "data:image/webp;base64,")
+    ):
+        try:
+            data = base64.b64decode(value.split(",", 1)[1], validate=True)
+        except (ValueError, binascii.Error):
+            raise SiteContentError(f"{where} must contain valid base64 image data") from None
+        if not data:
+            raise SiteContentError(f"{where} must contain non-empty image data")
+        return value
+    url = _http_url(value, where)
+    if urlsplit(url).scheme != "https":
+        raise SiteContentError(f"{where} must be an absolute https URL")
+    return url
 
 
 def _localized(value: object, where: str) -> dict[str, str]:
@@ -131,6 +155,9 @@ def _member(value: object, index: int) -> TeamMember:
     return TeamMember(
         name=_text(value.get("name"), f"{where}.name"),
         website=_http_url(value["website"], f"{where}.website") if "website" in value else "",
+        photo_url=_photo_url(value["photo_url"], f"{where}.photo_url")
+        if "photo_url" in value
+        else "",
         badge=_localized(value["badge"], f"{where}.badge") if "badge" in value else {},
         roles=tuple(_localized(role, f"{where}.roles[{i}]") for i, role in enumerate(roles)),
     )

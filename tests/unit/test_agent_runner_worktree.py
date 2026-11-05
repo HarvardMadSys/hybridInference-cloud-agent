@@ -303,15 +303,20 @@ def _child_started(child_pid: Path) -> bool:
 
 
 def _still_running(pid: int) -> bool:
-    """Whether ``pid`` exists and is not a zombie.
+    """Whether ``pid`` exists and has not exited.
 
     Read in one step: the process can exit between an existence check and the
-    read, and a status file that vanished means it ended.
+    read, and a status file that vanished means it ended. A zombie (``Z``) has
+    exited, and so has a process its parent is reaping (``X``): the kernel
+    shows that state for a moment before the status file goes, and reading
+    ``X`` as running failed this check about once in 30 runs on a busy host.
     """
     try:
-        return "\tZ" not in pathlib.Path(f"/proc/{pid}/status").read_text()
+        status = pathlib.Path(f"/proc/{pid}/status").read_text()
     except (FileNotFoundError, ProcessLookupError):
         return False
+    state = next((line.split()[1] for line in status.splitlines() if line.startswith("State:")), "")
+    return state not in {"", "Z", "X"}
 
 
 def _assert_ended(child_pid: Path) -> None:
