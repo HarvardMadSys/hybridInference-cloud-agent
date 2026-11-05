@@ -238,10 +238,10 @@ msgstr "主机认领任务，或 worker 的 HTTP 调用"
 #: ../developer/development.md
 msgid ""
 "`cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the "
-"orchestration in `host_service.py` and `turn_child.py`."
+"orchestration in `service/host_service.py` and `turn/turn_child.py`."
 msgstr ""
 "`cloud_agent_host/claimed_job.py`、`control_plane_client.py`，以及 "
-"`host_service.py` 和 `turn_child.py` 里的编排逻辑。"
+"`service/host_service.py` 和 `turn/turn_child.py` 里的编排逻辑。"
 
 #: ../developer/development.md
 msgid "Retained-container values or lifecycle"
@@ -249,11 +249,11 @@ msgstr "保留容器的数据类型或生命周期"
 
 #: ../developer/development.md
 msgid ""
-"`cloud_agent_host/chat_sandbox_models.py` for value types; "
-"`chat_sandbox.py` for Docker lifecycle."
+"`cloud_agent_host/container/chat_sandbox_models.py` for value types; "
+"`container/chat_sandbox.py` for Docker lifecycle."
 msgstr ""
-"数据类型在 `cloud_agent_host/chat_sandbox_models.py`，Docker 生命周期在 "
-"`chat_sandbox.py`。"
+"数据类型在 `cloud_agent_host/container/chat_sandbox_models.py`，Docker 生命周期在 "
+"`container/chat_sandbox.py`。"
 
 #: ../developer/development.md
 msgid "CLI behavior or version compatibility"
