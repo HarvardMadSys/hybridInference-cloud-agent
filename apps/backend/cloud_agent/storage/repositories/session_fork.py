@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
+from cloud_agent.domain.sandbox_group import DELETED_GROUP_STATES, GroupState
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
-from cloud_agent.storage._sql.hosts import DELETED_GROUP_STATES, refuse_start_on_revoked_host
+from cloud_agent.storage._sql.hosts import refuse_start_on_revoked_host
 from cloud_agent.storage._sql.jobs import JOB_SELECT, read_job
 from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
@@ -730,9 +731,9 @@ class PostgresSessionForkRepository:
                 operation_id,
             )
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes
-                SET state = 'running', archived_at = NULL,
+                SET state = {GroupState.RUNNING.sql}, archived_at = NULL,
                     last_activity_at = NOW(), updated_at = NOW()
                 WHERE id = $1 AND generation = $2 AND container_id = $3
                 """,

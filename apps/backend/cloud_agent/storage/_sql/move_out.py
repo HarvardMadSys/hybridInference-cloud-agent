@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from cloud_agent.domain.sandbox_group import GroupState, sql_list
 from cloud_agent.execution_profiles import KATA_RUNTIME, ExecutionProfile
 from cloud_agent.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
@@ -116,7 +117,10 @@ async def move_out_blocker(conn: Any, leaving: list[str], *, need_target: bool) 
 
 
 #: Groups still held only by a Host: not yet handed over, lost or deleted.
-UNMOVED_GROUP_SQL = f"""{UNDELETED_GROUP_SQL} AND g.state NOT IN ('cold', 'restoring', 'lost')"""
+UNMOVED_GROUP_SQL = (
+    f"{UNDELETED_GROUP_SQL} "
+    f"AND g.state NOT IN {sql_list(GroupState.COLD, GroupState.RESTORING, GroupState.LOST)}"
+)
 
 #: An unmoved group a leaving Host can still move: its checkpoint covers it
 #: now, or it has not stopped yet and its stop will record a checkpoint of an
@@ -129,7 +133,10 @@ UNMOVED_GROUP_SQL = f"""{UNDELETED_GROUP_SQL} AND g.state NOT IN ('cold', 'resto
 MOVABLE_GROUP_SQL = f"""({UNMOVED_GROUP_SQL} AND (
     {COVERED_GROUP_SQL}
     OR (
-        g.state IN ('provisioning', 'starting', 'running', 'stopping')
+        g.state IN (
+            {GroupState.PROVISIONING.sql}, {GroupState.STARTING.sql},
+            {GroupState.RUNNING.sql}, {GroupState.STOPPING.sql}
+        )
         AND g.sandbox_image_digest ~ '{PULLABLE_IMAGE_PATTERN}'
         AND (
             g.container_id IS NOT NULL

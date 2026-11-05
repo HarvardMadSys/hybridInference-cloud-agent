@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.pending_messages import QUEUE_PAUSED_STOPPED
+from cloud_agent.domain.sandbox_group import GroupState, sql_list
 from cloud_agent.storage._sql.goals import PAUSE_GOALS_SQL
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.sandbox import lock_memberships
@@ -35,11 +36,11 @@ ACCESS_ENDED_DETAIL = "Agent access ended for this account; resume the goal once
 #: The owner's groups that may still hold processes, and only those whose every
 #: member is the owner's. ``workspace_id`` is the member chat the sandbox
 #: manager addresses the group by.
-_OWNED_LIVE_GROUPS_SQL = """
+_OWNED_LIVE_GROUPS_SQL = f"""
 SELECT g.id AS sandbox_id, g.host, min(m.thread_id) AS workspace_id
 FROM agent_sandboxes g
 JOIN agent_thread_sandbox_memberships m ON m.sandbox_id = g.id
-WHERE g.user_id = $1 AND g.state IN ('starting', 'running')
+WHERE g.user_id = $1 AND g.state IN {sql_list(GroupState.STARTING, GroupState.RUNNING)}
   AND NOT EXISTS (
       SELECT 1 FROM agent_thread_sandbox_memberships other
       JOIN agent_threads t ON t.id = other.thread_id

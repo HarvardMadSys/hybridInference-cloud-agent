@@ -25,6 +25,7 @@ from cloud_agent.domain.compute import (
     provider_resource_absent,
     retirement_cancellable,
 )
+from cloud_agent.domain.sandbox_group import DeletionState, GroupState
 from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
 from cloud_agent.storage._sql import environment_runs
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
@@ -896,7 +897,7 @@ class PostgresComputeResourceRepository:
                     f"""SELECT h.host,h.status,h.compute_node_id,
                 (h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used,h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
                 (SELECT count(*) FROM agent_sandboxes g
-                 WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
+                 WHERE g.host=h.host AND g.deletion_state<>{DeletionState.DELETED.sql}) AS retained_groups
                 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
                 WHERE n.allocation_id=$1 ORDER BY h.host""",
                     allocation_id,
@@ -1604,7 +1605,7 @@ class PostgresComputeResourceRepository:
             host_names = [host["host"] for host in hosts]
             if await conn.fetchval(
                 "SELECT 1 FROM agent_sandboxes "
-                "WHERE host=ANY($1::text[]) AND deletion_state<>'deleted' LIMIT 1",
+                f"WHERE host=ANY($1::text[]) AND deletion_state<>{DeletionState.DELETED.sql} LIMIT 1",
                 host_names,
             ):
                 raise ValueError("autoscaling_member_not_idle")
@@ -2901,11 +2902,10 @@ class PostgresComputeResourceRepository:
             if group is None:
                 return False
             await conn.execute(
-                """UPDATE agent_sandboxes
-                   SET state='lost', idle_deadline=NULL, stop_requested_at=NULL,
+                f"""UPDATE agent_sandboxes
+                   SET state={GroupState.LOST.sql}, idle_deadline=NULL, stop_requested_at=NULL,
                        last_error='the server holding this sandbox was reclaimed by its provider',
-                       updated_at=NOW()
-                   WHERE id=$1""",
+                       updated_at=NOW() WHERE id=$1""",
                 sandbox_id,
             )
             await conn.execute(
@@ -3277,7 +3277,7 @@ class PostgresComputeResourceRepository:
             f"""SELECT g.id,g.host,g.state,g.active_operation_count,
                        {HANDED_OVER_GROUP_SQL} AS handed_over
                 FROM agent_sandboxes g
-                WHERE g.host=ANY($1::text[]) AND g.deletion_state<>'deleted'""",
+                WHERE g.host=ANY($1::text[]) AND g.deletion_state<>{DeletionState.DELETED.sql}""",
             hosts,
         )
         retained = [g for g in groups if not g["handed_over"]]
@@ -3292,8 +3292,8 @@ class PostgresComputeResourceRepository:
         if attempts:
             reasons.append("active_attempts_present")
         forks = await conn.fetchval(
-            """SELECT count(*) FROM agent_session_forks f JOIN agent_sandboxes g ON g.id=f.sandbox_id
-            WHERE g.host=ANY($1::text[]) AND g.deletion_state<>'deleted'
+            f"""SELECT count(*) FROM agent_session_forks f JOIN agent_sandboxes g ON g.id=f.sandbox_id
+            WHERE g.host=ANY($1::text[]) AND g.deletion_state<>{DeletionState.DELETED.sql}
               AND f.state IN ('preparing','materialized')""",
             hosts,
         )
