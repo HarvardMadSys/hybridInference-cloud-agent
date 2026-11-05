@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from cloud_agent.attachments.models import (
     AttachmentView,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.execution_profiles import ExecutionProfile
+from cloud_agent.domain.execution_profiles import ExecutionProfile
 from cloud_agent.schemas._host_reports import (
     WORKER_ID_MAX_CHARS,
     ReportedText,

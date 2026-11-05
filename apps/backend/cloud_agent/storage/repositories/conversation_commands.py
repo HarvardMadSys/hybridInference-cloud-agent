@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from cloud_agent.domain.execution import QUEUED, SUCCEEDED
+from cloud_agent.domain.execution_profiles import default_execution_profile
 from cloud_agent.domain.ids import new_job_id, new_thread_id
 from cloud_agent.domain.pending_messages import QUEUE_PAUSED_ARCHIVED
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.domain.requests import check_client_request
-from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.goals.models import GOAL_REPORT_PROTOCOL
 from cloud_agent.storage._sql.attachments import claim_attachments
 from cloud_agent.storage._sql.goals import (

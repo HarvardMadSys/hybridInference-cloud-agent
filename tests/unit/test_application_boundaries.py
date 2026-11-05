@@ -83,9 +83,6 @@ FIRST_PARTY = ("cloud_agent", "cloud_agent_host", "cloud_agent_shared")
 #: moved yet. Each is ``(port module, imported module)``; an entry is removed
 #: when its type moves, and a stale one fails the test below.
 PORT_IMPORT_EXCEPTIONS = {
-    # A value, not a type: the default retention window, which the protocol
-    # states and its repository applies.
-    ("ports/host_capacity.py", "cloud_agent.capacity_protocol"),
     # Each of the following names part of a response-model tree whose siblings
     # live in the same module; moving the one a port names would split the
     # tree. The code-structure plan moves these modules' models to schemas/

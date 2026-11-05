@@ -37,6 +37,7 @@ import asyncio
 import re
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.domain.source_control import REPO_PATTERN
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
 from cloud_agent.source_control.github_app import AppNotInstalled, UserAuthorizationRevoked
@@ -47,9 +48,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# `owner/name`, the only shape GitHub uses and the only one the runner knows
-# how to handle. Also keeps a leading `-` out of git's argv.
-REPO_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
 _REPO_RE = re.compile(REPO_PATTERN)
 
 _ALLOWLIST_VAR = "AGENT_REPO_ALLOWLIST"
@@ -316,7 +314,6 @@ async def require_entitled_repo(
 
 
 __all__ = [
-    "REPO_PATTERN",
     "GitHubReconnectRequired",
     "RepoAccessUnavailable",
     "RepoNotAllowed",

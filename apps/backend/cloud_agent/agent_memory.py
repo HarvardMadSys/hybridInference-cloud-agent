@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from cloud_agent.domain.user_text import CREDENTIAL, normalize_text
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.user_text import CREDENTIAL, normalize_text
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AgentMemoryRepository

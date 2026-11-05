@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import asyncpg
 
-from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.compute import (
     acquisition_absence_confirmable,
     autoscaling_acquire_can_cancel,
@@ -28,6 +27,7 @@ from cloud_agent.domain.compute import (
 from cloud_agent.domain.sandbox_group import DeletionState
 from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
+from cloud_agent.schemas.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.storage._sql import environment_runs
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.compute_inventory import (

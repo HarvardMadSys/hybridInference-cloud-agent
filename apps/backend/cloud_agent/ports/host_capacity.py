@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from cloud_agent.capacity_protocol import CAPACITY_HISTORY_RETENTION_S
+from cloud_agent.schemas.capacity_protocol import CAPACITY_HISTORY_RETENTION_S
 
 
 class HostCapacityRepository(Protocol):

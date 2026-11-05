@@ -2,7 +2,7 @@
 
 A *context profile* says how large each model request's input was, when the
 CLI compacted its context, and roughly what the stored conversation content
-weighs. Like :mod:`cloud_agent.thread_stats` it adds no measurement of its own:
+weighs. Like :mod:`cloud_agent.domain.thread_stats` it adds no measurement of its own:
 it reads rows the platform already writes, so a conversation that ran before
 this module existed has the profile its runtime's events allow.
 

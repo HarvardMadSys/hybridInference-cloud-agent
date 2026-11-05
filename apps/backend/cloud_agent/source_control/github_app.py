@@ -35,6 +35,7 @@ import httpx
 import jwt
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+from cloud_agent.domain.source_control import is_ref_name
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
 from cloud_agent.source_control.github_cache import RepositoryCache
@@ -76,26 +77,6 @@ _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 # A rate limit, abuse detection or the App's own client secret being refused
 # says nothing about the user's grant, and must not cost them their connection.
 _REVOKED_REFRESH_ERRORS = frozenset({"bad_refresh_token", "invalid_grant"})
-# Characters `git check-ref-format` refuses anywhere in a ref name.
-_REF_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
-
-
-def is_ref_name(ref: str) -> bool:
-    """Whether git would accept ``ref`` as the name of a branch or tag.
-
-    The rules of ``git check-ref-format --allow-onelevel``, plus no leading
-    ``-``, which git refuses for a branch. A user's ref is sent to GitHub inside
-    an API path, and these rules are also what keep it a ref there: no ``..``
-    or dot-leading segment for the HTTP client to collapse into another
-    endpoint, no ``?`` to start a query string, no control characters.
-    """
-    if not ref or ref == "@" or ref.startswith(("-", "/")) or ref.endswith(("/", ".")):
-        return False
-    if ".." in ref or "//" in ref or "@{" in ref:
-        return False
-    if any(char in _REF_FORBIDDEN_CHARS or ord(char) < 0x20 or ord(char) == 0x7F for char in ref):
-        return False
-    return not any(part.startswith(".") or part.endswith(".lock") for part in ref.split("/"))
 
 
 def rate_limit_wait(response: httpx.Response) -> float | None:

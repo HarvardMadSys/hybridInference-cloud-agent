@@ -18,7 +18,7 @@ from tests.integration.storage.test_host_pool_store import (
     store as store,
 )
 
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.ports.external.compute_provider import SshConnection
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

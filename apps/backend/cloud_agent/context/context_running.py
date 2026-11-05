@@ -13,7 +13,7 @@ attempt's events in order (:mod:`cloud_agent.context.context_profile`):
   taken back out of that request's vector (it is input to the next one).
 - :class:`RunningTiming` -- the attempt's span (first to last event, as the
   platform received them) and the union of its tool windows (``tool_use``
-  to its ``tool_result``), the same pairing ``cloud_agent.thread_stats``
+  to its ``tool_result``), the same pairing ``cloud_agent.domain.thread_stats``
   uses. Intervals are merged; past a bound the smallest gaps are closed and
   the time that added is recorded.
 

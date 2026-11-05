@@ -13,7 +13,7 @@ import re
 import secrets
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.execution_profiles import default_execution_profile
+from cloud_agent.domain.execution_profiles import default_execution_profile
 from cloud_agent.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.environment_runs import env_run_holds_slot
 from cloud_agent.storage._sql.fences import leased_attempt_sql

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent.thread_stats import summarize_attempt_rollup
+from cloud_agent.domain.thread_stats import summarize_attempt_rollup
 from cloud_agent_host.runtimes import (
     MAX_INIT_TOOLS,
     MERGED_MCP_SERVER_NAME,

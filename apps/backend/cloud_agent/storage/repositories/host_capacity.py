@@ -9,14 +9,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.capacity_protocol import CAPACITY_HISTORY_RETENTION_S, history_window
+from cloud_agent.schemas.capacity_protocol import CAPACITY_HISTORY_RETENTION_S, history_window
 
 if TYPE_CHECKING:
     from typing import Any
 
     import asyncpg
 
-    from cloud_agent.capacity_protocol import CapacityHistoryPointWrite
+    from cloud_agent.schemas.capacity_protocol import CapacityHistoryPointWrite
 
 
 async def insert_capacity_history_point(

@@ -1,6 +1,6 @@
 """Exact compatibility matching behind CloudLab autoscaling pressure."""
 
-from cloud_agent.execution_profiles import KATA_RUNTIME
+from cloud_agent.domain.execution_profiles import KATA_RUNTIME
 from cloud_agent.storage.repositories.host_pool import _maximum_compatible_jobs
 
 

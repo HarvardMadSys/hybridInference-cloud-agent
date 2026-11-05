@@ -7,7 +7,7 @@ import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent.application.send_now import recover_handoffs
-from cloud_agent.host_pool import HEARTBEAT_INTERVAL_S, MISSED_HEARTBEATS_BEFORE_OFFLINE
+from cloud_agent.domain.host_pool import HEARTBEAT_INTERVAL_S, MISSED_HEARTBEATS_BEFORE_OFFLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import integer_setting
 from cloud_agent.workers.terminal_replay import (

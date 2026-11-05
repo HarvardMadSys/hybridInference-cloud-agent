@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent import host_pool
+from cloud_agent.domain import host_pool
 from cloud_agent.schemas import HostHeartbeatRequest
 from cloud_agent_host import enrollment, host_capabilities, host_service
 from cloud_agent_shared.shared_protocol import HOST_LAUNCH_ERROR_MAX_CHARS

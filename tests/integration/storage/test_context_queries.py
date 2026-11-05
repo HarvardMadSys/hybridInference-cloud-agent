@@ -29,8 +29,8 @@ from cloud_agent.api import context as context_api, owner_usage as owner_usage_a
 from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.context.context_insights import ContextInsightsCursor, context_cursor_scope
 from cloud_agent.context.context_profile import CONTEXT_PROFILE_VERSION
+from cloud_agent.domain.thread_stats import ATTEMPT_ROLLUP_VERSION
 from cloud_agent.storage.assembly import Storage
-from cloud_agent.thread_stats import ATTEMPT_ROLLUP_VERSION
 from cloud_agent.usage.admin_usage import MAX_USAGE_RUNS
 from cloud_agent.usage.usage_batches import owner_usage
 from cloud_agent_shared.text_tokens import estimate_text_tokens

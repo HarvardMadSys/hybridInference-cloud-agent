@@ -14,7 +14,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.domain.sandbox_deletion import (
     DELETION_RETRY_MAX_ATTEMPTS,
@@ -30,6 +29,7 @@ from cloud_agent.domain.sandbox_group import (
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.sandbox import DeletionFailureDecision, TerminalControlRoute
+from cloud_agent.schemas.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.fences import (
     LockMode,

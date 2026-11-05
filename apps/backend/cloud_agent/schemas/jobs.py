@@ -10,11 +10,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from cloud_agent.attachments.models import (
     AttachmentRef,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent.domain.execution_profiles import ExecutionProfile
 from cloud_agent.domain.goals import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
     GoalReportOutcome,
     GoalReportParse,
 )
-from cloud_agent.execution_profiles import ExecutionProfile
+from cloud_agent.domain.source_control import REPO_PATTERN, is_ref_name
 from cloud_agent.goals.models import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
     GoalRoundKind,
     GoalView,
@@ -34,8 +35,6 @@ from cloud_agent.schemas.resources import (  # noqa: TC001 — Pydantic resolves
 from cloud_agent.skills.models import (
     SelectedSkill,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.source_control.entitlement import REPO_PATTERN
-from cloud_agent.source_control.github_app import is_ref_name
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 
 # Where a job's `base_ref` lives once it is persisted. The column stores the

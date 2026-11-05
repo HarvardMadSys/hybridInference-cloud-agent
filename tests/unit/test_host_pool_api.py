@@ -32,7 +32,7 @@ from tests.support.storage import AllCapabilities
 
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_storage, verify_admin_access
-from cloud_agent.host_pool import (
+from cloud_agent.domain.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
     HOST_ENROLLING,
