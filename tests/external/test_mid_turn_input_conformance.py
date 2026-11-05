@@ -41,13 +41,8 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from tests.support.claude_cli import sse
 
-from cloud_agent_host.drivers import (
-    InputOutcome,
-    LaunchContext,
-    PendingInput,
-    TurnInput,
-    get_driver,
-)
+from cloud_agent_host.drivers import InputOutcome, LaunchContext, PendingInput, TurnInput
+from cloud_agent_host.runtimes.live import get_driver
 from cloud_agent_host.sandbox import _PopenProcess
 from cloud_agent_shared.shared_protocol import USER_MESSAGE_EVENT
 

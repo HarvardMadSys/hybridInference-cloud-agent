@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from .base import EMPTY_RUNTIME_MCP_CONFIG, AgentRuntime, RuntimeCapabilities, RuntimeMCPConfig
+from ..base import EMPTY_RUNTIME_MCP_CONFIG, AgentRuntime, RuntimeCapabilities, RuntimeMCPConfig
 
 if TYPE_CHECKING:
     from cloud_agent_shared.runtime_catalog import RuntimeDefinition
@@ -17,7 +17,7 @@ class HttpBridgeRuntime(AgentRuntime):
     names. The image's ``<name>-freeinference`` wrapper writes the CLI's
     provider config from ``<NAME>_*`` variables, and the bridge runs the CLI's
     ``serve`` and speaks its HTTP API for the session, so the argv names only
-    the bridge and the CLI. Sessions are read by ``drivers.HttpAgentLiveSession``.
+    the bridge and the CLI. Sessions are read by ``session.HttpAgentLiveSession``.
     """
 
     #: The runtime's entry in the shared catalog: its name, MCP support and efforts.

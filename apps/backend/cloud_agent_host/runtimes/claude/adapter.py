@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent_shared.model_connections import anthropic_base_url
 from cloud_agent_shared.runtime_catalog import CLAUDE_CODE
 
-from .base import (
+from ..base import (
     COMPAT_ORIGIN,
     EMPTY_RUNTIME_MCP_CONFIG,
     MCP_TOKEN_ENV,
@@ -23,7 +23,7 @@ from .base import (
     compat_cli_credential,
     compat_launch,
 )
-from .events import (
+from ..events import (
     ERROR,
     LIFECYCLE,
     MESSAGE,
@@ -38,7 +38,7 @@ from .events import (
     reported_compaction,
     reported_context_windows,
 )
-from .preview import ReplyPreview
+from ..preview import ReplyPreview
 
 if TYPE_CHECKING:
     from collections.abc import Callable

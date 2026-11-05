@@ -53,7 +53,7 @@ from cloud_agent_host.runtimes import (
     ResponsesViaChatUrl,
 )
 from cloud_agent_host.runtimes.base import COMPAT_LAUNCHER
-from cloud_agent_host.runtimes.codex import NATIVE_LAUNCHER
+from cloud_agent_host.runtimes.codex.adapter import NATIVE_LAUNCHER
 from cloud_agent_shared.protocol_compat import ENV_TOKEN
 
 pytestmark = pytest.mark.external

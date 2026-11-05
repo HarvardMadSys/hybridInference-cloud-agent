@@ -168,7 +168,7 @@ guaranteeing that a model never makes another incorrect claim.
 
 Implementation and checks:
 [`runner.py`](../../apps/backend/cloud_agent_host/runner.py),
-[`drivers.py`](../../apps/backend/cloud_agent_host/drivers.py),
+[`runtimes/claude/session.py`](../../apps/backend/cloud_agent_host/runtimes/claude/session.py),
 [`shared_session_supervisor.py`](../../apps/backend/cloud_agent_host/shared_session_supervisor.py),
 [`shared_protocol.py`](../../apps/backend/cloud_agent_shared/shared_protocol.py),
 [`check_model_context.py`](../../deploy/preflight/check_model_context.py) and

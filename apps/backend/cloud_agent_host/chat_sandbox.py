@@ -171,7 +171,7 @@ ARCHIVE_EXPORT_TIMEOUT_PER_GIB_S = ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S
 CHAT_STATE_DIR = "/agent-state"
 CLAUDE_SHARED_PROJECTS_DIR = f"{CHAT_STATE_DIR}/claude/projects"
 #: Where Codex, OpenCode and Kilo keep one mode-0700 provider home per member
-#: (``resident_transport.PRIVATE_MEMBER_STATE_ROOTS``). Only a home's own
+#: (``member_homes.PRIVATE_MEMBER_STATE_ROOTS``). Only a home's own
 #: member UID can open it, and no member can rename or replace one: each
 #: collection is owned by the sandbox user and sticky, inside a sticky
 #: /agent-state (see :meth:`ChatSandboxManager.ensure_private_member_collections`).
@@ -1547,7 +1547,7 @@ class ChatSandboxManager:
 
     def ensure_codex_mcp_policy(self, spec: ChatSandboxSpec, base_url: str) -> None:
         """Allow only this deployment's relay before starting a Codex member."""
-        from cloud_agent_host.codex_mcp import install_policy_argv, relay_endpoint
+        from cloud_agent_host.runtimes.codex.mcp import install_policy_argv, relay_endpoint
 
         endpoint = relay_endpoint(base_url)
         result = self.exec_capture(
@@ -1563,7 +1563,7 @@ class ChatSandboxManager:
 
     def ensure_kilo_mcp_runtime(self, spec: ChatSandboxSpec, version: str) -> None:
         """Bring retained Kilo members onto the deployment's isolated runtime."""
-        from cloud_agent_host.kilo_mcp import ensure_kilo_runtime_once
+        from cloud_agent_host.runtimes.http_bridge.kilo_mcp import ensure_kilo_runtime_once
 
         ensure_kilo_runtime_once(self, spec, version)
 

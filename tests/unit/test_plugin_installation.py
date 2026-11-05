@@ -28,6 +28,7 @@ from cloud_agent_host.plugins import install_claude_plugins, run_plugin_command
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.runner import ClaimedJob
+from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
 
 if TYPE_CHECKING:
@@ -269,9 +270,7 @@ def test_installation_precedes_the_first_private_claude_launch(monkeypatch, fail
     manager.backend.base_env.return_value = {"HOME": "/home/agent", "PATH": "/usr/bin"}
     manager.reap_member_processes.side_effect = lambda *_args, **_kwargs: events.append("reap")
     factory = ResidentTransportFactory(manager)
-    monkeypatch.setattr(
-        factory, "_prepare_claude_member_state", lambda *_a: events.append("prepare")
-    )
+    monkeypatch.setattr(claude_member, "prepare_member_state", lambda *_a: events.append("prepare"))
 
     def install(_manager, _spec, plugins, *, env, config_dir, slot_id):
         events.append("install")

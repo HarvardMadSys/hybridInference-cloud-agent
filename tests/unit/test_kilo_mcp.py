@@ -8,8 +8,12 @@ from typing import Any
 import pytest
 
 from cloud_agent_host import tree_copy
-from cloud_agent_host.kilo_mcp import KILO_MCP_PATCH_SHA256, KILO_MCP_VERSION, ensure_kilo_runtime
 from cloud_agent_host.runtime_images import SOURCE_LABEL, WORK_LABEL
+from cloud_agent_host.runtimes.http_bridge.kilo_mcp import (
+    KILO_MCP_PATCH_SHA256,
+    KILO_MCP_VERSION,
+    ensure_kilo_runtime,
+)
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_RUNTIME_PINS
 

@@ -21,7 +21,7 @@ from cloud_agent_host import mcp_helpers, runtime_install
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 from cloud_agent_host.chat_sandbox_inspect import container_inspection
 from cloud_agent_host.install_locks import install_lock
-from cloud_agent_host.kilo_mcp import KILO_MCP_PATCH_SHA256, KILO_MCP_VERSION
+from cloud_agent_host.runtimes.http_bridge.kilo_mcp import KILO_MCP_PATCH_SHA256, KILO_MCP_VERSION
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 
 _MARKER = f"/opt/runtimes/claude-code/2.1.300/{runtime_install.MARKER}"

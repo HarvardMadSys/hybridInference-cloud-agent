@@ -40,6 +40,7 @@ from cloud_agent_host.member_preparation import (
     MemberStep,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
+from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.sandbox_browser import LAUNCHER
 from cloud_agent_host.sandbox_mcp import GATEWAY
@@ -662,7 +663,7 @@ def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
     )
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     monkeypatch.setattr(
-        factory, "_prepare_claude_member_state", lambda *_args: events.append("prepare")
+        claude_member, "prepare_member_state", lambda *_args: events.append("prepare")
     )
 
     def launch_live(context):

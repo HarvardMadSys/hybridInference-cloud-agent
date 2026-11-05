@@ -63,7 +63,7 @@ with os.fdopen(lock_fd, 'r+') as lock:
         if runtime == 'pi':
             install_env['npm_config_prefix'] = str(root)
             install_env['PI_CODING_AGENT_DIR'] = str(root / 'pi-config')
-            # No shared compile caches in /tmp, as for pi itself (runtimes/pi.py).
+            # No shared compile caches in /tmp, as for pi itself (runtimes/pi/adapter.py).
             install_env['JITI_FS_CACHE'] = 'false'
             install_env['NODE_DISABLE_COMPILE_CACHE'] = '1'
             subprocess.run(['pi', 'install', 'npm:' + spec], env=install_env,

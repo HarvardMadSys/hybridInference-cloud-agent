@@ -6,8 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.drivers import CLAUDE_TOOL_MARKS, LaunchContext, TurnResult, get_driver
+from cloud_agent_host.drivers import LaunchContext, TurnResult
 from cloud_agent_host.runtimes import registered_runtimes
+from cloud_agent_host.runtimes.claude.session import CLAUDE_TOOL_MARKS
+from cloud_agent_host.runtimes.live import get_driver
 from cloud_agent_host.tool_windows import hook_settings
 
 

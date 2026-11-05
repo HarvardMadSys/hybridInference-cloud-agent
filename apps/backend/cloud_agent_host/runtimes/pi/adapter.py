@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.runtime_catalog import PI
 
-from .base import (
+from ..base import (
     EMPTY_RUNTIME_MCP_CONFIG,
     AgentRuntime,
     RuntimeCapabilities,
     RuntimeMCPConfig,
     merged_mcp_server,
 )
-from .events import (
+from ..events import (
     ERROR,
     LIFECYCLE,
     MESSAGE,
@@ -28,7 +28,7 @@ from .events import (
     _truncate,
     reported_compaction,
 )
-from .preview import ReplyPreview
+from ..preview import ReplyPreview
 
 if TYPE_CHECKING:
     from collections.abc import Callable
