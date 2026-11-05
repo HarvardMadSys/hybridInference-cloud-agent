@@ -72,7 +72,7 @@ relative to `apps/backend/`.
 | Job or conversation HTTP behavior | `cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. `api/routes.py` mounts every agent surface listed in `SURFACE_ROUTERS`. |
 | Request or response validation | The owning module in `cloud_agent/schemas/`; public imports use `cloud_agent.schemas`. |
 | A new caller of task creation | `cloud_agent/application/job_admission.py`; `api/jobs.py` is an existing caller. |
-| Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host handling is in `cloud_agent_host/sandbox_manager.py`. |
+| Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host handling is in `cloud_agent_host/manager_api/workspaces.py` and `terminals.py`, which `sandbox_manager.py` assembles into the app. |
 | A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `apps/backend/migrations/versions/` for schema changes. |
 | Compute-resource lifecycle | `cloud_agent/application/compute_resources.py`, `compute_reconcile.py`, `workers/compute_resources.py`, and `providers/compute/`. |
 | Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `runner.py`. |

@@ -15,6 +15,15 @@ from cloud_agent_host.bounded_output import (
     MAX_PROTOCOL_LINE_BYTES,
     protocol_lines,
 )
+from cloud_agent_host.manager_api.models import (
+    EnvironmentSnapshotCaptureRequest,
+    SharedAbandonRequest,
+    SharedIdleStopRequest,
+    SharedLeaseRequest,
+    SharedResidencyLostRequest,
+    SharedSettleRequest,
+    SharedTurnRequest,
+)
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     ENVIRONMENT_INFERENCE_CAPABILITY,
@@ -25,6 +34,8 @@ from cloud_agent_shared.environment import (
 if TYPE_CHECKING:
     import builtins
     from collections.abc import Iterator
+
+    from pydantic import BaseModel
 
     from cloud_agent_host.chat_sandbox import ChatSandboxSpec
     from cloud_agent_host.resident_transport import ResidentLaunch
@@ -117,6 +128,16 @@ def _error_detail(response: httpx.Response, refused: str) -> str:
     reason = f"{refused}: HTTP {response.status_code} {response.reason_phrase}".rstrip()
     problems = _validation_problems(detail)
     return f"{reason} ({problems})" if problems else reason
+
+
+def _body(model: BaseModel, *, exclude: set[str] | None = None) -> dict[str, Any]:
+    """The JSON body ``model`` describes, built from the model the route validates.
+
+    Built with ``model_construct``, so nothing is validated here: the sandbox
+    manager validates the body against this same model and answers a bad one
+    with 422, which the caller handles like any other refusal.
+    """
+    return model.model_dump(mode="json", exclude=exclude)
 
 
 def _group_identity(
@@ -437,14 +458,16 @@ class SessionSupervisorClient:
         """Have the sandbox manager commit and upload a stopped environment run's container."""
         return self._manager_post(
             "/environment-snapshots/capture",
-            {
-                "run_id": run_id,
-                "lease_generation": lease_generation,
-                "container_id": container_id,
-                "sandbox_image_digest": sandbox_image_digest,
-                "owner": owner,
-                "snapshot_id": snapshot_id,
-            },
+            _body(
+                EnvironmentSnapshotCaptureRequest.model_construct(
+                    run_id=run_id,
+                    lease_generation=lease_generation,
+                    container_id=container_id,
+                    sandbox_image_digest=sandbox_image_digest,
+                    owner=owner,
+                    snapshot_id=snapshot_id,
+                )
+            ),
             # Commit, export and upload of a large installation take a while.
             timeout=1800,
         )
@@ -579,12 +602,14 @@ class SessionSupervisorClient:
             request = self._client.build_request(
                 "POST",
                 f"{self._base_url}{path}",
-                json={
-                    "token": token,
-                    "prompt": prompt,
-                    "model": model,
-                    "reasoning_effort": reasoning_effort,
-                },
+                json=_body(
+                    SharedTurnRequest.model_construct(
+                        token=token,
+                        prompt=prompt,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                    )
+                ),
                 timeout=stream_timeout,
             )
             response = self._client.send(request, stream=True)
@@ -600,7 +625,12 @@ class SessionSupervisorClient:
 
     def interrupt_shared(self, thread_id: str, *, token: str) -> None:
         """Interrupt one exact member turn."""
-        self._shared_request("POST", thread_id, "interrupt", payload={"token": token})
+        self._shared_request(
+            "POST",
+            thread_id,
+            "interrupt",
+            payload=_body(SharedLeaseRequest.model_construct(token=token)),
+        )
 
     def shared_residency_lost(self, thread_id: str, *, generation: int) -> dict[str, Any]:
         """Close the exact member process whose renewable grant was rejected."""
@@ -608,7 +638,7 @@ class SessionSupervisorClient:
             "POST",
             thread_id,
             "residency-lost",
-            payload={"generation": generation},
+            payload=_body(SharedResidencyLostRequest.model_construct(generation=generation)),
         )
 
     def settle_shared(
@@ -625,11 +655,11 @@ class SessionSupervisorClient:
             thread_id,
             "settle",
             timeout=10.0,
-            payload={
-                "token": token,
-                "job_id": job_id,
-                "context_status": context_status,
-            },
+            payload=_body(
+                SharedSettleRequest.model_construct(
+                    token=token, job_id=job_id, context_status=context_status
+                )
+            ),
         )
 
     def abandon_shared(self, thread_id: str, *, token: str, lost: bool) -> dict[str, Any]:
@@ -638,7 +668,7 @@ class SessionSupervisorClient:
             "POST",
             thread_id,
             "abandon",
-            payload={"token": token, "lost": lost},
+            payload=_body(SharedAbandonRequest.model_construct(token=token, lost=lost)),
         )
 
     def stop_shared_idle(
@@ -659,18 +689,20 @@ class SessionSupervisorClient:
             # exports bounded final roots and completes bounded S3 retries
             # before this call can report success.
             timeout=1800.0,
-            payload={
-                "generation": generation,
-                "activation_generation": activation_generation,
-                "reason": reason,
-                **(
-                    {}
-                    if member_activation_generations is None
-                    else {
-                        "member_activation_generations": member_activation_generations,
-                    }
+            payload=_body(
+                SharedIdleStopRequest.model_construct(
+                    generation=generation,
+                    activation_generation=activation_generation,
+                    reason=reason,
+                    member_activation_generations=member_activation_generations,
                 ),
-            },
+                # Omitted, not null, when the stop names no member fence.
+                exclude=(
+                    {"member_activation_generations"}
+                    if member_activation_generations is None
+                    else None
+                ),
+            ),
         )
 
 

@@ -5,82 +5,57 @@ job id. This service is deliberately separate from it: it can reach the host
 Docker daemon, while the public-facing control plane cannot. Commands, Git
 inspection, terminals, and Agent CLI transports all execute inside the exact
 retained chat container; no host workspace is mounted into either service.
+
+This module assembles the app: it builds the dependencies, owns their startup
+and shutdown, and includes the routers of :mod:`cloud_agent_host.manager_api`.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
-import base64
-import binascii
-import contextlib
-import functools
-import json
 import os
-import queue
-import re
-import secrets
-import tempfile
-import threading
-import time
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.concurrency import iterate_in_threadpool
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi import FastAPI
 
 from cloud_agent_host import sandbox_manager_profiling_policy
-from cloud_agent_host.bounded_output import OutputPump
-from cloud_agent_host.chat_sandbox import (
-    CHAT_WORKDIR,
-    ArchiveExportTooLarge,
-    ChatSandboxManager,
-    ChatSandboxSpec,
-    RetainedChatBackend,
-    RetainedChatLost,
-    SandboxRestoreFailed,
-)
-from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
-from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.environment_tests import environment_run_spec
+from cloud_agent_host.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.group_archive_policy import (
     ControllerArchivePolicy,
     GroupArchivePolicy,
     NullArchivePolicy,
     ServiceArchivePolicy,
 )
-from cloud_agent_host.guest_observer import (
-    GuestObservation,
-    add_process_counts,
-    add_process_resources,
-    attribute_processes,
-)
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
-from cloud_agent_host.operation_call import SandboxManagerCall, closed, open_call
-from cloud_agent_host.resources import shared_member_resource_rollup
-from cloud_agent_host.retained_workspace import (
-    RetainedWorkspaceError,
-    read_retained_file,
-    write_retained_file,
+from cloud_agent_host.manager_api.archives import ArchiveRoutes
+from cloud_agent_host.manager_api.calls import _CommandSlots, _EndpointLifecycleCalls
+from cloud_agent_host.manager_api.context import (
+    ManagerContext,
+    ManagerSettings,
+    SupervisorStart,
+    authenticator,
 )
-from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
-from cloud_agent_host.sandbox import (
-    ContainerBackend,
-    SandboxBackend,
-    SandboxError,
-    SandboxProcess,
-    SandboxSpec,
-    TerminalNotSupportedError,
-    build_backend_from_env,
+from cloud_agent_host.manager_api.errors import install_error_handlers
+from cloud_agent_host.manager_api.routing import bind
+from cloud_agent_host.manager_api.settings import SettingsRoutes
+from cloud_agent_host.manager_api.shared_sessions import SharedSessionRoutes
+from cloud_agent_host.manager_api.snapshots import SnapshotRoutes
+from cloud_agent_host.manager_api.terminal_manager import (
+    DEFAULT_MAX_TERMINAL_SESSIONS,
+    DEFAULT_TERMINAL_HARD_TTL_S,
+    DEFAULT_TERMINAL_IDLE_TTL_S,
+    _TerminalManager,
 )
+from cloud_agent_host.manager_api.terminals import TerminalRoutes
+from cloud_agent_host.manager_api.turns import TurnRoutes
+from cloud_agent_host.manager_api.workspaces import WorkspaceRoutes
+from cloud_agent_host.sandbox import ContainerBackend, build_backend_from_env
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
 from cloud_agent_host.sandbox_archives import safe_archive_error_type
 from cloud_agent_host.sandbox_checkpoints import (
     DEFAULT_CONTAINERD_CONTENT_DIR,
@@ -89,81 +64,35 @@ from cloud_agent_host.sandbox_checkpoints import (
 )
 from cloud_agent_host.sandbox_deletion_backup import (
     DEFAULT_ARCHIVE_STATE_DIR,
-    MAX_ARCHIVE_BYTES,
-    ArchiveIdentity,
     SandboxDeletionBackupService,
 )
 from cloud_agent_host.sandbox_initial_uploads import INITIAL_UPLOAD_DIRNAME
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
-from cloud_agent_host.session_lifecycle import (
-    DEFAULT_CHAT_IDLE_TIMEOUT_S,
-    SessionBusy,
-    SessionLeaseLost,
-)
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-    SharedSessionDescriptor,
-    SharedTurnBoundaryError,
-    SharedTurnTelemetry,
-    archive_failure_http_detail,
-)
-from cloud_agent_host.terminal_session import _TerminalEvent, _TerminalLimits, _TerminalSession
-from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
-from cloud_agent_host.workspace_download import write_workspace_download
-from cloud_agent_host.workspace_git import (
-    COMMIT_SHA as _COMMIT_SHA,
-    run_git as _workspace_git,
-    run_git_metadata as _workspace_git_metadata,
-)
+from cloud_agent_host.session_lifecycle import DEFAULT_CHAT_IDLE_TIMEOUT_S
+from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.terminal_session import _TerminalLimits
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     SANDBOX_MANAGER_SETTING_KEYS,
-    admin_values,
+    HostSetting,
     default_values,
-    resolve,
 )
-from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
-from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 from cloud_agent_shared.sandbox_manager_compat import manager_env
-from cloud_agent_shared.sandbox_manager_wire import (
-    SharedGroupIdentity,
-    SharedMember,
-    member_manifest,
-)
-from cloud_agent_shared.sandbox_restore import (
-    START_FENCE_HEADER,
-    CheckpointRestore,
-    parse_start_fence,
-)
-from cloud_agent_shared.workspace_browser import (
-    WorkspacePathError,
-    normalize_workspace_path,
-)
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+    from contextlib import AbstractAsyncContextManager
+
+    from cloud_agent_host.sandbox import SandboxBackend
+    from cloud_agent_host.sandbox_archives import SandboxArchiveService
 
 logger = get_logger(__name__)
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
-
-    from starlette.types import Receive, Scope, Send
-
-    from cloud_agent_host.resident_transport import ResidentTurn
-    from cloud_agent_host.sandbox_archives import SandboxArchiveService
-
 _DEFAULT_SETTINGS = default_values(SANDBOX_MANAGER_SETTING_KEYS)
-# Protocol validation keeps these upper bounds even when the runtime admin
-# value is lower. The shared registry is the single source for defaults.
-MAX_FILE_WRITE_BYTES = _DEFAULT_SETTINGS["workspace_file_write_max_mib"] * 1024 * 1024
-MAX_COMMAND_OUTPUT_BYTES = _DEFAULT_SETTINGS["workspace_command_output_max_mib"] * 1024 * 1024
-MAX_DIRECTORY_ENTRIES = _DEFAULT_SETTINGS["workspace_directory_max_entries"]
-DEFAULT_COMMAND_TIMEOUT_S = float(_DEFAULT_SETTINGS["workspace_command_timeout_s"])
-MAX_TERMINAL_SESSIONS_PER_WORKSPACE = _DEFAULT_SETTINGS["terminal_max_sessions_per_workspace"]
-DEFAULT_MAX_TERMINAL_SESSIONS = _DEFAULT_SETTINGS["terminal_max_sessions"]
-MAX_TERMINAL_INPUT_BYTES = _DEFAULT_SETTINGS["terminal_input_max_kib"] * 1024
-DEFAULT_TERMINAL_IDLE_TTL_S = float(_DEFAULT_SETTINGS["terminal_idle_ttl_s"])
-DEFAULT_TERMINAL_HARD_TTL_S = float(_DEFAULT_SETTINGS["terminal_hard_ttl_s"])
-TERMINAL_STREAM_WAIT_S = 15.0
+#: The settings whose local values come from create_app's own arguments.
+_ARGUMENT_SETTINGS = frozenset(
+    {"terminal_idle_ttl_s", "terminal_hard_ttl_s", "terminal_max_sessions", "chat_idle_timeout_s"}
+)
 #: Owner commands and Git inspection run on a pool of their own, at most this
 #: many at once on one sandbox manager and this many for one workspace. One
 #: past either limit is refused at once: queued, it would outlast its caller's
@@ -173,1201 +102,207 @@ MAX_WORKSPACE_COMMANDS = 16
 MAX_WORKSPACE_COMMANDS_PER_WORKSPACE = 4
 
 
-class _EndpointLifecycleCalls:
-    """Track executor work through request cancellation and sandbox manager shutdown."""
-
-    def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-        self._accepting = True
-        self._calls: set[asyncio.Future[Any]] = set()
-
-    async def run(
-        self,
-        function: Callable[..., Any],
-        /,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        """Admit one executor call, retaining ownership until it really exits."""
-        return await self.run_on(None, function, *args, **kwargs)
-
-    async def run_on(
-        self,
-        executor: Executor | None,
-        function: Callable[..., Any],
-        /,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        """Admit one call to ``executor``, or the loop's default one for ``None``."""
-        loop = asyncio.get_running_loop()
-        async with self._lock:
-            if not self._accepting:
-                raise HTTPException(status_code=503, detail="sandbox manager is shutting down")
-            future = loop.run_in_executor(executor, functools.partial(function, *args, **kwargs))
-            self._calls.add(future)
-            future.add_done_callback(self._call_finished)
-        # Cancellation of an ASGI request must not detach an already-running
-        # lifecycle call from sandbox manager shutdown ownership.
-        return await asyncio.shield(future)
-
-    def _call_finished(self, future: asyncio.Future[Any]) -> None:
-        loop = future.get_loop()
-        if not loop.is_closed():
-            loop.create_task(self._discard(future))
-
-    async def _discard(self, future: asyncio.Future[Any]) -> None:
-        async with self._lock:
-            self._calls.discard(future)
-
-    async def seal_and_wait(self) -> None:
-        """Reject new executor calls and wait for every admitted call to exit."""
-        async with self._lock:
-            self._accepting = False
-            calls = tuple(self._calls)
-        if calls:
-            await asyncio.gather(
-                *(asyncio.shield(call) for call in calls),
-                return_exceptions=True,
-            )
-        async with self._lock:
-            self._calls.difference_update(calls)
-
-
-class _EndingStreamingResponse(StreamingResponse):
-    """A streaming response that runs ``on_end`` however the response ends.
-
-    Starlette stops pulling a body when its client goes away, a send fails or
-    its task is cancelled, but never closes it. A generator left suspended
-    runs its own cleanup only when a garbage collector reaches it, which a
-    reference cycle can put off indefinitely.
-    """
-
-    def __init__(
-        self,
-        content: AsyncIterator[str],
-        *,
-        on_end: Callable[[], Awaitable[None]],
-        media_type: str,
-        headers: dict[str, str],
-    ) -> None:
-        super().__init__(content, media_type=media_type, headers=headers)
-        self._on_end = on_end
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            await self._on_end()
-
-
-class _CommandSlots:
-    """Admit owner commands without waiting, per workspace and per sandbox manager."""
-
-    def __init__(self, *, total: int, per_workspace: int) -> None:
-        self._lock = threading.Lock()
-        self._total = total
-        self._per_workspace = per_workspace
-        self._running: dict[str, int] = {}
-
-    def take(self, workspace_id: str) -> Callable[[], None]:
-        """Take a slot or refuse with 429; return what gives it back, once."""
-        with self._lock:
-            held = self._running.get(workspace_id, 0)
-            if held >= self._per_workspace or sum(self._running.values()) >= self._total:
-                raise HTTPException(
-                    status_code=429,
-                    detail="too many workspace commands are running; retry when one finishes",
-                )
-            self._running[workspace_id] = held + 1
-        returned = False
-
-        def give_back() -> None:
-            nonlocal returned
-            with self._lock:
-                if returned:
-                    return
-                returned = True
-                remaining = self._running[workspace_id] - 1
-                if remaining:
-                    self._running[workspace_id] = remaining
-                else:
-                    del self._running[workspace_id]
-
-        return give_back
-
-
 def _chat_idle_timeout_from_env() -> float:
     """Read the one canonical chat-group inactivity clock."""
     raw = os.environ.get("AGENT_CHAT_IDLE_TIMEOUT_S")
     return float(raw) if raw else DEFAULT_CHAT_IDLE_TIMEOUT_S
 
 
-from cloud_agent_host.action_receipts import ActionReceipts
-from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.environment_process import tool_environment
-from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig, resident_launch
-from cloud_agent_host.ssh_access import apply_ssh_access
-from cloud_agent_shared.environment import (
-    ENVIRONMENT_CAPABILITY,
-    ENVIRONMENT_INFERENCE_CAPABILITY,
-    BoundEnvironment,
-)
-from cloud_agent_shared.environment_snapshots import (
-    ENVIRONMENT_SNAPSHOT_CAPABILITY,
-    EnvironmentSnapshotRef,
-)
-from cloud_agent_shared.ssh_access import SSH_ACCESS_CAPABILITY, SshAccess
-
-
-class SshAccessRequest(BaseModel):
-    """A group's whole SSH state, sent by the runner or the control plane."""
-
-    model_config = ConfigDict(extra="forbid")
-    access: SshAccess = Field(repr=False)
-    #: The workspace's own turn starts with this state, so its member's keys
-    #: are written. Only the runner, which masks exactly those keys, says so;
-    #: a push leaves it False and can only take access away.
-    starting: bool = False
-
-
-class EnvironmentPrepareRequest(BaseModel):
-    """Immutable binding supplied only by an authenticated control plane."""
-
-    model_config = ConfigDict(extra="forbid")
-    environment: BoundEnvironment = Field(repr=False)
-    activation_owner: str | None = Field(None, max_length=128)
-
-
-class FileWriteRequest(BaseModel):
-    """One bounded UTF-8 file replacement."""
-
-    content: str = Field(..., max_length=MAX_FILE_WRITE_BYTES)
-
-
-class TerminalCreateRequest(BaseModel):
-    """Dimensions and fixed environment for one interactive terminal."""
-
-    model_config = ConfigDict(extra="forbid")
-    environment: BoundEnvironment | None = Field(None, repr=False)
-    action_id: str | None = Field(None, max_length=80)
-    run_id: str | None = Field(None, max_length=80)
-
-    rows: int = Field(24, ge=2, le=200)
-    cols: int = Field(80, ge=20, le=500)
-
-
-class TerminalInputRequest(BaseModel):
-    """One bounded base64-encoded terminal input chunk."""
-
-    data: str = Field(..., min_length=1, max_length=88_000)
-
-
-class TerminalResizeRequest(BaseModel):
-    """A validated PTY window size."""
-
-    rows: int = Field(..., ge=2, le=200)
-    cols: int = Field(..., ge=20, le=500)
-
-
-class TerminalCoordinationRequest(BaseModel):
-    """The protected turn owning one suspension token.
-
-    Each turn holds a token of its own, so concurrent fork siblings in one
-    shared workspace never thaw each other's suspension.
-    """
-
-    job_id: str = Field(..., min_length=1, max_length=128)
-
-
-class SharedLeaseRequest(BaseModel):
-    """Receipt for one shared member activation mutation."""
-
-    token: str = Field(..., min_length=1, max_length=512)
-
-
-class SharedInputRequest(BaseModel):
-    """The control plane's message for one member's running turn.
-
-    ``owner`` names the activation the control plane saw running
-    (``attempt:<id>``); a member now leased to anyone else does not take it.
-    ``message_id`` names the waiting message, so the turn's stream can say
-    which one it took.
-    """
-
-    owner: str = Field(..., min_length=1, max_length=128)
-    message_id: str = Field(..., min_length=1, max_length=128)
-    text: str = Field(..., min_length=1, max_length=100_000)
-
-
-class SharedResidencyLostRequest(BaseModel):
-    """Control-plane rejection of one exact member residency generation."""
-
-    generation: int = Field(..., ge=1)
-
-
-class SharedQuestionAnswerRequest(BaseModel):
-    """A bounded native-question reply for one exact activation owner."""
-
-    owner: str = Field(..., min_length=1, max_length=128)
-    request_id: str = Field(..., min_length=1, max_length=128)
-    answers: dict[
-        Annotated[str, Field(min_length=1, max_length=128)],
-        Annotated[list[Annotated[str, Field(max_length=10_000)]], Field(max_length=20)],
-    ] = Field(default_factory=dict, max_length=10)
-    reject: bool = False
-
-
-class SharedAbandonRequest(SharedLeaseRequest):
-    """Release a failed local admission without claiming a settled context."""
-
-    lost: bool = False
-
-
-class SharedIdleStopRequest(BaseModel):
-    """Durable control-plane fence authorizing one shared-container stop."""
-
-    generation: int = Field(..., ge=1)
-    # A sandbox manager reconstructed before the first agent activation may observe a
-    # generation-zero container after a file/terminal wake. The durable stop
-    # fence must still be able to name that exact container.
-    activation_generation: int = Field(..., ge=0)
-    reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
-    member_activation_generations: (
-        dict[Annotated[str, Field(min_length=1, max_length=256)], Annotated[int, Field(ge=0)]]
-        | None
-    ) = Field(None, max_length=128)
-
-    @model_validator(mode="after")
-    def zero_activation_requires_group_stop_scope(self) -> SharedIdleStopRequest:
-        if self.activation_generation == 0 and (
-            self.reason not in {"orphaned_attempt", "lost"}
-            or self.member_activation_generations is None
-        ):
-            raise ValueError("generation zero requires a fenced group-level orphan/lost stop")
-        return self
-
-
-class SandboxArchivePrepareRequest(BaseModel):
-    """Exact stopped identity and immutable S3 object for one admin deletion."""
-
-    request_id: str = Field(..., min_length=1, max_length=128)
-    generation: int = Field(..., ge=1)
-    expected_container_id: str = Field(..., min_length=1, max_length=256)
-    archive_key: str = Field(..., min_length=1, max_length=1024)
-
-
-class SandboxArchiveDiscardRequest(BaseModel):
-    """Exact stopped identity for a deletion that does not upload an archive."""
-
-    request_id: str = Field(..., min_length=1, max_length=128)
-    generation: int = Field(..., ge=1)
-    # The durable identity that lets the sandbox manager prove an
-    # already-absent target.
-    sandbox_id: str = Field(..., min_length=1, max_length=256)
-    expected_container_id: str = Field(..., min_length=1, max_length=256)
-
-
-class SandboxArchiveCommitRequest(SandboxArchivePrepareRequest):
-    """Prepared receipt independently verified by the trusted control plane."""
-
-    sha256: str = Field(..., pattern="^[0-9a-f]{64}$")
-    size_bytes: int = Field(..., gt=0, le=MAX_ARCHIVE_BYTES)
-
-
-class SandboxArchiveUploadRequest(SandboxArchiveCommitRequest):
-    """Checksum-bound single-object upload with no S3 credential on the host."""
-
-    upload_url: str = Field(..., min_length=1, max_length=16384)
-    upload_headers: dict[
-        Annotated[str, Field(min_length=1, max_length=128)],
-        Annotated[str, Field(max_length=2048)],
-    ] = Field(..., min_length=4, max_length=4)
-
-
-class SharedSandboxRestoreRequest(CheckpointRestore):
-    """The control plane's record of a moved group's checkpoint."""
-
-
-class SharedSandboxIdentityRequest(SharedGroupIdentity):
-    """Immutable group identity plus its current member manifest."""
-
-    #: The checkpoint a moved group is recreated from, only while it is restoring.
-    restore: SharedSandboxRestoreRequest | None = None
-
-
-class SharedSandboxAcquireRequest(SharedSandboxIdentityRequest):
-    """Lease one member while preserving sibling concurrency."""
-
-    owner: str = Field(..., min_length=1, max_length=256)
-    activation_generation: int = Field(..., ge=1)
-    has_settled_context: bool = False
-    #: An installation snapshot a new group may start from; ignored for a
-    #: group that already has a container here.
-    environment_snapshot: EnvironmentSnapshotRef | None = None
-    #: The measurement selection the caller is profiling this path under.
-    #: Deliberately unvalidated: a sandbox manager sees one call at a time and cannot
-    #: know which attempt it belongs to, so the caller states the selection and
-    #: `operation_profiling.start_stage_recording` decides whether to honour
-    #: it. Typing or bounding this field would let a malformed *measurement*
-    #: setting reject a sandbox request with 422 before the supervisor ever saw
-    #: it, and measurement configuration must never fail the business call.
-    profiling: Any = None
-
-
-class EnvironmentSnapshotCaptureRequest(BaseModel):
-    """Save one stopped environment run's container as an installation snapshot."""
-
-    model_config = ConfigDict(extra="forbid")
-    run_id: str = Field(..., min_length=1, max_length=128)
-    lease_generation: int = Field(..., ge=1)
-    container_id: str = Field(..., min_length=1, max_length=256)
-    sandbox_image_digest: str | None = Field(None, max_length=512)
-    owner: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    snapshot_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
-
-
-class EnvironmentSnapshotDeletion(BaseModel):
-    """One snapshot the control plane retired: its object, if stored, and local image."""
-
-    model_config = ConfigDict(extra="forbid")
-    snapshot_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
-    owner: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    object_key: str | None = Field(None, max_length=1024)
-    version_id: str | None = Field(None, max_length=1024)
-
-
-class EnvironmentSnapshotDeleteRequest(BaseModel):
-    """Snapshots to delete from the bucket and from this host's images."""
-
-    model_config = ConfigDict(extra="forbid")
-    snapshots: list[EnvironmentSnapshotDeletion] = Field(..., max_length=100)
-
-
-class SharedResidentLaunchRequest(SharedLeaseRequest):
-    """Lease fence plus resident launch configuration."""
-
-    launch: SharedResidentLaunchConfig
-    #: See ``SharedSandboxAcquireRequest.profiling``. Deliberately unvalidated
-    #: here too, so a malformed selection cannot reject a resident request.
-    profiling: Any = None
-
-
-class SharedTurnRequest(SharedLeaseRequest):
-    """One prompt delivered to an already-owned resident process."""
-
-    prompt: str = Field(..., min_length=1, max_length=2_000_000)
-    model: str = Field(..., min_length=1, max_length=256)
-    reasoning_effort: str | None = Field(None, max_length=64)
-
-
-class SharedSettleRequest(SharedLeaseRequest):
-    """One member's successful native turn boundary."""
-
-    job_id: str = Field(..., min_length=1, max_length=256)
-    context_status: Literal["new", "live", "restored"]
-
-
-class SharedForkRequest(SharedSandboxIdentityRequest):
-    """Prompt-free fork-only request inside one shared sandbox."""
-
-    operation_id: str = Field(..., min_length=1, max_length=256)
-    source_native_session_id: str = Field(..., min_length=1, max_length=512)
-    source_native_turn_no: int = Field(..., ge=1, le=100_000)
-    target_thread_id: str = Field(..., min_length=1, max_length=256)
-    target_slot_id: int = Field(..., ge=0, le=127)
-    source_launch: SharedResidentLaunchConfig
-    target_launch: SharedResidentLaunchConfig
-
-
-class SharedInitialArchiveRequest(SharedSandboxIdentityRequest):
-    """Exact fresh activation whose prepared workspace becomes the baseline."""
-
-    expected_container_id: str = Field(..., min_length=1, max_length=256)
-    token: str = Field(..., min_length=1, max_length=512)
-    preparation_id: str = Field(..., min_length=1, max_length=256)
-    base_sha: str = Field(..., min_length=7, max_length=64)
-    #: Return once the bundle is durable on this host (``upload: pending``) and
-    #: upload it after. An older runner omits it and waits for the upload.
-    defer_upload: bool = False
-
-
-class SharedInitialArchiveStatusRequest(SharedSandboxIdentityRequest):
-    """Exact fresh activation checking for a crash-committed baseline."""
-
-    expected_container_id: str = Field(..., min_length=1, max_length=256)
-    token: str = Field(..., min_length=1, max_length=512)
-    preparation_id: str = Field(..., min_length=1, max_length=256)
-
-
-def build_turn_resources(
-    value: Any,
-    tool_windows: ToolWindowTracker,
+def _accepted_local_value(definition: HostSetting, raw: str | None) -> int | None:
+    """A legacy environment value ``definition`` accepts, or None to keep the default."""
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if definition.accepts(value) else None
+
+
+def _archive_parts(
+    retained_manager: ChatSandboxManager | None,
+    archive_service: SandboxArchiveService | None,
+    archive_controller: SandboxArchiveController | None,
+) -> tuple[SandboxArchiveController | None, SandboxCheckpointStore | None]:
+    """The archive controller this app uses, and the checkpoint store it built for it."""
+    if archive_service is not None and archive_controller is not None:
+        raise ValueError("sandbox archive service and controller are mutually exclusive")
+    if archive_service is not None or archive_controller is not None or retained_manager is None:
+        return archive_controller, None
+    # Checkpoint receipts and their temporary exports share the durable,
+    # Sandbox Manager-only archive state directory; no sandbox mounts it.
+    state_dir = Path(os.environ.get("AGENT_SANDBOX_ARCHIVE_STATE_DIR") or DEFAULT_ARCHIVE_STATE_DIR)
+    checkpoint_store = SandboxCheckpointStore(state_dir / "checkpoints")
+    checkpoint_capture = SandboxCheckpointCapture(
+        docker_binary=retained_manager.backend.docker_binary,
+        spool_dir=state_dir / "checkpoint-spool",
+        store=checkpoint_store,
+        # A read-only mount of containerd's content store lets a
+        # checkpoint copy only its new layer; without it, the capture
+        # streams the whole image through `docker image save`.
+        content_dir=Path(
+            os.environ.get("AGENT_CONTAINERD_CONTENT_DIR") or DEFAULT_CONTAINERD_CONTENT_DIR
+        ),
+    )
+    controller = SandboxArchiveController(
+        retained_manager,
+        namespace=retained_manager.backend.sandbox_namespace,
+        checkpoint_capture=checkpoint_capture,
+        initial_upload_dir=state_dir / INITIAL_UPLOAD_DIRNAME,
+    )
+    return controller, checkpoint_store
+
+
+def _shared_supervisor(
+    injected: SharedChatSessionSupervisor | None,
+    retained_manager: ChatSandboxManager | None,
     *,
-    thread_id: str | None = None,
-) -> dict[str, Any]:
-    """The resource object one finished shared turn reports.
-
-    Named and module-level so the frame a turn actually emits can be built by a
-    test. The contract between this producer and the runner that reads it lived
-    in two closures either side of an HTTP hop, and a hand-written frame in the
-    runner's test hid a nesting change that made every real turn report
-    nothing.
-    """
-    telemetry = (
-        value
-        if isinstance(value, SharedTurnTelemetry)
-        else SharedTurnTelemetry(
-            observation=(
-                value
-                if isinstance(value, GuestObservation)
-                else GuestObservation.unavailable("shared turn returned no process telemetry")
-            )
+    idle_timeout_s: float,
+    archive_service: SandboxArchiveService | None,
+    archive_controller: SandboxArchiveController | None,
+) -> SharedChatSessionSupervisor:
+    """The supervisor this app serves, holding the app's archive policy."""
+    archive_policy: GroupArchivePolicy = (
+        ControllerArchivePolicy(archive_controller)
+        if archive_controller is not None
+        else ServiceArchivePolicy(archive_service)
+        if archive_service is not None
+        else NullArchivePolicy()
+    )
+    if injected is None:
+        if retained_manager is None:
+            raise ValueError("shared-live chat sandboxes require the container or kata backend")
+        return SharedChatSessionSupervisor(
+            retained_manager,
+            idle_timeout_s=idle_timeout_s,
+            archive_policy=archive_policy,
         )
-    )
-    marks = tool_windows.apply_marks(telemetry.tool_marks)
-    # One line per turn: every call's pairing, lag and reason, so mark
-    # adoption can be checked from the sandbox manager log without a database read.
-    logger.info("tool marks thread=%s %s", thread_id, marks.describe())
-    windows = tool_windows.windows()
-    resources: dict[str, Any] = shared_member_resource_rollup()
-    tool_calls = attribute(
-        [],
-        windows,
-        windows_complete=not tool_windows.truncated,
-    )
-    processes, process_counts = attribute_processes(
-        telemetry.observation,
-        windows,
-        windows_complete=not tool_windows.truncated,
-    )
-    resources.update(
-        {
-            "tool_calls": add_process_resources(
-                add_process_counts(tool_calls, process_counts),
-                processes,
-                observation_complete=telemetry.observation.complete,
-            ),
-            "tool_calls_truncated": tool_windows.truncated,
-            "tool_time_ms": (None if tool_windows.truncated else tool_time_ms(windows)),
-            "process_observer": telemetry.observation.source,
-            "process_observation_complete": telemetry.observation.complete,
-            "process_events_lost": telemetry.observation.lost_events,
-            "processes_truncated": telemetry.observation.truncated,
-            "processes": processes,
-        }
-    )
-    # The whole-turn member execution window travels beside the legacy rollup
-    # rather than inside it: it is a different measurement with its own
-    # endpoint, and folding it into this dict would make the shared-member
-    # guard's terms ambiguous.
-    if telemetry.turn_resources is not None:
-        resources["turn_resources"] = telemetry.turn_resources
-    return resources
+    if (archive_service or archive_controller) is not None and (
+        injected.archive_policy != archive_policy
+    ):
+        # An injected supervisor must already hold this app's archive: clean
+        # stops would otherwise never reach the archive it starts and closes.
+        raise ValueError("an injected shared supervisor must hold the sandbox archive policy")
+    return injected
 
 
-class _TerminalManager:
-    """Ephemeral registry of terminals inside retained chat containers."""
+def _lifespan(
+    sandbox: SandboxBackend, context: ManagerContext
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+    """Start the app's dependencies in order, and stop them in reverse."""
 
-    def __init__(
-        self,
-        *,
-        idle_ttl_s: float,
-        hard_ttl_s: float,
-        max_sessions: int,
-        max_sessions_per_workspace: int = MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
-        limits: _TerminalLimits | None = None,
-        action_receipts: ActionReceipts | None = None,
-    ) -> None:
-        self._action_receipts = action_receipts or ActionReceipts()
-        self._idle_ttl_s = idle_ttl_s
-        self._hard_ttl_s = hard_ttl_s
-        self._max_sessions = max_sessions
-        self._max_sessions_per_workspace = max_sessions_per_workspace
-        self._limits = limits or _TerminalLimits()
-        self._sessions: dict[str, dict[str, _TerminalSession]] = {}
-        self._suspended_workspaces: set[str] = set()
-        self._workspace_suspensions: dict[str, set[str]] = {}
-        self._lock = threading.RLock()
-        # One workspace's suspensions, resumptions and creations still run one
-        # at a time, but under a lock of that workspace's own, kept only while
-        # a caller holds or waits for it: all three wait on Docker, and
-        # ``_lock`` is taken by every terminal request on the sandbox manager.
-        self._workspace_locks: dict[str, tuple[threading.Lock, int]] = {}
-        # Terminals admitted but not listed yet: each counts against the
-        # global cap while its spawn runs without ``_lock``.
-        self._spawning = 0
-        self._stop = threading.Event()
-        self._reaper: threading.Thread | None = None
-
-    def configure(
-        self,
-        *,
-        idle_ttl_s: float,
-        hard_ttl_s: float,
-        max_sessions: int,
-        max_sessions_per_workspace: int | None = None,
-        limits: _TerminalLimits | None = None,
-    ) -> None:
-        """Change the limits at runtime, as the admin page asks.
-
-        Open terminals are judged by the new lifetimes from the next sweep, so
-        a shortened one closes those already past it. A lower session limit
-        refuses new terminals and closes none.
-        """
-        if idle_ttl_s <= 0 or hard_ttl_s <= 0:
-            raise ValueError("terminal TTL values must be positive")
-        if not 1 <= max_sessions <= 4096:
-            raise ValueError("terminal global session limit must be between 1 and 4096")
-        if max_sessions_per_workspace is not None and not (
-            1 <= max_sessions_per_workspace <= MAX_TERMINAL_SESSIONS_PER_WORKSPACE
-        ):
-            raise ValueError("terminal workspace session limit must be between 1 and 4")
-        with self._lock:
-            self._idle_ttl_s = idle_ttl_s
-            self._hard_ttl_s = hard_ttl_s
-            self._max_sessions = max_sessions
-            if max_sessions_per_workspace is not None:
-                self._max_sessions_per_workspace = max_sessions_per_workspace
-            if limits is not None:
-                self._limits = limits
-                for group in self._sessions.values():
-                    for session in group.values():
-                        session.configure_limits(limits)
-
-    @property
-    def max_sessions_per_workspace(self) -> int:
-        """Advertise the current creation limit to workspace clients."""
-        with self._lock:
-            return self._max_sessions_per_workspace
-
-    def start(self) -> None:
-        """Start periodic TTL cleanup once the app lifespan begins."""
-        with self._lock:
-            if self._reaper is not None:
-                return
-            self._reaper = threading.Thread(
-                target=self._reap_loop,
-                daemon=True,
-                name="workspace-terminal-reaper",
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Docker owns every chat workspace and provider state. The sandbox manager keeps
+        # only an in-memory index reconstructed from container labels/PID files.
+        sandbox.preflight()
+        expected_docker_root = (os.environ.get("AGENT_RETAINED_DOCKER_DATA_ROOT") or "").strip()
+        if expected_docker_root:
+            if context.retained_manager is None:
+                raise ValueError("retained DockerRootDir validation requires a container backend")
+            app.state.retained_docker_data_root = context.retained_manager.require_docker_data_root(
+                expected_docker_root
             )
-            self._reaper.start()
-
-    def close(self) -> None:
-        """Stop cleanup and close every live terminal transport."""
-        self._stop.set()
-        with self._lock:
-            sessions = [session for group in self._sessions.values() for session in group.values()]
-            self._sessions.clear()
-            self._suspended_workspaces.clear()
-            self._workspace_suspensions.clear()
-        for session in sessions:
-            try:
-                session.close(mark_activity=False)
-            except (SandboxError, OSError):
-                logger.exception("workspace_terminal_shutdown_cleanup_failed")
-        if self._reaper is not None:
-            self._reaper.join(timeout=5)
-
-    @contextlib.contextmanager
-    def _serialized(self, workspace_id: str) -> Iterator[None]:
-        """Run one suspension, resumption or creation of a workspace at a time.
-
-        Suspension and resumption signal every terminal through Docker, and
-        creation spawns one, which can take seconds each, so they hold this
-        workspace's own lock across those calls and ``_lock`` only for
-        bookkeeping: no other workspace's terminal request waits behind them.
-        A delete that finds no terminal waits here too, for a creation that
-        may be spawning it.
-        """
-        with self._lock:
-            lock, holders = self._workspace_locks.get(workspace_id) or (threading.Lock(), 0)
-            self._workspace_locks[workspace_id] = (lock, holders + 1)
+        archive_boundary = context.archive_boundary
+        archive_boundary_started = False
+        terminals_started = False
+        resource_collector: SandboxResourceCollector | None = None
         try:
-            with lock:
-                yield
+            # A replacement sandbox manager cannot reattach a previous one's
+            # Docker execs. Reconciliation stops each running group it
+            # discovers for the first time, so those resident CLIs and terminal
+            # PTYs end with their container; nothing reaps them one by one.
+            # Keep startup inside the cleanup guard: a failed Docker
+            # reconciliation must not leak the terminal manager's background
+            # thread from a failed ASGI lifespan.
+            if archive_boundary is not None:
+                archive_boundary.start()
+                archive_boundary_started = True
+            # A dynamic controller begins at UNKNOWN. Reconciliation can stop
+            # and release retained containers, so wait for the runner to
+            # deliver an explicit enabled or disabled database policy first.
+            if context.archive_controller is None:
+                context.supervisor_start()
+            context.terminals.start()
+            terminals_started = True
+            resource_collector = SandboxResourceCollector()
+            resource_collector.start()
+            app.state.sandbox_resource_collector = resource_collector
+            yield
         finally:
-            with self._lock:
-                lock, holders = self._workspace_locks.pop(workspace_id)
-                if holders > 1:
-                    self._workspace_locks[workspace_id] = (lock, holders - 1)
-
-    def create(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
-        self,
-        workspace_id: str,
-        workdir: Path | str,
-        *,
-        rows: int,
-        cols: int,
-        backend: SandboxBackend,
-        idle_ttl_s: float | None = None,
-        on_closed: Callable[[float], None] | None = None,
-        environment: BoundEnvironment | None = None,
-        action_id: str | None = None,
-        run_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Create one PTY while atomically enforcing the per-workspace cap.
-
-        Resolving an action's directory and spawning the PTY are Docker calls
-        that can take seconds, so they hold only this workspace's own lock,
-        which keeps its creations one at a time. ``_lock``, which every
-        terminal request on the sandbox manager takes, covers only the
-        admission, which reserves the new terminal's place under the global
-        cap, and the listing once it is spawned.
-        """
-        self.reap()
-        terminal_id = "term_" + (run_id or secrets.token_urlsafe(18))
-        now = time.monotonic()
-        evicted: list[_TerminalSession] = []
-        try:
-            # After a suspension or resumption of this workspace in progress,
-            # as when one lock covered both, rather than in its middle.
-            with self._serialized(workspace_id):
-                with self._lock:
-                    if workspace_id in self._suspended_workspaces:
-                        raise HTTPException(
-                            status_code=409, detail="terminal workspace is not ready"
-                        )
-                    group = self._sessions.setdefault(workspace_id, {})
-                    if terminal_id in group:
-                        if on_closed is not None:
-                            on_closed(now)
-                        return group[terminal_id].descriptor()
-                    global_active = self._spawning + sum(
-                        session.holds_process
-                        for sessions in self._sessions.values()
-                        for session in sessions.values()
-                    )
-                    if global_active >= self._max_sessions:
-                        if not group:
-                            self._sessions.pop(workspace_id, None)
-                        raise HTTPException(
-                            status_code=503, detail="sandbox manager terminal limit reached"
-                        )
-                    active = sum(session.holds_process for session in group.values())
-                    if active >= self._max_sessions_per_workspace:
-                        raise HTTPException(
-                            status_code=409, detail="workspace terminal limit reached"
-                        )
-                    action = (
-                        next((a for a in environment.actions if a.id == action_id), None)
-                        if environment and action_id
-                        else None
-                    )
-                    if action_id and action is None:
-                        raise HTTPException(404, "Action not found in workspace binding")
-                    operation_uids = {getattr(s, "operation_uid", None) for s in group.values()}
-                    self._spawning += 1
-                spawning = True
-                try:
-                    if action is not None:
-                        workdir = "/workspace/" + action.cwd
-                        if isinstance(backend, RetainedChatBackend):
-                            resolved = backend.manager.exec_capture(
-                                backend.spec,
-                                ["realpath", "-e", "--", str(workdir)],
-                                workdir="/workspace",
-                                timeout_s=10,
-                            )
-                            normalized = resolved.stdout.decode().strip()
-                            if resolved.returncode or not (
-                                normalized == "/workspace" or normalized.startswith("/workspace/")
-                            ):
-                                raise HTTPException(422, "Action directory escapes workspace")
-                            workdir = normalized
-                    spec = SandboxSpec(
-                        argv=["/bin/sh", "-lc", action.command] if action else ["/bin/sh"],
-                        workdir=str(workdir),
-                        env={
-                            **backend.base_env(),
-                            "GIT_CONFIG_NOSYSTEM": "1",
-                            "TERM": "xterm-256color",
-                            **(tool_environment() if environment else {}),
-                            **(environment.values("runtime") if environment else {}),
-                            **(
-                                {
-                                    "AGENT_ACTION_UID": str(
-                                        31000
-                                        + next(
-                                            i for i in range(64) if 31000 + i not in operation_uids
-                                        )
-                                    )
-                                }
-                                if action
-                                else {}
-                            ),
-                        },
-                    )
-                    if action is not None and environment is not None:
-                        previous = self._action_receipts.reserve(
-                            workspace_id, terminal_id, environment.binding_id, action.id
-                        )
-                        if previous is not None:
-                            if on_closed is not None:
-                                on_closed(now)
-                            return previous
-                    try:
-                        process = backend.spawn_terminal(spec, rows=rows, cols=cols)
-                    except TerminalNotSupportedError as exc:
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(
-                                "Interactive terminals require the container or kata "
-                                "sandbox backend."
-                            ),
-                        ) from exc
-                    except (OSError, SandboxError) as exc:
-                        raise HTTPException(
-                            status_code=502, detail="terminal could not be started"
-                        ) from exc
-                    session = _TerminalSession(
-                        terminal_id=terminal_id,
-                        process=process,
-                        workdir=workdir if isinstance(workdir, Path) else None,
-                        rows=rows,
-                        cols=cols,
-                        now=now,
-                        idle_ttl_s=idle_ttl_s,
-                        on_closed=on_closed,
-                        secrets=environment.secrets() if environment else {},
-                        limits=self._limits,
-                        on_result=(
-                            lambda result: self._action_receipts.finish(
-                                workspace_id, terminal_id, result
-                            )
-                        )
-                        if action
-                        else None,
-                    )
-                    session.operation_uid = int(spec.env["AGENT_ACTION_UID"]) if action else None
-                    # Draining before it is listed: whoever finds it listed, a
-                    # delete waiting on this workspace among them, may close
-                    # it, and closing joins the pump.
-                    session.start()
-                    with self._lock:
-                        self._spawning -= 1
-                        spawning = False
-                        # A reap or a delete may have unlisted this workspace
-                        # while it had no terminal.
-                        group = self._sessions.setdefault(workspace_id, {})
-                        evicted.extend(self._unlist_exited_locked(workspace_id))
-                        group[terminal_id] = session
-                finally:
-                    if spawning:
-                        with self._lock:
-                            self._spawning -= 1
-        finally:
-            for stale in evicted:
-                try:
-                    stale.close(mark_activity=False)
-                except (SandboxError, OSError):
-                    logger.exception("workspace_terminal_eviction_cleanup_failed")
-        return session.descriptor()
-
-    def _unlist_exited_locked(self, workspace_id: str) -> list[_TerminalSession]:
-        """Unlist the oldest exited shells so one more terminal fits both limits.
-
-        An exited shell stays listed for its output and keeps up to a full
-        output buffer, so it still takes room under both limits, but only a
-        running shell can refuse a new terminal. The new terminal's workspace
-        gives up its own oldest exited shells while its list is full; then,
-        while the sandbox manager as a whole is full, the oldest anywhere go. The
-        caller closes the returned sessions once the lock is released.
-        """
-        group = self._sessions[workspace_id]
-        exited = sorted(
-            (
-                (owner, session)
-                for owner, sessions in self._sessions.items()
-                for session in sessions.values()
-                if session.has_exited
-            ),
-            key=lambda candidate: candidate[1].created_at,
-        )
-        unlisted: list[_TerminalSession] = []
-
-        def unlist(candidate: tuple[str, _TerminalSession]) -> None:
-            owner, session = candidate
-            sessions = self._sessions[owner]
-            unlisted.append(sessions.pop(session.id))
-            # The new terminal's own group is about to receive it.
-            if not sessions and owner != workspace_id:
-                self._sessions.pop(owner)
-
-        own = [candidate for candidate in exited if candidate[0] == workspace_id]
-        while own and len(group) >= self._max_sessions_per_workspace:
-            candidate = own.pop(0)
-            exited.remove(candidate)
-            unlist(candidate)
-        retained = sum(
-            not session.is_closed
-            for sessions in self._sessions.values()
-            for session in sessions.values()
-        )
-        for candidate in exited[: max(0, retained + 1 - self._max_sessions)]:
-            unlist(candidate)
-        return unlisted
-
-    def suspend(self, workspace_id: str, *, job_id: str) -> dict[str, Any]:
-        """Freeze PTYs and retain one independent token per protected turn."""
-        with self._serialized(workspace_id):
-            with self._lock:
-                self._workspace_suspensions.setdefault(workspace_id, set()).add(job_id)
-                # From here no terminal of this workspace takes input or opens.
-                self._suspended_workspaces.add(workspace_id)
-                sessions = list(self._sessions.get(workspace_id, {}).values())
-            try:
-                for session in sessions:
-                    session.suspend()
-            except (SandboxError, OSError) as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="terminal suspension could not be confirmed; retry suspension",
-                ) from exc
-        return {"ok": True, "suspended": len(sessions)}
-
-    def resume(self, workspace_id: str, *, job_id: str) -> dict[str, Any]:
-        """Release one turn token and resume PTYs only after the last release.
-
-        A token the turn does not hold is released as a no-op, so a settled
-        turn's release after its own resume, or a sibling's, thaws nothing.
-        """
-        with self._serialized(workspace_id):
-            with self._lock:
-                suspensions = self._workspace_suspensions.get(workspace_id)
-                if not suspensions or job_id not in suspensions:
-                    return {"ok": True, "resumed": 0}
-                suspensions.remove(job_id)
-                if suspensions:
-                    return {"ok": True, "resumed": 0}
-                sessions = list(self._sessions.get(workspace_id, {}).values())
-            # The workspace stays fenced until every PTY has resumed: no terminal
-            # of it takes input or opens before then.
-            attempted: list[_TerminalSession] = []
-            try:
-                for session in sessions:
-                    attempted.append(session)
-                    session.resume()
-            except (SandboxError, OSError) as exc:
-                # Restore every PTY already resumed in this batch. A retry must
-                # see both the logical workspace fence and the actual processes
-                # suspended; otherwise one shell could mutate the shared tree
-                # inside a quiescent capture after a sibling's resume failed.
-                for session in attempted:
-                    with contextlib.suppress(SandboxError, OSError):
-                        session.suspend()
-                with self._lock:
-                    suspensions.add(job_id)
-                raise HTTPException(
-                    status_code=503,
-                    detail="terminal resume could not be confirmed; retry resume",
-                ) from exc
-            with self._lock:
-                self._workspace_suspensions.pop(workspace_id, None)
-                self._suspended_workspaces.discard(workspace_id)
-            return {"ok": True, "resumed": len(sessions)}
-
-    def list(self, workspace_id: str) -> list[dict[str, Any]]:
-        """List visible terminals for one workspace only."""
-        now = time.monotonic()
-        with self._lock:
-            sessions = [
-                session
-                for session in self._sessions.get(workspace_id, {}).values()
-                if not self._lapsed_locked(session, now)
-            ]
-        return [session.descriptor() for session in sessions if not session.is_closed]
-
-    def get(self, workspace_id: str, terminal_id: str) -> _TerminalSession:
-        """Resolve an opaque id inside its workspace namespace."""
-        with self._lock:
-            return self._find_locked(workspace_id, terminal_id)
-
-    def _find_locked(self, workspace_id: str, terminal_id: str) -> _TerminalSession:
-        """The open terminal a request names.
-
-        One past either lifetime is already gone to a request, and closing it
-        is the reaper's. So no keystroke waits on a teardown, its own
-        terminal's or another workspace's: a hangup, up to three seconds of
-        polling, then a kill.
-        """
-        session = self._sessions.get(workspace_id, {}).get(terminal_id)
-        if session is None or session.is_closed or self._lapsed_locked(session, time.monotonic()):
-            raise HTTPException(status_code=404, detail="terminal does not exist")
-        return session
-
-    def _lapsed_locked(self, session: _TerminalSession, now: float) -> bool:
-        return session.lapsed(now=now, idle_ttl_s=self._idle_ttl_s, hard_ttl_s=self._hard_ttl_s)
-
-    def output(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
-        """Read a live summary or the action's durable terminal result."""
-        # Unlike a keystroke this still closes what has expired first: closing
-        # an action's terminal is what records the result this read returns.
-        self.reap()
-        try:
-            session = self.get(workspace_id, terminal_id)
-        except HTTPException as exc:
-            if exc.status_code != 404:
-                raise
-            receipt = self._action_receipts.read(workspace_id, terminal_id)
-            if receipt is None:
-                raise
-            return receipt
-        output = session.safe_output()
-        if session._suspended:
-            output["state"] = "paused"
-        return output
-
-    def get_for_control(self, workspace_id: str, terminal_id: str) -> _TerminalSession:
-        """Resolve a terminal only while its workspace-level fence is open."""
-        with self._lock:
-            session = self._find_locked(workspace_id, terminal_id)
-            if workspace_id in self._suspended_workspaces:
-                raise HTTPException(status_code=409, detail="terminal workspace is not ready")
-            return session
-
-    def delete(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
-        """Close a terminal, retaining it when cleanup needs to be retried."""
-        with self._lock:
-            session = self._sessions.get(workspace_id, {}).get(terminal_id)
-        if session is None:
-            # A creation in this workspace may have reserved this action's
-            # receipt and still be spawning its terminal, holding the
-            # workspace's own lock. The tombstone below leaves a reserved
-            # receipt alone, so the stopped command would start once that
-            # terminal is listed: wait for the creation, then look again.
-            with self._serialized(workspace_id):
-                with self._lock:
-                    session = self._sessions.get(workspace_id, {}).get(terminal_id)
-                if session is None:
-                    # Action run ids are UUIDs; ephemeral interactive terminal ids are not.
-                    if re.fullmatch(
-                        r"term_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-                        terminal_id,
-                    ):
-                        self._action_receipts.stop(workspace_id, terminal_id)
-                    return {
-                        "id": terminal_id,
-                        "shell": "sh",
-                        "state": "closed",
-                        "cwd": "/workspace",
-                        "rows": 24,
-                        "cols": 80,
-                        "last_seq": 0,
-                    }
-        try:
-            descriptor = session.close()
-        except (SandboxError, OSError) as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="terminal cleanup could not be confirmed; retry kill",
-            ) from exc
-        with self._lock:
-            remaining = self._sessions.get(workspace_id)
-            if remaining is not None and remaining.get(terminal_id) is session:
-                remaining.pop(terminal_id, None)
-                if not remaining:
-                    self._sessions.pop(workspace_id, None)
-        return descriptor
-
-    def reap(self) -> None:
-        """Close sessions that exceeded either configured lifetime."""
-        now = time.monotonic()
-        with self._lock:
-            expired = [
-                (workspace_id, terminal_id, session)
-                for workspace_id, group in self._sessions.items()
-                for terminal_id, session in group.items()
-                if session.expired(
-                    now=now,
-                    idle_ttl_s=self._idle_ttl_s,
-                    hard_ttl_s=self._hard_ttl_s,
-                )
-            ]
-        for workspace_id, terminal_id, session in expired:
-            try:
-                session.close(mark_activity=False)
-            except (SandboxError, OSError):
-                logger.exception("workspace_terminal_reap_cleanup_failed")
-                continue
-            with self._lock:
-                group = self._sessions.get(workspace_id)
-                if group is not None and group.get(terminal_id) is session:
-                    group.pop(terminal_id, None)
-                    if not group:
-                        self._sessions.pop(workspace_id, None)
-
-    def _reap_loop(self) -> None:
-        # Recomputed each pass: the lifetimes can change at runtime, and an
-        # interval fixed at start would sweep a shortened one late.
-        while not self._stop.wait(self._reap_interval()):
-            self.reap()
-
-    def _reap_interval(self) -> float:
-        with self._lock:
-            return max(0.1, min(30.0, self._idle_ttl_s / 2, self._hard_ttl_s / 2))
-
-
-def _relative_path(raw: str | None) -> str:
-    try:
-        return normalize_workspace_path(raw)
-    except WorkspacePathError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-def _stop_overrun_command(process: SandboxProcess) -> None:
-    """Stop a bounded command that overran, keeping why it was stopped.
-
-    The kill signals only the command's own process group, and the Docker
-    client goes with it either way. A command can finish just before its
-    kill, leaving no receipt to honour: the caller's answer (timed out, too
-    large, unreadable) is still what happened, so a failed kill is logged
-    rather than raised in its place.
-    """
-    try:
-        process.kill()
-    except (SandboxError, OSError):
-        logger.warning("workspace_command_kill_failed", exc_info=True)
-
-
-def _run_sandbox(
-    backend: SandboxBackend,
-    *,
-    workdir: Path | str,
-    script: str,
-    env: dict[str, str],
-    timeout_s: float,
-    max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
-) -> tuple[int, str, str]:
-    """Run a bounded command and return status, stdout and stderr.
-
-    The deadline covers the command's exit as well as its output, so one that
-    closes stdout and keeps running is stopped like one that never closes it.
-    """
-    process = backend.spawn(
-        SandboxSpec(
-            argv=["/bin/sh", "-lc", script],
-            workdir=str(workdir),
-            env={**backend.base_env(), "GIT_CONFIG_NOSYSTEM": "1", **env},
-        )
-    )
-    # Real sandbox adapters read fixed-size chunks; injected line-only adapters
-    # remain supported without turning protocol frames into command records.
-    chunks_source = getattr(process, "chunks", process.lines)
-
-    def output_then_status() -> Iterator[str | int]:
-        yield from chunks_source()
-        # Queued behind the output, so the deadline also covers a command
-        # that closed its stdout and kept running.
-        yield process.wait()
-
-    output = OutputPump(output_then_status(), name="workspace-command")
-    deadline = time.monotonic() + timeout_s
-    chunks: list[str] = []
-    size = 0
-    exit_code: int | None = None
-    try:
-        while exit_code is None:
-            if time.monotonic() > deadline:
-                output.close(drain=True)
-                _stop_overrun_command(process)
-                process.wait()
-                raise HTTPException(status_code=408, detail="workspace command timed out")
-            try:
-                chunk = output.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if isinstance(chunk, int):
-                exit_code = chunk
-            elif chunk is not None:
-                size += len(chunk.encode("utf-8", errors="replace"))
-                if size > max_output_bytes:
-                    output.close(drain=True)
-                    _stop_overrun_command(process)
-                    process.wait()
-                    raise HTTPException(
-                        status_code=413, detail="workspace command output is too large"
-                    )
-                chunks.append(chunk)
-        stderr = process.stderr_text()
-        if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
-            stderr = stderr.encode("utf-8", errors="replace")[-max_output_bytes:].decode(
-                "utf-8", errors="replace"
+            await _shut_down(
+                app,
+                context,
+                archive_boundary_started=archive_boundary_started,
+                terminals_started=terminals_started,
+                resource_collector=resource_collector,
             )
-    finally:
-        output.close()
-    if isinstance(workdir, Path):
-        os.utime(workdir, None)
-    return exit_code, "".join(chunks), stderr
+
+    return lifespan
 
 
-def _run_git(
-    backend: SandboxBackend,
-    workdir: Path | str,
-    base_sha: str | None = None,
+async def _shut_down(
+    app: FastAPI,
+    context: ManagerContext,
     *,
-    timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
-    max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
-    exact_patch: bool = False,
-) -> dict[str, Any]:
-    return _workspace_git(
-        _run_sandbox,
-        backend,
-        workdir,
-        base_sha,
-        timeout_s=timeout_s,
-        max_output_bytes=max_output_bytes,
-        exact_patch=exact_patch,
-    )
+    archive_boundary_started: bool,
+    terminals_started: bool,
+    resource_collector: SandboxResourceCollector | None,
+) -> None:
+    """Stop what the lifespan started, each step attempted whatever the last one did."""
+    cleanup_failures: list[tuple[str, str]] = []
+
+    def cleanup(name: str, function: Callable[[], None]) -> None:
+        try:
+            function()
+        except Exception as exc:
+            error_type = safe_archive_error_type(exc)
+            logger.error(
+                "sandbox manager shutdown cleanup failed",
+                extra={
+                    "event": "sandbox_manager_cleanup_failed",
+                    "component": name,
+                    "error_type": error_type,
+                },
+            )
+            # Do not retain an archive/provider exception for the final
+            # ASGI lifespan failure: raising from it would make the raw
+            # message and its complete cause chain visible again.
+            cleanup_failures.append((name, error_type))
+
+    # A canceled request still owns its executor call. Drain every
+    # admitted mutation before closing supervisors or archive clients.
+    await context.endpoint_calls.seal_and_wait()
+    cleanup("command_pool", lambda: context.command_pool.shutdown(wait=False))
+    app.state.sandbox_resource_collector = None
+    if resource_collector is not None:
+        cleanup("resource_collector", resource_collector.close)
+    if terminals_started:
+        cleanup("terminals", context.terminals.close)
+    if context.supervisor_start.ready:
+        supervisor = context.supervisor
+        archive_boundary_configured = (
+            context.archive_service is not None or context.archive_controller is not None
+        )
+        if archive_boundary_configured or supervisor.has_pending_archive_work():
+            cleanup("shared_supervisor_quiesce", supervisor.quiesce)
+            cleanup(
+                "shared_sandbox_stop_all",
+                lambda: supervisor.stop_all_for_shutdown(
+                    include_running=archive_boundary_configured
+                ),
+            )
+        cleanup("shared_supervisor", supervisor.close)
+    if archive_boundary_started:
+        assert context.archive_boundary is not None
+        cleanup("sandbox_archive_service", context.archive_boundary.close)
+    if cleanup_failures:
+        component, error_type = cleanup_failures[0]
+        safe_cause = RuntimeError(f"{component} cleanup failed ({error_type})")
+        raise RuntimeError("sandbox manager shutdown cleanup failed") from safe_cause
 
 
-def _run_git_metadata(
-    backend: SandboxBackend,
-    workdir: Path | str,
-    base_sha: str | None = None,
-    *,
-    timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
-    max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
-) -> dict[str, Any]:
-    return _workspace_git_metadata(
-        _run_sandbox,
-        backend,
-        workdir,
-        base_sha,
-        timeout_s=timeout_s,
-        max_output_bytes=max_output_bytes,
-    )
-
-
-def _terminal_sse_frame(event: _TerminalEvent) -> str:
-    """Serialize one terminal event using the control plane's stable SSE contract."""
-    if event.kind == "output":
-        payload = {
-            "seq": event.seq,
-            "data": base64.b64encode(event.data).decode("ascii"),
-        }
-    elif event.kind == "reset":
-        payload = {"seq": event.seq, "reason": event.reason}
-    else:
-        payload = {"seq": event.seq, "exit_code": event.exit_code}
-    data = json.dumps(payload, separators=(",", ":"))
-    return f"id: {event.seq}\nevent: {event.kind}\ndata: {data}\n\n"
-
-
-def _terminal_attached_frame(last_seq: int) -> str:
-    """Tell a new viewer where the terminal's history ends.
-
-    Events up to ``last_seq`` were produced before the viewer attached. A fresh
-    screen replaying them must not answer the terminal queries among them --
-    the program that asked is long past waiting, or gone -- or the answers
-    reach the shell as typed input. It is not a resumable event, so it has no
-    id; a client that does not know it ignores it.
-    """
-    data = json.dumps({"seq": last_seq}, separators=(",", ":"))
-    return f"event: attached\ndata: {data}\n\n"
-
-
-def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+def create_app(
     *,
     backend: SandboxBackend | None = None,
     token: str | None = None,
@@ -1409,274 +344,24 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     )
     if chat_idle_timeout_s <= 0:
         raise ValueError("chat sandbox idle timeout must be positive")
-    shared_supervisor = shared_session_supervisor
     retained_manager = (
         ChatSandboxManager(sandbox) if isinstance(sandbox, ContainerBackend) else None
     )
-    if sandbox_archive_service is not None and sandbox_archive_controller is not None:
-        raise ValueError("sandbox archive service and controller are mutually exclusive")
-    archive_service = sandbox_archive_service
-    archive_controller = sandbox_archive_controller
-    checkpoint_store: SandboxCheckpointStore | None = None
-    checkpoint_capture: SandboxCheckpointCapture | None = None
-    if archive_service is None and archive_controller is None and retained_manager is not None:
-        # Checkpoint receipts and their temporary exports share the durable,
-        # Sandbox Manager-only archive state directory; no sandbox mounts it.
-        state_dir = Path(
-            os.environ.get("AGENT_SANDBOX_ARCHIVE_STATE_DIR") or DEFAULT_ARCHIVE_STATE_DIR
-        )
-        checkpoint_store = SandboxCheckpointStore(state_dir / "checkpoints")
-        checkpoint_capture = SandboxCheckpointCapture(
-            docker_binary=retained_manager.backend.docker_binary,
-            spool_dir=state_dir / "checkpoint-spool",
-            store=checkpoint_store,
-            # A read-only mount of containerd's content store lets a
-            # checkpoint copy only its new layer; without it, the capture
-            # streams the whole image through `docker image save`.
-            content_dir=Path(
-                os.environ.get("AGENT_CONTAINERD_CONTENT_DIR") or DEFAULT_CONTAINERD_CONTENT_DIR
-            ),
-        )
-        archive_controller = SandboxArchiveController(
-            retained_manager,
-            namespace=retained_manager.backend.sandbox_namespace,
-            checkpoint_capture=checkpoint_capture,
-            initial_upload_dir=state_dir / INITIAL_UPLOAD_DIRNAME,
-        )
-    archive_boundary = archive_service or archive_controller
-    archive_policy: GroupArchivePolicy = (
-        ControllerArchivePolicy(archive_controller)
-        if archive_controller is not None
-        else ServiceArchivePolicy(archive_service)
-        if archive_service is not None
-        else NullArchivePolicy()
+    archive_controller, checkpoint_store = _archive_parts(
+        retained_manager, sandbox_archive_service, sandbox_archive_controller
     )
-    if shared_supervisor is None:
-        if retained_manager is None:
-            raise ValueError("shared-live chat sandboxes require the container or kata backend")
-        shared_supervisor = SharedChatSessionSupervisor(
-            retained_manager,
-            idle_timeout_s=chat_idle_timeout_s,
-            archive_policy=archive_policy,
-        )
-    elif archive_boundary is not None and shared_supervisor.archive_policy != archive_policy:
-        # An injected supervisor must already hold this app's archive: clean
-        # stops would otherwise never reach the archive it starts and closes.
-        raise ValueError("an injected shared supervisor must hold the sandbox archive policy")
+    shared_supervisor = _shared_supervisor(
+        shared_session_supervisor,
+        retained_manager,
+        idle_timeout_s=chat_idle_timeout_s,
+        archive_service=sandbox_archive_service,
+        archive_controller=archive_controller,
+    )
     terminals = _TerminalManager(
         idle_ttl_s=idle_ttl_s,
         hard_ttl_s=hard_ttl_s,
         max_sessions=max_sessions,
     )
-    endpoint_calls = _EndpointLifecycleCalls()
-    command_pool = ThreadPoolExecutor(
-        max_workers=MAX_WORKSPACE_COMMANDS, thread_name_prefix="workspace-command"
-    )
-    command_slots = _CommandSlots(
-        total=MAX_WORKSPACE_COMMANDS, per_workspace=MAX_WORKSPACE_COMMANDS_PER_WORKSPACE
-    )
-    supervisor_start_lock = threading.Lock()
-    supervisor_ready = threading.Event()
-
-    def start_shared_supervisor() -> None:
-        """Start reconciliation once, after dynamic archive policy is known."""
-        with supervisor_start_lock:
-            if supervisor_ready.is_set():
-                return
-            shared_supervisor.start()
-            supervisor_ready.set()
-
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915 complexity baseline, #771
-        # Docker owns every chat workspace and provider state. The sandbox manager keeps
-        # only an in-memory index reconstructed from container labels/PID files.
-        sandbox.preflight()
-        expected_docker_root = (os.environ.get("AGENT_RETAINED_DOCKER_DATA_ROOT") or "").strip()
-        if expected_docker_root:
-            if retained_manager is None:
-                raise ValueError("retained DockerRootDir validation requires a container backend")
-            _app.state.retained_docker_data_root = retained_manager.require_docker_data_root(
-                expected_docker_root
-            )
-        archive_boundary_started = False
-        terminals_started = False
-        resource_collector: SandboxResourceCollector | None = None
-        try:
-            # A replacement sandbox manager cannot reattach a previous one's
-            # Docker execs. Reconciliation stops each running group it
-            # discovers for the first time, so those resident CLIs and terminal
-            # PTYs end with their container; nothing reaps them one by one.
-            # Keep startup inside the cleanup guard: a failed Docker
-            # reconciliation must not leak the terminal manager's background
-            # thread from a failed ASGI lifespan.
-            if archive_boundary is not None:
-                archive_boundary.start()
-                archive_boundary_started = True
-            # A dynamic controller begins at UNKNOWN. Reconciliation can stop
-            # and release retained containers, so wait for the runner to
-            # deliver an explicit enabled or disabled database policy first.
-            if archive_controller is None:
-                start_shared_supervisor()
-            terminals.start()
-            terminals_started = True
-            resource_collector = SandboxResourceCollector()
-            resource_collector.start()
-            _app.state.sandbox_resource_collector = resource_collector
-            yield
-        finally:
-            cleanup_failures: list[tuple[str, str]] = []
-
-            def cleanup(name: str, function: Callable[[], None]) -> None:
-                try:
-                    function()
-                except Exception as exc:
-                    error_type = safe_archive_error_type(exc)
-                    logger.error(
-                        "sandbox manager shutdown cleanup failed",
-                        extra={
-                            "event": "sandbox_manager_cleanup_failed",
-                            "component": name,
-                            "error_type": error_type,
-                        },
-                    )
-                    # Do not retain an archive/provider exception for the final
-                    # ASGI lifespan failure: raising from it would make the raw
-                    # message and its complete cause chain visible again.
-                    cleanup_failures.append((name, error_type))
-
-            # A canceled request still owns its executor call. Drain every
-            # admitted mutation before closing supervisors or archive clients.
-            await endpoint_calls.seal_and_wait()
-            cleanup("command_pool", lambda: command_pool.shutdown(wait=False))
-            _app.state.sandbox_resource_collector = None
-            if resource_collector is not None:
-                cleanup("resource_collector", resource_collector.close)
-            if terminals_started:
-                cleanup("terminals", terminals.close)
-            if supervisor_ready.is_set():
-                archive_boundary_configured = (
-                    archive_service is not None or archive_controller is not None
-                )
-                if archive_boundary_configured or shared_supervisor.has_pending_archive_work():
-                    cleanup("shared_supervisor_quiesce", shared_supervisor.quiesce)
-                    cleanup(
-                        "shared_sandbox_stop_all",
-                        lambda: shared_supervisor.stop_all_for_shutdown(
-                            include_running=archive_boundary_configured
-                        ),
-                    )
-                cleanup("shared_supervisor", shared_supervisor.close)
-            if archive_boundary_started:
-                assert archive_boundary is not None
-                cleanup("sandbox_archive_service", archive_boundary.close)
-            if cleanup_failures:
-                component, error_type = cleanup_failures[0]
-                safe_cause = RuntimeError(f"{component} cleanup failed ({error_type})")
-                raise RuntimeError("sandbox manager shutdown cleanup failed") from safe_cause
-
-    # No schema or docs routes: they are served outside the routes' auth
-    # dependency, and nothing reads them.
-    app = FastAPI(
-        title="Agent sandbox manager",
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-        lifespan=lifespan,
-    )
-    from fastapi.exceptions import RequestValidationError
-    from fastapi.responses import JSONResponse
-
-    @app.exception_handler(RequestValidationError)
-    async def safe_environment_validation(
-        request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
-        return JSONResponse(
-            status_code=422,
-            content={
-                "detail": [
-                    {"loc": error["loc"], "msg": error["msg"], "type": error["type"]}
-                    for error in exc.errors()
-                    if error["type"] != "value_error"
-                ]
-                or "Invalid sandbox manager request fields or environment limits"
-            },
-        )
-
-    app.state.terminal_manager = terminals
-    app.state.sandbox_checkpoint_store = checkpoint_store
-    app.state.sandbox_deletion_archive_service = SandboxDeletionBackupService(shared_supervisor)
-    app.state.sandbox_resource_collector = None
-
-    async def runtime_refused(_request: Request, exc: Exception) -> JSONResponse:
-        """Answer a runtime's deliberate refusal with the runtime's own reason.
-
-        A runtime refuses a launch it cannot run as configured: MCP servers
-        with no relay to reach them, or an effort its CLI cannot express. The
-        message is written to be read, but these are not driver or sandbox
-        errors, so no route mapped them. Each left as a plain-text 500, and
-        the runner could only say the supervisor "rejected the lifecycle
-        transition".
-        """
-        return JSONResponse(status_code=422, content={"detail": str(exc)[:300]})
-
-    for refusal in (RuntimeMCPUnavailableError, RuntimeEffortUnsupportedError):
-        app.add_exception_handler(refusal, runtime_refused)
-
-    async def unexpected_failure(request: Request, exc: Exception) -> JSONResponse:
-        """Answer a failure no route anticipated in a body both clients can read.
-
-        Starlette's plain-text ``Internal Server Error`` has no ``detail``, so
-        the cause never left this process. The exception's type and the route
-        are enough to find it in this log; Starlette still re-raises after
-        answering, so the traceback is logged here. The message stays here
-        too: a sandbox manager failure can reach the owner's browser through the
-        control plane, which shows only what is safe to show.
-        """
-        route = getattr(request.scope.get("route"), "path", None) or "an unknown route"
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": (
-                    "sandbox manager failed unexpectedly "
-                    f"({type(exc).__name__} in {request.method} {route})"
-                )
-            },
-        )
-
-    app.add_exception_handler(Exception, unexpected_failure)
-
-    # Until a policy arrives, this sandbox manager holds none, which reads as "not
-    # collecting". That is what stops a sandbox manager that started before its runner
-    # from briefly measuring for an experiment nobody told it about.
-    sandbox_manager_profiling_policy.install_policy_provider()
-
-    def authenticate(x_agent_workspace_token: str | None = Header(None)) -> None:
-        # Bytes, not str: compare_digest raises TypeError for a non-ASCII str,
-        # so any caller could turn this refusal into a 500.
-        if (
-            not expected_token
-            or not x_agent_workspace_token
-            or not secrets.compare_digest(expected_token.encode(), x_agent_workspace_token.encode())
-        ):
-            raise HTTPException(status_code=401, detail="invalid sandbox manager credential")
-
-    @app.post("/profiling-policy")
-    def profiling_policy(
-        body: dict[str, Any],
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Accept the profiling policy this host's runner pushes.
-
-        Reached over the sandbox manager's own shared-token channel and nowhere else.
-        The sandbox manager holds no host credential and must not be given one -- the
-        design keeps that out of the sandbox side entirely -- so the runner,
-        which does hold one, is what tells it what the deployment is collecting
-        for. Applying the policy through the same store the collector reads is
-        what makes a fragment possible at all: a sandbox manager with no policy refuses
-        every selection, however well-formed the header that carried it.
-        """
-        return sandbox_manager_profiling_policy.apply_received_policy(body)
-
     # Legacy environment values are bootstrap observations only. The first
     # authenticated settings push replaces all of them with admin defaults.
     local_settings: dict[str, float] = {
@@ -1686,23 +371,48 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         "terminal_max_sessions": max_sessions,
         "chat_idle_timeout_s": chat_idle_timeout_s,
     }
-    for key in SANDBOX_MANAGER_SETTING_KEYS - {
-        "terminal_idle_ttl_s",
-        "terminal_hard_ttl_s",
-        "terminal_max_sessions",
-        "chat_idle_timeout_s",
-    }:
+    for key in SANDBOX_MANAGER_SETTING_KEYS - _ARGUMENT_SETTINGS:
         definition = HOST_SETTINGS_BY_KEY[key]
-        raw = os.environ.get(definition.env)
-        if raw is None:
-            continue
-        try:
-            value = int(raw)
-        except ValueError:
-            continue
-        if definition.accepts(value):
+        value = _accepted_local_value(definition, os.environ.get(definition.env))
+        if value is not None:
             local_settings[key] = value
-    applied_settings = dict(local_settings)
+    context = ManagerContext(
+        supervisor=shared_supervisor,
+        supervisor_start=SupervisorStart(shared_supervisor),
+        archive_service=sandbox_archive_service,
+        archive_controller=archive_controller,
+        retained_manager=retained_manager,
+        terminals=terminals,
+        endpoint_calls=_EndpointLifecycleCalls(),
+        command_pool=ThreadPoolExecutor(
+            max_workers=MAX_WORKSPACE_COMMANDS, thread_name_prefix="workspace-command"
+        ),
+        command_slots=_CommandSlots(
+            total=MAX_WORKSPACE_COMMANDS, per_workspace=MAX_WORKSPACE_COMMANDS_PER_WORKSPACE
+        ),
+        environment_preparation=environment_preparation,
+        settings=ManagerSettings(local_settings),
+        authenticate=authenticator(expected_token),
+    )
+    # No schema or docs routes: they are served outside the routes' auth
+    # dependency, and nothing reads them.
+    app = FastAPI(
+        title="Agent sandbox manager",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=_lifespan(sandbox, context),
+    )
+    install_error_handlers(app)
+    app.state.terminal_manager = terminals
+    app.state.sandbox_checkpoint_store = checkpoint_store
+    app.state.sandbox_deletion_archive_service = SandboxDeletionBackupService(shared_supervisor)
+    app.state.sandbox_resource_collector = None
+    # Until a policy arrives, this sandbox manager holds none, which reads as "not
+    # collecting". That is what stops a sandbox manager that started before its runner
+    # from briefly measuring for an experiment nobody told it about.
+    sandbox_manager_profiling_policy.install_policy_provider()
+    applied_settings = context.settings.applied
     terminals.configure(
         idle_ttl_s=idle_ttl_s,
         hard_ttl_s=hard_ttl_s,
@@ -1710,1490 +420,16 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         max_sessions_per_workspace=int(applied_settings["terminal_max_sessions_per_workspace"]),
         limits=_TerminalLimits.from_settings(applied_settings),
     )
-
-    @app.post("/host-settings")
-    def host_settings(
-        body: dict[str, Any],
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Apply the complete admin configuration, with defaults for missing keys.
-
-        The runner sends them after every heartbeat, over the same
-        shared-token channel the profiling policy uses: the sandbox manager holds no
-        host credential and must not be given one. The whole set every time,
-        so a cleared or unsupported value uses the shared built-in default.
-        Legacy environment values cannot override a reset from the admin page.
-
-        Answers with what it now applies and what its own would be, which the
-        runner reports to the control plane as this host's confirmation.
-        """
-        nonlocal applied_settings
-        admin = {
-            **_DEFAULT_SETTINGS,
-            **admin_values(body.get("settings"), SANDBOX_MANAGER_SETTING_KEYS),
-        }
-        applied = resolve(admin, local_settings)
-        terminals.configure(
-            idle_ttl_s=float(applied["terminal_idle_ttl_s"]),
-            hard_ttl_s=float(applied["terminal_hard_ttl_s"]),
-            max_sessions=int(applied["terminal_max_sessions"]),
-            max_sessions_per_workspace=int(applied["terminal_max_sessions_per_workspace"]),
-            limits=_TerminalLimits.from_settings(applied),
-        )
-        shared_supervisor.set_idle_timeout_s(float(applied["chat_idle_timeout_s"]))
-        applied_settings = applied
-        return {"applied": applied, "local": local_settings}
-
-    @app.post("/sandbox-archive-settings")
-    async def sandbox_archive_settings(
-        body: dict[str, Any],
-        _: None = Depends(authenticate),
-    ) -> dict[str, object]:
-        """Apply one complete DB policy and confirm its exact revision.
-
-        This authenticated runner-to-sandbox-manager channel may carry one saved AWS
-        access key. The sandbox manager keeps it in memory for S3 and never writes it
-        into a sandbox marker. With no key, the sandbox manager's workload identity
-        remains the S3 authority. The policy names the bucket; the prefix stays fixed.
-        """
-        if archive_controller is None:
-            raise HTTPException(
-                status_code=409,
-                detail="sandbox manager does not use dynamic sandbox archive settings",
-            )
-        if set(body) != {"settings"} or not isinstance(body.get("settings"), dict):
-            raise HTTPException(
-                status_code=422,
-                detail="sandbox archive settings must be one complete object",
-            )
-
-        def apply_and_start() -> dict[str, object]:
-            status = archive_controller.apply(body["settings"])
-            # Apply first: reconciliation may immediately stop and archive an
-            # orphaned retained container through this controller.
-            start_shared_supervisor()
-            return status
-
-        try:
-            return await endpoint_calls.run(apply_and_start)
-        except (SandboxArchivePolicyError, SandboxArchiveConfigError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.get("/health")
-    def health(_: None = Depends(authenticate)) -> dict[str, Any]:
-        return {
-            "ok": True,
-            "capabilities": [
-                ENVIRONMENT_CAPABILITY,
-                ENVIRONMENT_INFERENCE_CAPABILITY,
-                SSH_ACCESS_CAPABILITY,
-                *(
-                    [ENVIRONMENT_SNAPSHOT_CAPABILITY]
-                    if getattr(archive_controller, "snapshots_available", False)
-                    else []
-                ),
-            ],
-            "sandbox_archives": (
-                {
-                    **archive_service.status(),
-                    "shutdown_candidates": (shared_supervisor.shutdown_archive_candidate_count()),
-                }
-                if archive_service is not None
-                else (
-                    {
-                        **archive_controller.status(),
-                        "supervisor_ready": supervisor_ready.is_set(),
-                        "shutdown_candidates": (
-                            shared_supervisor.shutdown_archive_candidate_count()
-                            if supervisor_ready.is_set()
-                            else 0
-                        ),
-                    }
-                    if archive_controller is not None
-                    else {"enabled": False}
-                )
-            ),
-            "retained_docker_data_root": getattr(
-                app.state,
-                "retained_docker_data_root",
-                None,
-            ),
-        }
-
-    def require_shared_supervisor() -> SharedChatSessionSupervisor:
-        if archive_controller is not None and not supervisor_ready.is_set():
-            raise HTTPException(
-                status_code=503,
-                detail="sandbox archive policy has not been confirmed",
-            )
-        return shared_supervisor
-
-    def supervisor_error(exc: Exception, *, safe_detail: str | None = None) -> HTTPException:
-        if isinstance(exc, SandboxRestoreFailed):
-            # The chat is intact in its checkpoint; the caller hands the turn back.
-            return HTTPException(
-                status_code=424,
-                detail=safe_detail if safe_detail is not None else str(exc)[:300],
-            )
-        if isinstance(exc, RetainedChatLost):
-            return HTTPException(
-                status_code=410,
-                detail=safe_detail if safe_detail is not None else str(exc),
-            )
-        if isinstance(exc, SessionBusy):
-            return HTTPException(
-                status_code=409,
-                detail=safe_detail if safe_detail is not None else str(exc),
-            )
-        if isinstance(exc, SessionLeaseLost):
-            return HTTPException(
-                status_code=409,
-                detail=safe_detail if safe_detail is not None else str(exc),
-            )
-        if isinstance(exc, ValueError):
-            return HTTPException(
-                status_code=422,
-                detail=safe_detail if safe_detail is not None else str(exc),
-            )
-        return HTTPException(
-            status_code=503,
-            detail=safe_detail if safe_detail is not None else str(exc)[:300],
-        )
-
-    def retained_owner(workspace_id: str) -> SharedChatSessionSupervisor:
-        """Resolve the only supported workspace shape: a shared chat member."""
-        owner = require_shared_supervisor()
-        if not workspace_id.startswith("athr_") or not owner.owns(workspace_id):
-            raise HTTPException(status_code=404, detail="shared chat workspace is not materialized")
-        return owner
-
-    def retained_operation(
-        workspace_id: str,
-        operation: Callable[[RetainedChatBackend, SandboxManagerCall], dict[str, Any]],
-        *,
-        call: SandboxManagerCall | None = None,
-        start_seq: int | None = None,
-    ) -> dict[str, Any]:
-        """Open a workspace, run one operation, and answer its measurement call.
-
-        ``call`` is this request's measurement fragment, if the inherited
-        selection named one. It gates nothing: the workspace is admitted, which
-        proves its network or stands on a recent proof, and the operation runs
-        exactly as before. Only the timings are conditional, and the answer is
-        merged into the body so a caller can tell a producer that collected
-        nothing from one that never reported at all.
-        """
-        active = call if call is not None else closed()
-        owner = retained_owner(workspace_id)
-        token: str | None = None
-        try:
-            # Admission proves the group network for this operation, or stands
-            # on a proof under a minute old (shared_admission_proof). A command
-            # the operation spawns stands on that proof rather than making
-            # another; its clock is the proof's, never later than this one.
-            admitted_from = time.monotonic()
-            with active.stage("admission"):
-                token, _ = owner.operation_opened(workspace_id, start_seq=start_seq)
-            retained = owner.backend(workspace_id, network_proved_at=admitted_from)
-            return active.answer(operation(retained, active))
-        except RetainedWorkspaceError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        finally:
-            if token is not None:
-                with contextlib.suppress(SandboxError):
-                    owner.operation_closed(workspace_id, token)
-
-    async def owner_command(
-        workspace_id: str,
-        operation: Callable[[RetainedChatBackend, SandboxManagerCall], dict[str, Any]],
-        *,
-        start_seq: int | None = None,
-    ) -> dict[str, Any]:
-        """Run an owner's workspace download or Git inspection on the command pool."""
-        give_back = command_slots.take(workspace_id)
-
-        def run() -> dict[str, Any]:
-            try:
-                return retained_operation(workspace_id, operation, start_seq=start_seq)
-            finally:
-                give_back()
-
-        try:
-            return await endpoint_calls.run_on(command_pool, run)
-        except HTTPException:
-            # Refused before the pool ran it. A command that ran gave its slot
-            # back already, and a second give-back changes nothing.
-            give_back()
-            raise
-
-    def ensure_workspace(workspace_id: str) -> SharedSessionDescriptor:
-        """Validate a member alias and return its shared-group descriptor."""
-        owner = retained_owner(workspace_id)
-        try:
-            return owner.status(workspace_id)
-        except SandboxError as exc:
-            raise supervisor_error(exc) from exc
-
-    def terminal_scope(workspace_id: str) -> str:
-        """Map any member URL onto the one terminal namespace for its group.
-
-        The public/control-plane route stays chat-scoped so ownership is still
-        checked against the addressed member.  The shell processes themselves
-        operate on the group's single ``/workspace`` as the group UID, though,
-        so capacity and suspension must be group-scoped too.  Otherwise a fork
-        sibling could keep writing through a PTY while another member had
-        installed the documented workspace preparation barrier.
-        """
-        return str(ensure_workspace(workspace_id).origin_thread_id)
-
-    def keystroke_scope(workspace_id: str) -> str:
-        """The same namespace for a terminal's input and resize, from memory.
-
-        Both reach only a terminal already open there, and the browser sends
-        one per keystroke: inspecting the container for each would put a
-        Docker CLI process in front of every echo. A container that died, or
-        that its group lost, has already ended its terminals with EOF, and
-        they refuse the keystroke themselves.
-        """
-        owner = retained_owner(workspace_id)
-        try:
-            # The group's origin chat names the namespace and is fixed with the
-            # group: the member's backend carries it in its spec, from memory.
-            return owner.backend(workspace_id).spec.thread_id
-        except SandboxError as exc:
-            raise supervisor_error(exc) from exc
-
-    def shared_spec(body: SharedSandboxIdentityRequest) -> ChatSandboxSpec:
-        return ChatSandboxSpec(
-            thread_id=body.origin_thread_id,
-            sandbox_id=body.sandbox_id,
-            generation=body.generation,
-            runtime_id=body.runtime_id,
-            runtime_version=body.runtime_version,
-            sandbox_image_digest=body.sandbox_image_digest,
-            memory_limit=body.memory_limit,
-            cpu_limit=body.cpu_limit,
-            disk_limit_mib=body.disk_limit_mib,
-            stop_timeout_s=body.stop_timeout_s,
-            shared_live=True,
-            resident_slot_capacity=body.resident_slot_capacity,
-        )
-
-    def shared_manifest(members: list[SharedMember]) -> list[SharedMemberManifest]:
-        return [SharedMemberManifest(**member.model_dump()) for member in members]
-
-    @app.post("/shared-sandboxes/{thread_id}/acquire")
-    async def acquire_shared_chat_sandbox(
-        thread_id: str,
-        body: SharedSandboxAcquireRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            lease = await endpoint_calls.run(
-                owner.acquire,
-                shared_spec(body),
-                thread_id=thread_id,
-                owner=body.owner,
-                activation_generation=body.activation_generation,
-                has_settled_context=body.has_settled_context,
-                manifest=shared_manifest(body.members),
-                expected_container_id=body.expected_container_id,
-                profiling=body.profiling,
-                start_seq=body.start_seq,
-                restore=None if body.restore is None else body.restore.require_supported(),
-                **(
-                    {"environment_snapshot": body.environment_snapshot}
-                    if body.environment_snapshot is not None
-                    else {}
-                ),
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(lease)
-
-    @app.post("/environment-snapshots/capture")
-    async def capture_installation_snapshot(
-        body: EnvironmentSnapshotCaptureRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Commit and upload a stopped environment run's container, and nothing else.
-
-        Only a container labelled as that exact run qualifies, so a runner
-        cannot have a chat's workspace uploaded as someone's snapshot.
-        """
-        if archive_controller is None or retained_manager is None:
-            raise HTTPException(status_code=409, detail="snapshots are not configured here")
-        spec = environment_run_spec(body.run_id, body.lease_generation, body.sandbox_image_digest)
-        try:
-            # ``docker container inspect`` can take its whole timeout on a slow
-            # daemon, so it runs off the event loop like the capture itself.
-            inspection = await endpoint_calls.run(retained_manager.inspect, spec.container_name)
-            if (
-                inspection is None
-                or inspection.container_id != body.container_id
-                or inspection.labels.get(ENVIRONMENT_TEST_LABEL) != body.run_id
-            ):
-                raise HTTPException(status_code=404, detail="environment run container not found")
-            return await endpoint_calls.run(
-                archive_controller.capture_environment_snapshot,
-                spec,
-                inspection,
-                owner=body.owner,
-                snapshot_id=body.snapshot_id,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)[:300]) from exc
-
-    @app.post("/environment-snapshots/images")
-    async def environment_snapshot_images(_: None = Depends(authenticate)) -> dict[str, Any]:
-        """Name the snapshot images on this host, so the runner can ask which are retired."""
-        if archive_controller is None:
-            return {"snapshot_ids": []}
-        try:
-            return {
-                "snapshot_ids": await endpoint_calls.run(
-                    archive_controller.environment_snapshot_images
-                )
-            }
-        except SandboxError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)[:300]) from exc
-
-    @app.post("/environment-snapshots/delete")
-    async def delete_environment_snapshots(
-        body: EnvironmentSnapshotDeleteRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Drop retired snapshots' local images, and delete the stored objects named."""
-        if archive_controller is None:
-            return {"deleted": []}
-        deleted: list[str] = []
-
-        def run() -> None:
-            for item in body.snapshots:
-                with contextlib.suppress(Exception):
-                    archive_controller.remove_environment_snapshot_image(
-                        item.owner, item.snapshot_id
-                    )
-                if item.object_key is None:
-                    continue
-                try:
-                    archive_controller.delete_environment_snapshot(
-                        owner=item.owner,
-                        snapshot_id=item.snapshot_id,
-                        key=item.object_key,
-                        version_id=item.version_id,
-                    )
-                except Exception as exc:
-                    # Without the delete permission the bucket's lifecycle
-                    # rule removes the object later.
-                    logger.warning(
-                        "environment snapshot object was not deleted",
-                        extra={
-                            "event": "environment_snapshot_delete_failed",
-                            "snapshot_id": item.snapshot_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
-                    continue
-                deleted.append(item.snapshot_id)
-
-        await endpoint_calls.run(run)
-        return {"deleted": deleted}
-
-    @app.post("/shared-sandboxes/{thread_id}/register")
-    async def register_shared_chat_sandbox(
-        thread_id: str,
-        body: SharedSandboxIdentityRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Restore DB-owned member aliases without waking the container."""
-        owner = require_shared_supervisor()
-        if thread_id != body.origin_thread_id:
-            raise HTTPException(status_code=422, detail="shared registration must name the origin")
-        try:
-            descriptors = await endpoint_calls.run(
-                owner.register_manifest,
-                shared_spec(body),
-                shared_manifest(body.members),
-                expected_container_id=body.expected_container_id,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        return {
-            "ok": True,
-            "sandbox_id": body.sandbox_id,
-            "member_count": len(descriptors),
-        }
-
-    @app.post("/shared-sandboxes/{thread_id}/archive-initial/status")
-    async def shared_initial_archive_status(
-        thread_id: str,
-        body: SharedInitialArchiveStatusRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Resolve a crash-committed pre-prompt baseline before reset/setup."""
-        owner = require_shared_supervisor()
-        if thread_id != body.origin_thread_id:
-            raise HTTPException(status_code=422, detail="initial archive must name the origin")
-        if archive_boundary is None:
-            return {"enabled": False, "prepared": False, "stored": False}
-        try:
-            return await endpoint_calls.run(
-                owner.capture_initial_archive,
-                thread_id,
-                body.token,
-                expected_spec=shared_spec(body),
-                expected_container_id=body.expected_container_id,
-                capture=lambda backend, _spec, members: archive_boundary.probe_initial(
-                    backend,
-                    expected_container_id=body.expected_container_id,
-                    preparation_id=body.preparation_id,
-                    members=members,
-                ),
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(
-                exc,
-                safe_detail=archive_failure_http_detail(exc),
-            ) from exc
-
-    @app.post("/shared-sandboxes/{thread_id}/archive-initial")
-    async def capture_shared_initial_archive(
-        thread_id: str,
-        body: SharedInitialArchiveRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Persist the exact prepared workspace before any resident/prompt."""
-        owner = require_shared_supervisor()
-        if thread_id != body.origin_thread_id:
-            raise HTTPException(status_code=422, detail="initial archive must name the origin")
-        if not _COMMIT_SHA.fullmatch(body.base_sha):
-            raise HTTPException(status_code=422, detail="base SHA is invalid")
-        if archive_boundary is None:
-            return {"enabled": False, "stored": False}
-        try:
-            return await endpoint_calls.run(
-                owner.capture_initial_archive,
-                thread_id,
-                body.token,
-                expected_spec=shared_spec(body),
-                expected_container_id=body.expected_container_id,
-                capture=lambda backend, _spec, members: archive_boundary.capture_initial(
-                    backend,
-                    expected_container_id=body.expected_container_id,
-                    preparation_id=body.preparation_id,
-                    base_sha=body.base_sha,
-                    members=members,
-                    defer_upload=body.defer_upload,
-                ),
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(
-                exc,
-                safe_detail=archive_failure_http_detail(exc),
-            ) from exc
-
-    @app.post("/shared-sandboxes/{thread_id}/resident")
-    async def ensure_shared_resident(
-        thread_id: str,
-        body: SharedResidentLaunchRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            descriptor = await endpoint_calls.run(
-                owner.ensure_resident,
-                thread_id,
-                body.token,
-                resident_launch(thread_id, body.launch),
-                profiling=body.profiling,
-            )
-        except (DriverError, SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(descriptor)
-
-    @app.post("/shared-sandboxes/{thread_id}/turn")
-    async def run_shared_turn(  # noqa: C901, PLR0915 complexity baseline, #771
-        thread_id: str,
-        body: SharedTurnRequest,
-        _: None = Depends(authenticate),
-    ) -> StreamingResponse:
-        owner = require_shared_supervisor()
-        try:
-            turn = await endpoint_calls.run(
-                owner.start_turn,
-                thread_id,
-                body.token,
-                prompt=body.prompt,
-                model=body.model,
-                reasoning_effort=body.reasoning_effort,
-            )
-        except (DriverError, SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-
-        def take_reported_checkpoint(
-            supervisor: Any, member_thread_id: str, member_turn: ResidentTurn[Any]
-        ) -> dict[str, Any] | None:
-            """Collect a checkpoint the sampler thread has already produced for this turn.
-
-            The sampler runs on its own clock, so a turn that emits nothing for
-            a minute still gets its uploads; this only forwards what is waiting.
-            A stream that outlived its turn takes nothing from the member's next
-            one. Best effort by construction: a checkpoint exists so a crash
-            keeps the work already measured, and a failure to forward one must
-            not reach the turn's own event stream as an error.
-            """
-            take = getattr(supervisor, "take_reported_checkpoint", None)
-            if take is None:
-                return None
-            try:
-                return take(member_thread_id, member_turn)
-            except Exception:
-                return None
-
-        turn_boundary_closed = False
-
-        def frames() -> Generator[str, None, None]:  # noqa: PLR0915 complexity baseline, #771
-            nonlocal turn_boundary_closed
-            tool_windows = ToolWindowTracker()
-            resources: dict[str, Any] | None = None
-
-            def close_resources(value: Any) -> dict[str, Any]:
-                nonlocal resources
-                if resources is not None:
-                    return resources
-                resources = build_turn_resources(value, tool_windows, thread_id=thread_id)
-                return resources
-
-            def observed_events() -> Iterator[Any]:
-                for event in turn.lines():
-                    # Timestamp at the native read boundary, before queueing:
-                    # backpressure must not move a tool's message window past
-                    # the trusted guest hook marks collected within it.
-                    tool_windows.observe(event.event_type, event.payload, mono=time.monotonic())
-                    yield event
-
-            events = OutputPump(observed_events(), name="shared-turn-events")
-            try:
-                while True:
-                    # Sampling and forwarding must both proceed while the CLI
-                    # is silent. A crash should retain its latest closed
-                    # checkpoint even during one long tool invocation.
-                    checkpoint = take_reported_checkpoint(owner, thread_id, turn)
-                    if checkpoint is not None:
-                        yield (
-                            json.dumps(
-                                {"kind": "resource_checkpoint", "turn_resources": checkpoint},
-                                separators=(",", ":"),
-                            )
-                            + "\n"
-                        )
-                    try:
-                        event = events.get(timeout=0.25)
-                    except queue.Empty:
-                        # Hand the pulling thread back while the CLI is quiet:
-                        # a response whose reader has gone can end only once
-                        # the pull it is waiting on returns.
-                        yield ""
-                        continue
-                    if event is None:
-                        break
-                    yield (
-                        json.dumps(
-                            {
-                                "kind": "event",
-                                "event_type": event.event_type,
-                                "payload": event.payload,
-                                "raw_line": event.raw_line,
-                            },
-                            separators=(",", ":"),
-                        )
-                        + "\n"
-                    )
-                result = turn.wait()
-                # The activation boundary is part of success, not cleanup
-                # after success. It reaps escaped background processes and
-                # normalizes shared writes; if either fails the runner must
-                # receive an error frame instead of a result followed by an
-                # opaque settle failure.
-                telemetry: SharedTurnTelemetry | None = owner.complete_turn(
-                    thread_id, body.token, turn
-                )
-                turn_boundary_closed = True
-                resources = close_resources(telemetry)
-                yield (
-                    json.dumps(
-                        {
-                            "kind": "result",
-                            "status": result.status,
-                            "final_output": result.final_output,
-                            "exit_code": result.exit_code,
-                            "usage": result.usage,
-                            "raw": result.raw,
-                            "native_turn_settled": result.native_turn_settled,
-                            "stderr": turn.stderr_text()[-4000:],
-                            "resources": resources,
-                        },
-                        separators=(",", ":"),
-                    )
-                    + "\n"
-                )
-            except Exception as exc:
-                telemetry = exc.telemetry if isinstance(exc, SharedTurnBoundaryError) else None
-                if telemetry is not None:
-                    turn_boundary_closed = True
-                if not turn_boundary_closed:
-                    try:
-                        telemetry = owner.abort_turn(thread_id, body.token, turn)
-                        turn_boundary_closed = True
-                    except SharedTurnBoundaryError as boundary_exc:
-                        telemetry = boundary_exc.telemetry
-                        turn_boundary_closed = True
-                    except Exception:
-                        telemetry = None
-                yield (
-                    json.dumps(
-                        {
-                            "kind": "error",
-                            "detail": str(exc)[:1000],
-                            "resources": close_resources(telemetry),
-                        },
-                        separators=(",", ":"),
-                    )
-                    + "\n"
-                )
-            finally:
-                events.close()
-                with contextlib.suppress(Exception):
-                    if not turn_boundary_closed:
-                        owner.abort_turn(thread_id, body.token, turn)
-                        turn_boundary_closed = True
-
-        lines = frames()
-
-        async def stream() -> AsyncIterator[str]:
-            async for line in iterate_in_threadpool(lines):
-                if line:
-                    yield line
-
-        def end_stream() -> None:
-            # Closing the frames aborts a turn they started and did not
-            # close; a reader gone before they started leaves it to this.
-            lines.close()
-            if not turn_boundary_closed:
-                with contextlib.suppress(Exception):
-                    owner.abort_turn(thread_id, body.token, turn)
-
-        async def ended() -> None:
-            # However the response ended -- the runner's process may have
-            # died -- the member's turn, lease and lock must not wait for a
-            # collector. Shutdown owns the call, as it owns every lifecycle
-            # call, and once sealed it closes the supervisor itself.
-            with contextlib.suppress(HTTPException):
-                await endpoint_calls.run(end_stream)
-
-        return _EndingStreamingResponse(
-            stream(),
-            on_end=ended,
-            media_type="application/x-ndjson",
-            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-        )
-
-    @app.post("/shared-sandboxes/{thread_id}/interrupt")
-    async def interrupt_shared_turn(
-        thread_id: str,
-        body: SharedLeaseRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            await endpoint_calls.run(owner.interrupt, thread_id, body.token)
-        except SandboxError as exc:
-            raise supervisor_error(exc) from exc
-        return {"ok": True}
-
-    @app.post("/shared-sandboxes/{thread_id}/input")
-    async def inject_shared_input(
-        thread_id: str,
-        body: SharedInputRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Give the member's turn a message for the model's next step, or say why not.
-
-        Accepted means the turn has it; the turn's own stream reports where the
-        model got it. A refusal is an answer, not an error: the message stays
-        waiting on the control plane and goes when the turn ends.
-        """
-        supervisor = require_shared_supervisor()
-        try:
-            outcome = await endpoint_calls.run(
-                supervisor.inject_input,
-                thread_id,
-                owner=body.owner,
-                message_id=body.message_id,
-                text=body.text,
-            )
-        except SandboxError as exc:
-            raise supervisor_error(exc) from exc
-        return {"accepted": outcome.accepted, "reason": outcome.reason}
-
-    @app.get("/shared-sandboxes/{thread_id}/questions")
-    async def pending_shared_questions(
-        thread_id: str,
-        owner: str = Query(..., min_length=1, max_length=128),
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """List native questions raised by the named running attempt."""
-        supervisor = require_shared_supervisor()
-        try:
-            questions = await endpoint_calls.run(
-                supervisor.pending_questions, thread_id, owner=owner
-            )
-        except (SandboxError, DriverError) as exc:
-            raise supervisor_error(exc) from exc
-        return {"questions": questions}
-
-    @app.post("/shared-sandboxes/{thread_id}/questions")
-    async def answer_shared_question(
-        thread_id: str,
-        body: SharedQuestionAnswerRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Deliver a response only to the native request that raised it."""
-        supervisor = require_shared_supervisor()
-        try:
-            outcome = await endpoint_calls.run(
-                supervisor.answer_question,
-                thread_id,
-                owner=body.owner,
-                request_id=body.request_id,
-                answers=body.answers,
-                reject=body.reject,
-            )
-        except (SandboxError, DriverError) as exc:
-            raise supervisor_error(exc) from exc
-        return {"accepted": outcome.accepted, "reason": outcome.reason}
-
-    @app.post("/shared-sandboxes/{thread_id}/residency-lost")
-    async def shared_residency_lost(
-        thread_id: str,
-        body: SharedResidencyLostRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            descriptor = await endpoint_calls.run(
-                owner.residency_lost,
-                thread_id,
-                generation=body.generation,
-            )
-        except SandboxError as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(descriptor)
-
-    @app.post("/shared-sandboxes/{thread_id}/settle")
-    async def settle_shared_chat_sandbox(
-        thread_id: str,
-        body: SharedSettleRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            descriptor = await endpoint_calls.run(
-                owner.settle,
-                thread_id,
-                body.token,
-                job_id=body.job_id,
-                context_status=body.context_status,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(descriptor)
-
-    @app.post("/shared-sandboxes/{thread_id}/abandon")
-    async def abandon_shared_chat_sandbox(
-        thread_id: str,
-        body: SharedAbandonRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            descriptor = await endpoint_calls.run(
-                owner.abandon,
-                thread_id,
-                body.token,
-                lost=body.lost,
-            )
-        except SandboxError as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(descriptor)
-
-    @app.get("/shared-sandboxes/{thread_id}")
-    async def shared_chat_sandbox_status(
-        thread_id: str,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            descriptor = await endpoint_calls.run(owner.status, thread_id)
-        except SandboxError as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(descriptor)
-
-    @app.post("/shared-sandboxes/{thread_id}/stop-idle")
-    async def stop_idle_shared_chat_sandbox(
-        thread_id: str,
-        body: SharedIdleStopRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            descriptor = await endpoint_calls.run(
-                owner.stop_if_idle,
-                thread_id,
-                generation=body.generation,
-                activation_generation=body.activation_generation,
-                reason=body.reason,
-                member_activation_generations=body.member_activation_generations,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(descriptor)
-
-    def sandbox_archive_identity(
-        thread_id: str, body: SandboxArchivePrepareRequest
-    ) -> ArchiveIdentity:
-        return ArchiveIdentity(
-            thread_id=thread_id,
-            request_id=body.request_id,
-            generation=body.generation,
-            expected_container_id=body.expected_container_id,
-            archive_key=body.archive_key,
-        )
-
-    @app.post("/shared-sandboxes/{thread_id}/admin-delete/prepare")
-    async def prepare_sandbox_archive(
-        thread_id: str,
-        body: SandboxArchivePrepareRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        require_shared_supervisor()
-        try:
-            return await endpoint_calls.run(
-                app.state.sandbox_deletion_archive_service.prepare,
-                sandbox_archive_identity(thread_id, body),
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-
-    @app.post("/shared-sandboxes/{thread_id}/admin-delete/upload")
-    async def upload_sandbox_archive(
-        thread_id: str,
-        body: SandboxArchiveUploadRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        require_shared_supervisor()
-        try:
-            return await endpoint_calls.run(
-                app.state.sandbox_deletion_archive_service.upload,
-                sandbox_archive_identity(thread_id, body),
-                sha256=body.sha256,
-                size_bytes=body.size_bytes,
-                upload_url=body.upload_url,
-                upload_headers=body.upload_headers,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-
-    @app.post("/shared-sandboxes/{thread_id}/admin-delete/commit")
-    async def commit_sandbox_archive_deletion(
-        thread_id: str,
-        body: SandboxArchiveCommitRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        require_shared_supervisor()
-        try:
-            return await endpoint_calls.run(
-                app.state.sandbox_deletion_archive_service.commit,
-                sandbox_archive_identity(thread_id, body),
-                sha256=body.sha256,
-                size_bytes=body.size_bytes,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-
-    @app.post("/shared-sandboxes/{thread_id}/admin-delete/discard")
-    async def discard_sandbox_without_archive(
-        thread_id: str,
-        body: SandboxArchiveDiscardRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        require_shared_supervisor()
-        try:
-            return await endpoint_calls.run(
-                app.state.sandbox_deletion_archive_service.discard,
-                ArchiveIdentity(
-                    thread_id=thread_id,
-                    request_id=body.request_id,
-                    generation=body.generation,
-                    expected_container_id=body.expected_container_id,
-                    archive_key="",
-                ),
-                sandbox_id=body.sandbox_id,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-
-    @app.post("/shared-sandboxes/{thread_id}/admin-delete/abort")
-    async def abort_sandbox_archive(
-        thread_id: str,
-        body: SandboxArchivePrepareRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        require_shared_supervisor()
-        try:
-            return await endpoint_calls.run(
-                app.state.sandbox_deletion_archive_service.abort,
-                sandbox_archive_identity(thread_id, body),
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-
-    @app.post("/shared-sandboxes/{thread_id}/fork")
-    async def fork_shared_chat_session(
-        thread_id: str,
-        body: SharedForkRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        owner = require_shared_supervisor()
-        try:
-            # The target already has a durable slot reservation, but Fork
-            # itself installs its native identity. Reconciling that placeholder
-            # first would occupy the identity with None, or overwrite a child
-            # recovered after a lost receipt. Keep local live-child ownership
-            # intact so fork_native can recover it under the existing fences.
-            source_members = [
-                member for member in body.members if member.thread_id != body.target_thread_id
-            ]
-            await endpoint_calls.run(
-                owner.register_manifest,
-                shared_spec(body),
-                shared_manifest(source_members),
-                expected_container_id=body.expected_container_id,
-            )
-            result = await endpoint_calls.run(
-                owner.fork_native,
-                thread_id,
-                start_seq=body.start_seq,
-                operation_id=body.operation_id,
-                source_native_session_id=body.source_native_session_id,
-                source_native_turn_no=body.source_native_turn_no,
-                target_thread_id=body.target_thread_id,
-                target_slot_id=body.target_slot_id,
-                source_launch=resident_launch(thread_id, body.source_launch),
-                target_launch=resident_launch(body.target_thread_id, body.target_launch),
-            )
-        except (DriverError, SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(result)
-
-    @app.get("/sandboxes")
-    async def list_chat_sandboxes(
-        thread_id: str | None = Query(None, min_length=1, max_length=256),
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Return Docker-observed state for all groups or one member's group.
-
-        The full listing is a complete observation, not an ownership mutation. The
-        control plane keeps the durable thread/container mapping and accepts
-        only exact identity matches; the sandbox manager supplies the fact it alone
-        can see: whether each retained Docker container is currently running.
-        Reconciliation also makes a sandbox manager restart self-healing because it
-        rebuilds the supervisor's in-memory index from Docker labels first.
-        A member query inspects only its known group without host reconciliation.
-        """
-        try:
-            owner = require_shared_supervisor()
-            shared_descriptors = (
-                await endpoint_calls.run(owner.list, background_recovery=True)
-                if thread_id is None
-                else await endpoint_calls.run(owner.list_for_thread, thread_id)
-            )
-        except SandboxError as exc:
-            raise supervisor_error(exc) from exc
-        rows: list[dict[str, Any]] = []
-        shared_groups: dict[str, list[dict[str, Any]]] = {}
-        for descriptor in shared_descriptors:
-            shared_groups.setdefault(descriptor.sandbox_id, []).append(asdict(descriptor))
-        for members in shared_groups.values():
-            origin = next(
-                (row for row in members if row["thread_id"] == row["origin_thread_id"]),
-                members[0],
-            )
-            origin = dict(origin)
-            # Descriptors count each member's PTYs; the heartbeat observes the
-            # whole shared container, including terminals opened by a fork.
-            origin["terminal_count"] = sum(row["terminal_count"] for row in members)
-            origin["shared_live"] = True
-            origin["members"] = member_manifest(members)
-            rows.append(origin)
-        resource_collector = app.state.sandbox_resource_collector
-        if resource_collector is not None and thread_id is None:
-            # The listing already proved each group's labels and exact ID.
-            # Synchronization and cache reads perform no Docker stats I/O.
-            # A partial listing must not evict unrelated collection targets.
-            resource_collector.sync_targets(rows)
-        checkpoints: SandboxCheckpointStore | None = app.state.sandbox_checkpoint_store
-        for row in rows:
-            row["resource_usage"] = (
-                None
-                if resource_collector is None or not row["running"]
-                else resource_collector.latest(row["container_id"])
-            )
-            # The latest checkpoint repeats on every beat; the control plane
-            # records it idempotently, so a lost beat needs no retry state.
-            receipt = None if checkpoints is None else checkpoints.latest(row["sandbox_id"])
-            row["checkpoint"] = None if receipt is None else receipt.as_dict()
-        return {"sandboxes": rows}
-
-    @app.get("/workspaces/{workspace_id}/files")
-    def files(
-        workspace_id: str,
-        request: Request,
-        path: str = Query("", max_length=4096),
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        start_seq = parse_start_fence(request.headers.get(START_FENCE_HEADER))
-        relative = _relative_path(path)
-        # A path alone cannot say what this request is: the empty path is the
-        # root listing, but a non-empty one may be a file preview or a
-        # directory expansion, and only the read can tell them apart. So the
-        # call is opened for the candidates the caller offered and filed by the
-        # kind its own result reports.
-        candidates = ("files.list", "files.open") if path else ("files.list",)
-        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operations=candidates)
-
-        def _read(retained: Any, active: SandboxManagerCall) -> dict[str, Any]:
-            body = read_retained_file(
-                retained,
-                relative,
-                max_preview_bytes=int(applied_settings["workspace_file_preview_max_kib"]) * 1024,
-                max_directory_entries=int(applied_settings["workspace_directory_max_entries"]),
-                observer=active.recorder,
-            )
-            kind = str(body.get("kind") or "")
-            if kind == "directory":
-                active.set_operation("files.list")
-            elif kind in {"file", "symlink"}:
-                active.set_operation("files.open")
-            return body
-
-        return retained_operation(workspace_id, _read, call=call, start_seq=start_seq)
-
-    @app.put("/workspaces/{workspace_id}/files")
-    def write_file(
-        workspace_id: str,
-        request: Request,
-        body: FileWriteRequest,
-        path: str = Query(..., min_length=1, max_length=4096),
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        relative = _relative_path(path)
-        return retained_operation(
-            workspace_id,
-            lambda retained, _call: write_retained_file(
-                retained,
-                relative,
-                body.content,
-                max_write_bytes=int(applied_settings["workspace_file_write_max_mib"]) * 1024 * 1024,
-                max_preview_bytes=int(applied_settings["workspace_file_preview_max_kib"]) * 1024,
-                max_directory_entries=int(applied_settings["workspace_directory_max_entries"]),
-            ),
-            start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
-        )
-
-    @app.get("/workspaces/{workspace_id}/archive")
-    async def workspace_archive(
-        workspace_id: str,
-        request: Request,
-        _: None = Depends(authenticate),
-    ) -> StreamingResponse:
-        """Send workspace files without Git metadata, or refuse the download whole.
-
-        Docker's archive boundary reads ``/workspace`` without running anything
-        inside the sandbox. Git metadata is filtered from the download only,
-        and the archive is spooled before the first byte is sent: a workspace over the download limit is
-        refused with 413 rather than arriving as a truncated file. The open
-        operation keeps the sandbox from being stopped or deleted underneath
-        the copy, and the command slots bound how many copies run at once.
-        """
-        limit_mib = int(applied_settings["workspace_download_max_mib"])
-        spool = tempfile.TemporaryFile(  # noqa: SIM115 — handed to the response body.
-            prefix="freeinference-workspace-download-"
-        )
-
-        def export(retained: RetainedChatBackend, _call: SandboxManagerCall) -> dict[str, Any]:
-            try:
-                with tempfile.TemporaryFile(prefix="freeinference-workspace-export-") as source:
-                    retained.manager.export_archive(
-                        retained.spec, CHAT_WORKDIR, source, max_bytes=limit_mib * 1024 * 1024
-                    )
-                    source.seek(0)
-                    write_workspace_download(source, spool)
-            except ArchiveExportTooLarge as exc:
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        f"The workspace is larger than this server's {limit_mib} MiB "
-                        "download limit."
-                    ),
-                ) from exc
-            return {}
-
-        try:
-            await owner_command(
-                workspace_id,
-                export,
-                start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
-            )
-        except BaseException:
-            spool.close()
-            raise
-        size = spool.tell()
-        spool.seek(0)
-
-        async def body() -> AsyncIterator[bytes]:
-            try:
-                while chunk := await asyncio.to_thread(spool.read, 1024 * 1024):
-                    yield chunk
-            finally:
-                spool.close()
-
-        return StreamingResponse(
-            body(),
-            media_type="application/gzip",
-            headers={"Content-Length": str(size), "Cache-Control": "no-store"},
-        )
-
-    @app.get("/workspaces/{workspace_id}/environment/status")
-    async def environment_status(
-        workspace_id: str, binding_id: str, _: None = Depends(authenticate)
-    ) -> dict[str, Any]:
-        def read_status() -> dict[str, Any]:
-            return environment_preparation.status(
-                retained_owner(workspace_id).backend(workspace_id), binding_id
-            )
-
-        return await endpoint_calls.run(read_status)
-
-    @app.post("/workspaces/{workspace_id}/environment/cancel")
-    async def environment_cancel(
-        workspace_id: str, activation_owner: str, _: None = Depends(authenticate)
-    ) -> dict[str, bool]:
-        def cancel() -> None:
-            retained_owner(workspace_id).cancel_environment(workspace_id, activation_owner)
-
-        # The supervisor's lock stays off the event loop, as in ``prepare``.
-        await endpoint_calls.run(cancel)
-        return {"cancelled": True}
-
-    @app.post("/workspaces/{workspace_id}/environment/prepare")
-    async def prepare_environment(
-        workspace_id: str,
-        request: Request,
-        body: EnvironmentPrepareRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        # The supervisor's lock stays off the event loop. Preparing starts the
-        # group, which proves its network; a boot already prepared runs nothing.
-        owner = await endpoint_calls.run(retained_owner, workspace_id)
-        return await endpoint_calls.run(
-            owner.prepare_environment,
-            workspace_id,
-            body.environment,
-            environment_preparation,
-            activation_owner=body.activation_owner,
-            start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
-        )
-
-    @app.put("/workspaces/{workspace_id}/ssh-access")
-    async def sync_ssh_access(
-        workspace_id: str, body: SshAccessRequest, _: None = Depends(authenticate)
-    ) -> dict[str, Any]:
-        """Converge a running group to its owner's SSH state; a stopped one waits.
-
-        A stopped group has no bridge and no member tmpfs to update; its next
-        turn carries the state again before anything runs in it.
-        """
-
-        def sync() -> dict[str, Any]:
-            retained = retained_owner(workspace_id).backend(workspace_id)
-            current = retained.manager.inspect(retained.spec.container_name)
-            if current is None or not current.running:
-                return {"newest": False, "running": False}
-            retained.manager.require_network(retained.spec)
-            return {
-                **apply_ssh_access(
-                    retained.manager,
-                    retained.spec,
-                    body.access,
-                    starting_thread_id=workspace_id if body.starting else None,
-                ),
-                "running": True,
-            }
-
-        try:
-            return await endpoint_calls.run(sync)
-        except RetainedWorkspaceError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-
-    @app.post("/workspaces/{workspace_id}/terminals")
-    async def create_terminal(
-        workspace_id: str,
-        request: Request,
-        body: TerminalCreateRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        call = open_call(
-            request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
-        )
-        owner = await endpoint_calls.run(retained_owner, workspace_id)
-        start_seq = parse_start_fence(request.headers.get(START_FENCE_HEADER))
-        terminal_token: str | None = None
-        try:
-            if body.environment is not None and body.environment.required:
-                await endpoint_calls.run(
-                    owner.prepare_environment,
-                    workspace_id,
-                    body.environment,
-                    environment_preparation,
-                    start_seq=start_seq,
-                )
-            # Admission proves the group network for this PTY.
-            with call.stage("admission"):
-                token, descriptor = await endpoint_calls.run(
-                    owner.terminal_opened, workspace_id, start_seq=start_seq
-                )
-            terminal_token = token
-            retained = await endpoint_calls.run(owner.backend, workspace_id)
-
-            def on_terminal_closed(last_activity: float) -> None:
-                owner.terminal_closed(
-                    workspace_id,
-                    token,
-                    last_activity_monotonic=last_activity,
-                )
-
-            with call.stage("pty_spawn"):
-                body_out = await endpoint_calls.run(
-                    terminals.create,
-                    descriptor.origin_thread_id,
-                    "/workspace",
-                    rows=body.rows,
-                    cols=body.cols,
-                    backend=retained,
-                    idle_ttl_s=owner.idle_timeout_s,
-                    on_closed=on_terminal_closed,
-                    environment=body.environment,
-                    action_id=body.action_id,
-                    run_id=body.run_id,
-                )
-            return call.answer(body_out)
-        except (HTTPException, SandboxError, ValueError) as exc:
-            if terminal_token is not None:
-                with contextlib.suppress(HTTPException, SandboxError):
-                    await endpoint_calls.run(owner.terminal_closed, workspace_id, terminal_token)
-            if isinstance(exc, HTTPException):
-                raise
-            raise supervisor_error(exc) from exc
-
-    @app.get("/workspaces/{workspace_id}/terminals/{terminal_id}/output")
-    async def terminal_output(
-        workspace_id: str, terminal_id: str, _: None = Depends(authenticate)
-    ) -> dict[str, Any]:
-        def read_output() -> dict[str, Any]:
-            output = terminals.output(terminal_scope(workspace_id), terminal_id)
-            if (
-                output["state"] == "running"
-                and retained_owner(workspace_id).status(workspace_id).snapshotting
-            ):
-                output["state"] = "paused"
-            return output
-
-        # Resolving the scope and the status inspect Docker; reaping and the
-        # durable receipt touch Docker and disk. None of it runs on the loop.
-        return await endpoint_calls.run(read_output)
-
-    @app.post("/workspaces/{workspace_id}/terminals/suspend")
-    async def suspend_terminals(
-        workspace_id: str,
-        body: TerminalCoordinationRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(terminals.suspend, scope, job_id=body.job_id)
-
-    @app.post("/workspaces/{workspace_id}/terminals/resume")
-    async def resume_terminals(
-        workspace_id: str,
-        body: TerminalCoordinationRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(terminals.resume, scope, job_id=body.job_id)
-
-    @app.post("/workspaces/{workspace_id}/terminals/resume-settled")
-    async def resume_settled_terminals(
-        workspace_id: str,
-        body: TerminalCoordinationRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        # A settled turn releases its own token like any other resume; a
-        # concurrent sibling's suspension stays in force.
-        scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(terminals.resume, scope, job_id=body.job_id)
-
-    @app.get("/workspaces/{workspace_id}/terminals")
-    async def list_terminals(
-        workspace_id: str,
-        request: Request,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        call = open_call(
-            request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
-        )
-        scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        with call.stage("list"):
-            listed, max_sessions = await endpoint_calls.run(
-                lambda: (terminals.list(scope), terminals.max_sessions_per_workspace)
-            )
-            body = {
-                "terminals": listed,
-                "max_sessions": max_sessions,
-                "max_input_bytes": int(applied_settings["terminal_input_max_kib"]) * 1024,
-            }
-        return call.answer(body)
-
-    @app.get("/workspaces/{workspace_id}/terminals/{terminal_id}/stream")
-    async def stream_terminal(
-        workspace_id: str,
-        terminal_id: str,
-        request: Request,
-        after: int = Query(0, ge=0),
-        _: None = Depends(authenticate),
-    ) -> StreamingResponse:
-        call = open_call(
-            request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
-        )
-        scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        with call.stage("stream_attach"):
-            session = await endpoint_calls.run(terminals.get, scope, terminal_id)
-            session.open_stream()
-
-        async def event_stream() -> AsyncIterator[str]:
-            cursor = after
-            try:
-                yield _terminal_attached_frame(session.descriptor()["last_seq"])
-                while True:
-                    events = await session.events_after_async(
-                        cursor,
-                        wait_s=TERMINAL_STREAM_WAIT_S,
-                    )
-                    for event in events:
-                        cursor = event.seq
-                        yield _terminal_sse_frame(event)
-                    descriptor = session.descriptor()
-                    if descriptor["state"] != "running" and cursor >= descriptor["last_seq"]:
-                        return
-                    if not events:
-                        # Keep intermediaries from timing out a quiet interactive
-                        # shell without inventing a sequenced client event.
-                        yield ": keepalive\n\n"
-            finally:
-                session.close_stream()
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            # A stream's body is the terminal's own bytes, so this call's
-            # measurement answer travels in headers rather than in the body.
-            headers=call.headers(extra={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}),
-        )
-
-    @app.post("/workspaces/{workspace_id}/terminals/{terminal_id}/input")
-    async def terminal_input(
-        workspace_id: str,
-        terminal_id: str,
-        body: TerminalInputRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        scope = await endpoint_calls.run(keystroke_scope, workspace_id)
-        try:
-            data = base64.b64decode(body.data, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise HTTPException(
-                status_code=400, detail="terminal input is not valid base64"
-            ) from exc
-        if len(data) > int(applied_settings["terminal_input_max_kib"]) * 1024:
-            raise HTTPException(status_code=413, detail="terminal input is too large")
-        session = await endpoint_calls.run(terminals.get_for_control, scope, terminal_id)
-        return await endpoint_calls.run(session.write, data, now=time.monotonic())
-
-    @app.post("/workspaces/{workspace_id}/terminals/{terminal_id}/resize")
-    async def resize_terminal(
-        workspace_id: str,
-        terminal_id: str,
-        body: TerminalResizeRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        scope = await endpoint_calls.run(keystroke_scope, workspace_id)
-        session = await endpoint_calls.run(terminals.get_for_control, scope, terminal_id)
-        return await endpoint_calls.run(
-            session.resize,
-            rows=body.rows,
-            cols=body.cols,
-            now=time.monotonic(),
-        )
-
-    @app.delete("/workspaces/{workspace_id}/terminals/{terminal_id}")
-    async def delete_terminal(
-        workspace_id: str,
-        terminal_id: str,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(terminals.delete, scope, terminal_id)
-
-    @app.get("/workspaces/{workspace_id}/git")
-    async def git(
-        workspace_id: str,
-        request: Request,
-        base_sha: str | None = Query(None, max_length=64),
-        metadata: bool = False,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        operation = _run_git_metadata if metadata else _run_git
-        return await owner_command(
-            workspace_id,
-            lambda retained, _call: operation(
-                retained,
-                "/workspace",
-                base_sha,
-                timeout_s=applied_settings["workspace_command_timeout_s"],
-                max_output_bytes=int(applied_settings["workspace_command_output_max_mib"])
-                * 1024
-                * 1024,
-            ),
-            start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
-        )
-
+    for routes in (
+        SettingsRoutes(context, app.state),
+        SharedSessionRoutes(context, app.state),
+        SnapshotRoutes(context),
+        ArchiveRoutes(context, app.state),
+        TurnRoutes(context),
+        WorkspaceRoutes(context),
+        TerminalRoutes(context),
+    ):
+        bind(app.router, routes, authenticate=context.authenticate)
     return app
 
 
@@ -3219,10 +455,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = [
-    "FileWriteRequest",
-    "TerminalCreateRequest",
-    "TerminalInputRequest",
-    "TerminalResizeRequest",
-    "create_app",
-]
+__all__ = ["create_app"]
