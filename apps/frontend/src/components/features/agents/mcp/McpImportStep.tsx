@@ -98,6 +98,8 @@ export function McpImportStep({
   const submission = useRef(false);
   const [text, setText] = useState(initialText);
   const [preview, setPreview] = useState<McpImportPreviewApi | null>(null);
+  // Where each draft runs, as its preview placed it: an address is a service, a
+  // command a program in each chat's sandbox. Saving keeps what the owner saw.
   const [locations, setLocations] = useState<Record<string, McpLocation>>({});
   const [secrets, setSecrets] = useState<Record<string, Record<string, string>>>({});
   const [checking, setChecking] = useState(false);
@@ -247,25 +249,6 @@ export function McpImportStep({
             >
               <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{draft.label}</p>
               <DraftBody draft={draft} />
-              {draft.transport === 'stdio' ? (
-                // A command runs with each chat. Running it on the owner's own
-                // computer, through a connector, is the one exception they choose.
-                <label className="mt-3 flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
-                  <input
-                    type="checkbox"
-                    aria-label={`Run ${draft.label} on my computer`}
-                    checked={(locations[draft.label] ?? draft.location) === 'user-connector'}
-                    disabled={saving}
-                    onChange={(event) =>
-                      setLocations((current) => ({
-                        ...current,
-                        [draft.label]: event.target.checked ? 'user-connector' : 'sandbox',
-                      }))
-                    }
-                  />
-                  Run on my computer instead (needs a connected MCP connector)
-                </label>
-              ) : null}
               {draft.warnings.map((warning) => (
                 <p key={warning} className="mt-2 text-xs text-amber-800 dark:text-amber-300">
                   {warning}

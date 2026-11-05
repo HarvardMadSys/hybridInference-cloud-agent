@@ -104,6 +104,11 @@ _EXACT_VERSION = re.compile(
 )
 
 
+def is_exact_release(version: str) -> bool:
+    """Whether ``version`` names one release, as a sandbox server's package must."""
+    return _EXACT_VERSION.match(version) is not None
+
+
 class LaunchPlanError(ValueError):
     """Raised when a launch spec cannot be expressed as a managed plan."""
 
@@ -320,7 +325,7 @@ def _check_sandbox(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep:
     install = _install_for(spec, argv)
     if install is None:  # pragma: no cover - npx and uvx are package runners
         raise LaunchPlanError("a sandbox server needs a package to run")
-    if not _EXACT_VERSION.match(install.version):
+    if not is_exact_release(install.version):
         raise LaunchPlanError(
             f"pin {install.package!r} to an exact release (for example "
             f"{install.package}@1.2.3), not {install.version!r}",
@@ -373,7 +378,8 @@ def _install_for(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep | None:
     if version is None:
         # Deliberately a refusal rather than a resolution: resolving here would
         # mean the install step and the run step could disagree, and the whole
-        # point of the split is that the version is decided once, by the user.
+        # point of the split is that the version is decided once, when it is
+        # saved. An import pins a bare name before it gets here (package_pins).
         raise LaunchPlanError(
             f"pin {package!r} to an exact version. A server that installs "
             f"{package!r} unpinned runs whatever the registry publishes next, in a "
@@ -467,6 +473,7 @@ __all__ = [
     "ManagedLaunchPolicy",
     "build_launch_plan",
     "declared_secret_names",
+    "is_exact_release",
     "resolve_env",
     "split_package_reference",
 ]

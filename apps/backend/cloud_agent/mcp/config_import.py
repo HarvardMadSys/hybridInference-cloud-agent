@@ -318,10 +318,6 @@ def _draft(
             )
         runner = command.rsplit("/", 1)[-1].lower()
         ecosystem = _PACKAGE_RUNNERS.get(runner)
-        if ecosystem:
-            warnings.append(
-                f"{runner} resolves a package at start; the platform pins the version it installs"
-            )
         return ImportDraft(
             label=name,
             transport=Transport.STDIO,

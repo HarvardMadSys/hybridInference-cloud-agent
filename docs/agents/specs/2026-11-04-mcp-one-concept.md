@@ -27,12 +27,13 @@ Other cloud agents do not ask users this question. As far as their public docume
 | The user gives | It is | Runs | Reaches |
 | --- | --- | --- | --- |
 | An `https://` address, a catalog service (GitHub, Slack, …) | A service | Where it is hosted; the platform connects to it | The internet |
-| A command: `npx` or `uvx` with an exact version | A program | In each chat's sandbox, with the agent | The task's `localhost`, files and browser, and the internet |
+| A command: `npx` or `uvx` and one package | A program | In each chat's sandbox, with the agent | The task's `localhost`, files and browser, and the internet |
 
 - The command form keeps today's guarantees: one exactly pinned package, started by `npx` or `uvx`; no shell and no unpinned `latest`.
-- A pasted configuration (Claude, Cursor, VS Code JSON) is classified the same way, entry by entry. A command entry becomes a sandbox program by default, instead of today's default, "your computer".
-- **Running on the user's own computer** (the existing MCP connector) stays possible, as an explicit opt-in on a command entry ("Run on my computer instead"). It is the only case where the user names a place, because it is the only one where the place is theirs.
-- **The managed worker** has no runtime behind it. It leaves the UI until it exists.
+- **A bare package name is pinned for the user.** READMEs write `npx -y @scope/server` or `@scope/server@latest`, and almost nobody adds a version. Adding such a command asks the registry for the current release and stores that exact version (`@scope/server@1.4.0`, `server==1.4.0`), shown before the user confirms. It changes only when the user edits the server.
+- A pasted configuration (Claude, Cursor, VS Code JSON) is classified the same way, entry by entry. A command entry becomes a sandbox program, instead of today's default, "your computer".
+- **Running on the user's own computer** (the MCP connector) leaves the UI. No connector runtime ships (`operations.md` § *Connector configuration*), so the option could only fail. A stored connection of that kind keeps its *On your computer* label.
+- **The managed worker** has no runtime behind it either. It leaves the UI until it exists.
 
 ### Credentials
 
@@ -60,7 +61,7 @@ Both kinds list their tools. A program's list is reported by the sandbox the fir
 
 | Situation | Message |
 | --- | --- |
-| Command without an exact version | "Pin an exact version, for example `pkg@1.2.3`." |
+| Command with a range (`^1.2`), or a package the registry cannot find | "Name one release of pkg, for example `pkg@1.2.3`." A bare name or `latest` is pinned instead. |
 | Command that is not `npx`/`uvx` | "Add a command that starts with `npx` or `uvx` and one package." |
 | A program that failed to start in a chat | The chat goes on without it, and its CLI reports the server as failed. A clearer message in the chat is *later*. |
 
@@ -68,8 +69,8 @@ Today's extras-syntax bug (`uvx --from 'pkg[extra]==1.2.3' …` rejected as unpi
 
 ## What changes
 
-- **UI.** Remove the run-location picker and "Cloud worker". A command entry runs in the sandbox unless "Run on my computer instead" is ticked. Cards say *Online service*, *Program* or *On your computer*. Hide approval controls for programs, and list their tools once reported.
-- **API and data.** No new location: `remote` and `sandbox` remain the stored values, chosen from what was added. Import defaults command entries to `sandbox`. A program's sealed keys and `${NAME}` references are accepted.
+- **UI.** Remove the run-location picker, "Cloud worker" and "your computer". A command entry runs in the sandbox. Cards say *Online service* or *Program*. Hide approval controls for programs, and list their tools once reported.
+- **API and data.** No new location: `remote` and `sandbox` remain the stored values, chosen from what was added. Import defaults command entries to `sandbox` and pins a bare package name to its current release (`cloud_agent/mcp/package_pins.py`). A program's sealed keys and `${NAME}` references are accepted.
 - **Host.** Resolve a program's credentials (its sealed keys from the claim, `${NAME}` from the member's environment) and hand them to the slot's runner, as that runner's user, into its private directory; a change restarts only the affected servers. Report a program's tool list back to the control plane once per change.
 - **Docs and agent instructions.** Say "MCP servers"; describe programs as "running next to you in the sandbox".
 
@@ -79,6 +80,7 @@ Today's extras-syntax bug (`uvx --from 'pkg[extra]==1.2.3' …` rejected as unpi
 - A program's start failure shown in the chat, in the user's words.
 - A full desktop, or live view and takeover (phase 3 of computer use).
 
-## Open questions
+## Decided after review
 
-1. Should a program also be addable by a bare package name ("`@playwright/mcp`"), with the platform pinning the current version on save?
+1. A program is addable by a bare package name ("`@playwright/mcp`"); the platform pins the current release when it is added (*Adding a server*, above).
+2. "Run on my computer instead" is removed: it offered a connector that no longer runs.

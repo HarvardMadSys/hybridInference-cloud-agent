@@ -419,9 +419,8 @@ export async function previewMcpImport(
 /**
  * Save a paste the user has already seen.
  *
- * `locations` overrides the run location per draft, which is the one decision
- * the paste cannot make for the user: a colleague's snippet says nothing about
- * whether this deployment may run a local process for it.
+ * `locations` names where each draft runs, as its preview placed it, so the
+ * save stores what the user confirmed.
  */
 export async function saveMcpImport(
   text: string,

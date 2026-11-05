@@ -84,6 +84,7 @@ from cloud_agent.mcp.net_policy import (
     policy_from_environment,
     validate_endpoint,
 )
+from cloud_agent.mcp.package_pins import pin_import
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
     McpRegistryError,
@@ -661,6 +662,7 @@ async def import_connections(
         result = config_import.parse_import(body.text, format_hint=body.format_hint)
     except config_import.ImportError_ as exc:
         raise _bad_request(str(exc)) from exc
+    result = await pin_import(result)  # a bare package name, at its current release
 
     preview = [draft.summary() for draft in result.drafts]
     if not body.save:

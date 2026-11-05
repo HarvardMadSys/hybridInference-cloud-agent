@@ -1219,7 +1219,10 @@ The [design](../agents/specs/2026-11-02-computer-use-base-capability.md#in-sandb
 explains it.
 
 - **What may run there.** One exactly pinned package started by `npx` or `uvx`,
-  with no mount or working directory. It may use the owner's credentials, as
+  with no mount or working directory. An import pins a bare package name, or a
+  tag such as `latest`, to the release the public registry names then
+  (`cloud_agent/mcp/package_pins.py`); a range, or a package the registry
+  cannot find, is refused. It may use the owner's credentials, as
   any command the agent runs may: keys pasted with it are sealed at rest and
   named `secret://NAME`, and `${NAME}` is filled from the chat's environment.
   The host hands both only to the slot's runner, in a file only that runner's

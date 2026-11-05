@@ -332,10 +332,9 @@ describe('McpAddDialog', () => {
     const add = await screen.findByRole('button', { name: 'Add 1 server' });
     expect(add).toBeDisabled();
     expect(screen.getByText('npx -y package /my folder')).toBeInTheDocument();
-    // No place to choose: it runs with each chat, unless it is moved to the
-    // owner's own computer.
+    // No place to choose: a command runs with each chat.
     expect(screen.queryByText('Cloud worker')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Run docs on my computer')).not.toBeChecked();
+    expect(screen.queryByLabelText('Run docs on my computer')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('docs · Value for API_KEY'), {
       target: { value: 'private-token' },
     });
@@ -344,35 +343,6 @@ describe('McpAddDialog', () => {
       expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'sandbox' }, {}, undefined, {
         docs: { API_KEY: 'private-token' },
       }),
-    );
-  });
-
-  it("moves a command to the owner's own computer only when asked", async () => {
-    const command = {
-      ...preview.drafts[0],
-      transport: 'stdio' as const,
-      location: 'sandbox' as const,
-      url: null,
-      argv: ['npx', '-y', 'package@1.0.0'],
-    };
-    vi.mocked(previewMcpImport).mockResolvedValue({ ...preview, drafts: [command] });
-    vi.mocked(saveMcpImport).mockResolvedValue({
-      ...preview,
-      saved: [{ id: 6, label: 'docs' }] as never,
-    });
-    render(<McpAddDialog templates={[]} initialMode="json" onClose={vi.fn()} onAdded={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('MCP configuration'), { target: { value: text } });
-    const add = await screen.findByRole('button', { name: 'Add 1 server' });
-    fireEvent.click(screen.getByLabelText('Run docs on my computer'));
-    fireEvent.click(add);
-    await waitFor(() =>
-      expect(saveMcpImport).toHaveBeenCalledWith(
-        text,
-        { docs: 'user-connector' },
-        {},
-        undefined,
-        {},
-      ),
     );
   });
 
