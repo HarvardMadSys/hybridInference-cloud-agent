@@ -24,7 +24,7 @@ JOB_OWN_COLUMNS = (
     "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, base_sha, task_prompt, "
     "runtime, model, model_connection_id, reasoning_effort, state, "
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
-    "published_pr_url, published_commit_sha, detail, "
+    "published_pr_url, detail, "
     "metadata, skills, attachments, fork_source_job_id, "
     "turn_source, goal_round, goal_round_kind, goal_revision, goal_id, "
     "goal_report_parse, goal_report_outcome, goal_report_reason, goal_report_detail, "
@@ -124,8 +124,8 @@ async def read_job(conn: Any, job_id: str) -> dict[str, Any] | None:
 
 # Permanent deletion hides a chat from its owner whether or not it is archived
 # or working: the delete itself cancels its turns and revokes its residency.
-# Only a Fork or a publication in flight still refuses, because each is a
-# short shared-workspace transition another chat may depend on. The retained
+# Only a Fork in flight still refuses, because it is a short
+# shared-workspace transition another chat may depend on. The retained
 # rows keep lineage and billing attributable.
 SESSION_DELETE_BLOCK_SQL = """
 CASE
@@ -137,13 +137,6 @@ CASE
         SELECT 1 FROM agent_thread_sandbox_memberships m
         WHERE m.thread_id = t.session_id AND m.fork_operation_id IS NOT NULL
     ) THEN 'fork_in_progress'
-    WHEN EXISTS (
-        SELECT 1 FROM agent_sandbox_snapshots snapshot
-        JOIN agent_snapshot_jobs included ON included.snapshot_id = snapshot.id
-        JOIN agent_jobs included_job ON included_job.id = included.job_id
-        WHERE included_job.thread_id = t.session_id
-          AND snapshot.state IN ('pending', 'capturing', 'captured', 'publishing')
-    ) THEN 'publication_pending'
     ELSE NULL
 END
 """

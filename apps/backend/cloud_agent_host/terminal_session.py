@@ -274,7 +274,7 @@ class _TerminalSession:
                 # A backend may report failure after a partially effective
                 # CONT. Best-effort STOP it again before preserving the
                 # logical suspension; callers must never treat an uncertain
-                # resume as an open publication/preparation barrier.
+                # resume as an open preparation barrier.
                 with contextlib.suppress(SandboxError, OSError):
                     self._process.suspend()
                 raise

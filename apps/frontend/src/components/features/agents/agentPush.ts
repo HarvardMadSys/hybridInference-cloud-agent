@@ -39,8 +39,6 @@ export interface AgentRecordsChange {
   queues: string[];
   /** Jobs whose tool calls awaiting approval changed. */
   mcp: string[];
-  /** Conversations whose publication progress changed. */
-  publications: string[];
   /** Changes may have been missed: read again rather than trust patches. */
   resync: boolean;
 }
@@ -49,7 +47,6 @@ const HINT_FIELD = {
   usage: 'usage',
   queue: 'queues',
   mcp: 'mcp',
-  publication: 'publications',
 } as const satisfies Record<AgentChangeHint, keyof AgentRecordsChange>;
 
 let live = false;
@@ -76,7 +73,6 @@ function queue(update: (change: AgentRecordsChange) => void): void {
     usageValues: {},
     queues: [],
     mcp: [],
-    publications: [],
     resync: false,
   };
   update(pending);

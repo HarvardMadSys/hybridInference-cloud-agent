@@ -191,17 +191,17 @@ def test_a_default_the_code_relies_on_is_not_blanked_out(control_plane_env: dict
     """**`:-` is not "leave it unset".**
 
     Compose passes an empty string as a *set* variable, and
-    `os.getenv(name, "dev")` returns that empty string rather than the default.
-    So `${AGENT_PUBLISH_BASE_BRANCH:-}` silently means "open the PR against a
-    branch called `''`", and `${AGENT_GITHUB_API:-}` means "talk to an empty
-    API base" — both from a compose file that looks like it configured nothing.
+    `os.getenv(name, "INFO")` returns that empty string rather than the default.
+    So `${AGENT_LOG_LEVEL:-}` silently means "log at level `''`", and
+    `${AGENT_GITHUB_API:-}` means "talk to an empty API base" — both from a
+    compose file that looks like it configured nothing.
 
     Variables whose *code* carries a default must repeat it here or be omitted
     entirely. Listed by name because the rule only applies to the ones with a
     default behind them; a genuinely optional variable is right to be blank.
     """
     for name, default in (
-        ("AGENT_PUBLISH_BASE_BRANCH", "dev"),
+        ("AGENT_LOG_LEVEL", "INFO"),
         ("AGENT_GITHUB_API", "https://api.github.com"),
     ):
         assert control_plane_env[name].endswith(f":-{default}}}"), (

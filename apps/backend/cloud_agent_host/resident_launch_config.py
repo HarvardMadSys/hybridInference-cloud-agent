@@ -44,8 +44,11 @@ class SharedResidentLaunchConfig(BaseModel):
     sandbox_mcp_servers: list[SandboxMcpServer] = Field(
         default_factory=list, max_length=MAX_SANDBOX_MCP_SERVERS
     )
-    github_token: str | None = Field(None, max_length=16384, repr=False)
+    github_credential: str = Field("", max_length=16384, repr=False)
     github_repo: str = Field("", max_length=512)
+    git_author_name: str = Field("", max_length=256)
+    git_author_email: str = Field("", max_length=512)
+    git_coauthor: str = Field("", max_length=1024)
     slot_id: int = Field(..., ge=0, le=127)
     residency_generation: int = Field(0, ge=0)
     # The owner model connection: used exactly, never replaced by a relay.
@@ -94,8 +97,11 @@ def resident_launch(
         ),
         mcp_credential=body.mcp_credential,
         sandbox_mcp_servers=tuple(body.sandbox_mcp_servers) if body.mcp_server_ids else (),
-        github_token=body.github_token,
+        github_credential=body.github_credential,
         github_repo=body.github_repo,
+        git_author_name=body.git_author_name,
+        git_author_email=body.git_author_email,
+        git_coauthor=body.git_coauthor,
         environment=body.environment,
         slot_id=body.slot_id,
         residency_generation=body.residency_generation,

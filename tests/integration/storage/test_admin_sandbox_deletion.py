@@ -145,8 +145,6 @@ async def test_deletion_requires_verified_archive_and_retains_native_and_job_led
         ("state='running'", "not_stopped"),
         ("state='lost'", "not_stopped"),
         ("active_operation_count=1", "busy"),
-        ("snapshot_state='pending'", "busy"),
-        ("snapshot_state='importing'", "busy"),
     ],
 )
 async def test_delete_refuses_live_or_unsettled_group(db, store, change, result):
@@ -156,6 +154,18 @@ async def test_delete_refuses_live_or_unsettled_group(db, store, change, result)
     assert await request_delete(store, "asbx_busy") == result
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_admin_audit_log") == 0
+
+
+@pytest.mark.parametrize("left", ["pending", "snapshotting", "importing"])
+async def test_delete_ignores_snapshot_state_left_by_the_removed_publisher(db, store, left):
+    # The publisher that settled these states is gone; a group upgraded in
+    # one of them must not be refused deletion forever.
+    await seed(db, store, "asbx_left", state="stopped")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET snapshot_state=$1 WHERE id='asbx_left'", left
+        )
+    assert await request_delete(store, "asbx_left") == "accepted"
 
 
 @pytest.mark.parametrize(

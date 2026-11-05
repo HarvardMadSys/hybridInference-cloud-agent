@@ -67,6 +67,37 @@ services:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
 
+  # The GitHub relay's tunnel, the second relay a sandbox reaches. It carries
+  # the names github.com and api.github.com as relay aliases, so every group
+  # bridge resolves GitHub to it (Docker's resolver under runc, the managed
+  # /etc/hosts block in a Kata guest), and forwards TLS unopened to the
+  # control plane's GitHub relay, which holds the certificate.
+  #
+  # Its own key and permitopen, for the reason the MCP tunnel has its own.
+  # Behind the github-relay profile, with AGENT_SANDBOX_GITHUB_RELAY_CA_FILE
+  # set for the runner and sandbox manager below.
+  github-tunnel:
+    profiles: [github-relay]
+    build:
+      context: ../..
+      dockerfile: deploy/host/Dockerfile.agent-ssh-tunnel
+    restart: unless-stopped
+    environment:
+      TUNNEL_SSH_DESTINATION: ${AGENT_GITHUB_TUNNEL_SSH_DESTINATION:-}
+      TUNNEL_SSH_PORT: ${AGENT_GITHUB_TUNNEL_SSH_PORT:-22}
+      TUNNEL_REMOTE_HOST: ${AGENT_GITHUB_TUNNEL_REMOTE_HOST:-127.0.0.1}
+      # The GitHub relay's listener, never 8000 or 8001.
+      TUNNEL_REMOTE_PORT: ${AGENT_GITHUB_TUNNEL_REMOTE_PORT:-8443}
+      TUNNEL_LISTEN_PORT: "443"
+    volumes:
+      - ${AGENT_GITHUB_TUNNEL_SSH_KEY:-/etc/hybridinference/github-tunnel-id}:/etc/agent-tunnel/id:ro
+      - ${AGENT_GITHUB_TUNNEL_SSH_KNOWN_HOSTS:-/etc/hybridinference/github-tunnel-known-hosts}:/etc/agent-tunnel/known_hosts:ro
+    networks:
+      agent-relays:
+        aliases:
+          - github.com
+          - api.github.com
+
   # The second destination, and the one no sandbox may reach. The runner claims
   # jobs, registers this host and heartbeats against the control plane's main
   # listener — the same 8000 the MCP tunnel deliberately stopped pointing at.
@@ -176,6 +207,8 @@ services:
       # sandbox manager therefore needs the same sandbox-reachable relay address
       # the runner hands to ordinary resident processes.
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
+      # Set, groups carry the GitHub relay's names and members trust its CA.
+      AGENT_SANDBOX_GITHUB_RELAY_CA_FILE: ${AGENT_SANDBOX_GITHUB_RELAY_CA_FILE:+/etc/hybridinference/github-relay-ca.pem}
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
       # The sandbox manager wakes groups on its own (Fork, files, terminals), so it
@@ -196,6 +229,8 @@ services:
       - cloud_agent_host.sandbox_manager
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The GitHub relay CA's certificate (public). An unset path mounts an empty file, unused.
+      - ${AGENT_SANDBOX_GITHUB_RELAY_CA_FILE:-/dev/null}:/etc/hybridinference/github-relay-ca.pem:ro
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/sandbox-archives:/var/lib/hybridinference/broker-archives
       # Mount the receipt child, never the credential-bearing parent.
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/upload-receipts:/var/lib/hybridinference/upload-receipts
@@ -248,6 +283,8 @@ services:
       # given by address, or one it cannot find on the relay network, before
       # it claims anything.
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
+      # Set, groups carry the GitHub relay's names and members trust its CA.
+      AGENT_SANDBOX_GITHUB_RELAY_CA_FILE: ${AGENT_SANDBOX_GITHUB_RELAY_CA_FILE:+/etc/hybridinference/github-relay-ca.pem}
       # --- Enrolled host identity (required) ---
       # A one-time token, spent at first start for a lasting per-host
       # credential. Once that credential exists the runner claims with it and
@@ -352,6 +389,8 @@ services:
       - cloud_agent_host.runner
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The GitHub relay CA's certificate (public). An unset path mounts an empty file, unused.
+      - ${AGENT_SANDBOX_GITHUB_RELAY_CA_FILE:-/dev/null}:/etc/hybridinference/github-relay-ca.pem:ro
       # The host credential, and the lock enrollment is taken under. On the
       # machine, not in a container: an enrollment token is single-use, so a
       # credential that dies with the container needs a new token on every

@@ -841,7 +841,6 @@ class PostgresSessionForkRepository:
                             turn["reasoning_effort"],
                             turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
                             turn["published_pr_url"],
-                            turn["published_commit_sha"],
                             turn["detail"],
                             json.dumps(load_json(turn["metadata"]))
                             if turn["metadata"] is not None
@@ -865,11 +864,11 @@ class PostgresSessionForkRepository:
                     INSERT INTO agent_jobs (
                         id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
                         base_sha, task_prompt, runtime, model, reasoning_effort, state,
-                        published_pr_url, published_commit_sha, detail, metadata,
+                        published_pr_url, detail, metadata,
                         fork_source_job_id, skills, model_connection_id, created_at, updated_at
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                        $13, $14, $15, $16::jsonb, $17, $18::jsonb, $19,
+                        $13, $14, $15::jsonb, $16, $17::jsonb, $18,
                         clock_timestamp(), clock_timestamp()
                     )
                     """,

@@ -163,7 +163,12 @@ def _stamp(**_: object) -> dict[str, Any]:
     }
 
 
-def test_claimed_github_write_token_reaches_only_the_resident_launch(monkeypatch):
+def test_github_reaches_the_resident_launch_from_its_residency_not_its_claim(monkeypatch):
+    """The relay placeholder and the owner's identity come with the residency.
+
+    A claim from an older control plane that still carries a sandbox write
+    token has it ignored: no token GitHub accepts reaches a member.
+    """
     claim = ClaimedJob.from_response(
         {
             **_PAYLOAD,
@@ -176,13 +181,24 @@ def test_claimed_github_write_token_reaches_only_the_resident_launch(monkeypatch
 
     assert run.result == 0
     assert run.launches
-    assert all(launch.github_token == "sandbox-write-token" for launch in run.launches)
     assert all(launch.github_repo == claim.repo for launch in run.launches)
-    assert "sandbox-write-token" not in repr(claim)
-    assert (
-        ClaimedJob.from_response({**_PAYLOAD, "clone_token": "host-clone-token"}).github_token
-        is None
-    )
+    # The probe names none; a live process keeps the one its residency gave it.
+    assert all(not launch.github_credential for launch in run.launches)
+    assert "sandbox-write-token" not in repr(run.launches)
+
+    residency = {
+        "github_credential": "agh.residency.signature",
+        "git_author_name": "octo",
+        "git_author_email": "7+octo@users.noreply.github.com",
+        "git_coauthor": "FreeInference <9+freeinference[bot]@users.noreply.github.com>",
+    }
+    assert runner_mod.residency_github_launch(claim.repo, residency) == residency
+    # Without a repository there is nothing for the relay to act on, but the
+    # owner still authors the commits.
+    assert runner_mod.residency_github_launch(None, residency) == {
+        **residency,
+        "github_credential": "",
+    }
 
 
 def _run_new_chat(
@@ -221,6 +237,10 @@ def _run_new_chat(
         "credential": _JOB.model_connection.api_key,
         "generation": 1,
         "model": job.model,
+        "github_credential": "agh.residency.signature",
+        "git_author_name": "octo",
+        "git_author_email": "7+octo@users.noreply.github.com",
+        "git_coauthor": "",
         **residency_connection("claude-code"),
     }
     if job.thread_attachment_count:

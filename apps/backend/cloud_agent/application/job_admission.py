@@ -458,8 +458,7 @@ async def _admit_repository(
         ) from exc
     # A branch is resolved to the commit it points at *now*. The job stores the
     # sha: a branch moves, so a job that recorded "dev" would silently mean a
-    # different tree by the time it ran, and the publisher applies its patch
-    # onto a pinned commit.
+    # different tree by the time it ran.
     base_sha = body.base_sha
     if base_sha is None and body.base_ref and app_credentials is not None:
         try:
@@ -474,13 +473,13 @@ async def _admit_repository(
                     }
                 },
             ) from exc
-    # The publisher fetches the base by hash and pushes a branch built on it.
-    # GitHub serves any object of the repository's network by hash, a fork's
+    # The runner fetches the base by hash. GitHub serves any object of the
+    # repository's network by hash, a fork's
     # pull request head included, and a ref resolves to whatever commit it
     # names — so neither a named commit nor a resolved ref is, by itself, part
     # of the repository's history. Checked once here: a job's base is fixed at
     # creation (a host fills only an absent one, from its own checkout), and a
-    # follow-up builds on the branch the platform published.
+    # follow-up starts from the same base.
     if base_sha is not None and app_credentials is not None:
         await _require_base_on_branch(
             app_credentials, repo=repo, base_sha=base_sha, base_ref=body.base_ref

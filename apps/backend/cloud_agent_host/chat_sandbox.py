@@ -1368,7 +1368,7 @@ class ChatSandboxManager:
         process_pidfile: str | None = None,
     ) -> SandboxProcess:
         """Run an attached command inside the retained container."""
-        current = spawn_target(self, spec)
+        current, env = spawn_target(self, spec, env)
         exec_argv = argv
         if process_pidfile is not None:
             self._validate_member_pidfile(spec, process_pidfile, user_uid=user_uid)
@@ -1984,8 +1984,8 @@ class ChatSandboxManager:
         user_uid: int | None = None,
     ) -> TerminalProcess:
         """Attach a PTY to one shell without creating or killing a container."""
-        current = spawn_target(
-            self, spec, not_running="chat sandbox must be started before terminal exec"
+        current, env = spawn_target(
+            self, spec, env, not_running="chat sandbox must be started before terminal exec"
         )
         token = secrets.token_hex(16)
         if user_uid is not None:
@@ -3204,7 +3204,7 @@ class ChatSandboxManager:
         commit: str,
         env: dict[str, str] | None = None,
     ) -> None:
-        """Import publisher-base objects without changing workspace Git state.
+        """Import a follow-up's base objects without changing workspace Git state.
 
         The bundle crosses stdin into activation tmpfs and is removed before
         this command returns. ``git bundle unbundle`` adds objects only: it

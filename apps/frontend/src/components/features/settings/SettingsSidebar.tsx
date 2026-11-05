@@ -18,7 +18,12 @@ const ITEMS = [
   {
     href: SETTINGS_PATHS.account,
     label: 'security.title',
-    icon: 'M12 3 4 6v6c0 5 3.4 8.5 8 9 4.6-.5 8-4 8-9V6l-8-3ZM9 12l2 2 4-4',
+    icon: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6.6 18.2a6 6 0 0 1 10.8 0',
+  },
+  {
+    href: SETTINGS_PATHS.models,
+    label: 'settings.models.title',
+    icon: 'M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM9.5 9.5h5v5h-5zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3',
   },
   {
     href: SETTINGS_PATHS.memory,

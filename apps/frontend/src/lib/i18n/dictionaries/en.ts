@@ -350,20 +350,10 @@ export const en = {
   'review.fixHint': 'Ask this review agent to fix its findings in the shared workspace',
   'watchPr.action': 'Watch PR and merge',
   'watchPr.start':
-    'Ask the agent to watch tests and reviews, then merge. Requires source-control tools with merge access.',
-  'watchPr.unavailable':
-    'This chat must be able to continue, and its latest changes must be in the PR, before starting a PR watch.',
+    'Ask the agent to watch tests and reviews, then merge. It acts on GitHub as you, so your GitHub account needs merge access.',
+  'watchPr.unavailable': 'Available once this chat can continue and nothing is running in it.',
   'watchPr.sendFailed': 'Could not start watching this PR.',
-  'publish.create': 'Create PR',
-  'publish.update': 'Update PR',
-  'publish.createHint': 'Push this workspace to an agent/… branch and open a draft PR.',
-  'publish.updateHint': 'Push the workspace’s latest changes to its draft PR.',
-  'publish.unavailable': 'Available once the running turn finishes.',
-  'publish.inProgress': 'Publishing changes…',
-  'publish.failed': 'Could not publish changes. Try again.',
-  'publish.unchanged': 'No changes to publish.',
-  'publish.unpublished': 'Changes not in the PR yet.',
-  'publish.sendFailed': 'Could not publish this workspace.',
+  'outcome.openPr': 'Open PR',
   'sideChat.new': 'New Side Chat',
   'sideChat.close': 'Close {name}',
   'sideChat.region': 'Side chat',
@@ -538,7 +528,10 @@ export const en = {
   'settings.backToChats': 'Back to chats',
   'settings.collapseNavigation': 'Collapse settings navigation',
   'settings.expandNavigation': 'Expand settings navigation',
-  'settings.personalDescription': 'Manage your profile, default model, and notifications.',
+  'settings.personalDescription': 'Manage your profile and notifications.',
+  'settings.models.title': 'Models',
+  'settings.models.description':
+    'Your personal model connections: the provider API keys and models your tasks run on.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',
@@ -775,8 +768,7 @@ export const en = {
   'archive.deleteSession': 'Permanently delete {title}',
   'archive.deleteAll': 'Permanently delete all',
   'archive.deleteFiltered': 'Permanently delete filtered',
-  'archive.deleteBusy':
-    'This session is preparing a fork or publishing. Try again after it finishes.',
+  'archive.deleteBusy': 'This session is preparing a fork. Try again after it finishes.',
   'archive.preparing': 'Collecting matching sessions…',
   'archive.prepareFailed':
     'Could not collect all matching sessions. No changes were made. Please try again.',
@@ -784,10 +776,9 @@ export const en = {
   'archive.deleteTitle': 'Permanently delete {count} sessions?',
   'archive.deleteBody':
     'You will no longer be able to view or restore these sessions, and any running task is stopped. This cannot be undone. Forked sessions and pushed branches or pull requests are unaffected; a workspace shared with other sessions is kept.',
-  'archive.deleteSkipped': '{count} sessions preparing a fork or publishing are excluded.',
+  'archive.deleteSkipped': '{count} sessions preparing a fork are excluded.',
   'archive.noDeletableTitle': 'No sessions can be deleted yet',
-  'archive.noDeletable':
-    'All matching sessions are preparing a fork or publishing. Try again after they finish.',
+  'archive.noDeletable': 'All matching sessions are preparing a fork. Try again after they finish.',
   'archive.bulkLimit':
     'Select at most {count} sessions at a time. Narrow your search or project and status filters, then try again.',
   'archive.scopeSession': 'Session: {title}',
@@ -802,8 +793,6 @@ export const en = {
   'archive.deleting': 'Deleting…',
   'archive.deleteFailed': 'Could not delete these sessions. Check your connection and try again.',
   'archive.forkInProgress': 'A selected session is being forked. Wait for the fork to finish.',
-  'archive.publicationPending':
-    'A selected session has unfinished publication. Wait for it to finish.',
   'archive.sessionNotFound': 'A selected session is no longer available.',
   'archive.selectionChanged': 'The selection has changed. Review the refreshed list and try again.',
   'archive.deletedOne': '1 session deleted',
@@ -1079,10 +1068,9 @@ export const en = {
     'Your repository is cloned into the sandbox. The agent only edits this copy.',
   'firstRun.workspaceCreated':
     'The sandbox starts from an empty folder. Nothing is cloned, and nothing is published.',
-  'firstRun.publishing': 'Pushing the changes to an agent/… branch and opening a draft PR.',
   'firstRun.doneTitle': 'Your first draft PR is ready',
   'firstRun.doneBody':
-    'Review it on GitHub; merging is up to you. Want changes? Reply below, then Update PR.',
+    'Review it on GitHub; merging is up to you. Want changes? Reply below and ask the agent to push them to the PR.',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': 'Queued messages',

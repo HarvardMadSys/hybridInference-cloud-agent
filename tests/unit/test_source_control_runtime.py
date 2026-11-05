@@ -514,7 +514,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
 ) -> None:
     """The half of issue #47 a fix to ``app.state`` alone would have missed.
 
-    The publisher and the reaper were given the credentials the lifespan had at
+    The pending-message maintenance and the reaper were given the credentials the lifespan had at
     startup and kept them for as long as they ran. Asserted on the real
     lifespan, because the bug was in the wiring and nowhere else.
     """
@@ -555,7 +555,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     monkeypatch.setattr(
         "cloud_agent.bootstrap.lifespan.run_pending_message_maintenance", recording("queue")
     )
-    monkeypatch.setattr("cloud_agent.publish_worker.publish_loop", recording("publisher"))
     monkeypatch.setattr(
         "cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", recording("sandbox_deletion")
     )
@@ -567,7 +566,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # This wiring test uses a fake pool; its notification listener must
         # also stay idle instead of resolving the test-only database hostname.
         "cloud_agent.bootstrap.lifespan.listen",
-        "cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots",
         "cloud_agent.capacity_history.prune_host_capacity_history",
         "cloud_agent.operational_health.monitor_queue",
         "cloud_agent.mcp.runtime.maintain_host_sessions",
@@ -610,9 +608,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # Waiting messages are settled outside the reaper now, and the App
         # went with them to the task that asks for it.
         assert started["queue"]["github_app"] is runtime.github
-        assert started["publisher"]["github_app"] is runtime.github
-        # Its titles and pull requests ride the process's pool, not a client each.
-        assert started["publisher"]["http"] is app.state.http
         credentials = runtime.github.get()
         assert credentials is not None
         async with credentials._http() as client:

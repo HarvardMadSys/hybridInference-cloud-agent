@@ -416,9 +416,7 @@ describe('archived session management', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Permanently delete filtered' }));
     const dialog = await screen.findByRole('dialog', { name: 'Permanently delete 100 sessions?' });
     expect(within(dialog).getByText('Scope: current search and filters')).toBeVisible();
-    expect(
-      within(dialog).getByText(/2 sessions preparing a fork or publishing are excluded/),
-    ).toBeVisible();
+    expect(within(dialog).getByText(/2 sessions preparing a fork are excluded/)).toBeVisible();
     expect(mocks.list).toHaveBeenCalledWith(
       expect.objectContaining({ repo: 'owner/alpha', limit: 100, cursor: '100' }),
       expect.any(AbortSignal),
@@ -524,7 +522,6 @@ describe('archived session management', () => {
 
   it.each([
     ['fork_in_progress', 'being forked'],
-    ['publication_pending', 'unfinished publication'],
     ['not_found', 'no longer available'],
   ])(
     'discards a stale delete selection on %s and retries with refreshed IDs',

@@ -186,7 +186,7 @@ async def test_the_claim_carries_no_repository_credential(
     assert body["repo"] is None
     assert body["base_sha"] == TEMPORARY_WORKSPACE_BASE_SHA
     assert body["clone_token"] is None
-    assert body["github_token"] is None
+    assert "github_token" not in body
     assert asked == []
 
 

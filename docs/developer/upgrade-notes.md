@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0111_mcp_sandbox_location`. The supported deployment scripts run migrations
+`0112_thread_pull_requests`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -18,6 +18,31 @@ transitions that need stopped writers are listed in
 After migrating, start the main control-plane listener with its existing
 complete environment: it imports newly registered settings once, as described
 in [Admin Settings](operations.md#admin-settings).
+
+## Agents open their own pull requests
+
+The platform no longer publishes workspaces. There is no **Create PR** or
+**Update PR** button, no `POST /v1/agent/threads/{thread_id}/publish`, no
+workspace snapshot and no `agent/<thread>` branch. When the owner asks, the
+agent commits, pushes a branch and opens the pull request itself, as the
+owner, through [the GitHub relay](operations.md#the-github-relay); without
+the relay configured, agents cannot push. **Watch PR and merge** has the agent
+use git and `gh api` REST calls itself. Follow-up turns always start from the
+conversation's own base. Pull requests the publisher opened before this
+release stay on GitHub as they are, and nothing pushes to their `agent/…`
+branches again.
+
+The control plane no longer reads `AGENT_GITHUB_TOKEN`,
+`AGENT_PUBLISH_BASE_BRANCH`, `AGENT_GIT_AUTHOR_NAME` or
+`AGENT_GIT_AUTHOR_EMAIL`, and Admin → Settings has no Publication group. Delete
+those lines from the control plane's `.env`. Commits are authored as the
+conversation's owner, with `AGENT_GITHUB_COAUTHOR` as co-author.
+
+The publisher's tables (`agent_sandbox_snapshots`, `agent_snapshot_jobs`,
+`agent_pr_archive_checks`) and `agent_jobs.published_commit_sha` stay in the
+schema, unused: this release neither reads nor writes them, and a migration in
+the next release drops them. This release is an ordinary rolling deploy, and
+rolling back to the previous release needs no downgrade and loses nothing.
 
 ## Shorter `.env` files
 
@@ -199,6 +224,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0112_thread_pull_requests` | Adds `agent_thread_pull_requests`: the pull requests a conversation's agent opened through the GitHub relay, one row per conversation and pull request. Nothing reads it before this release, so the previous release runs unchanged beside it. A downgrade drops the table. |
 | `0111_mcp_sandbox_location` | Lets an MCP connection run inside the task sandbox: the `agent_mcp_connections.location` check constraint admits `sandbox` beside `remote`, `managed-worker` and `user-connector`, under the stable name `agent_mcp_connections_location_check`. No row changes. A downgrade restores the three-location constraint, and refuses while any sandbox connection exists rather than deleting it. |
 | `0110_host_late_settings` | Adds two columns to `agent_runner_hosts`: the host settings registered after a host's first import that it has already offered (so each is imported once, and an administrator's reset is never undone), and what the host reports it uses for configuration delivered on the heartbeat, such as the agent package registry. Existing rows get an empty list and no report. A downgrade drops both columns. |
 | `0109_local_account_parity` | Local accounts only. Splits `agent_local_password_logins` into sign-in identities (email, login name, phone) and optional password credentials, carrying every account over with its verification time and hash (a verified email is recorded as verified by its link, the only way `0108_local_accounts` had); adds the access view every SQL gate reads, the `deleted` account state with the account's name, note, language and sign-in and deletion times, phone codes, browser sessions, sign-in events, the signup domain list, first-run setup and administrator mail to accounts. It touches only the account tables. A downgrade restores the email-and-password table and drops the new tables, with the sign-in events and mail history in them; it refuses while any account signs in some other way or is deleted, rather than dropping that account. |

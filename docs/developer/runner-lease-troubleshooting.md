@@ -126,7 +126,7 @@ prompt is sent exactly once, after its admission acknowledgement succeeds.
 Supervisor settlement retains the last token's receipt until another activation
 takes ownership. Control-plane settlement returns the recorded boundary only
 for the same still-live attempt and activation. Repeating it does not increment
-the workspace epoch, append a snapshot or change the native turn ordinal. A
+the workspace epoch or change the native turn ordinal. A
 sandbox manager restart loses its in-memory receipt, so uncertain completion across a
 restart fails closed.
 

@@ -15,7 +15,6 @@ import base64
 import binascii
 import contextlib
 import functools
-import hashlib
 import json
 import os
 import queue
@@ -37,7 +36,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent_host import sandbox_manager_profiling_policy
-from cloud_agent_host.base_bundle_request import bind_base_bundle_reader
 from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
@@ -109,11 +107,9 @@ from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_tim
 from cloud_agent_host.workspace_download import write_workspace_download
 from cloud_agent_host.workspace_git import (
     COMMIT_SHA as _COMMIT_SHA,
-    GIT_VIEW_ENV as _GIT_VIEW_ENV,
     run_git as _workspace_git,
     run_git_metadata as _workspace_git_metadata,
 )
-from cloud_agent_shared.git.base_bundle_stream import BASE_BUNDLE_STREAM_CAPABILITY
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     SANDBOX_MANAGER_SETTING_KEYS,
@@ -134,7 +130,6 @@ from cloud_agent_shared.sandbox_restore import (
     CheckpointRestore,
     parse_start_fence,
 )
-from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 from cloud_agent_shared.workspace_browser import (
     WorkspacePathError,
     normalize_workspace_path,
@@ -305,7 +300,6 @@ def _chat_idle_timeout_from_env() -> float:
 from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.environment_process import tool_environment
-from cloud_agent_host.environment_snapshot import check_snapshot_secrets
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig, resident_launch
 from cloud_agent_host.ssh_access import apply_ssh_access
 from cloud_agent_shared.environment import (
@@ -317,7 +311,6 @@ from cloud_agent_shared.environment_snapshots import (
     ENVIRONMENT_SNAPSHOT_CAPABILITY,
     EnvironmentSnapshotRef,
 )
-from cloud_agent_shared.secret_redaction import SecretRedactor
 from cloud_agent_shared.ssh_access import SSH_ACCESS_CAPABILITY, SshAccess
 
 
@@ -579,29 +572,6 @@ class SharedForkRequest(SharedSandboxIdentityRequest):
     target_slot_id: int = Field(..., ge=0, le=127)
     source_launch: SharedResidentLaunchConfig
     target_launch: SharedResidentLaunchConfig
-
-
-class SharedSnapshotCaptureRequest(SharedSandboxIdentityRequest):
-    """Exact ordered workspace epoch requested by the coordinator."""
-
-    environment: BoundEnvironment | None = Field(None, repr=False)
-    #: Further values the snapshot must not add: the group owner's model
-    #: connection keys, current and past. Never shown, never echoed.
-    known_secrets: dict[str, str] = Field(default_factory=dict, repr=False, max_length=200)
-
-    snapshot_id: int = Field(..., ge=1)
-    workspace_epoch: int = Field(..., ge=1)
-    base_sha: str = Field(..., min_length=7, max_length=64)
-
-
-class SharedBaseImportRequest(SharedSandboxIdentityRequest):
-    """Published commit objects to add without moving shared Git state."""
-
-    snapshot_id: int = Field(..., ge=1)
-    commit_sha: str = Field(..., min_length=7, max_length=64)
-
-
-_read_base_bundle_request = bind_base_bundle_reader(SharedBaseImportRequest.model_validate_json)
 
 
 class SharedInitialArchiveRequest(SharedSandboxIdentityRequest):
@@ -1325,56 +1295,6 @@ def _run_sandbox(
     return exit_code, "".join(chunks), stderr
 
 
-class SnapshotBaseMissing(HTTPException):
-    """A capture's refusal when the workspace lacks the commit its diff is cut from.
-
-    A published base reaches the workspace only as objects no ref names
-    (:meth:`ChatSandboxManager.import_base_bundle` leaves refs, HEAD and the
-    index to their owner), so Git's own housekeeping prunes it once its pack
-    is old enough. ``read-tree`` then fails with the same 502 as a refused
-    patch, which fails the snapshot, and every later capture of that base the
-    same way. This answer is told apart instead: 409 with exactly
-    :data:`SNAPSHOT_BASE_MISSING`, on which the control plane imports the base
-    again and retries the capture.
-    """
-
-    def __init__(self) -> None:
-        """Answer with the one status and detail the control plane matches."""
-        super().__init__(status_code=409, detail=SNAPSHOT_BASE_MISSING)
-
-
-def _commit_missing(
-    backend: SandboxBackend,
-    workdir: Path | str,
-    sha: str,
-    *,
-    timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
-) -> bool:
-    """Whether the workspace's object store lacks commit ``sha`` or its root tree.
-
-    Only a definite answer counts: ``rev-parse --quiet --verify`` exits 1 when
-    the name resolves to no object the store holds, and ``cat-file -e`` when
-    the tree is gone. Anything else, such as a directory that is not a
-    repository, is left to the capture, which reports its own failure. The
-    environment is the Git view's, so the workspace's configuration starts no
-    program and no lazy fetch.
-    """
-    if not _COMMIT_SHA.fullmatch(sha):
-        raise HTTPException(status_code=400, detail="base SHA is not a commit hash")
-    status, _stdout, _stderr = _run_sandbox(
-        backend,
-        workdir=workdir,
-        script=(
-            f'tree=$(git rev-parse --quiet --verify "{sha}^{{tree}}"); status=$?; '
-            '[ "$status" -eq 0 ] || exit "$status"; '
-            'git cat-file -e "$tree"'
-        ),
-        env={**_GIT_VIEW_ENV, "GIT_OPTIONAL_LOCKS": "0"},
-        timeout_s=timeout_s,
-    )
-    return status == 1
-
-
 def _run_git(
     backend: SandboxBackend,
     workdir: Path | str,
@@ -1924,7 +1844,6 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 ENVIRONMENT_CAPABILITY,
                 ENVIRONMENT_INFERENCE_CAPABILITY,
                 SSH_ACCESS_CAPABILITY,
-                BASE_BUNDLE_STREAM_CAPABILITY,
                 *(
                     [ENVIRONMENT_SNAPSHOT_CAPABILITY]
                     if getattr(archive_controller, "snapshots_available", False)
@@ -2082,7 +2001,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         operate on the group's single ``/workspace`` as the group UID, though,
         so capacity and suspension must be group-scoped too.  Otherwise a fork
         sibling could keep writing through a PTY while another member had
-        installed the documented workspace preparation/publication barrier.
+        installed the documented workspace preparation barrier.
         """
         return str(ensure_workspace(workspace_id).origin_thread_id)
 
@@ -2837,140 +2756,6 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         except (DriverError, SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
         return asdict(result)
-
-    def _capture_environment_snapshot(
-        backend: RetainedChatBackend, body: SharedSnapshotCaptureRequest
-    ) -> dict[str, Any]:
-        # Asked first: a missing base fails read-tree with the same 502 as a
-        # refused patch, which would fail the snapshot instead of re-importing.
-        if _commit_missing(
-            backend,
-            CHAT_WORKDIR,
-            body.base_sha,
-            timeout_s=applied_settings["workspace_command_timeout_s"],
-        ):
-            raise SnapshotBaseMissing()
-        result = _run_git(
-            backend,
-            CHAT_WORKDIR,
-            body.base_sha,
-            timeout_s=applied_settings["workspace_command_timeout_s"],
-            max_output_bytes=int(applied_settings["workspace_command_output_max_mib"])
-            * 1024
-            * 1024,
-            exact_patch=True,
-        )
-        if body.environment is not None or body.known_secrets:
-            check_snapshot_secrets(
-                backend, body.base_sha, body.environment, known_secrets=body.known_secrets
-            )
-        return result
-
-    def capture_environment_snapshot(
-        backend: RetainedChatBackend, body: SharedSnapshotCaptureRequest
-    ) -> dict[str, Any]:
-        try:
-            return _capture_environment_snapshot(backend, body)
-        except SnapshotBaseMissing:
-            # Platform words the control plane matches exactly; nothing in
-            # them came from the workspace, so redaction has nothing to mask
-            # and must not rewrite them.
-            raise
-        except Exception as exc:
-            redactor = SecretRedactor(
-                {**(body.environment.secrets() if body.environment else {}), **body.known_secrets}
-            )
-            if isinstance(exc, HTTPException):
-                # The inspection's own answer, redacted. A refused patch (502)
-                # is final for the snapshot coordinator, which retries a 503.
-                raise HTTPException(
-                    status_code=exc.status_code, detail=redactor.text(str(exc.detail))
-                ) from None
-            raise SandboxError(redactor.text(str(exc))) from None
-
-    @app.post("/shared-sandboxes/{thread_id}/snapshot")
-    async def capture_shared_workspace_snapshot(
-        thread_id: str,
-        body: SharedSnapshotCaptureRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Capture one immutable group diff under the supervisor barrier."""
-        owner = require_shared_supervisor()
-        try:
-            await endpoint_calls.run(
-                owner.register_manifest,
-                shared_spec(body),
-                shared_manifest(body.members),
-                expected_container_id=body.expected_container_id,
-            )
-            result = await endpoint_calls.run(
-                owner.capture_snapshot,
-                thread_id,
-                capture=lambda backend: capture_environment_snapshot(backend, body),
-                start_seq=body.start_seq,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        patch = result.get("patch")
-        if not isinstance(patch, str):
-            raise HTTPException(status_code=502, detail="Git capture returned no patch")
-        return {
-            "snapshot_id": body.snapshot_id,
-            "sandbox_id": body.sandbox_id,
-            "sandbox_generation": body.generation,
-            "container_id": body.expected_container_id,
-            "workspace_epoch": body.workspace_epoch,
-            "base_sha": body.base_sha,
-            "patch": patch,
-            "content_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
-        }
-
-    @app.post("/shared-sandboxes/{thread_id}/import-base")
-    async def import_shared_workspace_base(
-        thread_id: str,
-        request: Request,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Import a trusted publisher commit object without checkout/reset."""
-        owner = require_shared_supervisor()
-        body, bundle = await _read_base_bundle_request(request)
-        try:
-            await endpoint_calls.run(
-                owner.register_manifest,
-                shared_spec(body),
-                shared_manifest(body.members),
-                expected_container_id=body.expected_container_id,
-            )
-            token, _descriptor = await endpoint_calls.run(
-                owner.operation_opened, thread_id, start_seq=body.start_seq
-            )
-            try:
-                # The supervisor's lock is never taken on the event loop.
-                backend = await endpoint_calls.run(owner.backend, thread_id)
-                await endpoint_calls.run(
-                    backend.manager.import_base_bundle,
-                    backend.spec,
-                    bundle,
-                    commit=body.commit_sha,
-                    env={
-                        "GIT_CONFIG_COUNT": "1",
-                        "GIT_CONFIG_KEY_0": "safe.directory",
-                        "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
-                    },
-                )
-            finally:
-                await endpoint_calls.run(owner.operation_closed, thread_id, token)
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        finally:
-            bundle.close()
-        return {
-            "ok": True,
-            "snapshot_id": body.snapshot_id,
-            "sandbox_id": body.sandbox_id,
-            "commit_sha": body.commit_sha,
-            "workspace_head_preserved": True,
-        }
 
     @app.get("/sandboxes")
     async def list_chat_sandboxes(

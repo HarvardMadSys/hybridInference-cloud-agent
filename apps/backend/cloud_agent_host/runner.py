@@ -5,12 +5,15 @@ streams the member Agent CLI's output through the sandbox manager. Its shape
 follows from the adjudicated security model rather than convenience:
 
 - **Narrow credentials.** The enrolled host claims with its own identity. Only
-  a member-scoped inference grant, an attempt-fenced MCP token, and a
-  short-lived repository-scoped GitHub App write token enter the sandbox.
-  Worker-control, account and service credentials stay outside.
-- **Snapshot-out, not push.** The runner never pushes. The trusted publisher
-  captures and validates a quiescent shared-workspace snapshot, then pushes it.
-  The sandbox may also publish directly using its repository-scoped token.
+  a member-scoped inference grant, an attempt-fenced MCP token, and a GitHub
+  relay placeholder (``agh.``) that GitHub itself refuses enter the sandbox.
+  The read-only clone token, the owner's GitHub token, and worker-control,
+  account and service credentials stay outside.
+- **The agent pushes, not the platform.** The runner never pushes. It clones
+  with a read-only token, puts the worktree on a local ``agent/<thread>``
+  branch and leaves a credential-free ``origin``. The agent commits, pushes
+  and opens pull requests itself through the GitHub relay, as the
+  conversation's owner.
 - **Heartbeats are how cancellation arrives.** A background thread renews the
   lease and watches the reply for ``cancel_requested``; the agent is killed on
   the next beat. Losing the lease (409) is fatal by design — a runner whose
@@ -81,6 +84,7 @@ from cloud_agent_host.drivers import (
     driver_for,
 )
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
+from cloud_agent_host.github_relay_env import residency_github_launch
 from cloud_agent_host.host_capacity import (
     HostCapacityCollector,
     build_storage_probe,
@@ -174,7 +178,7 @@ from cloud_agent_shared.environment_snapshots import (
     ENVIRONMENT_SNAPSHOT_CAPABILITY,
     EnvironmentSnapshotRef,
 )
-from cloud_agent_shared.git.patch_gate import branch_name_for
+from cloud_agent_shared.git.branches import branch_name_for
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_base_bundle,
@@ -807,11 +811,10 @@ def prepare_worktree(
     at this point the worktree is ours, not the agent's, so running git here is
     safe because later Git inspection runs inside the retained container.
 
-    A shallow single-commit fetch, with no remote recorded. Not adding a remote
-    is the point — it is what keeps the credential out of ``.git/config``, and
-    the runner has no reason to offer the agent a push path it must not use.
-    ``depth`` 2 also brings the commit's parent, for a caller that bundles only
-    what the commit adds to it.
+    A shallow fetch by URL with the credential in the environment only, then
+    ``origin`` recorded as the plain HTTPS URL: the agent pushes through it, and
+    the GitHub relay, not this URL, decides what that buys. ``depth`` 2 also
+    brings the commit's parent, for a caller that bundles only what it adds.
 
     ``max_bytes`` is the import limit the checkout is about to be held to. The
     fetch and the checkout are stopped once ``workdir`` holds more than that,
@@ -861,6 +864,8 @@ def prepare_worktree(
     if checkout.returncode != 0:
         raise WorktreeError(f"could not check out {ref}: {checkout.stderr.strip()[:200]}")
 
+    if _run_git(["remote", "add", "origin", url], cwd=workdir, stop=stop).returncode != 0:
+        raise WorktreeError("could not record origin")
     resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir, stop=stop).stdout.strip()
     _assert_no_credential_on_disk(workdir, clone_token, stop=stop)
     return resolved or (base_sha or "")
@@ -967,7 +972,7 @@ def source_import_max_bytes(env: dict[str, str] | None = None) -> int:
 def checkout_output_branch(
     workdir: str, branch_id: str, *, stop: threading.Event | None = None
 ) -> str:
-    """Put a fresh durable worktree on the publisher's local output branch."""
+    """Put a fresh durable worktree on the conversation's local ``agent/<id>`` branch."""
     branch = branch_name_for(branch_id)
     switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir, stop=stop)
     if switched.returncode != 0:
@@ -1657,11 +1662,10 @@ def _import_retained_base(
 ) -> str:
     """Fetch a follow-up base outside the sandbox and import objects only.
 
-    A base missing here is usually a published commit whose own import was
-    missed, and its parent is the base the workspace already had. Then the
-    bundle carries only what the commit adds; the whole tree, which for a
-    large repository does not fit a bundle, goes only to a workspace that
-    lacks the parent too.
+    When the workspace already holds the base's parent, the bundle carries
+    only what the commit adds; the whole tree, which for a large repository
+    does not fit a bundle, goes only to a workspace that lacks the parent
+    too.
     """
     with tempfile.TemporaryDirectory(prefix="freeinference-base-") as source:
         held: str | None = None
@@ -2684,7 +2688,6 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             model=job.model,
             reasoning_effort=job.reasoning_effort,
             credential=None,
-            github_token=job.github_token,
             environment=job.environment,
             github_repo=job.repo or "",
             plugins=tuple(job.plugins),
@@ -2731,6 +2734,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                 credential=credential,
                 mcp_credential=mcp_credential,
                 residency_generation=int(residency["generation"]),
+                **residency_github_launch(job.repo, residency),
             )
             resident_call = operation_profiling.expect_fragment(
                 measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
@@ -2887,10 +2891,9 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 1
         if tool_errors:
-            # Match the existing conservative no-change rule only after a
-            # publication snapshot can attribute the shared diff. A successful
-            # shared turn may race a sibling, so tool errors alone do not prove
-            # this member produced no useful state.
+            # Reported, not failed: a successful shared turn may race a
+            # sibling, so tool errors alone do not prove this member produced
+            # no useful state.
             control.append_event(
                 NormalizedEvent(
                     "lifecycle",
@@ -2946,7 +2949,6 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                     {
                         "phase": "shared_workspace_settled",
                         "workspace_shared": True,
-                        "publication": "pending_snapshot",
                     },
                 )
             )
@@ -2958,7 +2960,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             _log_control_failure("completion_event", job.job_id, exc)
         finish_decided(
             "succeeded",
-            "agent completed (shared workspace; publication snapshot pending)",
+            "agent completed (shared workspace)",
             base_sha,
         )
         return 0

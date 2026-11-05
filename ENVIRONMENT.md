@@ -68,7 +68,7 @@ would hide existing lifecycle fences or pending deletion receipts.
 Choose the configuration location by what the value controls:
 
 - Use **Admin → Settings** for application behavior, integration URLs and
-  credentials, publication, web appearance, operational intervals, upload and
+  credentials, web appearance, operational intervals, upload and
   skill limits, task titles, and global sandbox/workspace limits.
 - Use a server's **Servers** page for sandbox and workspace values that should
   apply only to that server.
@@ -81,7 +81,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0111_mcp_sandbox_location`) before
+Run `alembic upgrade head` (through `0112_thread_pull_requests`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -382,14 +382,12 @@ permissions, retention and verification requirements.
 | `AGENT_GITHUB_APP_PRIVATE_KEY_FILE` | Host-side key file mounted read-only by control-plane Compose at `/etc/cloud-agent/github-app.pem`. Default `/dev/null` supplies no key. This differs from the in-container `_PATH` setting. |
 | `AGENT_GITHUB_APP_PRIVATE_KEY` | *Initial import.* Inline PEM for a one-time import in deployments that already supply it. Compose does not forward this variable. Set or replace an inline key in Admin Settings, where it is encrypted and never returned to the browser. The mounted `_PATH` form remains available for deployment-managed keys. |
 | `AGENT_GITHUB_APP_INSTALL_URL` | `https://github.com` authorization/installation URL used by the Connect GitHub flow; any other host, scheme or port is refused when saved or imported. The App, OAuth credentials and this URL must all be configured for user connections. |
-| `AGENT_GITHUB_API` | Defaults to `https://api.github.com`. Publication pushes to the Git host paired with it (`github.com` for the default, otherwise this URL's own host), so a token goes back only to the host that minted it. GitHub Enterprise Server is not supported: the Connect GitHub flow's OAuth and installation URLs are GitHub.com's. |
+| `AGENT_GITHUB_COAUTHOR` | NEW. The co-author agents name in their commits, as `Name <email>`. Use the GitHub App bot's noreply address, `<bot-user-id>+<app-slug>[bot]@users.noreply.github.com`, so GitHub shows its avatar beside the owner's. Empty: commits name the owner only. Agents author commits as the conversation's owner (their GitHub noreply address) either way. |
+| `AGENT_GITHUB_API` | Defaults to `https://api.github.com`. Where the control plane sends GitHub App, installation-token and user-token requests and its repository reads. GitHub Enterprise Server is not supported: the Connect GitHub flow's OAuth and installation URLs are GitHub.com's, and the GitHub relay serves only `github.com` and `api.github.com`. |
 | `AGENT_GITLAB_OAUTH_CLIENT_ID` | GitLab.com OAuth application client ID for user connections. |
 | `AGENT_GITLAB_OAUTH_CLIENT_SECRET` | GitLab.com OAuth client secret; store outside Git. |
 | `AGENT_GITLAB_OAUTH_REDIRECT_URI` | Public OAuth callback URI registered with GitLab. Must use HTTPS, except for localhost development, and anything else is refused when saved or imported; update the registration when the deployment URL changes. |
-| `AGENT_REPO_ALLOWLIST` | Comma-separated `owner/name` entries or `owner/*` rules for deployment-owned repository access. It is not per user: every user admitted to Cloud Agent may have the platform clone and publish to the listed repositories with this deployment's GitHub App or `AGENT_GITHUB_TOKEN` credential, without connecting GitHub, so list only repositories all of them may work on. Matching is case-insensitive. Empty grants no allowlist access; users may still use repositories authorized through their own GitHub connection. |
-| `AGENT_GIT_AUTHOR_NAME` / `AGENT_GIT_AUTHOR_EMAIL` | Commit identity for published work. Defaults: `HybridInference Agent` / `agent@localhost`. |
-| `AGENT_GITHUB_TOKEN` | Optional fallback GitHub credential for publication without a GitHub App. Unset does not disable App-based publication. Long-lived publication credentials stay in the control plane and never enter sandboxes. |
-| `AGENT_PUBLISH_BASE_BRANCH` | Pull-request target branch, default `dev`. Keep it nonempty: direct application configuration reads a blank value as a blank branch. Compose uses `:-dev` to apply the default to blank values. |
+| `AGENT_REPO_ALLOWLIST` | Comma-separated `owner/name` entries or `owner/*` rules for deployment-owned repository access. It is not per user: every user admitted to Cloud Agent may have the platform clone the listed repositories with this deployment's GitHub App, without connecting GitHub, so list only repositories all of them may work on. It grants no push: agents push and open pull requests only with their owner's own GitHub connection, through the GitHub relay. Matching is case-insensitive. Empty grants no allowlist access; users may still use repositories authorized through their own GitHub connection. |
 
 ### MCP
 
@@ -408,6 +406,8 @@ relay reachability and connection target policy.
 | ~~`AGENT_MCP_CONFIG`~~ | *Removed.* There is no deployment-wide MCP registry. It named a file of remote servers with their credentials, and every user who could create a job could use them under that one identity — the team-MCP shape this product does not offer. Per-user connections replace it; the relay, the proxy and the sandbox boundary stay. Listed here rather than deleted because an existing deployment has this set, and a variable that silently stops meaning anything is worse than one recorded as gone. |
 | `AGENT_SANDBOX_MCP_URL` | *Host only.* The MCP relay **as this host's sandboxes reach it**. The host compose derives it from the host's own MCP tunnel (`http://<AGENT_MCP_HOSTNAME>:<LISTEN_PORT>`) and gives it to the runner and the sandbox manager, which hand it to every member CLI that has tools; it is also the relay the host rules admit. The control plane no longer reads it: the copy it handed over at claim time had to match every host's alias, and left unset it failed every turn whose owner had connected a tool. A host without one fails such a turn before any container work, telling the owner the site is misconfigured and to ask an admin to finish setting it up. |
 | `AGENT_MCP_TUNNEL_*` | MCP-only SSH tunnel. Required suffixes: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`. Defaults for `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT` / `LISTEN_PORT`: `22` / `127.0.0.1` / `8001` / `8000`. Its remote destination must be the MCP-only listener; main API port 8000 serves no tools. Give it a distinct, narrowly restricted key. |
+| `AGENT_SANDBOX_GITHUB_RELAY_CA_FILE` | NEW. *Host only.* The GitHub relay CA's certificate on this host (`deploy/control-plane/github-relay-certs.sh` makes it). Set, with the `github-relay` Compose profile on this host and the control plane, every group bridge resolves `github.com` and `api.github.com` to the host's `github-tunnel`, and each member trusts the CA for its own processes; git and `gh` then reach GitHub as the conversation's owner through the control plane's GitHub relay. Unset, sandboxes reach GitHub directly and anonymously. See the [design](docs/agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md). |
+| `AGENT_GITHUB_TUNNEL_*` | NEW. The GitHub relay's SSH tunnel, started by the `github-relay` profile. Required with it: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`. Defaults for `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT`: `22` / `127.0.0.1` / `8443`; it listens on 443 under the names `github.com` and `api.github.com`. Its remote destination must be the GitHub relay's listener (`AGENT_GITHUB_RELAY_BIND` / `AGENT_GITHUB_RELAY_PORT` on the control plane, with its certificate and key in `AGENT_GITHUB_RELAY_TLS_DIR`). Give it a key of its own. |
 | `AGENT_MCP_HOSTNAME` | The relay's alias on both container networks. Defaults to `agent-mcp`. |
 | `AGENT_CONTROL_PLANE_TUNNEL_*` | Runner-only SSH tunnel to the main API. Required suffixes: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`. Defaults for `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT` / `LISTEN_PORT`: `22` / `127.0.0.1` / `8000` / `8000`. It joins only the runner network and is unreachable from sandboxes. Use a key distinct from the MCP and inference keys. |
 | `AGENT_CONTROL_PLANE_HOSTNAME` | That tunnel's alias, on the runner network only. Defaults to `agent-control-plane`. |
@@ -693,7 +693,6 @@ Existing host credentials and retained sandboxes stay in place.
 | `AGENT_PLUGIN_PATHS` | *Internal.* Generated by the host plugin installer for pi, OpenCode, and Kilo. A JSON array of absolute paths to the selected plugins installed in the member's private home; defaults to `[]`. CLI wrappers load these paths explicitly while retaining disabled project plugin discovery. Operators must not set this; each chat's saved selections determine it. |
 | `AGENT_ACTION_UID` | *Internal.* Set by the sandbox manager on a repository environment action it starts in a member's terminal: the scoped UID (31000–31063) the action runs as. Operators must not set it. |
 | `AGENT_ENVIRONMENT_SCRIPT` / `AGENT_SCRIPT_STATUS` | *Internal.* Passed by the sandbox manager to the wrapper that runs one repository environment script (`environment_process.py`): the script, and where to record its exit status. The wrapper removes both from its environment before the script starts. Operators must not set them. |
-| `AGENT_SECRET_PATTERN_*` | *Internal.* Set only for the snapshot secret scan inside the sandbox (`environment_snapshot.py`): base64 patterns derived from the bound environment's Secrets, so a snapshot that adds one is refused without its contents leaving the sandbox. Operators must not set them. |
 
 ### Kata runtime qualification generation
 

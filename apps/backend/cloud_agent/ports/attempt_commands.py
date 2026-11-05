@@ -188,9 +188,8 @@ class AttemptCommands(Protocol):
         For each expired ``running`` attempt: mark it ``superseded``, append an
         ``attempt_superseded`` control event, then decide the job's fate —
         requeue while attempts remain, ``cancelled`` if cancellation was
-        pending, ``failed`` once ``max_attempts`` is exhausted. Publication is
-        a snapshot's lifecycle, not the job's, so no job is ever caught
-        mid-publish here. Returns a summary per reaped attempt.
+        pending, ``failed`` once ``max_attempts`` is exhausted. Returns a
+        summary per reaped attempt.
         """
         ...
 

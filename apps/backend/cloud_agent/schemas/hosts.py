@@ -478,6 +478,29 @@ class HostResidencyEstablishResponse(BaseModel):
             "the process keeps it for every later turn it serves."
         ),
     )
+    github_credential: str = Field(
+        "",
+        repr=False,
+        description=(
+            "The GitHub relay placeholder for this residency's process: what git and "
+            "gh present to GitHub, which only the GitHub relay accepts and exchanges "
+            "for the owner's own GitHub token. Like `mcp_credential` it names the "
+            "residency, so the process keeps it across turns."
+        ),
+    )
+    git_author_name: str = Field(
+        "",
+        description="The owner's GitHub login, as commit author and committer. Empty "
+        "when the owner has not connected GitHub.",
+    )
+    git_author_email: str = Field(
+        "",
+        description="The owner's GitHub noreply address, so GitHub attributes the commits to them.",
+    )
+    git_coauthor: str = Field(
+        "",
+        description="`Name <email>` the agent names as its commits' co-author, or empty.",
+    )
 
 
 class HostHeartbeatResponse(BaseModel):

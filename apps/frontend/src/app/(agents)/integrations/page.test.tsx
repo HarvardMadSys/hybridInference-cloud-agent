@@ -34,6 +34,7 @@ it.each([
   ['#settings-shortcuts', '/settings/keyboard-shortcuts'],
   ['#settings-skills', '/settings/plugins'],
   ['#settings-getting-started', '/settings/getting-started'],
+  ['#settings-connections', '/settings/models'],
 ])('preserves the legacy bookmark %s', (hash, page) => {
   window.history.replaceState(null, '', `/integrations${hash}`);
   render(<IntegrationsPage />);

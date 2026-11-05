@@ -3,7 +3,7 @@ Moved from the source repository at the freeze commit `764a6f97`
 (`docs/developer/agent-sandbox-operations.md`). The move's provenance table and
 the historical verification records are in
 docs/agents/reviews/2026-08-04-sandbox-operations-verification-baseline.md.
-The job API, store, accounts, publisher, MCP relay and admin host switch
+The job API, store, accounts, MCP and GitHub relays and admin host switch
 belong to this service's control plane. Gateway sign-in, admission and
 inference were removed; see the cutover in upgrade-notes.md.
 -->
@@ -13,7 +13,7 @@ inference were removed; see the cutover in upgrade-notes.md.
 This is a task-based runbook; you do not need to read it from beginning to end.
 Use it to provision hosts, deploy Cloud Agent, protect retained workspaces, and
 diagnose job or network failures. The control plane owns the job API, database,
-accounts and admission, publisher, MCP relay, and admin settings. Every turn
+accounts and admission, the MCP and GitHub relays, and admin settings. Every turn
 runs on a model connection its owner added with their own provider key.
 
 Start with the task you need:
@@ -50,7 +50,7 @@ Replace every `<...>` placeholder before running a command.
 ## Admin Settings
 
 Use **Admin → Settings** to manage application and integration configuration,
-publication, web appearance, operational intervals, upload and skill limits,
+web appearance, operational intervals, upload and skill limits,
 task-title generation, sandbox/workspace limits, and sandbox archives. These
 settings are stored in the Agent database.
 
@@ -79,8 +79,8 @@ that still need attention.
 Admin Settings is operator access, and `agent.admin` should be granted only to
 people trusted to operate the deployment. It edits the host signing key and
 the account settings (sign-up, approval, mail transport and administrator
-addresses), and the GitHub API URL that the App's, the publication token's and
-users' own GitHub credentials are sent to. Saved credentials stay write-only.
+addresses), and the GitHub API URL that the App's and users' own GitHub
+credentials are sent to. Saved credentials stay write-only.
 
 Apply migrations before an upgrade as described in the
 [upgrade notes](upgrade-notes.md), then start the main control-plane listener
@@ -394,38 +394,35 @@ POST /v1/agent/jobs             owner queues work
       → native Agent CLI        one live process/session per member chat
       → normalized events       streamed to the owner over SSE
       → model calls             the owner's provider, on their own key
-      → optional direct push    member's GH_TOKEN; skips the publisher's checks
-  → turn settles                nothing is published
-
-POST /v1/agent/threads/{id}/publish   owner asks (Create PR / Update PR)
-  → quiescent group snapshot    immutable diff for the trusted publisher
-  → publisher validates         .github/ block, secret scan, path escape, size
-    → agent/<origin-chat-id>    one stable branch per workspace group
-      → draft PR                merges follow the repository's GitHub rules
+      → push and pull request   git/gh as the owner, through the GitHub relay
+  → turn settles                the workspace stays in the retained sandbox
 ```
 
-The platform publishes only when the owner asks; see
-[Resume, Fork, and publication](#resume-fork-and-publication). The agent can
-also push and open pull requests itself, and **Watch PR and merge** asks it to
-merge once the PR satisfies its required checks and reviews.
-Branch protection and other GitHub rules on the repository decide what may
-merge without a person.
+The platform never pushes or opens a pull request itself. When the owner asks
+for one, the agent commits, pushes a branch and opens the pull request as the
+owner, through the [GitHub relay](#the-github-relay), and the pull requests it
+opens are recorded for the conversation; see
+[Resume, Fork, and pull requests](#resume-fork-and-pull-requests).
+**Watch PR and merge** asks it to merge once the PR satisfies its required
+checks and reviews. Branch protection and other GitHub rules on the repository
+decide what may merge without a person.
 
 Keep these credential boundaries intact:
 
-- **No long-lived repository credential enters the sandbox.** The host
-  captures a quiescent group diff; the control-plane publisher holds the
-  GitHub token it publishes with. The runner holds
-  a clone credential, but it is read-only, scoped to the one repository, and
-  deliberately never recorded in `.git/config`: the checkout adds no remote,
-  the credential travels in git's environment rather than its argv, and the
-  runner refuses to start the agent if it finds the token anywhere under
-  `.git/`.
-- **The only repository credential in the sandbox is short-lived.** When the
-  GitHub App is configured, the owning member receives `GH_TOKEN`: an App
-  installation token limited to `contents: write` and `pull_requests: write`
-  on the job's repository, expiring after about one hour. Pushes made with it
-  skip the publisher's patch gate. See [credentials](#2-credentials).
+- **No repository credential enters the sandbox.** The owner's GitHub token
+  stays in the control plane, where only the GitHub relay uses it. The runner
+  holds a clone credential, but it is read-only, scoped to the one repository, and
+  deliberately never recorded in `.git/config`: `origin` is recorded as the
+  plain HTTPS URL, the credential travels in git's environment rather than
+  its argv, and the runner refuses to start the agent if it finds the token
+  anywhere under `.git/`.
+- **git and `gh` in the sandbox speak as the owner, without the owner's
+  token.** With the GitHub relay configured, a member's `GH_TOKEN` is its
+  residency's placeholder, which GitHub refuses. The control plane's GitHub
+  relay exchanges it for the owner's own token while the residency serves a
+  running turn, for the conversation's repository only, and refuses branch
+  deletion, tags, GraphQL and repository administration. Nothing on the
+  platform scans what it pushes. See [the GitHub relay](#the-github-relay).
 - **The sandbox also holds two narrow, non-interchangeable credentials.** The
   member's CLI runs on its owner's provider key from the model connection the
   turn names, handed over only in that owner's claim and residency (see
@@ -434,7 +431,7 @@ Keep these credential boundaries intact:
   relay and only the servers authorized by the conversation's current
   bindings. **There is no per-job spend cap and no local quota**; the owner's
   provider keeps the key's quota and bill. Neither credential can write the
-  event log, upload a replacement patch, or move the job to a terminal state;
+  event log or move the job to a terminal state;
   the trusted runner holds the token that can.
 
 ### Temporary workspaces
@@ -449,8 +446,9 @@ plane records that commit as the job's base. A request that also names
 a repository. The environment is the platform base, the owner's global
 variables, and the task's own overrides.
 
-Its turns settle without opening a workspace snapshot, so nothing is captured
-for the publisher and no branch or pull request is made. Everything else is an
+It has no repository for the GitHub relay to act for, so the relay sends its
+agent's GitHub requests without anyone's credential and records no pull
+request for it. Everything else is an
 ordinary conversation: archive, delete, Fork, Side Chat, goals, MCP, retention,
 checkpoints and S3 archiving behave as they do for a repository chat, and
 project memory is not built from it. `temporary=true` on `GET /v1/agent/jobs`,
@@ -535,7 +533,7 @@ records the GitHub account in `agent_github_accounts`, and stores only the
 installations GitHub reports in `agent_repo_grants`. Reconnecting removes grants
 for installations the user can no longer reach.
 
-The composer, job creation, claims, workspace reads, and publishing all check
+The composer, job creation, claims and workspace reads all check
 repositories **as the user**, through `/user/installations/{id}/repositories`.
 Only repositories the user can **push** to qualify, because the result is a
 branch and pull request. The response is cached for one minute per user. Do not
@@ -562,9 +560,10 @@ access** in the composer open the same page.
 
 **Deployment allowlist.** `AGENT_REPO_ALLOWLIST` supports single-tenant use
 against the operator's repositories. It is not per user: every user admitted to
-Cloud Agent may have the platform clone and publish to every listed repository
-with the deployment's GitHub credentials, so list only repositories all of them
-may work on. When the App's OAuth credentials and
+Cloud Agent may have the platform clone every listed repository with the
+deployment's GitHub App, so list only repositories all of them may work on. It
+grants no push: the GitHub relay pushes and opens pull requests only with the
+owner's own GitHub connection, and GitHub decides what that account may do. When the App's OAuth credentials and
 `AGENT_GITHUB_APP_INSTALL_URL` are configured, the composer still requires a
 connection before any repository can be selected, allowlisted ones included;
 until then a task runs in a [temporary workspace](#temporary-workspaces).
@@ -600,8 +599,8 @@ prompts, or raw container diagnostics.
 **Stop idle sandbox** requests a stop of the shared container, preserving its
 workspace and native sessions for a later turn. It applies to every member of
 the group. The API checks the reviewed container, generation, and last activity
-before accepting the request, and refuses a busy group, pending snapshot or
-publication work, or a group with open terminals or stale terminal observations.
+before accepting the request, and refuses a busy group or a group with open
+terminals or stale terminal observations.
 The request is recorded in the admin audit log. The host performs its own idle
 check before stopping the container.
 When the terminal report is zero, missing, or older than 90 seconds, opening or
@@ -1369,7 +1368,8 @@ container.
 key. Nothing needs to be minted or rotated by hand: the platform signs a
 nine-minute App JWT (`github_app.py`; GitHub refuses more than ten) and
 exchanges it for an hour-long token scoped to the installation covering the
-repository being published to.
+repository, which the runner's clone credential, branch lookups and
+repository reads use.
 
 The key reaches the container through a read-only bind mount, at a fixed path.
 Two variables, and they are not the same variable:
@@ -1401,8 +1401,8 @@ valid key — does not stop the control plane (issue #47):
 
 - Integrations and the task composer say GitHub is temporarily unavailable.
   Creating a job (a temporary workspace's too), a runner's claim, or a branch
-  lookup answers `503 source_control_unavailable` with `Retry-After: 30`; queued jobs, pending
-  publishes and goal wakeups wait without spending any retries.
+  lookup answers `503 source_control_unavailable` with `Retry-After: 30`; queued jobs
+  and goal wakeups wait without spending any retries.
 - The log carries one `ERROR` event, `source_control_load_failed`, with a
   `reason` (`key_file_unreadable`, `key_missing`, `key_invalid`, `unexpected`)
   and, for a file, its path and the OS error. It repeats only if the reason
@@ -1420,8 +1420,9 @@ database and takes precedence over the mounted key. The legacy
 import in deployments that pass it through. The mounted file remains available
 when the saved inline key is empty.
 
-For checkout and publication, the App needs `contents: write` and
-`pull_requests: write`. To enable **Create repository** in the workspace and
+For checkout, and for the pushes and pull requests agents make as their
+owners, the App needs `contents: write` and `pull_requests: write`: an owner's
+GitHub App user token holds only what both the App and the owner may do. To enable **Create repository** in the workspace and
 new-task pickers, also configure the GitHub App's repository permission
 **Repository creation: write**. GitHub also accepts
 **Administration: Read and write**, but Repository creation grants only the
@@ -1431,8 +1432,8 @@ Existing installations may need their owners to approve the updated
 permissions on GitHub. Without that permission,
 repository creation reports that the App cannot create repositories; existing
 tasks continue to use their existing permissions. The App does not need
-`workflows`, so a patch touching `.github/` cannot be pushed even if the gate
-were bypassed. Revocation is uninstalling the App.
+`workflows`; without it, GitHub refuses a push that changes a file under
+`.github/workflows/`. Revocation is uninstalling the App.
 
 Creation calls GitHub's `POST /user/repos` with the connected user's encrypted,
 refreshable GitHub App user token, kept in the control plane. It creates only
@@ -1480,41 +1481,63 @@ The same App also supplies the runner's clone credential, and the two are
 _not_ the same token. An installation token inherits every permission the App
 holds unless it asks for less, so the clone token is requested as
 `contents: read` on the single repository being worked on. Checkout does not
-inherit the publisher's broader authority.
+inherit the App's broader authority.
 
-The claim separately mints a single-repository installation token with
-`contents: write` and `pull_requests: write`, injected as `GH_TOKEN` in the
-owning sandbox member's Agent CLI environment. `GH_REPO` selects the job's
-repository and `GH_HOST` selects `github.com`; `gh` authenticates as the App
-installation, rather than as the user's account. The token is not written to
-Git or GitHub CLI configuration, shared workspace files, or the image. Setup
-scripts and standalone terminal sessions do not receive it. Git uses the
-`gh auth git-credential` helper through invocation-only environment settings,
-so `git push` and `gh pr create` can authenticate without an interactive login.
-The host clone credential stays read-only; user account/refresh tokens and
-the App's private key remain outside the sandbox.
+#### The GitHub relay
 
-Direct sandbox pushes bypass the trusted publisher's patch gate, including
-its workflow-file and secret checks. Repository branch protection and GitHub
-rules still apply. The App installation must grant Contents and Pull requests
-write access; token issuance failures return the claim to the queue.
+No GitHub token reaches a sandbox. Each member's residency carries a
+placeholder (`agh.`) that git and `gh` present to GitHub, and the owner as
+the commits' author (`GIT_AUTHOR_*`, from the owner's GitHub noreply
+address) with the deployment's `AGENT_GITHUB_COAUTHOR` as co-author. Every
+group bridge resolves `github.com` and `api.github.com` to the host's
+`github-tunnel`, so every process in the sandbox reaches the relay, and
+every process trusts the deployment's GitHub relay CA, whether or not it holds
+a placeholder: a setup script cloning a public repository goes through the
+relay too, as nobody. Before the first process starts, a root exec writes the
+CA and a bundle of the image's roots plus the CA to `/etc/freeinference/`,
+root-owned and read-only. The tunnel forwards TLS unopened to the control
+plane's GitHub relay, a listener of its own that holds the certificate.
 
-Each claim obtains a live token from the App's expiry-aware cache. When that
-token changes, the member resumes its native session in a replacement process
-so subsequent commands inherit the new credential. Installation tokens expire
-after about one hour; there is no in-turn renewal, so `gh` calls in a longer
-turn may require a new turn to obtain a fresh token.
+The relay accepts the placeholder only while its residency is the chat's hot
+one, serving a running, leased, unstopped turn on an enrolled host. It then
+sends the request with the owner's own GitHub App user token if the request
+is about the conversation's repository and on its allowlist, with no
+credential at all if it is about anything else, and refuses repository
+administration, secrets, GraphQL, branch deletion and tags. A pull request it
+sees created is recorded for the conversation. The owner's token is renewed
+in the control plane, so a long turn does not outlive it.
+
+To turn it on:
+
+1. Run `deploy/control-plane/github-relay-certs.sh <dir>`. Keep `ca.key`
+   offline; give `relay.pem` and `relay.key` to the control plane
+   (`AGENT_GITHUB_RELAY_TLS_DIR`) and `ca.pem` to every host
+   (`AGENT_SANDBOX_GITHUB_RELAY_CA_FILE`).
+2. Give `relay.key` to the relay's user. The `github-relay` container runs as
+   uid 10001 and reads the directory through a read-only bind mount, which
+   keeps host ownership, so a key the operator owns at `0600` fails with
+   `PermissionError`. Run the script as root, which sets the key to
+   `10001:10001` and `0400`, or run `sudo chown 10001:10001 <dir>/relay.key`
+   as the script prints. Move `ca.key` out of `<dir>` before you mount it.
+3. Enable the `github-relay` Compose profile on the control plane and on each
+   host, and give each host's `github-tunnel` its own SSH key restricted with
+   `permitopen` to the relay's port (`AGENT_GITHUB_TUNNEL_*`).
+4. Set `AGENT_GITHUB_COAUTHOR` to the App bot's noreply address.
+
+Nothing on the platform scans what goes through the relay: there is no
+workflow-file or secret check of its own. Repository branch protection,
+GitHub's push protection and the repository's CI still apply, and a push that
+changes a workflow needs the App's Workflows permission. The design is in
+[agent-native pull requests](../agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md).
 
 With no App configured the claim returns no clone token and the runner clones
 anonymously, which is enough for a public repository. A private repository
 needs the App.
 
-A static `AGENT_GITHUB_TOKEN` still works as a fallback for the trusted
-publisher, but it is a long-lived credential someone has to create and
-rotate; prefer the App. Sandbox GitHub authentication requires the App and
-never falls back to this static token.
-With neither, the publisher loop idles and says so — jobs still run and still
-produce patches, they just never become PRs.
+Without the App and the relay, agents cannot push or open pull requests: jobs
+still run, and their changes stay in the retained workspace, where the owner
+can read them in the Git pane or download them as an archive. There is no
+static-token fallback; `AGENT_GITHUB_TOKEN` is no longer read.
 
 ## Running self-hosted
 
@@ -1616,15 +1639,13 @@ with no leader and no sharding.
 | `AGENT_HOST_STORAGE_PROBE` | `overlay_root` | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see _How full is the sandbox storage?_ |
 | `AGENT_STORAGE_MIN_AVAILABLE_MIB` | `1024` | Bootstrap value for **Storage reserve for new sandboxes**; the admin runtime setting replaces it after the host's first settings heartbeat. Fresh verified available space below this reserve declines a new sandbox allocation without spending the turn. Existing sandboxes may resume; unknown capacity does not establish a pressure verdict. This is an admission guard, not a disk quota |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
-| `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Every admitted user may have the platform clone and publish to the listed repositories. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
+| `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Every admitted user may have the platform clone the listed repositories with the deployment's App; pushing still needs the user's own GitHub connection. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
 | `AGENT_GITHUB_APP_INSTALL_URL` | — | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Offered after connecting whenever the App is not on the user's own account, and behind _Configure repositories_. The control plane adds a short-lived, user-bound `state`; set the App's Callback URL to the agent web's own origin, `<origin>/connected?provider=github` (see _2. Credentials_) |
 | `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | — | GitLab.com OAuth application credentials, kept on the control plane. Configure only `read_user` and `read_api` scopes |
 | `AGENT_GITLAB_OAUTH_REDIRECT_URI` | — | Exact registered callback, normally `<frontend>/agents/connected?provider=gitlab`. HTTPS is required except for localhost development |
 | `AGENT_SANDBOX_MCP_URL` | — | Host only: MCP-only relay URL as this host's sandboxes see it. The standalone host compose derives it from the MCP tunnel alias, and the control plane no longer reads it; never point it at inference or the full control API |
 | `AGENT_MCP_TUNNEL_*` | — | Remote MCP-only listener destination and independent restricted SSH key/known-hosts; see `ENVIRONMENT.md` for the complete set |
-| `AGENT_GITHUB_TOKEN` | — | Control-plane fallback publisher credential; unset means the publisher idles |
-| `AGENT_PUBLISH_BASE_BRANCH` | `dev` | What a draft PR targets when its job named no branch of its own. A job started from a branch targets _that_ branch; this is only the fallback |
 
 The authenticated `/agents/integrations` page is the only supported place to
 start either OAuth flow. OAuth state is unpredictable, bound to the signed-in
@@ -1633,15 +1654,11 @@ uses PKCE. GitLab access and refresh tokens are encrypted before persistence,
 rotated on refresh, never returned to the browser, and revoked best-effort on
 disconnect.
 
-GitHub repositories retain the complete Agent lifecycle: checkout, branch
-discovery, push, and draft PR publishing use short-lived GitHub App installation
-tokens. A draft PR's title is the first concrete line of each included turn's
-closing summary, skipping headings and generic completion preambles, shared
-across the turns a snapshot includes; with no usable summary it names the
-changed files. No model is called to write it. The original task remains in
-the PR body. A conversation keeps one draft PR across its turns while that PR is open; once
-someone closes or merges it, the next published snapshot opens a new draft PR
-from the same `agent/…` branch.
+GitHub repositories retain the complete Agent lifecycle. Checkout and branch
+discovery use short-lived GitHub App installation tokens; the agent pushes and
+opens pull requests as the owner through [the GitHub relay](#the-github-relay).
+The agent writes the branch, commits, pull-request title and description
+itself, and the platform adds nothing to them.
 GitLab is intentionally narrower in this release: it verifies the
 authenticated GitLab user and shows their accessible projects for discovery.
 GitLab projects do not appear in the Agent task composer, and the control plane does
@@ -2349,8 +2366,8 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   become `verified` once a restore has loaded and started them.
 - Each receipt names the control plane's start fence (`start_seq`) for the run
   its stop ended. Every path that may start the container (a turn, a workspace
-  file, terminal, Git or environment request, a Fork, a snapshot capture or a
-  base import) advances the fence first and sends the value it took with the
+  file, terminal, Git or environment request, or a Fork) advances the fence
+  first and sends the value it took with the
   request itself: in its body, or for a workspace request in an
   `X-Agent-Start-Seq` header. An open terminal's input, resize and close
   cannot start the container, so they take no fence. The Sandbox Manager
@@ -2385,9 +2402,8 @@ credential was revoked is handed on by the reaper's next pass.
 
 Nothing starts a group on a removed host, since that host never reports the
 stop that would cover it again. A workspace request (Files, Terminal, Git or
-an environment retry) answers `workspace_unavailable` (409), a Fork is refused,
-and a publication's capture and base import wait until the group has moved. A
-checkpoint still in flight therefore covers its group when it lands, and a
+an environment retry) answers `workspace_unavailable` (409) and a Fork is
+refused. A checkpoint still in flight therefore covers its group when it lands, and a
 request or Fork that finds the group covered hands it on at once: the request
 answers `workspace_restoring`.
 
@@ -2609,8 +2625,7 @@ job. That conservative choice prevents duplicate prompt/tool execution.
 
 On the host, the reaper's close of that member's residency also ends the
 activation that ran on it, as an abandon would, so a Fork sibling's group can
-still go idle and its publication snapshot is not refused as an active
-mutation. A turn that was running when the runner died was already aborted
+still go idle. A turn that was running when the runner died was already aborted
 when the runner's turn stream to the sandbox manager closed. A runner that
 hung instead still holds that stream: the close interrupts its turn, and the
 activation ends once the stream has closed the turn. A stream its runner no
@@ -2654,7 +2669,7 @@ bounded queues; oversized native CLI records stop the affected member. Resource
 checkpoints continue to reach the control plane while CLI output is silent. See
 [Host execution limits](host-execution-limits.md) for the limits and boundaries.
 
-#### Resume, Fork, and publication
+#### Resume, Fork, and pull requests
 
 There is no retained/shared feature flag or runtime allowlist switch. Claude
 Code, Codex, Pi, OpenCode, and Kilo are claimable only after exact
@@ -2672,65 +2687,22 @@ runners never emit `replay`; the API accepts it only so an attempt admitted by
 the previous generation can finish during a parallel rollout, and historical
 rows remain readable in the UI.
 
-A settled turn publishes nothing. The platform publishes a workspace only when
-its owner asks (`POST /v1/agent/threads/{thread_id}/publish`, the conversation's
-Create PR / Update PR button): the request advances the group's epoch and opens
-a snapshot holding every turn settled since the last one, and capture, the
-secret scan, the push, the draft PR and the base import follow as before. A
-request while a turn runs in the workspace is refused (`turn_running`); one
-while a publication is on its way returns that publication. Until the owner
-asks, a settled workspace holds nothing back: it stops when idle and its chat
-can be deleted. Its unpublished turns live in the retained sandbox, and in its
-checkpoint once it stops cleanly. See the
-[design](../agents/specs/2026-10-15-manual-publication-design.zh-CN.md).
+A settled turn leaves its changes in the retained workspace; the platform
+neither captures nor publishes them. Every follow-up starts from the
+conversation's own base, so the workspace's Git view shows every change the
+conversation made. A settled workspace holds nothing back: it stops when idle
+and its chat can be deleted. Its changes live in the retained sandbox, and in
+its checkpoint once it stops cleanly.
 
-After a publication request, the snapshot and draft-PR fields change
-asynchronously. The detail view and recent-task list poll only while that
-publication state is pending/capturing/captured/publishing, and stop at
-published/failed; other terminal jobs do not acquire a background
-polling loop.
-
-A snapshot whose patch the publisher refuses, whose capture the host refuses,
-or whose five publication retries run out stays `failed` with its reason, and
-its group is marked `dirty`. It is not retried. The owner's next request opens
-the group's next snapshot, which supersedes it: every snapshot is the whole
-diff from the last published commit, so it carries the failed changes too, and
-is refused in turn if it still holds what was refused. Snapshots still publish
-in epoch order; only a failed one stops holding the later ones back. If the
-failed attempt had already pushed its commit to the `agent/<thread>` branch
-(the draft-PR step failed after the push, or the push landed after it timed
-out), that commit is the group's own: the publisher records it as the
-snapshot's `pushed_commit_sha` before pushing it, and does not push a commit it
-could not record. The later snapshot builds on it: the branch fast-forwards to
-the later snapshot's tree and the draft PR is opened then. Any other commit on
-the branch is still refused as a moved branch until that branch is deleted;
-the platform never force-pushes. A GitHub rate limit, answered with a 403 or a
-429, is retried after the wait GitHub names (`Retry-After`, or the reset time
-of an exhausted limit), up to an hour, and so is a published base's import
-whose credential hit one. A draft-PR refusal that names only its head branch
-(`head invalid`), which GitHub can answer until it has seen the branch just
-pushed, is retried within the same five-attempt budget; an invalid base branch
-is refused for good.
-
-The base import adds a published commit's objects to the workspace and writes
-no ref, HEAD or index, so Git's own housekeeping prunes them once their pack is
-old enough (two weeks for a default `git gc`). A capture that then finds the
-published base missing is not failed: the sandbox manager refuses it with a
-409 of its own, the group returns to `importing` for the same published base,
-the publisher fetches that commit from GitHub again and imports it, and the
-capture runs once the import completes. That bundle is cut from the commit the
-workspace started from, which its own history keeps, because Git prunes the
-published commits together. A missing base that no snapshot published has
-nothing to fetch, and its capture fails as before. A publication waiting on a
-base import that keeps failing (GitHub no longer serves the commit, access was
-withdrawn, or the workspace cannot take the bundle) fails after an hour and
-leaves its group `dirty`; the owner's next request captures, and imports,
-again.
-
-An import completes only for the generation and container it was sent to. If
-the group's host is removed and another host restores the group while an
-import is still out, the old host's late answer changes nothing, and the
-import is sent again to the restored container.
+When the owner asks for a pull request, the agent opens it through
+[the GitHub relay](#the-github-relay), and pushing again to that pull
+request's branch updates it, as it would locally. Each pull request the relay
+sees created is recorded in `agent_thread_pull_requests` for the
+conversation. A job's `published_pr_url` is the first pull request its own
+turn opened, and `workspace_pr_url` the conversation's newest. A Fork does not
+inherit its parent's records, and a pull request someone opens on GitHub
+directly is not recorded; paste its link into the conversation instead. See
+the [design](../agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md).
 
 Admission checks free space only through the
 [storage reserve](#how-full-is-the-sandbox-storage); disk-pressure alerting and
@@ -4253,14 +4225,13 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   revision and the plan (`client>upstream`); a change of path while a turn
   starts fails that start rather than mixing the two.
 - **Scan history.** When a key is bound to a residency, an encrypted scanning
-  copy is recorded under a separate domain against that sandbox group and
-  connection revision. Trusted snapshot and publication scans of the group
-  look for every key it used, including rotated and deleted ones and those of
-  same-owner Fork members, and nothing from other groups. The copy stays with
-  the sandbox group record after the connection is deleted; it is still a
-  real provider key, and deleting the connection here does not revoke it at
-  the provider. A group whose history exceeds the scan bound fails the scan
-  closed rather than skipping keys.
+  copy is still recorded under a separate domain against that sandbox group
+  and connection revision, but nothing reads it any more: the workspace
+  snapshot scan that used it was removed with the platform publisher, and
+  nothing on the platform scans what an agent pushes. The copy stays with the
+  sandbox group record after the connection is deleted; it is still a real
+  provider key, and deleting the connection here does not revoke it at the
+  provider.
 - **Translated turns.** For Codex or Claude Code on a model whose only usable
   API is Chat Completions, the host installs `/usr/local/libexec/model-protocol-translator.pyz`
   (built from `cloud_agent_host/protocol_translator.py` and
@@ -4376,12 +4347,12 @@ capacity; its returning host cannot claim new work until cleanup is acknowledged
 the enrolled host receives only its own expired test IDs and removes the exact
 labelled containers before acknowledging cleanup. Do not delete unrelated groups
 or bypass lease/container identity checks to clear capacity. Archived, unreferenced
-versions are collected after 30 days; existing workspace, test and publication
-bindings keep their historical encrypted values for redaction/scanning.
+versions are collected after 30 days; existing workspace and test bindings keep
+their historical encrypted values for redaction.
 
 Owner-provided credentials can be read and sent outside by user code through the
-existing network. Known-value masking and trusted publish scans do not cover
-encoded secrets, raw owner terminals/files, or direct Git pushes. Platform-held
+existing network. Known-value masking does not cover encoded secrets, raw owner
+terminals/files, or Git pushes, and nothing on the platform scans a push. Platform-held
 long-lived credentials, reserved variable names and fixed egress remain protected.
 
 Environment setup, startup and actions share executable package data in
@@ -4419,8 +4390,7 @@ recorded in the team's audit log. Design:
   `team_environment_revoked` (403, logged as
   `agent_job_team_environment_revoked`); a turn already running finishes.
   Terminals, actions, Fork, preparation and runtime refresh on such a
-  conversation return 409; masking and publication scanning still read its
-  values.
+  conversation return 409; masking still reads its values.
   Rejoining does not revive old conversations: the generation has moved on.
   A member's repository default naming a team environment they can no longer
   use is cleared when they next start a task.

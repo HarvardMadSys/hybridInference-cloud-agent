@@ -23,8 +23,8 @@ So a provider here is in one of three states, and they are kept apart:
 in place — a ``chown``, a remount — and a restart should not be the only way
 to find out. There is no retry task: whatever needs the credentials asks for
 them, and an ask that finds the App unavailable, with the last attempt at
-least ``github_reload_interval_s`` ago, reads the key again first. The
-publisher asks every 15 seconds and the reaper every 30, so a repaired key is
+least ``github_reload_interval_s`` ago, reads the key again first. The goal
+wakeup and pending-message sweeps ask every 30 seconds, so a repaired key is
 picked up within a minute whether or not anybody is using the site.
 
 Admin settings are checked when each provider is requested. Saving a changed
@@ -170,7 +170,7 @@ class GitHubAppProvider:
         # Track surviving consumers for shutdown without retaining old caches.
         self._retired: WeakSet[GitHubAppCredentials] = WeakSet()
         # Requests resolve their dependencies on a thread pool, while the
-        # publisher and the reaper ask from the event loop. One attempt at a
+        # maintenance loops ask from the event loop. One attempt at a
         # time; a caller that finds one in progress does not wait for it.
         self._lock = threading.Lock()
         if self._configured:

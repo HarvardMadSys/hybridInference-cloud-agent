@@ -72,13 +72,13 @@ describe('pushed records', () => {
     expect(seen[0].resync).toBe(true);
   });
 
-  it('names usage, queue, approval and publication changes once per batch', () => {
+  it('names usage, queue and approval changes once per batch', () => {
     const seen = collect();
     receiveHint('usage', 'ajob_1');
     receiveHint('usage', 'ajob_1');
     receiveHint('mcp', 'ajob_1');
     receiveHint('queue', 'athr_1');
-    receiveHint('publication', 'athr_1');
+    receiveHint('queue', 'athr_1');
     vi.advanceTimersByTime(PUSH_BATCH_MS);
 
     expect(seen).toHaveLength(1);
@@ -86,7 +86,6 @@ describe('pushed records', () => {
       usage: ['ajob_1'],
       mcp: ['ajob_1'],
       queues: ['athr_1'],
-      publications: ['athr_1'],
       resync: false,
     });
   });

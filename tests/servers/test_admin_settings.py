@@ -304,14 +304,14 @@ async def test_real_registry_encrypts_secrets_and_exposes_only_configured_status
         response = await client.put(
             "/admin/agent/settings",
             headers=ADMIN,
-            json={"settings": {"max_attempts": 2, "github_publish_token": SECRET}},
+            json={"settings": {"max_attempts": 2, "serper_api_key": SECRET}},
         )
     assert response.status_code == 200
-    assert response.json()["values"]["github_publish_token"] is None
-    assert response.json()["secret_configured"]["github_publish_token"] is True
+    assert response.json()["values"]["serper_api_key"] is None
+    assert response.json()["secret_configured"]["serper_api_key"] is True
     assert SECRET not in response.text + repr(repository.values) + repr(audit.calls)
-    assert set(repository.values["github_publish_token"]) == {"ciphertext"}
-    assert settings.text_setting("github_publish_token") == SECRET
+    assert set(repository.values["serper_api_key"]) == {"ciphertext"}
+    assert settings.text_setting("serper_api_key") == SECRET
     assert settings.integer_setting("max_attempts") == 2
 
 

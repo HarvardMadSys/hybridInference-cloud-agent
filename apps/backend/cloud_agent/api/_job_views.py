@@ -30,7 +30,7 @@ from cloud_agent.schemas import (
     ProcessObservation,
     ToolCallResources,
 )
-from cloud_agent_shared.git.patch_gate import branch_name_for
+from cloud_agent_shared.git.branches import branch_name_for
 
 if TYPE_CHECKING:
     from typing import Any
@@ -176,7 +176,6 @@ def _job_response(
         published_pr_url=job["published_pr_url"],
         revision=job.get("revision") or 0,
         thread_revision=job.get("thread_revision") or 0,
-        published_commit_sha=job.get("published_commit_sha"),
         detail=job["detail"],
         forked_from_job_id=job.get("fork_source_job_id"),
         # How this turn came to exist, and what it said about the
@@ -211,10 +210,7 @@ def _job_response(
         fork_anchor_job_id=sandbox.get("fork_anchor_job_id"),
         native_fork_available=native_fork_available,
         mid_turn_input_supported=mid_turn_input_supported(job),
-        workspace_publication_state=sandbox.get("workspace_publication_state"),
-        workspace_publication_unchanged=bool(sandbox.get("workspace_publication_unchanged")),
         workspace_pr_url=sandbox.get("workspace_pr_url"),
-        workspace_unpublished_changes=bool(sandbox.get("workspace_unpublished_changes")),
         workspace_epoch=sandbox.get("workspace_epoch"),
         started_at=_iso((telemetry or {}).get("started_at")),
         finished_at=_iso((telemetry or {}).get("finished_at")),

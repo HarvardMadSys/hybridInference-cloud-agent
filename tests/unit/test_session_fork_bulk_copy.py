@@ -122,7 +122,6 @@ async def test_finalize_session_fork_batches_a_thousand_turns_and_preserves_line
             "reasoning_effort": "high",
             "state": "succeeded" if turn_no % 2 else "running",
             "published_pr_url": f"https://example.test/pr/{turn_no}",
-            "published_commit_sha": f"commit-{turn_no}",
             "detail": f"detail {turn_no}",
             "metadata": {"turn": turn_no},
             "skills": [{"name": f"skill-{turn_no}"}],
@@ -173,11 +172,11 @@ async def test_finalize_session_fork_batches_a_thousand_turns_and_preserves_line
     assert len({row[0] for row in copied_turns}) == 1000
     assert copied_turns[0][2] is None
     assert [row[2] for row in copied_turns[1:]] == [row[0] for row in copied_turns[:-1]]
-    assert [row[16] for row in copied_turns] == [turn["id"] for turn in turns]
+    assert [row[15] for row in copied_turns] == [turn["id"] for turn in turns]
     # Every copied turn keeps the source it ran on, Gateway (null) included.
-    assert [row[18] for row in copied_turns] == [turn["model_connection_id"] for turn in turns]
+    assert [row[17] for row in copied_turns] == [turn["model_connection_id"] for turn in turns]
     assert [row[11] for row in copied_turns[0:2]] == ["succeeded", "cancelled"]
-    assert copied_turns[-1][1:15] == (
+    assert copied_turns[-1][1:14] == (
         operation["target_thread_id"],
         copied_turns[-2][0],
         1000,
@@ -190,16 +189,15 @@ async def test_finalize_session_fork_batches_a_thousand_turns_and_preserves_line
         "high",
         "cancelled",
         "https://example.test/pr/1000",
-        "commit-1000",
         "detail 1000",
     )
-    assert json.loads(copied_turns[-1][15]) == {"turn": 1000}
-    assert copied_turns[-1][16] == "source-job-1000"
-    assert json.loads(copied_turns[-1][17]) == [{"name": "skill-1000"}]
+    assert json.loads(copied_turns[-1][14]) == {"turn": 1000}
+    assert copied_turns[-1][15] == "source-job-1000"
+    assert json.loads(copied_turns[-1][16]) == [{"name": "skill-1000"}]
 
     message_sql, copied_messages = connection.executemany_calls[1]
     assert "INSERT INTO agent_thread_messages" in message_sql
-    source_to_copy = {row[16]: row[0] for row in copied_turns}
+    source_to_copy = {row[15]: row[0] for row in copied_turns}
     assert [row[1] for row in copied_messages] == [
         source_to_copy[message["job_id"]] for message in messages
     ]

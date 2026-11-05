@@ -397,7 +397,6 @@ def _full_claim() -> WorkerClaimResponse:
         },
         mcp_token="t",
         clone_token="c",
-        github_token="g",
         mcp_bindings=["docs"],
         sandbox_mcp_servers=[
             SandboxMcpServer(alias="browser", command="npx", args=("-y", "@playwright/mcp@0.0.83"))

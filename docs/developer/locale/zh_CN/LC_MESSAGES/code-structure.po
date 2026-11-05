@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 22:23-0400\n"
+"POT-Creation-Date: 2026-11-04 08:10-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -40,7 +40,9 @@ msgid ""
 "they agree on; it imports neither implementation. Accounts, admission and"
 " usage live in the agent database; model calls go from the sandbox to the"
 " owner's provider."
-msgstr "控制平面和主机是分别部署的两套实现，互不导入。共享代码提供双方共同认可的事实和契约，它不导入任何一方的实现。账号、准入和用量都在 agent 数据库中；模型调用从沙箱直接发往所有者的服务商。"
+msgstr ""
+"控制平面和主机是分别部署的两套实现，互不导入。共享代码提供双方共同认可的事实和契约，它不导入任何一方的实现。账号、准入和用量都在 agent "
+"数据库中；模型调用从沙箱直接发往所有者的服务商。"
 
 #: ../developer/code-structure.md:29
 msgid "Follow a control-plane request"
@@ -576,8 +578,8 @@ msgid "`RunOutcome`, `GitPanel`"
 msgstr ""
 
 #: ../developer/code-structure.md
-msgid "Outcome, publication, and Git interaction"
-msgstr "运行结果、发布和 Git 交互"
+msgid "Outcome, pull request, and Git interaction"
+msgstr "运行结果、pull request 和 Git 交互"
 
 #: ../developer/code-structure.md
 msgid "`JobDetailSidePanels`, `LazyPanels`"
@@ -679,3 +681,4 @@ msgstr ""
 "`cloud_agent_shared`），不能用仓库里的命名空间 "
 "`apps.backend`。主机镜像会把这些包展平，带仓库前缀的导入在本地也许能用，部署后就会失败，所以三个包里都会拦下这种写法。导入扫描会覆盖相对导入、函数内部的导入和"
 " `TYPE_CHECKING` 块。后端的行为测试放在 `tests/` 下；前端测试和它测试的功能或工具函数放在一起。"
+
