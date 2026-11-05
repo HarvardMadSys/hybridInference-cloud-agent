@@ -154,18 +154,16 @@ def test_github_helper_does_not_offer_the_token_to_other_https_hosts(tmp_path):
     assert _PLACEHOLDER not in result.stdout + result.stderr
 
 
-def test_members_trust_the_relay_ca_only_when_the_relay_is_configured(monkeypatch, tmp_path):
+def test_relay_trust_is_the_sandboxs_not_a_members(monkeypatch, tmp_path):
+    # Every process on the bridge reaches the relay, credential or not, so the
+    # trust is installed for the whole container when a process is spawned
+    # (tests/unit/test_github_relay_trust.py), not carried by a member's launch.
     ca = tmp_path / "ca.pem"
     ca.write_text("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
-    without, _, _ = _context()
     monkeypatch.setenv("AGENT_SANDBOX_GITHUB_RELAY_CA_FILE", str(ca))
-    written = []
-    context, calls, _ = _context(slot_id=3)
-    assert "SSL_CERT_FILE" not in without.base_env
-    assert context.base_env["SSL_CERT_FILE"] == "/run/agent-members/3/ca-bundle.pem"
-    assert context.base_env["GIT_SSL_CAINFO"] == context.base_env["SSL_CERT_FILE"]
-    assert context.base_env["NODE_EXTRA_CA_CERTS"] == "/run/agent-members/3/github-relay-ca.pem"
-    del written, calls
+    context, _, _ = _context(slot_id=3)
+    for name in ("SSL_CERT_FILE", "GIT_SSL_CAINFO", "NODE_EXTRA_CA_CERTS"):
+        assert name not in context.base_env
 
 
 def test_claude_is_told_how_github_works_here_and_names_the_co_author():

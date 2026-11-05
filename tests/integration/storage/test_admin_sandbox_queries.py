@@ -301,13 +301,10 @@ async def test_stale_host_removal_refuses_a_host_that_heartbeats_after_review(db
     "change",
     [
         "active_operation_count=1",
-        "snapshot_state='pending'",
-        "snapshot_state='snapshotting'",
-        "snapshot_state='importing'",
         "deletion_state='pending'",
     ],
 )
-async def test_stale_host_removal_keeps_operation_snapshot_and_deletion_fences(db, store, change):
+async def test_stale_host_removal_keeps_operation_and_deletion_fences(db, store, change):
     await seed(db, store, "asbx_stale_busy")
     async with db.acquire() as conn:
         await conn.execute(f"UPDATE agent_sandboxes SET {change} WHERE id='asbx_stale_busy'")
@@ -379,9 +376,6 @@ async def test_removed_inventory_pagination_and_counts_use_same_visibility(db, s
         ("state = 'stopped_dirty'", "not_stopped"),
         ("state = 'lost'", "not_stopped"),
         ("active_operation_count = 1", "busy"),
-        ("snapshot_state = 'pending'", "busy"),
-        ("snapshot_state = 'snapshotting'", "busy"),
-        ("snapshot_state = 'importing'", "busy"),
     ],
 )
 async def test_inventory_removal_refuses_live_or_busy_groups(db, store, change, reason):
@@ -652,13 +646,37 @@ async def test_admin_stop_survives_running_heartbeats_and_clears_on_confirmation
     assert logs[0]["target_user_id"] == origin["user_id"]
 
 
+@pytest.mark.parametrize("left", ["pending", "snapshotting", "importing"])
+async def test_stop_ignores_snapshot_state_left_by_the_removed_publisher(db, store, left):
+    # Nothing moves a group out of these states any more: the publisher and
+    # its snapshot worker are gone. A group upgraded while in one must still
+    # stop, or no stop would ever be accepted for it.
+    await seed(db, store, "asbx_left")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET terminal_count=0, terminal_count_observed_at=NOW(), "
+            "snapshot_state=$1 WHERE id='asbx_left'",
+            left,
+        )
+    assert await stop_request(db, store, "asbx_left") == "accepted"
+
+
+@pytest.mark.parametrize("left", ["pending", "snapshotting", "importing"])
+async def test_inventory_removal_ignores_snapshot_state_left_by_the_removed_publisher(
+    db, store, left
+):
+    await seed(db, store, "asbx_left", state="stopped")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET snapshot_state=$1 WHERE id='asbx_left'", left
+        )
+    assert await archive_request(store, "asbx_left") == "accepted"
+
+
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
         ("active_operation_count = 1", "busy"),
-        ("snapshot_state = 'pending'", "busy"),
-        ("snapshot_state = 'snapshotting'", "busy"),
-        ("snapshot_state = 'importing'", "busy"),
         ("terminal_count = 1", "terminals_open"),
         ("terminal_count_observed_at = NOW() - INTERVAL '2 minutes'", "activity_unknown"),
         ("state = 'stopped'", "not_running"),

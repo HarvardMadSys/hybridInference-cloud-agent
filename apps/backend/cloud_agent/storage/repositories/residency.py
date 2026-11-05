@@ -328,7 +328,6 @@ class PostgresResidencyRepository:
                   AND m.resident_state IN ('stopped', 'lost')
                   AND m.active_attempt_id IS NULL
                   AND g.active_operation_count = 0
-                  AND g.snapshot_state <> 'snapshotting'
                 RETURNING COALESCE(m.residency_grant_id, '')
                 """,
                 thread_id,

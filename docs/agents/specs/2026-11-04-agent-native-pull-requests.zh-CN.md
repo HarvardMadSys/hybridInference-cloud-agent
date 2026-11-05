@@ -59,7 +59,7 @@ github.com / api.github.com
 - **一个只做这件事的 listener。** 和 `create_mcp_app` 同一个镜像、同一个数据库，`create_github_relay_app` 只包含 GitHub 中继路由。它不进公网边缘，也不和 MCP relay 共用端口：MCP relay 的 token 不能在这里用，反过来也一样。
 - **独立隧道。** 宿主机上新增 `github-tunnel` 容器，用自己的 SSH 密钥和 `permitopen`，挂在 `agent-relays` 网络上，由现有的 relay 别名机制接到每个组桥上，端口 443 进入组桥的 `relays` 集合。理由和 MCP 隧道单独一条一样：一把能开两条隧道的钥匙会让隔离变成摆设。
 - **名字解析。** `github-tunnel` 在 `agent-relays` 网络上带着 `github.com` 和 `api.github.com` 两个别名，由现有的 relay 机制接到每个组桥上：runc 下 Docker 自带的 DNS 直接用别名回答（已在本机验证），Kata guest 里由可信 helper 维护的 `/etc/hosts` 块写入同样的地址。其他 GitHub 域名（`codeload`、`raw.githubusercontent.com`、`objects.githubusercontent.com` 等）不变，仍然直连公网。
-- **CA 信任。** 部署生成一个只允许签 `github.com`、`api.github.com` 的 CA（X.509 name constraints），私钥只在控制面。成员启动时，宿主机以该成员自己的 uid 在它私有的 tmpfs 里写一份合并后的信任库（镜像自带的系统根证书加上这个 CA），并设置 `SSL_CERT_FILE`、`GIT_SSL_CAINFO`、`CURL_CA_BUNDLE`、`REQUESTS_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`，使 git、gh、curl、Node 和 Python 都信任它。镜像的信任库和其他成员都不受影响，也不需要改容器的创建参数。
+- **CA 信任。** 部署生成一个只允许签 `github.com`、`api.github.com` 的 CA（X.509 name constraints），私钥只在控制面。网桥把这两个名字解析到中继，对 sandbox 里的**每个**进程都是这样：有占位凭据的成员、临时工作区里没有凭据的成员、环境的 setup/services/verify 脚本、action、终端。所以信任这个 CA 不能跟"持有 GitHub 凭据"绑在一起，否则 setup 脚本 `git clone` 一个公开仓库就会 TLS 失败。容器里第一个进程启动之前，宿主机以 root 在 `/etc/freeinference/` 写入这个 CA 和一份合并后的信任库（镜像自带的系统根证书加上这个 CA），root 所有、`0444`，任何成员、脚本和终端都改不了；每个进程都带上 `SSL_CERT_FILE`、`GIT_SSL_CAINFO`、`CURL_CA_BUNDLE`、`REQUESTS_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`，使 git、gh、curl、Node 和 Python 都信任它，进程自己设置了同名变量时以它自己的为准。镜像的信任库不受影响，也不需要改容器的创建参数。
 
 **hosts 覆盖不是安全边界，只是方便。** agent 可以绕开 hosts 直接用 GitHub 的真实 IP（出口本来就允许公网 443），但 sandbox 里没有任何真正的 GitHub 凭据，绕过去只能匿名访问 GitHub。安全边界是"真 token 只在中继里"，不是"sandbox 到不了 github.com"。
 
@@ -159,7 +159,7 @@ co-author 那一行：Claude 通过 `attribution` 设置自动加（写进成员
 **改造：**
 
 - `workspace_pr_url`、`published_pr_url` 的读取方（`_sql/sandbox.py`、`_sql/sessions.py` 的 done 状态、`adapt.ts`、`recordedTurnOutputs.ts`、`sidebarRecordChanges.ts`、`RunDetails.tsx`、`execution_queries.py`、`threads.py`）改读 `agent_thread_pull_requests`。job 的 `published_pr_url` 是这一轮开的 PR，`workspace_pr_url` 是对话最新的 PR。Fork 不继承原对话的 PR 记录。
-- 停止或删除对话时等待快照的检查（`_GROUP_WORK_PENDING_SQL` 里的快照条件、`publication_pending`）删掉。
+- 停止或删除对话时等待快照的检查（`_GROUP_WORK_PENDING_SQL` 里的快照条件、`publication_pending`）删掉。`agent_sandboxes.snapshot_state` 也不再被当成"忙"：这一版没有任何代码会把它从 `pending`、`snapshotting`、`importing` 改回来，升级时正处在这些状态的组如果还按忙处理，就永远停不下、删不掉，也不会被空闲回收。
 - 续接对话的 base 不再随发布前移，每轮都用对话最初的 base；工作区 diff 视图对比的是整个对话的改动。
 - Watch PR 的提示词去掉"sandbox 没有凭据"和"等用户点 Update PR"，改成 agent 自己用 git 和 `gh api` REST 调用读 PR、push 到 PR 分支、合并；它的 `require_idle` 不再检查快照状态。Code review 的提示词保留"用本地 git 审查"，去掉"没有凭据"。
 

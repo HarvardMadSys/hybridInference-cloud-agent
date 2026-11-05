@@ -3,8 +3,8 @@
 The sandbox resolves ``github.com`` and ``api.github.com`` to the relay's
 tunnel on its own bridge (the tunnel carries those two names as relay
 aliases). The relay terminates TLS with a certificate this deployment's CA
-signed, so a member trusts that CA, and only for its own processes: the
-combined bundle lives in the member's private tmpfs.
+signed, which every process in the sandbox trusts, credential or not
+(:mod:`cloud_agent_host.github_relay_trust`).
 
 What a member holds is a placeholder (``agh.``) that GitHub refuses; the relay
 exchanges it for the owner's own token. git gets it from ``gh auth
@@ -21,14 +21,12 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from cloud_agent_host.member_paths import member_ca_bundle_path, member_relay_ca_path
-
 if TYPE_CHECKING:
     from cloud_agent_host.resident_transport import ResidentLaunch
 
 #: The PEM of this deployment's GitHub relay CA, on the sandbox manager's host.
-#: Set, the relay is in use: groups carry the relay's two names, and members
-#: trust the CA.
+#: Set, the relay is in use: groups carry the relay's two names, and every
+#: process in them trusts the CA.
 RELAY_CA_FILE_ENV = "AGENT_SANDBOX_GITHUB_RELAY_CA_FILE"
 #: The largest CA file read; a CA certificate is a couple of kilobytes.
 _MAX_CA_BYTES = 64 * 1024
@@ -46,7 +44,7 @@ def relay_ca_pem() -> str | None:
     return data.decode("ascii")
 
 
-def github_relay_env(launch: ResidentLaunch, *, relay_ca: bool | None = None) -> dict[str, str]:
+def github_relay_env(launch: ResidentLaunch) -> dict[str, str]:
     """The variables one member's CLI gets for GitHub, and nothing for a launch without it."""
     env: dict[str, str] = {}
     if launch.git_author_name and launch.git_author_email:
@@ -80,19 +78,6 @@ def github_relay_env(launch: ResidentLaunch, *, relay_ca: bool | None = None) ->
     )
     if launch.github_repo:
         env["GH_REPO"] = launch.github_repo
-    if relay_ca if relay_ca is not None else bool(os.environ.get(RELAY_CA_FILE_ENV, "").strip()):
-        bundle = member_ca_bundle_path(launch.slot_id)
-        env.update(
-            {
-                # Go (gh) and OpenSSL read SSL_CERT_FILE; git's libcurl and the
-                # curl CLI are told explicitly, as are Python requests and Node.
-                "SSL_CERT_FILE": bundle,
-                "GIT_SSL_CAINFO": bundle,
-                "CURL_CA_BUNDLE": bundle,
-                "REQUESTS_CA_BUNDLE": bundle,
-                "NODE_EXTRA_CA_CERTS": member_relay_ca_path(launch.slot_id),
-            }
-        )
     return env
 
 

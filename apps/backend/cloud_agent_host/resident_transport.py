@@ -41,9 +41,8 @@ from cloud_agent_host.drivers import (
     TurnResult,
     get_driver,
 )
-from cloud_agent_host.github_relay_env import github_relay_env, relay_ca_pem
+from cloud_agent_host.github_relay_env import github_relay_env
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
-from cloud_agent_host.member_paths import write_member_github_trust
 from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.platform_instructions import (
@@ -964,15 +963,6 @@ class ResidentTransportFactory:
                     self._manager.write_member_inference_env(
                         spec,
                         inference_script,
-                        slot_id=launch.slot_id,
-                        user_uid=uid,
-                        user_gid=self._manager.backend.gid,
-                    )
-                if launch.github_credential and (ca_pem := relay_ca_pem()):
-                    write_member_github_trust(
-                        self._manager,
-                        spec,
-                        ca_pem,
                         slot_id=launch.slot_id,
                         user_uid=uid,
                         user_gid=self._manager.backend.gid,

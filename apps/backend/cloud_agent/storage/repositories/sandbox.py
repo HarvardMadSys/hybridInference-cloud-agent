@@ -159,7 +159,7 @@ class PostgresSandboxRepository:
             )
             group = await conn.fetchrow(
                 "SELECT id, user_id, host, generation, container_id, last_activity_at, "
-                "state, archived_at, deletion_state, active_operation_count, snapshot_state "
+                "state, archived_at, deletion_state, active_operation_count "
                 "FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
                 sandbox_id,
             )
@@ -199,11 +199,7 @@ class PostgresSandboxRepository:
                 elif group["state"] != "stopped" and group["deletion_state"] != "deleted":
                     return "not_stopped"
                 busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
-                if (
-                    busy
-                    or group["active_operation_count"]
-                    or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
-                ):
+                if busy or group["active_operation_count"]:
                     return "busy"
             await self._record_trajectory_event(
                 conn,
@@ -343,11 +339,7 @@ class PostgresSandboxRepository:
             if group["state"] != "stopped" and not forced_stopped_recovery:
                 return "not_stopped"
             busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
-            if (
-                busy
-                or group["active_operation_count"]
-                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
-            ):
+            if busy or group["active_operation_count"]:
                 return "busy"
             if forced_stopped_recovery:
                 await conn.execute(
@@ -1500,7 +1492,7 @@ class PostgresSandboxRepository:
             )
             group = await conn.fetchrow(
                 "SELECT id, user_id, host, generation, container_id, last_activity_at, state, "
-                "stop_requested_at, active_operation_count, snapshot_state, "
+                "stop_requested_at, active_operation_count, "
                 "terminal_count, terminal_count_observed_at, NOW() AS observed_at "
                 "FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
                 sandbox_id,
@@ -1518,11 +1510,7 @@ class PostgresSandboxRepository:
             if group["state"] != "running":
                 return "not_running"
             busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
-            if (
-                busy
-                or group["active_operation_count"]
-                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
-            ):
+            if busy or group["active_operation_count"]:
                 return "busy"
             if group["terminal_count"]:
                 return "terminals_open"
@@ -1630,11 +1618,7 @@ class PostgresSandboxRepository:
             if group["state"] != "running":
                 return "not_running"
             busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
-            if (
-                busy
-                or group["active_operation_count"]
-                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
-            ):
+            if busy or group["active_operation_count"]:
                 return "busy"
             await self._record_trajectory_event(
                 conn,
@@ -1709,11 +1693,7 @@ class PostgresSandboxRepository:
             if group["state"] != "running":
                 return "not_running"
             busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
-            if (
-                busy
-                or group["active_operation_count"]
-                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
-            ):
+            if busy or group["active_operation_count"]:
                 return "busy"
             await self._record_trajectory_event(
                 conn,
@@ -2725,7 +2705,6 @@ class PostgresSandboxRepository:
                 WHERE g.id = $1 AND g.origin_thread_id = $2 AND g.host = $3
                   AND g.container_id = $4 AND g.generation = $5
                   AND g.active_operation_count = 0
-                  AND g.snapshot_state <> 'snapshotting'
                   AND NOT {member_turn_running("g")}
                   AND (
                         (state = 'running' AND idle_deadline IS NOT NULL
@@ -3212,11 +3191,7 @@ class PostgresSandboxRepository:
             # fork/snapshot coordinator increments its durable operation
             # fence.  Never let that stale sample re-arm an idle deadline in
             # the middle of the externally visible mutation.
-            durable_activity = (
-                bool(active_member)
-                or int(group["active_operation_count"]) > 0
-                or (group["snapshot_state"] == "snapshotting")
-            )
+            durable_activity = bool(active_member) or int(group["active_operation_count"]) > 0
             # A runner may have died after every durable member context became
             # LOST while the sandbox manager still holds a stale local lease.
             # That lease must not keep the shared container RUNNING forever.

@@ -1479,8 +1479,12 @@ placeholder (`agh.`) that git and `gh` present to GitHub, and the owner as
 the commits' author (`GIT_AUTHOR_*`, from the owner's GitHub noreply
 address) with the deployment's `AGENT_GITHUB_COAUTHOR` as co-author. Every
 group bridge resolves `github.com` and `api.github.com` to the host's
-`github-tunnel`, and each member trusts the deployment's GitHub relay CA
-for its own processes only. The tunnel forwards TLS unopened to the control
+`github-tunnel`, so every process in the sandbox reaches the relay, and
+every process trusts the deployment's GitHub relay CA, whether or not it holds
+a placeholder: a setup script cloning a public repository goes through the
+relay too, as nobody. Before the first process starts, a root exec writes the
+CA and a bundle of the image's roots plus the CA to `/etc/freeinference/`,
+root-owned and read-only. The tunnel forwards TLS unopened to the control
 plane's GitHub relay, a listener of its own that holds the certificate.
 
 The relay accepts the placeholder only while its residency is the chat's hot
@@ -1498,10 +1502,16 @@ To turn it on:
    offline; give `relay.pem` and `relay.key` to the control plane
    (`AGENT_GITHUB_RELAY_TLS_DIR`) and `ca.pem` to every host
    (`AGENT_SANDBOX_GITHUB_RELAY_CA_FILE`).
-2. Enable the `github-relay` Compose profile on the control plane and on each
+2. Give `relay.key` to the relay's user. The `github-relay` container runs as
+   uid 10001 and reads the directory through a read-only bind mount, which
+   keeps host ownership, so a key the operator owns at `0600` fails with
+   `PermissionError`. Run the script as root, which sets the key to
+   `10001:10001` and `0400`, or run `sudo chown 10001:10001 <dir>/relay.key`
+   as the script prints. Move `ca.key` out of `<dir>` before you mount it.
+3. Enable the `github-relay` Compose profile on the control plane and on each
    host, and give each host's `github-tunnel` its own SSH key restricted with
    `permitopen` to the relay's port (`AGENT_GITHUB_TUNNEL_*`).
-3. Set `AGENT_GITHUB_COAUTHOR` to the App bot's noreply address.
+4. Set `AGENT_GITHUB_COAUTHOR` to the App bot's noreply address.
 
 Nothing on the platform scans what goes through the relay: there is no
 workflow-file or secret check of its own. Repository branch protection,

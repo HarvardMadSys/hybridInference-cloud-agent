@@ -25,6 +25,7 @@ import time
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar
 
 from cloud_agent_host.chat_sandbox_models import ChatSandboxStatus, RetainedChatLost
+from cloud_agent_host.github_relay_trust import ensure_github_relay_trust
 from cloud_agent_host.install_locks import install_lock
 from cloud_agent_host.sandbox import SandboxError
 
@@ -290,13 +291,22 @@ def checked_exec(
 
 
 def spawn_target(
-    manager: ChatSandboxManager, spec: ChatSandboxSpec, *, not_running: str = NOT_RUNNING
-) -> ChatSandboxInspection:
-    """Inspect the container a process is spawned into, refusing a same-name replacement."""
+    manager: ChatSandboxManager,
+    spec: ChatSandboxSpec,
+    env: dict[str, str] | None = None,
+    *,
+    not_running: str = NOT_RUNNING,
+) -> tuple[ChatSandboxInspection, dict[str, str]]:
+    """Inspect the container a process is spawned into, refusing a same-name replacement.
+
+    Also the environment the process starts with: ``env`` over the GitHub
+    relay's trust, which every process in the sandbox gets, credential or not
+    (:mod:`cloud_agent_host.github_relay_trust`).
+    """
     current = manager._require(spec)
     proven = manager._proven.get(spec)
     if proven is not None and proven.container_id != current.container_id:
         raise RetainedChatLost("chat sandbox container identity changed")
     if not current.running:
         raise SandboxError(not_running)
-    return current
+    return current, {**ensure_github_relay_trust(manager, spec), **(env or {})}

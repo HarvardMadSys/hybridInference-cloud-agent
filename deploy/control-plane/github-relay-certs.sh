@@ -59,5 +59,21 @@ openssl x509 -req -in "$work/relay.csr" -CA "$out/ca.pem" -CAkey "$out/ca.key" \
     -CAcreateserial -out "$out/relay.pem" -days 397 \
     -extfile "$work/relay.cnf" -extensions leaf
 rm -f "$out/ca.srl"
-chmod 0644 "$out/ca.pem" "$out/relay.pem"
 openssl verify -CAfile "$out/ca.pem" "$out/relay.pem"
+
+# The github-relay container runs as uid 10001 (deploy/control-plane/Dockerfile)
+# and reads relay.pem and relay.key through a read-only bind mount, which keeps
+# their host owner and mode. So the directory must be traversable, and the key
+# must belong to that uid; 0600 under the operator's own uid is unreadable there.
+relay_uid=10001
+chmod 0755 "$out"
+chmod 0644 "$out/ca.pem" "$out/relay.pem"
+chmod 0400 "$out/relay.key"
+if [ "$(id -u)" = 0 ]; then
+    chown "$relay_uid:$relay_uid" "$out/relay.key"
+else
+    echo "relay.key is owned by uid $(id -u); the relay runs as uid $relay_uid and cannot read it." >&2
+    echo "Give it to the relay before starting it:" >&2
+    echo "  sudo chown $relay_uid:$relay_uid $out/relay.key" >&2
+fi
+echo "Move $out/ca.key off this machine before mounting $out: nothing at runtime needs it." >&2
