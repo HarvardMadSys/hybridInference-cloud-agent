@@ -37,8 +37,6 @@ from cloud_agent.application.compute_setup import (
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.application.release_inventory import quiesce_and_scan
 from cloud_agent.application.superseded_removal import superseded_refusal
-from cloud_agent.compute_config import current_observation_seconds, current_registration_url
-from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
     MOVE_OUT_RENEWAL_LEAD_SECONDS,
     RECLAIMED_QUIET_SECONDS,
@@ -66,6 +64,11 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
     DeploymentProfile,
 )
+from cloud_agent.providers.compute.compute_config import (
+    current_observation_seconds,
+    current_registration_url,
+)
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
 from cloud_agent.schemas.compute import ExtendComputeRequest, RenewalPolicy

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import httpx
 
-from cloud_agent import memory_tool, web_search
+from cloud_agent import memory_tool
 from cloud_agent.agent_memory import claim_agent_memories
 from cloud_agent.application.claim_credentials import mint_clone_token
 from cloud_agent.application.model_connections import claim_model_connection
@@ -49,6 +49,7 @@ from cloud_agent.owner_access import (
     owner_may_use_agent,
 )
 from cloud_agent.prompt_injections import claim_prompt
+from cloud_agent.providers import web_search
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import WorkerClaimResponse
 from cloud_agent.source_control.entitlement import (

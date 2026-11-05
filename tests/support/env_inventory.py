@@ -809,7 +809,7 @@ RAW_SETTING_READS: dict[tuple[str, str, str], str] = {
         for name in ("AGENT_LOG_LEVEL", "AGENT_LOG_FORMAT")
     },
     (
-        "apps/backend/cloud_agent/compute_config.py",
+        "apps/backend/cloud_agent/providers/compute/compute_config.py",
         "ComputeConfiguration.from_env",
         "AGENT_CLOUDLAB_API_URL",
     ): (

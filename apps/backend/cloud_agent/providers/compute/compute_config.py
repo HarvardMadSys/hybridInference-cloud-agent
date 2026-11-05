@@ -17,12 +17,15 @@ from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
-from cloud_agent.compute_secrets import ComputeSecretError, StoredDeploymentResolver
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
+from cloud_agent.providers.compute.compute_secrets import (
+    ComputeSecretError,
+    StoredDeploymentResolver,
+)
 from cloud_agent.settings import integer_setting, public_api_url, setting_env, text_setting
 
 if TYPE_CHECKING:
-    from cloud_agent.compute_secrets import ComputeSecretStore
+    from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 
 ENV_COMPUTE_CONFIG = "AGENT_COMPUTE_CONFIG"
 ENV_CLOUDLAB_API_URL = "AGENT_CLOUDLAB_API_URL"

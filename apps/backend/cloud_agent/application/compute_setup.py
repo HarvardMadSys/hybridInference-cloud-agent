@@ -34,9 +34,12 @@ from cloud_agent_shared.sandbox_manager_compat import manager_environment
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from cloud_agent.compute_config import ComputeConfiguration, ComputeSecretResolver
-    from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
+    from cloud_agent.providers.compute.compute_config import (
+        ComputeConfiguration,
+        ComputeSecretResolver,
+    )
+    from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
     from cloud_agent.providers.compute.setup_tunnels import SshTunnelSetup
     from cloud_agent.schemas.compute import AutomaticDeploymentSetup, SetupMachine
 

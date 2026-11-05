@@ -26,7 +26,6 @@ from pydantic import SecretStr
 from cloud_agent.application.compute_release import NEVER_CREATED, release_evidence
 from cloud_agent.application.compute_setup import load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
-from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
     ComputeRefusal,
     discard_request_id,
@@ -42,6 +41,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     DeploymentProfile,
     default_namespace,
 )
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
 from cloud_agent.schemas.compute import RenewalPolicy, RetireComputeRequest

@@ -951,7 +951,7 @@ def initial_settings(
     values: dict[str, SettingValue] = {setting.key: setting.default for setting in SETTINGS}
     imported: dict[str, SettingValue] = {}
     if keys is None and os.environ.get("AGENT_COMPUTE_CONFIG"):
-        from cloud_agent.compute_config import ComputeConfiguration
+        from cloud_agent.providers.compute.compute_config import ComputeConfiguration
 
         configuration = ComputeConfiguration.from_env()
         imported = {

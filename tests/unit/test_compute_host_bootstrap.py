@@ -605,7 +605,7 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
     tmp_path, monkeypatch
 ):
     """The shipped runbook profile must satisfy the actual deployment boundary."""
-    from cloud_agent.compute_config import ComputeConfiguration
+    from cloud_agent.providers.compute.compute_config import ComputeConfiguration
 
     repo = Path(__file__).resolve().parents[2]
     document = json.loads((repo / "deploy/control-plane/compute.example.json").read_text())

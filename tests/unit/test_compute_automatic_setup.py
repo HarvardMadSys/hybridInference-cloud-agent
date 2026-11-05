@@ -18,13 +18,13 @@ from pydantic import ValidationError
 from cloud_agent import settings
 from cloud_agent.application.compute_resources import ComputeCommands
 from cloud_agent.application.compute_setup import AutomaticComputeSetup
-from cloud_agent.compute_config import ComputeConfiguration, ComputeSecretResolver
-from cloud_agent.compute_registry import ComputeProviderRegistry
-from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import ProviderError, SshConnection
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
+from cloud_agent.providers.compute.compute_config import ComputeConfiguration, ComputeSecretResolver
+from cloud_agent.providers.compute.compute_registry import ComputeProviderRegistry
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 from cloud_agent.providers.compute.setup_tunnels import ControlPlaneEndpoint, generate_tunnel_key
 from cloud_agent.schemas.compute import AutomaticDeploymentSetup
 

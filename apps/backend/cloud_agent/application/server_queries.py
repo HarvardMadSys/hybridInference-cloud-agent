@@ -11,10 +11,10 @@ from cloud_agent.schemas.compute import RenewalPolicy
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent.compute_registry import ComputeProviderRegistry
-    from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
     from cloud_agent.ports.external.compute_provider import ProviderCapabilities
+    from cloud_agent.providers.compute.compute_registry import ComputeProviderRegistry
+    from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 
 
 class ServerQueries:

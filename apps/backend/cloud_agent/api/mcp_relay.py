@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent import memory_tool, web_search
+from cloud_agent import memory_tool
 from cloud_agent.api.deps import get_http_client, get_mcp_decision_signal, get_storage
 from cloud_agent.api.errors import typed_error
 from cloud_agent.credential_cipher import CredentialCipherError
@@ -90,6 +90,7 @@ from cloud_agent.mcp.resources import (
     split_resource_uri,
 )
 from cloud_agent.mcp.runtime import get_host as _host
+from cloud_agent.providers import web_search
 from cloud_agent.tokens import (
     SCOPE_MCP,
     InvalidAgentToken,

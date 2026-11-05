@@ -20,9 +20,6 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import admin_compute
 from cloud_agent.application.cloudlab_inventory import CloudLabInventoryUnavailable
 from cloud_agent.application.compute_resources import ComputeCommands
-from cloud_agent.compute_config import ComputeConfiguration
-from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
-from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.domain.cloudlab import DEFAULT_CLOUDLAB_NODE_TYPES
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
@@ -31,6 +28,12 @@ from cloud_agent.ports.external.compute_provider import (
     ProviderCapabilities,
 )
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
+from cloud_agent.providers.compute.compute_config import ComputeConfiguration
+from cloud_agent.providers.compute.compute_registry import (
+    ComputeProviderRegistration,
+    ComputeProviderRegistry,
+)
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 from cloud_agent.schemas.compute import AutomaticDeploymentSetup, RenewalPolicy
 from cloud_agent_shared.egress import network_from_env
 

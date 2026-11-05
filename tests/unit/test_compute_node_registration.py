@@ -24,9 +24,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
 from cloud_agent.application.compute_resources import ComputeCommands
-from cloud_agent.compute_config import registration_url
 from cloud_agent.domain.compute import ComputeRefusal, normalize_host_keys
 from cloud_agent.domain.host_pool import hash_secret
+from cloud_agent.providers.compute.compute_config import registration_url
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "deploy" / "cloudlab" / "cloud-agent-node.py"
