@@ -20,9 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import HTTPException
-
 from cloud_agent.application.follow_ups import PreparedFollowUp, prepare_follow_up
+from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.owner_access import (
@@ -87,16 +86,6 @@ def prepared_head(
     )
 
 
-def _refusal(exc: HTTPException) -> str:
-    """The sentence a refused check gave its owner, for the held message."""
-    detail = exc.detail
-    if isinstance(detail, dict):
-        error = detail.get("error")
-        if isinstance(error, dict) and error.get("message"):
-            return str(error["message"])
-    return str(detail)
-
-
 async def prepare_message(
     store: QueueStorage,
     *,
@@ -158,23 +147,24 @@ async def prepare_message(
             store=store,
             app_credentials=app_credentials,
         )
-    except HTTPException as exc:
-        if exc.status_code >= 500:
-            logger.warning(
-                "agent_pending_message_check_unavailable",
-                extra={
-                    "event": "agent_pending_message_check_unavailable",
-                    "thread_id": message.get("thread_id"),
-                    "message_id": message.get("id"),
-                    "status_code": exc.status_code,
-                },
-            )
-            return None
+    except Unavailable as exc:
+        logger.warning(
+            "agent_pending_message_check_unavailable",
+            extra={
+                "event": "agent_pending_message_check_unavailable",
+                "thread_id": message.get("thread_id"),
+                "message_id": message.get("id"),
+                "error_type": exc.type,
+            },
+        )
+        return None
+    except Refused as exc:
+        # The sentence the refused check gave its owner, for the held message.
         return PreparedHead(
             message_id=str(message["id"]),
             revision=int(message["revision"]),
             parent_job_id=parent_job_id,
-            error=_refusal(exc),
+            error=exc.message,
         )
     except Exception:
         # An outage is not a verdict on the message. Holding it would make the

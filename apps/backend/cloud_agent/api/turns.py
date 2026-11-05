@@ -51,7 +51,7 @@ from cloud_agent.application.pending_messages import (
     settle_queue,
     settle_queue_when_possible,
 )
-from cloud_agent.application.session_fork import materialize_session_fork
+from cloud_agent.application.session_fork import ForkHostFailed, materialize_session_fork
 from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.domain.requests import request_fingerprint
@@ -75,8 +75,10 @@ from cloud_agent.source_control_runtime import (
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
     JobEventSignal,
 )
+from cloud_agent.workspace_errors import _sandbox_manager_http_error
 
 if TYPE_CHECKING:
+    from cloud_agent.domain.errors import Refused
     from cloud_agent.ports import (
         AttachmentRepository,
         ConversationCommands,
@@ -150,7 +152,7 @@ def _no_such_message_error() -> HTTPException:
     )
 
 
-def _message_refused(result: dict[str, Any]) -> HTTPException:
+def _message_refused(result: dict[str, Any]) -> HTTPException | Refused:
     """The owner-facing refusal for a queue write the store turned down."""
     error = result.get("error")
     if error == "not_found":
@@ -686,7 +688,7 @@ async def delete_thread_message(
     return await _queue_result(job_store, thread_id=thread_id, user=user, outcome=outcome)
 
 
-def _send_now_refused(result: dict[str, Any]) -> HTTPException:
+def _send_now_refused(result: dict[str, Any]) -> HTTPException | Refused:
     """The owner-facing refusal for a message that cannot be sent into the turn now."""
     error = result.get("error")
     if error == "not_running":
@@ -1079,11 +1081,14 @@ async def fork_agent_job(
         # mutation.  READY and MATERIALIZED are durable control-plane states:
         # a retry after a lost HTTP response must return/finalize the same
         # child even when the retaining host has since become unreachable.
-        await materialize_session_fork(
-            operation,
-            job_id=job_id,
-            job_store=job_store,
-        )
+        try:
+            await materialize_session_fork(
+                operation,
+                job_id=job_id,
+                job_store=job_store,
+            )
+        except ForkHostFailed as exc:
+            raise _sandbox_manager_http_error(exc.failure) from exc.failure
 
     forked = await job_store.session_fork.finalize_session_fork(operation_id=operation_id)
     if forked is None:

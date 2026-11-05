@@ -68,6 +68,27 @@ def test_domain_and_ports_do_not_import_storage_or_http_frameworks(layer: str) -
     assert not offenders, f"{layer} imports an adapter or framework: {offenders}"
 
 
+@pytest.mark.parametrize("layer", ["application", "domain"])
+def test_application_and_domain_do_not_import_web_frameworks(layer: str) -> None:
+    """Flows and rules refuse with domain errors; only the API maps them onto HTTP.
+
+    A flow also runs with no request behind it (a waiting message, a goal round,
+    the recovery sweep), where an ``HTTPException`` is nobody's answer and its
+    status code is a guess at what the caller should do.
+    """
+    offenders = []
+    for path in (CONTROL / layer).rglob("*.py"):
+        targets = file_imports(path, root=CONTROL, package_name="cloud_agent")
+        forbidden = sorted(
+            target
+            for target in targets
+            if matches_package(target, "fastapi") or matches_package(target, "starlette")
+        )
+        if forbidden:
+            offenders.append(f"{path.relative_to(CONTROL)}: {forbidden}")
+    assert not offenders, f"{layer} imports a web framework: {offenders}"
+
+
 @pytest.mark.parametrize(
     "source",
     [

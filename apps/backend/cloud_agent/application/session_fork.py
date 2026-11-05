@@ -8,10 +8,11 @@ of `fork_agent_job`; a flow that can only be reached through an HTTP request is
 a flow whose failure branches can only be tested through one.
 
 Nothing about the steps changed. The order, the transaction boundaries the
-store owns, the error mapping — every branch still raises the same
-``HTTPException`` with the same status, type and message — and the worker-fenced
-cleanup a failed mint performs is the same nested helper, moved with the block
-that calls it. `release_failed_fork_residencies` stays nested for exactly that
+store owns, the error mapping — every branch still refuses with the same type
+and message, now as ``Refused`` or ``Unavailable``, and the retaining host's
+own failure comes back as ``ForkHostFailed`` for the handler to map — and the
+worker-fenced cleanup a failed mint performs is the same nested helper, moved
+with the block that calls it. `release_failed_fork_residencies` stays nested for exactly that
 reason: as a module function it would need three closure variables as
 parameters, and the call inside the block would stop being the same line.
 
@@ -26,8 +27,6 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import HTTPException
-
 from cloud_agent.application.model_connections import (
     access_for_job,
     connection_residency_credential,
@@ -36,6 +35,7 @@ from cloud_agent.application.model_connections import (
 )
 from cloud_agent.application.residency import residency_ttl_s
 from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.model_connections import ModelConnectionUnusable
 from cloud_agent.sandbox_manager_client import (
     SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S,
@@ -44,7 +44,6 @@ from cloud_agent.sandbox_manager_client import (
     identity_from_row,
 )
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
-from cloud_agent.workspace_errors import _sandbox_manager_http_error
 from cloud_agent_shared.environment import environment_payload
 from cloud_agent_shared.sandbox_manager_wire import member_manifest
 
@@ -92,18 +91,22 @@ def _recorded_group(operation: dict[str, Any]) -> dict[str, Any]:
     return {**operation, "generation": operation["sandbox_generation"]}
 
 
-def _credential_refused(exc: Exception) -> HTTPException:
+class ForkHostFailed(Exception):
+    """The retaining host failed the native fork request; ``failure`` is its answer.
+
+    Its own exception so the handler maps it the way it maps every sandbox
+    manager failure, without catching the ones raised before the fork request.
+    """
+
+    def __init__(self, failure: SandboxManagerError) -> None:
+        super().__init__(failure.message)
+        self.failure = failure
+
+
+def _credential_refused(exc: Exception) -> Refused | Unavailable:
     if isinstance(exc, ModelConnectionUnusable):
-        return unusable_error(exc, status=409)
-    return HTTPException(
-        status_code=503,
-        detail={
-            "error": {
-                "type": "model_connections_unconfigured",
-                "message": "Model connection keys cannot be read.",
-            }
-        },
-    )
+        return unusable_error(exc, kind="conflict")
+    return Unavailable("model_connections_unconfigured", "Model connection keys cannot be read.")
 
 
 async def _fork_source_job(
@@ -159,10 +162,11 @@ async def materialize_session_fork(
     """Drive a PREPARING fork operation to MATERIALIZED, or refuse it.
 
     Raises:
-        HTTPException: the same refusals the handler used to raise from here —
-            an unreachable host, an incomplete manifest, a fork already being
-            materialized, a changed fence, a connection that cannot serve it,
-            and a receipt that does not match.
+        Refused: an incomplete manifest, a fork already being materialized, a
+            changed fence, or a connection that cannot serve it.
+        Unavailable: an unreachable host, unreadable connection keys, or a
+            receipt that does not match.
+        ForkHostFailed: the retaining host's own failure of the fork request.
     """
     operation_id = str(operation["id"])
 
@@ -177,14 +181,9 @@ async def materialize_session_fork(
 
     sandbox_manager = await sandbox_manager_for_job(job_store.host_pool, job_id)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "sandbox_host_unavailable",
-                    "message": ("The host retaining this chat is not reachable for native Fork."),
-                }
-            },
+        raise Unavailable(
+            "sandbox_host_unavailable",
+            "The host retaining this chat is not reachable for native Fork.",
         )
     # Validate every immutable host input before rotating either residency. A
     # malformed manifest is a control-plane defect, not a reason to start two
@@ -197,14 +196,8 @@ async def materialize_session_fork(
         None,
     )
     if source_member is None or operation.get("resident_slot_id") is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_context_unavailable",
-                    "message": "The shared sandbox manifest is incomplete.",
-                }
-            },
+        raise Refused(
+            "conflict", "native_context_unavailable", "The shared sandbox manifest is incomplete."
         )
     launch_common: dict[str, Any] = {
         "runtime_id": str(operation["runtime_id"]),
@@ -238,15 +231,11 @@ async def materialize_session_fork(
         ),
     )
     if not claimed:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "fork_in_progress",
-                    "message": "This native Fork is already being materialized; retry shortly.",
-                }
-            },
-            headers={"Retry-After": "2"},
+        raise Refused(
+            "conflict",
+            "fork_in_progress",
+            "This native Fork is already being materialized; retry shortly.",
+            retry_after_seconds=2,
         )
     residencies = await job_store.session_fork.establish_session_fork_residencies(
         operation_id=operation_id,
@@ -258,14 +247,8 @@ async def materialize_session_fork(
             operation_id=operation_id,
             coordinator_token=coordinator_token,
         )
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "fork_fence_changed",
-                    "message": "The source session changed before Fork could start.",
-                }
-            },
+        raise Refused(
+            "conflict", "fork_fence_changed", "The source session changed before Fork could start."
         )
     try:
         source_fields, target_fields = await _fork_credentials(job_store, source_job, residencies)
@@ -307,19 +290,14 @@ async def materialize_session_fork(
         # PREPARING is intentionally retained: a retry with the same key
         # recovers the in-container journal or safely resumes before the
         # native mutation was reached.
-        raise _sandbox_manager_http_error(exc) from exc
+        raise ForkHostFailed(exc) from exc
     materialized = await job_store.session_fork.record_session_fork_materialized(
         operation_id=operation_id,
         coordinator_token=coordinator_token,
         receipt=receipt,
     )
     if materialized is None:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": {
-                    "type": "invalid_native_fork_receipt",
-                    "message": "The sandbox host returned a mismatched native Fork receipt.",
-                }
-            },
+        raise Unavailable(
+            "invalid_native_fork_receipt",
+            "The sandbox host returned a mismatched native Fork receipt.",
         )

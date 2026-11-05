@@ -710,8 +710,8 @@ async def test_old_broker_receives_no_secret_bearing_payload():
 async def test_empty_binding_fork_reaches_coordination_without_environment_preparation(monkeypatch):
     from unittest.mock import AsyncMock
 
-    from fastapi import HTTPException
     from tests.support.owners import CONNECTION_ID, CONNECTION_MODEL, connection_row
+    from tests.support.refusals import raises_http
 
     from cloud_agent.application import session_fork
 
@@ -745,7 +745,7 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
         },
         "group_members": [{"thread_id": "thread"}],
     }
-    with pytest.raises(HTTPException) as failure:
+    with raises_http() as failure:
         await session_fork.materialize_session_fork(operation, job_id="job", job_store=store)
     assert failure.value.detail["error"]["type"] == "fork_in_progress"
     broker.prepare_environment.assert_not_awaited()

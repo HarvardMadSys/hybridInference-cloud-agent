@@ -21,14 +21,13 @@ import contextlib
 import secrets
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
-from fastapi import HTTPException
-
 from cloud_agent.application.residency import close_released_residencies
 from cloud_agent.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,
 )
+from cloud_agent.domain.errors import RefusalKind, Refused, Unavailable
 from cloud_agent.domain.execution import FAILED, RUNNING
 from cloud_agent.domain.model_connections import (
     ModelConnectionUnusable,
@@ -302,18 +301,9 @@ class _TurnResidencyStorage(_ResidencyStorage, Protocol):
     attempt_commands: AttemptCommands
 
 
-def unusable_error(exc: ModelConnectionUnusable, *, status: int) -> HTTPException:
+def unusable_error(exc: ModelConnectionUnusable, *, kind: RefusalKind) -> Refused:
     """The refusal a worker or Fork answers for a turn its connection cannot run."""
-    return HTTPException(
-        status_code=status,
-        detail={
-            "error": {
-                "type": "model_connection_unusable",
-                "reason": exc.reason,
-                "message": str(exc),
-            }
-        },
-    )
+    return Refused(kind, "model_connection_unusable", str(exc), details={"reason": exc.reason})
 
 
 async def claim_model_connection(
@@ -336,8 +326,8 @@ async def claim_model_connection(
     }
     if not claim.get("model_connection_id"):
         await _end_unusable(store, claim, fence, ModelConnectionUnusable("no_connection"))
-    waiting = HTTPException(
-        503, "Waiting for a model-connection-capable host or available encryption"
+    waiting = Unavailable(
+        None, "Waiting for a model-connection-capable host or available encryption"
     )
     if MODEL_CONNECTION_CAPABILITY not in capabilities:
         await store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
@@ -377,7 +367,7 @@ async def _end_unusable(
             "reason": exc.reason,
         },
     )
-    raise unusable_error(exc, status=403) from None
+    raise unusable_error(exc, kind="forbidden") from None
 
 
 async def connection_residency_credential(
@@ -437,7 +427,7 @@ async def residency_credential(
                 thread_id=str(row["thread_id"]), generation=int(row["generation"]), host=host
             )
         if isinstance(exc, CredentialCipherError):
-            raise HTTPException(503, "Model connection keys cannot be read") from None
+            raise Unavailable(None, "Model connection keys cannot be read") from None
         await store.attempt_commands.transition(
             job_id=fence["job_id"],
             attempt_id=fence["attempt_id"],
@@ -446,7 +436,7 @@ async def residency_credential(
             to_state=FAILED,
             detail=str(exc),
         )
-        raise unusable_error(exc, status=403) from None
+        raise unusable_error(exc, kind="forbidden") from None
     return access.api_key, access.revision, access.plan.identity
 
 

@@ -38,10 +38,9 @@ from tests.support.model_connections import (
 from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, FakeOwners, on_connection
 from tests.support.uploads import thread_uploads
 
-from cloud_agent.api import routes, uploads, worker
+from cloud_agent.api import errors, routes, uploads, worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory, get_storage
-from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.settings import integer_setting
@@ -379,6 +378,7 @@ async def api(pool, monkeypatch):
     owners = FakeOwners()
     app = FastAPI()
     app.include_router(routes.router)
+    errors.install_domain_errors(app)
     app.include_router(uploads.router)
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_owner_directory] = lambda: owners
@@ -388,7 +388,7 @@ async def api(pool, monkeypatch):
         "role": "free",
         "authenticated": True,
     }
-    app.dependency_overrides[verify_claiming_host] = lambda: {
+    app.dependency_overrides[worker.verify_claiming_host] = lambda: {
         "host": _HOST,
         "credential_hash": _HOST_CREDENTIAL,
     }

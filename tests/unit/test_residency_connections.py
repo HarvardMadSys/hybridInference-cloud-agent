@@ -7,8 +7,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
 from tests.support.owners import CONNECTION_ID, TEST_PROVIDER_KEY, connection_row
+from tests.support.refusals import raises_http
 
 from cloud_agent.api import worker
 from cloud_agent.application import session_fork
@@ -102,7 +102,7 @@ async def test_a_residency_with_no_connection_is_released_before_anything_holds_
     store = _store(establish=_establish(None))
     body = WorkerSandboxResidencyRequest(sandbox_id="asbx_1", runtime_id="claude-code")
 
-    with pytest.raises(HTTPException) as refused:
+    with raises_http() as refused:
         await worker.worker_establish_shared_sandbox_residency(
             "ajob_1", body, authorization="worker-token", store=store
         )
@@ -122,7 +122,7 @@ async def test_a_residency_the_connection_will_not_bind_gets_no_key(monkeypatch)
     store.model_connections.bind_residency = AsyncMock(return_value=False)
     body = WorkerSandboxResidencyRequest(sandbox_id="asbx_1", runtime_id="claude-code")
 
-    with pytest.raises(HTTPException):
+    with raises_http():
         await worker.worker_establish_shared_sandbox_residency(
             "ajob_1", body, authorization="worker-token", store=store
         )
@@ -206,7 +206,7 @@ async def test_a_fork_retried_after_a_lost_host_answer_binds_both_members_again(
         AsyncMock(return_value=SimpleNamespace(fork_shared_session=fork)),
     )
 
-    with pytest.raises(HTTPException):
+    with pytest.raises(session_fork.ForkHostFailed):
         await session_fork.materialize_session_fork(_FORK, job_id="ajob_1", job_store=store)
     await session_fork.materialize_session_fork(_FORK, job_id="ajob_1", job_store=store)
 
@@ -230,7 +230,7 @@ async def test_a_fork_whose_turn_has_no_connection_is_refused_before_any_host_ca
     )
     source_job = {**_FORK["source_job"], "model_connection_id": None}
 
-    with pytest.raises(HTTPException):
+    with raises_http():
         await session_fork.materialize_session_fork(
             {**_FORK, "source_job": source_job}, job_id="ajob_1", job_store=store
         )
