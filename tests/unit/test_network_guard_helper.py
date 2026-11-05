@@ -40,7 +40,6 @@ from tests.unit.test_network_guard import (
     _update,
 )
 
-from cloud_agent_host import host_service
 from cloud_agent_host.network import network_guard, network_guard_helper
 from cloud_agent_host.network.network_guard import (
     _NFT_BATCH,
@@ -49,6 +48,7 @@ from cloud_agent_host.network.network_guard import (
     NetworkGuardError,
 )
 from cloud_agent_host.network.network_guard_helper import LongLivedHelper, serve_program
+from cloud_agent_host.service import host_service
 from cloud_agent_shared.egress import render_ruleset
 
 if TYPE_CHECKING:

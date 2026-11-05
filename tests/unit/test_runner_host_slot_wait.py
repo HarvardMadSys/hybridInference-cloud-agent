@@ -26,9 +26,10 @@ from tests.unit.test_runner_host_service import (
     service as service,
 )
 
-from cloud_agent_host import claimed_job, environment_tests, host_service, runner_stop
+from cloud_agent_host import claimed_job, environment_tests
 from cloud_agent_host.container import sandbox
-from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, TurnPool
+from cloud_agent_host.service import host_service, runner_stop
+from cloud_agent_host.service.host_runtime import LAUNCH_STARTED, LaunchResult, TurnPool
 
 if TYPE_CHECKING:
     from collections.abc import Callable

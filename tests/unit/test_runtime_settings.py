@@ -7,11 +7,11 @@ import json
 import httpx
 import pytest
 
-from cloud_agent_host.runtime_settings import RuntimeSettings
 from cloud_agent_host.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,
 )
+from cloud_agent_host.service.runtime_settings import RuntimeSettings
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 
 LOCAL = {

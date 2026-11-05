@@ -61,7 +61,7 @@ from cloud_agent_shared.operation_profiling import (
 )
 from cloud_agent_shared.shared_protocol import PROFILING_POLICY_HEADER
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("cloud_agent_host.profiling_policy")
 
 #: How often to read the configuration while an experiment is in force. The
 #: page tells an operator to allow up to 30 seconds for a change to land

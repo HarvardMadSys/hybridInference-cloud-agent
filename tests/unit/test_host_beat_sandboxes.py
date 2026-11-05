@@ -15,8 +15,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from cloud_agent_host import host_service
 from cloud_agent_host.sandbox_manager_client import SandboxManagerError
+from cloud_agent_host.service import host_service
 
 
 def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):

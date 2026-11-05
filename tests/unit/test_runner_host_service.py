@@ -23,22 +23,20 @@ import pytest
 from tests.support.owners import connection_access
 from tests.support.runner_fakes import NoRuntimeDownloads as _NoRuntimeDownloads
 
-from cloud_agent_host import (
+from cloud_agent_host import claimed_job, measurement_delivery, runner
+from cloud_agent_host.container import sandbox
+from cloud_agent_host.container.sandbox import ProcessBackend
+from cloud_agent_host.service import (
     attempt_lease,
-    claimed_job,
     host_capabilities,
     host_service,
     local_settings,
-    measurement_delivery,
     measurement_sender,
-    runner,
     runner_stop,
     turn_launch,
 )
-from cloud_agent_host.container import sandbox
-from cloud_agent_host.container.sandbox import ProcessBackend
-from cloud_agent_host.enrollment import HostIdentity
-from cloud_agent_host.host_runtime import (
+from cloud_agent_host.service.enrollment import HostIdentity
+from cloud_agent_host.service.host_runtime import (
     HOST_CONCURRENCY_CAPABILITY,
     LAUNCH_NOT_STARTED,
     LAUNCH_STARTED,
@@ -294,10 +292,7 @@ def test_a_handover_read_error_keeps_the_spawned_child_tracked(monkeypatch):
     import io
     from types import SimpleNamespace
 
-    from cloud_agent_host import (
-        host_runtime as host_runtime_mod,
-        host_service,
-    )
+    from cloud_agent_host.service import host_runtime as host_runtime_mod, host_service
 
     process = SimpleNamespace(stdin=io.BytesIO(), killed=False)
 
@@ -1298,7 +1293,7 @@ def test_a_turn_process_accepts_before_it_runs_the_turn(monkeypatch):
     import io
     import os
 
-    from cloud_agent_host.host_runtime import encode_turn
+    from cloud_agent_host.service.host_runtime import encode_turn
 
     read_fd, write_fd = os.pipe()
     payload = {
@@ -1354,7 +1349,7 @@ def test_a_turn_process_declines_when_its_backend_is_not_usable(monkeypatch, emp
     import os
 
     from cloud_agent_host.container.sandbox import SandboxError
-    from cloud_agent_host.host_runtime import encode_turn
+    from cloud_agent_host.service.host_runtime import encode_turn
 
     read_fd, write_fd = os.pipe()
     payload = {
@@ -1494,7 +1489,7 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     in the parent is worthless unless it crosses that boundary. Without this
     the whole feature is silent on the path production actually uses.
     """
-    from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult
+    from cloud_agent_host.service.host_runtime import LAUNCH_STARTED, LaunchResult
     from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
@@ -1774,7 +1769,7 @@ def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
     import os
     import time
 
-    from cloud_agent_host.host_runtime import encode_turn
+    from cloud_agent_host.service.host_runtime import encode_turn
     from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
@@ -1863,7 +1858,7 @@ def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch, se
     import os
     import time
 
-    from cloud_agent_host.host_runtime import encode_turn
+    from cloud_agent_host.service.host_runtime import encode_turn
     from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
@@ -1925,7 +1920,7 @@ def test_a_declining_child_does_not_emit_or_refund_the_parent_selection(monkeypa
     import os
 
     from cloud_agent_host.container.sandbox import SandboxError
-    from cloud_agent_host.host_runtime import encode_turn
+    from cloud_agent_host.service.host_runtime import encode_turn
     from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch, max_operations=1)

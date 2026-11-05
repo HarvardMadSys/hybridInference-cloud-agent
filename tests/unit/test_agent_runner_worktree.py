@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host.local_settings import source_import_max_bytes
+from cloud_agent_host.service.local_settings import source_import_max_bytes
 from cloud_agent_host.turn import source_preparation
 from cloud_agent_host.turn.source_preparation import (
     WorktreeError,

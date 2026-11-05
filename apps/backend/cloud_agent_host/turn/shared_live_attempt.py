@@ -15,11 +15,6 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from cloud_agent_host.attempt_lease import (
-    Heartbeater,
-    _retry_control_receipt,
-    _retry_lifecycle_receipt,
-)
 from cloud_agent_host.claimed_job import (
     ClaimedJob,
     LeaseLost,
@@ -36,10 +31,8 @@ from cloud_agent_host.container.sandbox import SandboxBackend, SandboxError
 from cloud_agent_host.control_plane_client import ControlPlane, _log_control_failure
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.github_relay_env import residency_github_launch
-from cloud_agent_host.local_settings import _chat_idle_timeout_s
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
-from cloud_agent_host.measurement_sender import _enqueue_delivery
 from cloud_agent_host.observe.resources import shared_member_resource_rollup
 from cloud_agent_host.resident_probe import probe_live_resident
 from cloud_agent_host.resident_transport import ResidentLaunch
@@ -49,6 +42,13 @@ from cloud_agent_host.sandbox_manager_client import (
     SandboxManagerError,
     sandbox_manager_from_env,
 )
+from cloud_agent_host.service.attempt_lease import (
+    Heartbeater,
+    _retry_control_receipt,
+    _retry_lifecycle_receipt,
+)
+from cloud_agent_host.service.local_settings import _chat_idle_timeout_s
+from cloud_agent_host.service.measurement_sender import _enqueue_delivery
 from cloud_agent_host.setup import run_setup
 from cloud_agent_host.turn.group_reservation import (
     GroupPlan,

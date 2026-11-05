@@ -13,7 +13,7 @@ arrives on the heartbeat answer and becomes the limit; nothing on this machine
 has to be resized to honour it. Raising it lets the next poll claim more;
 lowering it stops claiming and the turns already running finish. Besides one
 spare child, started ahead of the next claim and holding nothing until it gets
-that turn (:mod:`cloud_agent_host.turn_launch`), there is no idle process to
+that turn (:mod:`cloud_agent_host.service.turn_launch`), there is no idle process to
 keep, no population to reconcile, and no "which one do I stop" decision to get
 wrong.
 

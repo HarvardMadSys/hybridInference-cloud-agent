@@ -183,7 +183,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
 
     from cloud_agent.measurement import operation_measurement
     from cloud_agent.sandbox_manager import sandbox_manager_routing
-    from cloud_agent_host import measurement_sender
+    from cloud_agent_host.service import measurement_sender
 
     operation_measurement.reset()
     measurement_sender.reset_delivery_state()
@@ -393,9 +393,9 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         # Real client, real endpoints, real credential: the control plane's
         # exchange, then the sandbox manager's own policy route. This is the wiring that
         # a sync built without a sandbox manager client silently skipped.
-        from cloud_agent_host.profiling_policy import ProfilingPolicySync
         from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
         from cloud_agent_host.sandbox_manager_profiling_policy import applied_state
+        from cloud_agent_host.service.profiling_policy import ProfilingPolicySync
 
         sandbox_manager_client = SandboxManagerClient(
             chain.sandbox_manager_base_url, "acceptance-sandbox-manager-token", timeout=10

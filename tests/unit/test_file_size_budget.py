@@ -48,7 +48,7 @@ TEST_BASELINE = {
     "tests/integration/storage/test_mcp_connection_store.py": 3182,
     "tests/servers/test_admin_compute.py": 2089,
     "tests/servers/test_agent_jobs_api.py": 5993,
-    "tests/unit/test_agent_runner.py": 2325,
+    "tests/unit/test_agent_runner.py": 2318,
     "tests/unit/test_agent_sandbox_manager.py": 3440,
     "tests/unit/test_chat_sandbox.py": 3146,
     "tests/unit/test_compute_providers.py": 2002,
@@ -57,7 +57,7 @@ TEST_BASELINE = {
     "tests/unit/test_host_pool_api.py": 3377,
     "tests/unit/test_mcp_connections_api.py": 3043,
     "tests/unit/test_retained_deploy.py": 2231,
-    "tests/unit/test_runner_host_service.py": 2827,
+    "tests/unit/test_runner_host_service.py": 2822,
     "tests/unit/test_shared_session_supervisor.py": 5150,
 }
 

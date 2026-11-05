@@ -43,8 +43,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host import incident_relay
 from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.service import incident_relay
 from cloud_agent_shared.host_settings import admin_values
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,

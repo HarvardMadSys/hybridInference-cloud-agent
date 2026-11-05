@@ -608,7 +608,9 @@ def test_a_host_setting_read_outside_its_bootstrap_fails() -> None:
         'import os\ndef _chat_idle_timeout_s():\n    os.environ.get("AGENT_CHAT_IDLE_TIMEOUT_S")\n'
     )
     assert (
-        resolver_bypasses(_reads(bootstrap, "apps/backend/cloud_agent_host/local_settings.py"))
+        resolver_bypasses(
+            _reads(bootstrap, "apps/backend/cloud_agent_host/service/local_settings.py")
+        )
         == []
     )
 

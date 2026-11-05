@@ -11,7 +11,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.enrollment import credential_path
+from cloud_agent_host.service.enrollment import credential_path
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,

@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
-from cloud_agent_host import claimed_job, host_control
+from cloud_agent_host import claimed_job
+from cloud_agent_host.service import host_control
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

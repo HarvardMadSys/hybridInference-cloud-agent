@@ -1,7 +1,7 @@
 """How a claimed turn reaches its child: a cold start, or a spare started ahead.
 
 Every turn runs in a child of the host service and is handed over on that
-child's standard input (:mod:`cloud_agent_host.host_runtime`), never in its
+child's standard input (:mod:`cloud_agent_host.service.host_runtime`), never in its
 arguments or environment: the turn carries its attempt's credentials, and
 ``/proc/<pid>/cmdline`` and ``/proc/<pid>/environ`` are readable by anyone
 who can see the process. A cold child pays for its interpreter and the
@@ -40,7 +40,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from cloud_agent_host.host_runtime import (
+from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.service.host_runtime import (
     HANDOVER_ACCEPTED,
     HANDOVER_DECLINED,
     HANDOVER_TIMEOUT_S,
@@ -51,8 +52,7 @@ from cloud_agent_host.host_runtime import (
     encode_turn,
     read_handover,
 )
-from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.runner_stop import STOPPING
+from cloud_agent_host.service.runner_stop import STOPPING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

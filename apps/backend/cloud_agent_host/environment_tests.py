@@ -22,7 +22,7 @@ from cloud_agent_host.environment_preparation import (
     run_step,
     write_setup_marker,
 )
-from cloud_agent_host.host_control import keepalive_client
+from cloud_agent_host.service.host_control import keepalive_client
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -74,7 +74,7 @@ def claim_and_execute(
     open; without one, this opens its own. ``attestation`` is the proof the
     claim loop just built for its own claim; without one, this builds it.
     """
-    from cloud_agent_host.host_capabilities import claim_attestation
+    from cloud_agent_host.service.host_capabilities import claim_attestation
 
     with contextlib.ExitStack() as stack:
         if client is None:

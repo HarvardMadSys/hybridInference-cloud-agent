@@ -12,11 +12,12 @@ import pytest
 from tests.support.owners import connection_access
 
 from cloud_agent.schemas import WorkerReleaseRequest
-from cloud_agent_host import local_settings, storage_admission
+from cloud_agent_host import storage_admission
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.host_capacity import StorageMissing, StorageSample
-from cloud_agent_host.host_runtime import HANDOVER_DECLINED, encode_turn
+from cloud_agent_host.service import local_settings
+from cloud_agent_host.service.host_runtime import HANDOVER_DECLINED, encode_turn
 from cloud_agent_host.turn import turn_child
 
 
