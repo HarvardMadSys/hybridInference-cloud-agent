@@ -712,6 +712,13 @@ def test_the_service_starts_chromium_per_use_for_every_member(fake_paths):
             daemon._stop("test over")
             await asyncio.wait_for(service, 10)
         assert browser.status(paths)["service"] is False
+        # A member's stop, a crash, an idle stop: only the crash was nobody's
+        # request, so only it is journalled for the host.
+        journal = Path(paths.incidents).read_text().splitlines()
+        assert [(entry["kind"], entry["signal"]) for entry in map(json.loads, journal)] == [
+            ("browser_crashed", 9)
+        ]
+        assert os.stat(paths.incidents).st_mode & 0o777 == 0o640
 
     asyncio.run(scenario())
 

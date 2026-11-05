@@ -15,6 +15,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host import incident_relay
 from cloud_agent_host.claimed_job import ClaimedJob, ClaimUnreachable, WorkWaitUnsupported
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
 from cloud_agent_host.host_capabilities import (
@@ -174,6 +175,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
     client: SessionSupervisorClient | None = None
     try:
         client = session_supervisor_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
+        incident_relay.confirm(client)
         rows = client.list()
         observations: list[dict[str, Any]] = []
         now = time.monotonic()
@@ -227,6 +229,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     "checkpoint": (
                         row.get("checkpoint") if isinstance(row.get("checkpoint"), dict) else None
                     ),
+                    "incidents": incident_relay.carry(row),
                 }
             )
         return observations

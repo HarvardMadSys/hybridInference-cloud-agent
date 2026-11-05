@@ -55,6 +55,7 @@ from cloud_agent.storage.repositories import (
     PostgresPendingMessageRepository,
     PostgresProfilingControlRepository,
     PostgresResidencyRepository,
+    PostgresSandboxIncidentRepository,
     PostgresSandboxRepository,
     PostgresSessionForkRepository,
     PostgresSettingsRepository,
@@ -121,6 +122,7 @@ if TYPE_CHECKING:
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.sandbox_incidents import SandboxIncidentRepository
 
 
 class Storage:
@@ -128,16 +130,7 @@ class Storage:
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Build one implementation per capability against the caller's pool."""
-        #: Admin read models. Still concrete: they are bounded projections for
-        #: one console, not a capability any other caller asks for, and they
-        #: have no port yet. Named here so that the routes which need them
-        #: stop reaching into another object's pool to build one.
-        self.admin_conversations = AdminConversationQueries(pool)
-        self.admin_database = AdminDatabaseQueries(pool)
-        self.admin_runs = AdminRunQueries(pool)
-        self.admin_sandboxes = AdminSandboxQueries(pool)
-        self.admin_usage = AdminUsageQueries(pool)
-
+        self._admin_read_models(pool)
         self.environments: EnvironmentRepository = PostgresEnvironmentRepository(pool)
         self.environment_snapshots: EnvironmentSnapshotRepository = (
             PostgresEnvironmentSnapshotRepository(pool)
@@ -173,6 +166,7 @@ class Storage:
         self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)
         self.residency: ResidencyRepository = PostgresResidencyRepository(pool)
         self.sandbox: SandboxRepository = PostgresSandboxRepository(pool)
+        self.sandbox_incidents: SandboxIncidentRepository = PostgresSandboxIncidentRepository(pool)
         self.session_fork: SessionForkRepository = PostgresSessionForkRepository(pool)
         self.settings: SettingsRepository = PostgresSettingsRepository(pool)
         self.skills: SkillRepository = PostgresSkillRepository(pool)
@@ -189,3 +183,17 @@ class Storage:
         #: Accounts and the work ended with them.
         self.local_accounts: LocalAccountRepository = PostgresLocalAccountRepository(pool)
         self.owner_work: OwnerWorkTermination = PostgresOwnerWorkRepository(pool)
+
+    def _admin_read_models(self, pool: asyncpg.Pool) -> None:
+        """The admin read models.
+
+        Still concrete: they are bounded projections for one console, not a
+        capability any other caller asks for, and they have no port yet. Named
+        here so that the routes which need them stop reaching into another
+        object's pool to build one.
+        """
+        self.admin_conversations = AdminConversationQueries(pool)
+        self.admin_database = AdminDatabaseQueries(pool)
+        self.admin_runs = AdminRunQueries(pool)
+        self.admin_sandboxes = AdminSandboxQueries(pool)
+        self.admin_usage = AdminUsageQueries(pool)

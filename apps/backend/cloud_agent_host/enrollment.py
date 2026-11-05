@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host import incident_relay
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared.host_settings import admin_values
 from cloud_agent_shared.sandbox_archive_settings import (
@@ -434,6 +435,9 @@ def heartbeat(
         # an exact (thread, generation) match, so a late answer to an old
         # beat cannot end a successor residency.
         on_residencies_lost([item for item in lost if isinstance(item, dict)])
+    # What the beat's ``retained_sandboxes`` carried of sandbox incidents is
+    # forgotten only on this word from the control plane.
+    incident_relay.settle(answer.get("incidents"))
     stop_retained = answer.get("retained_sandboxes_stop")
     if stop_retained and on_retained_sandboxes_stop is not None:
         on_retained_sandboxes_stop([item for item in stop_retained if isinstance(item, dict)])

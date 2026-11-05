@@ -25,6 +25,8 @@ _ANY = "dict[str, typing.Any]"
 #: (method, path, handler, response model, body model, query parameters), in
 #: the order the closure registered them.
 ROUTES: tuple[tuple[str, str, str, str, str | None, tuple[str, ...]], ...] = (
+    # Added on dev by #1110 (sandbox incidents), after this list was frozen.
+    ("POST", "/sandbox-incidents/confirm", "confirm_incidents", "dict[str, int]", "dict", ()),
     ("POST", "/profiling-policy", "profiling_policy", _ANY, "dict", ()),
     ("POST", "/host-settings", "host_settings", _ANY, "dict", ()),
     (

@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_storage
+from cloud_agent.application.sandbox_incidents import record_heartbeat_incidents
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
@@ -54,6 +55,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_S3_URI,
     SANDBOX_CHECKPOINT_CAPABILITY,
 )
+from cloud_agent_shared.sandbox_incidents import INCIDENTS_ACCEPTED
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -61,6 +63,7 @@ if TYPE_CHECKING:
         ResidencyRepository,
         SandboxRepository,
     )
+    from cloud_agent.ports.sandbox_incidents import SandboxIncidentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,7 @@ class _HostsStorage(Protocol):
     host_pool: HostPoolRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
+    sandbox_incidents: SandboxIncidentRepository
 
 
 # Host traffic arrives through the tunnel, past the edge's body limits.
@@ -344,6 +348,9 @@ async def heartbeat_host(
         observations=[_sandbox_observation(retained) for retained in retained_rows],
     )
     await _record_checkpoints(job_store, updated["host"], retained_rows)
+    incidents_stored = await record_heartbeat_incidents(
+        job_store.sandbox_incidents, updated["host"], retained_rows
+    )
     await _release_stopped_residencies(job_store, updated["host"], retained_rows)
     # Starting/restarting is a bounded launch window. Renew only a process that
     # has proved itself LIVE.
@@ -404,6 +411,7 @@ async def heartbeat_host(
         sandbox_manager_error=await _probed_sandbox_manager_error(
             updated["host"], body.sandbox_manager_url
         ),
+        incidents=INCIDENTS_ACCEPTED if incidents_stored else None,
     )
 
 

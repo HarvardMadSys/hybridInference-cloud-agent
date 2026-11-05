@@ -239,7 +239,10 @@
       }
     },
     {
-      "files": ["src/app/(agents)/admin/settings/page.tsx"],
+      "files": [
+        "src/app/(agents)/admin/settings/ApplicationSettingGroup.tsx",
+        "src/app/(agents)/admin/settings/page.tsx"
+      ],
       "rules": {
         "complexity": ["error", 43]
       }
@@ -248,7 +251,6 @@
       "files": [
         "src/app/(agents)/admin/hosts/ComputeResourcePanel.tsx",
         "src/app/(agents)/admin/measurements/MeasurementControlPanel.tsx",
-        "src/app/(agents)/admin/settings/ApplicationSettingGroup.tsx",
         "src/app/(agents)/admin/settings/SandboxArchiveSettings.tsx",
         "src/components/features/agents/job-detail/JobComposer.tsx",
         "src/components/features/agents/useSideChatSession.ts"

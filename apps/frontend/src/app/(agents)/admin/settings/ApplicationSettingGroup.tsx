@@ -20,7 +20,7 @@ import type {
 } from '@/lib/api/adminSettings';
 
 import type { ApplicationSettingsState } from './ApplicationSettings';
-import { ARCHIVE_BUCKET, displayValue, parseValue } from './settingValues';
+import { ARCHIVE_BUCKET, namedOptions, parseValue, valueLabel } from './settingValues';
 
 type Changes = Record<string, AdminSettingValue | null>;
 // `snapshot` is what the review shows as current. It applies only at that
@@ -163,7 +163,7 @@ function ReviewChanges({
                         ? review.snapshot.secret_configured[key]
                           ? 'Configured · hidden'
                           : 'Not configured'
-                        : displayValue(current) || '(empty)'}
+                        : valueLabel(key, current) || '(empty)'}
                     </dd>
                   </div>
                   <span aria-hidden="true" className="hidden items-center px-1 text-muted sm:flex">
@@ -188,7 +188,7 @@ function ReviewChanges({
                         ? value === null
                           ? 'Not configured — secret will be cleared'
                           : 'New secret · hidden'
-                        : displayValue(next) || '(empty) — this setting will be cleared'}
+                        : valueLabel(key, next) || '(empty) — this setting will be cleared'}
                     </dd>
                   </div>
                 </dl>
@@ -316,9 +316,21 @@ function describedBy(id: string, error: string | undefined): string {
   return [`${id}-help`, error && `${id}-error`].filter(Boolean).join(' ');
 }
 
-/** A model id is one token, so the free-text line toggle stays off it. */
+/** A dropdown's options: named choices, or the server's own with any unlisted value kept. */
+function selectOptions(field: AdminSettingDefinition, value: string, saved: string) {
+  const named = namedOptions(field.key, saved);
+  if (named || !field.choices?.length) return named;
+  return [
+    ...(field.choices.includes(value) ? [] : [{ value, label: value }]),
+    ...field.choices.map((choice) => ({ value: choice, label: choice || '(empty)' })),
+  ];
+}
+
+/** A model id is one token, so the free-text line toggle stays off it, as off a dropdown. */
 function offersMultiline(field: AdminSettingDefinition, showInput: boolean): boolean {
-  return showInput && field.kind === 'string' && !field.choices?.length;
+  return (
+    showInput && field.kind === 'string' && !field.choices?.length && !namedOptions(field.key, '')
+  );
 }
 
 export function ApplicationSettingGroup({
@@ -330,7 +342,8 @@ export function ApplicationSettingGroup({
   fields: AdminSettingDefinition[];
   settings: ApplicationSettingsState;
 }) {
-  const { snapshot, saved, busy, save } = settings;
+  const { snapshot, saved, busy, save, isSettingVisible, setGoverningDraft, clearGoverningDrafts } =
+    settings;
   const [editing, setEditing] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [replacing, setReplacing] = useState<Record<string, boolean>>({});
@@ -344,7 +357,10 @@ export function ApplicationSettingGroup({
   const groupId = useId();
   const incoming = (field: AdminSettingDefinition) =>
     field.secret ? '' : String(snapshot?.values[field.key] ?? field.default);
-  const changed = fields.filter(
+  // Fields of an unselected provider or a disabled feature are not shown. Their
+  // drafts are kept for switching back, but never counted or submitted.
+  const shown = fields.filter((field) => isSettingVisible(field.key));
+  const changed = shown.filter(
     (field) =>
       !field.read_only && drafts[field.key] !== undefined && drafts[field.key] !== incoming(field),
   );
@@ -380,6 +396,7 @@ export function ApplicationSettingGroup({
     setReplacing({});
     setMultiline({});
     setErrors({});
+    clearGoverningDrafts(fields.map((field) => field.key));
     setEditing(false);
     requestAnimationFrame(() => editButton.current?.focus());
   };
@@ -422,6 +439,7 @@ export function ApplicationSettingGroup({
 
   return (
     <div
+      hidden={!shown.length}
       className={`mt-4 rounded-xl border bg-surface first:mt-0 ${editing ? 'border-accent/30 shadow-[0_0_0_3px_rgb(var(--ui-accent)/0.04)]' : 'border-border'}`}
     >
       <div className="flex min-h-14 items-center justify-between gap-4 rounded-t-xl border-b border-border/70 bg-surface-muted/45 px-4 py-2 sm:px-5">
@@ -450,7 +468,7 @@ export function ApplicationSettingGroup({
           ref={editButton}
           type="button"
           aria-label={`Edit ${title} settings`}
-          disabled={busy || editing || fields.every((field) => field.read_only)}
+          disabled={busy || editing || shown.every((field) => field.read_only)}
           hidden={editing}
           className={`ui-button ui-button-ghost min-h-9 shrink-0 gap-1.5 px-2.5 text-xs hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${editing ? 'hidden' : ''}`}
           onClick={() => {
@@ -486,13 +504,14 @@ export function ApplicationSettingGroup({
           prepare();
         }}
       >
-        {fields.map((field) => {
+        {shown.map((field) => {
           const key = field.key;
           const id = `application-setting-${key}`;
           const configured = snapshot?.secret_configured[key] ?? false;
           const editable = editing && !field.read_only;
           const showInput = editable && (!field.secret || replacing[key]);
           const value = drafts[key] ?? incoming(field);
+          const options = selectOptions(field, value, incoming(field));
           const error = errors[key];
           const change = (next: string) => {
             setDrafts((previous) => {
@@ -502,6 +521,7 @@ export function ApplicationSettingGroup({
               return updated;
             });
             setErrors((previous) => ({ ...previous, [key]: '' }));
+            setGoverningDraft(key, next === incoming(field) ? undefined : next);
           };
           const fieldProps = {
             id,
@@ -540,7 +560,7 @@ export function ApplicationSettingGroup({
                 </p>
                 {editable && !field.secret && (
                   <p className="mt-2 break-words text-xs text-muted">
-                    Default: {displayValue(field.default) || '(empty)'}
+                    Default: {valueLabel(key, field.default) || '(empty)'}
                   </p>
                 )}
               </div>
@@ -566,7 +586,7 @@ export function ApplicationSettingGroup({
                             {configured ? 'Configured · value hidden' : 'Not configured'}
                           </span>
                         ) : (
-                          displayValue(snapshot?.values[key] ?? field.default) || (
+                          valueLabel(key, snapshot?.values[key] ?? field.default) || (
                             <span className="text-muted">Not set</span>
                           )
                         )}
@@ -582,17 +602,8 @@ export function ApplicationSettingGroup({
                           { value: 'false', label: 'Disabled' },
                         ]}
                       />
-                    ) : field.choices?.length ? (
-                      <Select
-                        {...selectProps}
-                        options={[
-                          ...(field.choices.includes(value) ? [] : [{ value, label: value }]),
-                          ...field.choices.map((choice) => ({
-                            value: choice,
-                            label: choice || '(empty)',
-                          })),
-                        ]}
-                      />
+                    ) : options ? (
+                      <Select {...selectProps} options={options} />
                     ) : field.kind === 'string' && (multiline[key] ?? value.includes('\n')) ? (
                       <textarea
                         {...inputProps}

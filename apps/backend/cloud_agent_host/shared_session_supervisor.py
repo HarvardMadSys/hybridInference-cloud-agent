@@ -680,6 +680,15 @@ class SharedChatSessionSupervisor:
         """Observe one known group without running host-wide reconciliation."""
         return self._reconciler.list_for_thread(thread_id)
 
+    def running_group(self, sandbox_id: str) -> tuple[ChatSandboxSpec, str] | None:
+        """A running group's spec and container id, for a bounded host read; else ``None``."""
+        state = self.state
+        with state.lock:
+            group = state.groups.get(sandbox_id)
+            if group is None or group.stopping or not group.inspection.running:
+                return None
+            return group.spec, group.inspection.container_id
+
     def stop_if_idle(
         self,
         thread_id: str,

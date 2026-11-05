@@ -396,6 +396,18 @@ class SessionSupervisorClient:
             raise SessionSupervisorError(502, "chat Session Supervisor returned invalid data")
         return [dict(row) for row in rows]
 
+    def confirm_incidents(self, confirmed: dict[str, builtins.list[str]]) -> None:
+        """Tell the sandbox manager which incident rows the control plane stored."""
+        self._request_object(
+            "POST",
+            "/sandbox-incidents/confirm",
+            payload={"confirmed": confirmed},
+            timeout=self._client.timeout,
+            unavailable="chat Session Supervisor is unavailable",
+            refused="chat Session Supervisor rejected the incident confirmation",
+            invalid="chat Session Supervisor returned invalid data",
+        )
+
     def acquire_shared(
         self,
         spec: ChatSandboxSpec,

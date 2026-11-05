@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from cloud_agent_host.operation_call import SandboxManagerCall
     from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
     from cloud_agent_host.sandbox_archives import SandboxArchiveService
+    from cloud_agent_host.sandbox_incidents import SandboxIncidents
     from cloud_agent_host.shared_session_state import SharedSessionDescriptor
     from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
     from cloud_agent_shared.sandbox_manager_wire import SharedMember
@@ -167,6 +168,7 @@ class ManagerContext:
     environment_preparation: EnvironmentPreparation
     settings: ManagerSettings
     authenticate: Callable[..., None]
+    incidents: SandboxIncidents
     archive_boundary: SandboxArchiveService | SandboxArchiveController | None = field(init=False)
 
     def __post_init__(self) -> None:

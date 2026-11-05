@@ -223,11 +223,32 @@ def _fresh_host(monkeypatch):
 
 
 def _spec(name="chat-1"):
-    return SimpleNamespace(container_name=name)
+    return SimpleNamespace(container_name=name, sandbox_id=f"sandbox-{name}")
 
 
 def _steps(manager):
     return [(argv, kwargs["user_uid"]) for argv, kwargs in manager.calls]
+
+
+def test_the_host_remembers_whose_credential_it_admitted(monkeypatch):
+    """A failure the runner journals under a digest is that member's, whoever has the slot now."""
+    from cloud_agent_host.sandbox_incidents import MemberCredentials
+
+    members = MemberCredentials()
+    monkeypatch.setattr(sandbox_mcp, "MEMBER_CREDENTIALS", members)
+    digest = hashlib.sha256(b"cred").hexdigest()
+
+    sandbox_mcp.admit_sandbox_mcp(
+        _Manager(), _spec(), slot_id=2, credential="cred", servers=(PLAYWRIGHT,), thread_id="t-1"
+    )
+    assert members.thread("sandbox-chat-1", digest) == "t-1"
+    assert members.slots("sandbox-chat-1") == {2}
+    # A revoke admits nobody, and a launch with no thread names nobody.
+    sandbox_mcp.admit_sandbox_mcp(_Manager(), _spec("other"), slot_id=0, credential="c", servers=())
+    sandbox_mcp.admit_sandbox_mcp(
+        _Manager(), _spec("third"), slot_id=0, credential="c", servers=(PLAYWRIGHT,)
+    )
+    assert members.slots("sandbox-other") == set() and members.slots("sandbox-third") == set()
 
 
 def test_the_host_admits_as_root_then_starts_the_gateway_then_the_slots_runner():

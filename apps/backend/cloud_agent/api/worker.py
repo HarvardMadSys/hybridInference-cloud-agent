@@ -45,7 +45,7 @@ from cloud_agent.application.model_connections import residency_credential
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import residency_ttl_s
 from cloud_agent.application.ssh_servers import push_ssh_access
-from cloud_agent.application.turn_claim import ClaimRefusal, hand_over_claim
+from cloud_agent.application.turn_claim import ClaimRefusal, ClaimStorage, hand_over_claim
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.domain.execution import QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.goals.controller import continue_after_finish
@@ -113,27 +113,18 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from cloud_agent.ports import (
-        AgentMemoryRepository,
-        AttachmentRepository,
-        AttemptCommands,
         ConversationCommands,
         ConversationQueries,
         ExecutionQueries,
         GoalRepository,
         GoalWakeupRepository,
-        HostPoolRepository,
-        McpConnectionRepository,
-        ModelConnectionRepository,
         OperationMeasurements,
         PendingMessageRepository,
         ResidencyRepository,
         SandboxRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
-        SshServerRepository,
     )
-    from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
-    from cloud_agent.ports.environments import EnvironmentExecutionRepository
     from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerClient
 
 
@@ -199,34 +190,20 @@ router = APIRouter(prefix="/v1/agent", route_class=_BoundedTurnResourcesRoute)
 logger = get_logger("cloud_agent.api.routes")
 
 
-class _WorkerStorage(Protocol):
+class _WorkerStorage(ClaimStorage, Protocol):
     """Capabilities reached by runner endpoints and their claim/finish helpers."""
 
-    agent_memory: AgentMemoryRepository
-    attachments: AttachmentRepository
-    attempt_commands: AttemptCommands
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
     execution_queries: ExecutionQueries
     goal_wakeups: GoalWakeupRepository
     goals: GoalRepository
-    host_pool: HostPoolRepository
-    mcp: McpConnectionRepository
-    model_connections: ModelConnectionRepository
     operation_measurements: OperationMeasurements
     pending_messages: PendingMessageRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
     skills: SkillRepository
     source_control: SourceControlPort
-
-    @property
-    def environments(self) -> EnvironmentExecutionRepository:
-        """Environment persistence needed by this flow."""
-        ...
-
-    environment_snapshots: EnvironmentSnapshotRepository
-    ssh_servers: SshServerRepository
 
 
 def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:

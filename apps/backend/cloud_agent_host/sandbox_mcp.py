@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 
 from cloud_agent_host.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
 from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.sandbox_incidents import MEMBER_CREDENTIALS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -137,8 +138,15 @@ def admit_sandbox_mcp(
     servers: tuple[SandboxMcpServer, ...],
     environment: Mapping[str, str] | None = None,
     mcp_base_url: str = "",
+    thread_id: str = "",
 ) -> bool:
-    """Replace one member's admission; whether its servers are now served. Never raises."""
+    """Replace one member's admission; whether its servers are now served. Never raises.
+
+    ``thread_id`` is the member's chat. The host remembers whose credential it
+    admitted, so a failure the slot's runner journals under that credential's
+    digest is that chat's, whoever holds the slot when the host reads it
+    (``cloud_agent_host.sandbox_incidents``).
+    """
     if servers and not credential:
         logger.warning(
             "sandbox MCP servers for %s slot %s need an MCP credential; none was issued",
@@ -152,6 +160,13 @@ def admit_sandbox_mcp(
             return False
         _known_clean.discard(key)
     document = admission(credential, servers, report_url(mcp_base_url))
+    if servers and thread_id:
+        MEMBER_CREDENTIALS.admitted(
+            spec.sandbox_id,
+            hashlib.sha256(credential.encode()).hexdigest(),
+            thread_id=thread_id,
+            slot=slot_id,
+        )
     try:
         _step(manager, spec, "admission", ["admit", str(slot_id)], ROOT_UID, document)
         if not servers:

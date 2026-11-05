@@ -31,6 +31,8 @@ class SandboxMcpFacet(LaunchFacet):
     relay_url: str
     # The chat's environment, for the servers' ${NAME} references.
     environment: BoundEnvironment | None = field(repr=False)
+    # The chat the servers run for, which the gateway names in its incident reports.
+    thread_id: str = ""
 
     @override
     def fingerprint(self) -> Mapping[str, object]:
@@ -48,6 +50,7 @@ class SandboxMcpFacet(LaunchFacet):
             servers=self.servers,
             environment=self.environment.values("runtime") if self.environment else {},
             mcp_base_url=self.relay_url,
+            thread_id=self.thread_id,
         )
 
     @override

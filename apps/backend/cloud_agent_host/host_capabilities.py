@@ -28,6 +28,7 @@ from cloud_agent_shared.shared_protocol import (
     HOST_SETTINGS_CAPABILITY,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     PROFILING_CONTROL_CAPABILITY,
+    SANDBOX_BROWSER_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
@@ -135,6 +136,7 @@ def _shared_live_host_capabilities(  # noqa: PLR0912 complexity baseline, #771
         # ... and recreates a group another host left behind from its
         # checkpoint, so a claim may hand this replica a cold group.
         SANDBOX_RESTORE_CAPABILITY,
+        *([SANDBOX_BROWSER_CAPABILITY] if helpers.get("cloud-agent-browser") else []),
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
