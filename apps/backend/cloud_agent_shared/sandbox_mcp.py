@@ -131,7 +131,9 @@ class SandboxMcpServer(BaseModel):
 
     def secrets(self) -> dict[str, str]:
         """This server's own keys by name, for the output redactor."""
-        return {f"sandbox-mcp:{self.alias}:{name}": value for name, value in self.secret_env.items()}
+        return {
+            f"sandbox-mcp:{self.alias}:{name}": value for name, value in self.secret_env.items()
+        }
 
     def runner_secrets(self, environment: Mapping[str, str]) -> dict[str, str]:
         """The values only the slot's runner gets: its keys, and referenced environment.

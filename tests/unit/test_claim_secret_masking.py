@@ -244,4 +244,3 @@ def test_a_programs_own_key_is_masked_under_its_server():
     assert redacted == "key=[secret:sandbox-mcp:search:API_KEY]"
     # A plain env value and a secret:// reference are configuration, not secrets.
     assert "eu" not in values.values() and "secret://API_KEY" not in values.values()
-
