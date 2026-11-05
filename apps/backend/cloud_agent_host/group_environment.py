@@ -14,6 +14,7 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.chat_sandbox import (
+    ChatSandboxInspection,
     RetainedChatBackend,
     RetainedChatLost,
 )
@@ -27,6 +28,8 @@ from cloud_agent_host.session_lifecycle import (
 from cloud_agent_host.shared_session_state import (
     _SAME_RUN,
     SharedSessionState,
+    _Group,
+    _Member,
     _SameRun,
 )
 
@@ -46,7 +49,7 @@ class GroupEnvironmentPreparation:
         self._manager = state.manager
         self._lifecycle = lifecycle
 
-    def prepare_environment(  # noqa: PLR0915 complexity baseline, #771
+    def prepare_environment(
         self,
         thread_id: str,
         environment: Any,
@@ -84,45 +87,21 @@ class GroupEnvironmentPreparation:
             current_group, current_member = self._state.member(thread_id)
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost("shared sandbox membership changed during observation")
-            if group.inspection == observed and group.lifecycle_generation == lifecycle_generation:
-                if current is None:
-                    self._state.mark_container_lost_locked(group)
-                    raise RetainedChatLost("shared sandbox container is missing")
-                self._state.accept_inspection_locked(group, current)
-            elif group.container_lost:
-                raise RetainedChatLost("shared sandbox container identity was lost")
+            self._accept_observation_locked(group, observed, lifecycle_generation, current)
             if receipt.get("ready") and prepared_in(receipt, group.inspection):
                 return receipt
-            group.lifecycle.admit(Operation.MUTATION)
-            if group.operation_tokens or any(
-                m.current_turn is not None
-                or (m.lease_token is not None and m.lease_token != activation_owner)
-                for m in group.members.values()
-            ):
-                raise SessionBusy("Environment preparation waits for active workspace operations")
-            self._state.join_run_locked(group, start_seq)
-            cancelled = threading.Event()
-            group.environment_cancel = cancelled
-            group.environment_owner = activation_owner
-            group.snapshotting = True
-            generation = group.lifecycle_generation
-            expected = group.inspection.container_id
-            slots = [m.resident_slot_id for m in group.members.values()]
+            cancelled, generation, expected, slots = self._reserve_preparation_locked(
+                group, activation_owner=activation_owner, start_seq=start_seq
+            )
         monitor_stop = threading.Event()
-
-        def monitor() -> None:
-            while not monitor_stop.wait(0.5):
-                with self._state.lock:
-                    if group.lifecycle_generation != generation or (
-                        activation_owner is not None and member.lease_token != activation_owner
-                    ):
-                        cancelled.set()
-                        return
-
-        monitor_thread = threading.Thread(
-            target=monitor, daemon=True, name="environment-lease-fence"
+        monitor_thread = self._start_lease_fence(
+            group,
+            member,
+            generation=generation,
+            activation_owner=activation_owner,
+            cancelled=cancelled,
+            monitor_stop=monitor_stop,
         )
-        monitor_thread.start()
         manifest = None
         try:
             # Writers are frozen only around a script: preparing a boot that
@@ -162,6 +141,82 @@ class GroupEnvironmentPreparation:
                     group.environment_owner = None
                     self._state.arm_idle_if_quiescent(group)
                     self._state.condition.notify_all()
+
+    def _accept_observation_locked(
+        self,
+        group: _Group,
+        observed: ChatSandboxInspection,
+        lifecycle_generation: int,
+        current: ChatSandboxInspection | None,
+    ) -> None:
+        """Accept an unlocked Docker observation no lifecycle call superseded.
+
+        The caller holds the lock.
+        """
+        if group.inspection == observed and group.lifecycle_generation == lifecycle_generation:
+            if current is None:
+                self._state.mark_container_lost_locked(group)
+                raise RetainedChatLost("shared sandbox container is missing")
+            self._state.accept_inspection_locked(group, current)
+        elif group.container_lost:
+            raise RetainedChatLost("shared sandbox container identity was lost")
+
+    def _reserve_preparation_locked(
+        self,
+        group: _Group,
+        *,
+        activation_owner: str | None,
+        start_seq: int | _SameRun | None,
+    ) -> tuple[threading.Event, int, str, list[int]]:
+        """Take the group's exclusive-workspace barrier for this preparation.
+
+        The caller holds the lock. Returns the preparation's cancel event, the
+        lifecycle generation and container it is fenced to, and the member
+        slots whose writers it may freeze.
+        """
+        group.lifecycle.admit(Operation.MUTATION)
+        if group.operation_tokens or any(
+            m.current_turn is not None
+            or (m.lease_token is not None and m.lease_token != activation_owner)
+            for m in group.members.values()
+        ):
+            raise SessionBusy("Environment preparation waits for active workspace operations")
+        self._state.join_run_locked(group, start_seq)
+        cancelled = threading.Event()
+        group.environment_cancel = cancelled
+        group.environment_owner = activation_owner
+        group.snapshotting = True
+        generation = group.lifecycle_generation
+        expected = group.inspection.container_id
+        slots = [m.resident_slot_id for m in group.members.values()]
+        return cancelled, generation, expected, slots
+
+    def _start_lease_fence(
+        self,
+        group: _Group,
+        member: _Member,
+        *,
+        generation: int,
+        activation_owner: str | None,
+        cancelled: threading.Event,
+        monitor_stop: threading.Event,
+    ) -> threading.Thread:
+        """Start the thread that cancels preparation once its lease or lifecycle moves on."""
+
+        def monitor() -> None:
+            while not monitor_stop.wait(0.5):
+                with self._state.lock:
+                    if group.lifecycle_generation != generation or (
+                        activation_owner is not None and member.lease_token != activation_owner
+                    ):
+                        cancelled.set()
+                        return
+
+        monitor_thread = threading.Thread(
+            target=monitor, daemon=True, name="environment-lease-fence"
+        )
+        monitor_thread.start()
+        return monitor_thread
 
     def cancel_environment(self, thread_id: str, activation_owner: str) -> None:
         """Only the preparing activation may revoke its long-running setup."""

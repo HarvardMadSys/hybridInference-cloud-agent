@@ -54,7 +54,29 @@ def _shared_live_ready_file() -> str:
     return (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
 
 
-def _shared_live_host_capabilities(  # noqa: PLR0912 complexity baseline, #771
+def _steerable_runtime_capabilities() -> list[str] | None:
+    """Mid-turn input capabilities of the registered runtimes.
+
+    None when any registered runtime cannot run as a shared-live resident.
+    """
+    steerable: list[str] = []
+    for runtime_id in registered_runtimes():
+        try:
+            runtime_capabilities = driver_for(get_runtime(runtime_id)).capabilities()
+        except KeyError:
+            return None
+        if (
+            runtime_capabilities.resident_transport != "supervisor_live"
+            or runtime_capabilities.fork != "at_anchor"
+            or not runtime_capabilities.concurrent_shared_workspace
+        ):
+            return None
+        if runtime_capabilities.steering == "mid_turn":
+            steerable.append(mid_turn_input_capability(runtime_id))
+    return steerable
+
+
+def _shared_live_host_capabilities(
     backend: SandboxBackend,
     stamp: dict[str, Any],
 ) -> list[str]:
@@ -99,20 +121,9 @@ def _shared_live_host_capabilities(  # noqa: PLR0912 complexity baseline, #771
         for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
     ):
         return []
-    steerable: list[str] = []
-    for runtime_id in registered_runtimes():
-        try:
-            runtime_capabilities = driver_for(get_runtime(runtime_id)).capabilities()
-        except KeyError:
-            return []
-        if (
-            runtime_capabilities.resident_transport != "supervisor_live"
-            or runtime_capabilities.fork != "at_anchor"
-            or not runtime_capabilities.concurrent_shared_workspace
-        ):
-            return []
-        if runtime_capabilities.steering == "mid_turn":
-            steerable.append(mid_turn_input_capability(runtime_id))
+    steerable = _steerable_runtime_capabilities()
+    if steerable is None:
+        return []
     capabilities = [
         SHARED_SANDBOX_CAPABILITY,
         NATIVE_FORK_AT_ANCHOR_CAPABILITY,
