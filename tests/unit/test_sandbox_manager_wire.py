@@ -11,7 +11,10 @@ import pytest
 from tests.support.owners import CONNECTION_ID, connection_row
 
 from cloud_agent.application import session_fork
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, identity_from_row
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    identity_from_row,
+)
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.manager_api.models import SharedForkRequest, SharedSandboxIdentityRequest
 from cloud_agent_host.session_supervisor_client import _group_identity

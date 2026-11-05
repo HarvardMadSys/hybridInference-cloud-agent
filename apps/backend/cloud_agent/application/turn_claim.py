@@ -49,7 +49,7 @@ from cloud_agent.owner_access import (
     owner_may_use_agent,
 )
 from cloud_agent.prompt_injections import claim_prompt
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import WorkerClaimResponse
 from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP, mint_worker_token
 from cloud_agent_shared.environment import (
@@ -461,7 +461,7 @@ async def _require_environment_host(
         raise SandboxManagerError(503, "Host cannot execute environment configuration")
     if uses_inference_names(environment) and ENVIRONMENT_INFERENCE_CAPABILITY not in capabilities:
         raise SandboxManagerError(503, "Host cannot isolate inference variables")
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_job
 
     try:
         broker = await sandbox_manager_for_job(store.host_pool, claim["id"])

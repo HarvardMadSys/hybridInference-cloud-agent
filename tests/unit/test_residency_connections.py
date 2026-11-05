@@ -12,7 +12,7 @@ from tests.support.refusals import raises_http
 
 from cloud_agent.api import worker
 from cloud_agent.application import session_fork
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import WorkerSandboxResidencyRequest
 from cloud_agent.tokens import ENV_SIGNING_SECRET
 

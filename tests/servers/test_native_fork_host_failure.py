@@ -22,8 +22,8 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     store,
 )
 
-from cloud_agent import sandbox_manager_routing
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
 pytestmark = pytest.mark.asyncio
 

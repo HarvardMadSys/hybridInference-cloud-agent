@@ -33,8 +33,8 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive import S3SandboxArchiveStore
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
     sandbox_manager_configuration_error,
     sandbox_manager_for_host,

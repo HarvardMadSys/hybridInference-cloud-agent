@@ -54,14 +54,17 @@ from tests.support.db import reset_agent_tables
 from tests.support.local_accounts import LOCAL_SECRET, PASSWORD, make_account
 from tests.support.migrations import apply_migrations
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.accounts.config import ENV_LOCAL_SESSION_SECRET
 from cloud_agent.accounts.session_cookie import LOCAL_SESSION_COOKIE, LOCAL_SESSION_COOKIE_INSECURE
 from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.app import create_app
 from cloud_agent.measurement import measurement_writer, operation_measurement
 from cloud_agent.measurement.operation_measurement import INTERACTION_HEADER
-from cloud_agent.sandbox_manager_client import SandboxManagerError, SandboxManagerStream
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerError,
+    SandboxManagerStream,
+)
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
 from cloud_agent_host import operation_call, runner as runner_mod

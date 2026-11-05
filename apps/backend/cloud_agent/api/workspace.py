@@ -64,7 +64,7 @@ from cloud_agent.measurement.operation_measurement import (
     operation as measured_operation,
     root_scope,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import (
     AgentGitWorkspaceMetadataResponse,
     AgentGitWorkspaceResponse,
@@ -94,7 +94,10 @@ if TYPE_CHECKING:
         SourceControlRepository as SourceControlPort,
     )
     from cloud_agent.ports.environments import EnvironmentBindingRepository
-    from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerStream
+    from cloud_agent.sandbox_manager.sandbox_manager_client import (
+        SandboxManagerClient,
+        SandboxManagerStream,
+    )
 
 
 router = APIRouter(prefix="/v1/agent")

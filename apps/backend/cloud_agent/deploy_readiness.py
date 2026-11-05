@@ -33,7 +33,10 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from cloud_agent.host_pool import HOST_DRAINING, HOST_ONLINE
-from cloud_agent.sandbox_manager_routing import ENV_SANDBOX_MANAGER_TOKEN, probe_sandbox_manager
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
+    ENV_SANDBOX_MANAGER_TOKEN,
+    probe_sandbox_manager,
+)
 from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,

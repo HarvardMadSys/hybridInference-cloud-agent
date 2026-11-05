@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from cloud_agent import settings
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
     validate_sandbox_manager_url,
 )

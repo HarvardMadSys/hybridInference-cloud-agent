@@ -26,7 +26,7 @@ from cloud_agent.environments import (
     EnvironmentForbidden,
     EnvironmentNotFound,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import REPO_PATTERN
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
@@ -790,7 +790,7 @@ async def workspace_environment(
         user["user_id"], str(job["thread_id"])
     )
     if view.get("binding_id") and view.get("required"):
-        from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+        from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_job
 
         broker = await sandbox_manager_for_job(store.host_pool, job_id)
         if broker is not None:
@@ -986,7 +986,7 @@ async def retry_preparation(
 ) -> dict[str, Any]:
     """Retry failed preparation using the same workspace binding."""
     from cloud_agent.api._owner_auth import _owned_job
-    from cloud_agent.sandbox_manager_routing import (
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import (
         hydrate_shared_sandbox_manager,
         sandbox_manager_for_job,
     )
@@ -1051,7 +1051,7 @@ async def skip_environment_start(
 ) -> dict[str, Any]:
     """Allow one next turn to proceed after an explicitly acknowledged start failure."""
     from cloud_agent.api._owner_auth import _owned_job
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_job
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)

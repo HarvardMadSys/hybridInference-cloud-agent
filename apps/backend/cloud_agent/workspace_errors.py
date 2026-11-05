@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from fastapi import HTTPException
 
 if TYPE_CHECKING:
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
 
 def _sandbox_manager_http_error(exc: SandboxManagerError) -> HTTPException:

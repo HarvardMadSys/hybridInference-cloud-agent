@@ -25,8 +25,8 @@ from tests.servers.test_agent_jobs_api import (
 )
 from tests.support.owners import connection_claim, on_connection
 
-from cloud_agent import sandbox_manager_routing
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 
 _TEMPORARY = on_connection({"repo": None, "task_prompt": "write a script", "model": "glm-5.1"})

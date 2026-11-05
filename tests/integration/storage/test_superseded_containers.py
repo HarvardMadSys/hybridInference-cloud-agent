@@ -37,7 +37,7 @@ from tests.unit.test_sandbox_deletion_backup import _Manager
 from cloud_agent.ports.external.compute_provider import ProviderReceipt
 from cloud_agent.ports.external.host_bootstrap import default_namespace
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.storage._sql.hosts import (
     authorize_superseded_removals,
     superseded_containers,

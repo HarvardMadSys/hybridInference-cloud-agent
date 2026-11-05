@@ -21,8 +21,11 @@ from cloud_agent.sandbox_archive import (
     SandboxArchiveUnavailable,
     SandboxArchiveVerificationError,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     sandbox_manager_configuration_error,
     sandbox_manager_for_host,
 )

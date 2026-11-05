@@ -313,7 +313,8 @@ def _prepare(
 
     monkeypatch.setattr("cloud_agent.mcp.runtime.close_host", close_host)
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.close_sandbox_manager_clients", close_sandbox_managers
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.close_sandbox_manager_clients",
+        close_sandbox_managers,
     )
 
     real_aclose = SourceControlRuntime.aclose

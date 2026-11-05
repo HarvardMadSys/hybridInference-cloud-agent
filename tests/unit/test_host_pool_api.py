@@ -30,7 +30,6 @@ from httpx import ASGITransport, AsyncClient
 from tests.support.owners import connection_claim
 from tests.support.storage import AllCapabilities
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_storage, verify_admin_access
 from cloud_agent.host_pool import (
@@ -43,7 +42,8 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     ENV_SANDBOX_MANAGER_HOSTS,
     PROBE_FAILED_FOR_HOST,
     SandboxManagerUrlRefused,

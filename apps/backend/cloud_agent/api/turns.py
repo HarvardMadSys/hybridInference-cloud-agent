@@ -56,8 +56,8 @@ from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_attempt
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_attempt
 from cloud_agent.schemas import (
     AgentJobResponse,
     AgentPendingMessageSendNow,

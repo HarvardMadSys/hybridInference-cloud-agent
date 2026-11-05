@@ -47,7 +47,6 @@ from tests.support.owners import (
 )
 from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary, NoAccounts
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
@@ -58,6 +57,7 @@ from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.model_preference import ModelPreferenceView
+from cloud_agent.sandbox_manager import sandbox_manager_routing
 from cloud_agent.storage.repositories.conversation_commands import _goal_round_metadata
 from cloud_agent.storage.repositories.goals import _pause_detail
 from cloud_agent.thread_stats import summarize_thread
@@ -4098,7 +4098,7 @@ async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
     store: FakeStorage, monkeypatch
 ):
     """The sandbox manager's shared-only 404 describes the workspace, not a file path."""
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
     class SandboxManager:
         def with_start_seq(self, _start_seq: int | None):
@@ -4277,7 +4277,7 @@ class _TerminalSessionSandboxManager:
     async def terminal_input(self, workspace_id: str, terminal_id: str, *, data: str):
         self.calls.append(("input", workspace_id, terminal_id, data))
         if workspace_id in self.suspended:
-            from cloud_agent.sandbox_manager_client import SandboxManagerError
+            from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
             raise SandboxManagerError(409, "workspace terminals are suspended")
         return _terminal_session_descriptor()
@@ -4795,7 +4795,7 @@ async def test_terminal_routes_report_missing_sandbox_manager_and_workspace_as_c
     store: FakeStorage, monkeypatch
 ):
     """A retained chat reports missing sandbox manager/workspace as actionable conflicts."""
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
     app = _build_app(store)
     transport = ASGITransport(app=app)
@@ -4956,7 +4956,7 @@ async def test_cancel_reports_its_commit_when_the_workspace_host_cannot_be_reach
     The retained group's sandbox manager cannot be hydrated, so the terminals are not
     resumed now; the durable marker stays set for the reaper's next pass.
     """
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
     sandbox_manager = _TerminalSessionSandboxManager()
 

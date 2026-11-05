@@ -18,7 +18,7 @@ from cloud_agent.environments import (
     EnvironmentForbidden,
     EnvironmentNotFound,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent_shared.environment import EnvironmentInputError
 
 if TYPE_CHECKING:

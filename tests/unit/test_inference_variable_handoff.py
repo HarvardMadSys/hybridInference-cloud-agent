@@ -12,7 +12,10 @@ import httpx
 import pytest
 from tests.support.owners import launch_connection
 
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
 from cloud_agent_host.chat_sandbox import (
     MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
