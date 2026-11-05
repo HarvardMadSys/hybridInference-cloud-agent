@@ -31,9 +31,10 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     json,
     pytest,
     store,
-    worker,
 )
 from tests.support.owners import connection_claim, on_connection
+
+from cloud_agent import memory_tool, web_search
 
 pytestmark = pytest.mark.asyncio
 
@@ -555,7 +556,7 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
     # from each name, so a dict here would either fail the schema or address a
     # server that does not exist.
     # The platform's memory tools ride the same endpoint, after the connections.
-    assert body["mcp_bindings"] == ["deepwiki", "github", worker.memory_tool.RUNTIME_SERVER_ID]
+    assert body["mcp_bindings"] == ["deepwiki", "github", memory_tool.RUNTIME_SERVER_ID]
     assert "mcp.example.com" not in json.dumps(body)
     assert "wiki.example.com" not in json.dumps(body)
 
@@ -608,13 +609,13 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
     parallel_key: str,
 ) -> None:
     values = {
-        worker.web_search.PROVIDER_SETTING: selection,
-        worker.web_search.SERPER_API_KEY_SETTING: serper_key,
-        worker.web_search.BRAVE_API_KEY_SETTING: brave_key,
-        worker.web_search.PARALLEL_API_KEY_SETTING: parallel_key,
+        web_search.PROVIDER_SETTING: selection,
+        web_search.SERPER_API_KEY_SETTING: serper_key,
+        web_search.BRAVE_API_KEY_SETTING: brave_key,
+        web_search.PARALLEL_API_KEY_SETTING: parallel_key,
     }
     monkeypatch.setattr(
-        worker.web_search,
+        web_search,
         "text_setting",
         lambda key: values[key],
     )
@@ -626,8 +627,8 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
     ).json()
 
     assert body["mcp_bindings"] == [
-        worker.web_search.RUNTIME_SERVER_ID,
-        worker.memory_tool.RUNTIME_SERVER_ID,
+        web_search.RUNTIME_SERVER_ID,
+        memory_tool.RUNTIME_SERVER_ID,
     ]
     assert body["mcp_token"]
     assert all(

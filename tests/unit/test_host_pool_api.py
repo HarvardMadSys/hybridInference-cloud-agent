@@ -1697,14 +1697,14 @@ def test_a_claim_warns_about_a_new_untrusted_group_without_a_disk_quota(
     caplog, disk_limit_mib, profile, thread_sandbox, warned
 ):
     """A warning only: the claim itself is never changed by the quota."""
-    from cloud_agent.api.worker import _warn_on_unbounded_untrusted_group
+    from cloud_agent.application.turn_claim import warn_on_unbounded_untrusted_group
     from cloud_agent.schemas import WorkerClaimAttestation
 
     claim = {"id": "ajob_1", "execution_profile": profile, "thread_sandbox": thread_sandbox}
     attestation = WorkerClaimAttestation(sandbox_disk_limit_mib=disk_limit_mib)
 
     with caplog.at_level(logging.WARNING):
-        _warn_on_unbounded_untrusted_group(claim, attestation, host="runner-a")
+        warn_on_unbounded_untrusted_group(claim, attestation, host="runner-a")
 
     events = [
         record

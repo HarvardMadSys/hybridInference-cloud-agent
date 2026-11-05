@@ -25,8 +25,8 @@ from fastapi import HTTPException
 from tests.unit.test_goal_controller import FakeOwners
 from tests.unit.test_runner_host_settings import _JOB, _run_new_chat
 
+from cloud_agent.agent_memory import claim_agent_memories as _claim_agent_memories
 from cloud_agent.api.environments import RuntimeRefreshInput, refresh_runtime_environment
-from cloud_agent.api.worker import _claim_agent_memories
 from cloud_agent.goals.controller import _check_access
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.runner import prepare_temporary_worktree

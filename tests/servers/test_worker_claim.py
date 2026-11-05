@@ -30,6 +30,7 @@ from cloud_agent.api.deps import (
     get_storage,
 )
 from cloud_agent.api.errors import install_domain_errors
+from cloud_agent.application import turn_claim
 
 pytestmark = pytest.mark.asyncio
 
@@ -297,7 +298,7 @@ async def test_an_unavailable_repository_lookup_delays_the_claim(claim, monkeypa
     async def unavailable(*args: Any, **kwargs: Any) -> None:
         raise RepoAccessUnavailable("GitHub is temporarily unavailable")
 
-    monkeypatch.setattr(agent_worker, "require_entitled_repo", unavailable)
+    monkeypatch.setattr(turn_claim, "require_entitled_repo", unavailable)
     store = _ClaimStore()
     response = await claim(store)
     assert response.status_code == 503
@@ -370,7 +371,7 @@ async def test_a_repository_refusal_is_decided_before_any_credential(claim, monk
             raise RepoNotAllowed("owner/name is no longer reachable by its owner")
         raise RepoAccessUnavailable("GitHub is temporarily unavailable")
 
-    monkeypatch.setattr(agent_worker, "require_entitled_repo", refused)
+    monkeypatch.setattr(turn_claim, "require_entitled_repo", refused)
     store = _ClaimStore()
 
     response = await claim(store)
@@ -404,7 +405,7 @@ async def test_an_unexpected_failure_after_the_claim_hands_the_job_back(
         raise RuntimeError("the store dropped the connection")
 
     if failing_step == "mcp_bindings":
-        monkeypatch.setattr(agent_worker, "resolve_for_thread", broken_read)
+        monkeypatch.setattr(turn_claim, "resolve_for_thread", broken_read)
     elif failing_step == "attachment_count":
         monkeypatch.setattr(store, "count_thread_attachments", broken_read)
     else:
