@@ -4,9 +4,9 @@ A pull request splits the slow tiers over two hosted VMs; trusted events keep
 them whole on the persistent pool. The split itself is `scripts/ci_shard.py`'s
 and is tested there. What is pinned here is the wiring around it: each shard
 asks for the tier that its pytest then runs, the steps that must run once per
-commit run in one shard, and a shard cannot report checks it skipped as green.
-The step that builds the Host move's node image first builds the image its
-test builds, so the test's own build is a cached one.
+commit run in one shard or in a job without shards, and a shard cannot report
+checks it skipped as green. The step that builds the Host move's node image
+first builds the image its test builds, so the test's own build is a cached one.
 """
 
 from __future__ import annotations
@@ -70,12 +70,6 @@ def test_each_shard_asks_for_the_tier_its_pytest_runs(job: str, step: str) -> No
     ("job", "step"),
     [
         ("test-db", "Previous release survives the candidate migration"),
-        ("test", "Shared member permissions survive a sibling CLI restart"),
-        ("test", "Build the node image for the Host move"),
-        ("test", "Set up Node for native CLI regression"),
-        ("test", "Install the sandbox's pinned Claude CLI"),
-        ("test", "Install the sandbox's pinned Claude SDK"),
-        ("test", "Native history survives close, restore and failed-turn retry"),
         ("check", "ESLint"),
         ("check", "Prettier"),
         ("check", "TypeScript"),
@@ -85,14 +79,50 @@ def test_once_per_commit_steps_run_in_the_first_shard(job: str, step: str) -> No
     assert _step(job, step)["if"] == "matrix.shard == 1"
 
 
+DOCKER_CHECKS = (
+    "Shared member permissions survive a sibling CLI restart",
+    "Build the node image for the Host move",
+    "A Host moves between two nodes over SSH",
+    "A restored chat starts from its checkpoint",
+    "A released node stops its runner and inventories clean",
+    "Set up Node for native CLI regression",
+    "Install the sandbox's pinned Claude CLI",
+    "Install the sandbox's pinned Claude SDK",
+    "Native history survives close, restore and failed-turn retry",
+)
+
+
+def test_the_real_docker_checks_run_once_per_commit_beside_pytest() -> None:
+    """Once in their own unsharded job, not after pytest in the first shard."""
+    jobs = _jobs()
+    job = jobs["test-docker"]
+    assert "strategy" not in job, "a sharded job would run every check once per shard"
+    assert "if" not in job, "like `test`, it runs whatever changed"
+    assert job["needs"] == "changes"
+    assert job["runs-on"] == jobs["test"]["runs-on"]
+    names = [step.get("name") for step in job["steps"]]
+    assert [name for name in names if name in DOCKER_CHECKS] == list(DOCKER_CHECKS)
+    assert all("if" not in step for step in job["steps"])
+    assert not {step.get("name") for step in jobs["test"]["steps"]} & set(DOCKER_CHECKS)
+    assert "test-docker" in jobs["ci-gate"]["needs"]
+    gate = _step("ci-gate", "Every job succeeded or was deliberately skipped")
+    assert "test-docker=${{ needs.test-docker.result }}" in gate["env"]["RESULTS"]
+
+
+def test_the_released_node_tests_share_four_workers() -> None:
+    """Each starts its own node; one after another they took 173 s."""
+    script = _step("test-docker", "A released node stops its runner and inventories clean")["run"]
+    assert "uv run pytest -q -n 4 --dist load -m external" in script
+
+
 def test_the_host_move_image_step_builds_the_image_its_test_builds() -> None:
     """Built from other inputs, the image would be built again in the test's 300 s (#985)."""
-    names = [step.get("name") for step in _jobs()["test"]["steps"]]
+    names = [step.get("name") for step in _jobs()["test-docker"]["steps"]]
     build = names.index("Build the node image for the Host move")
     assert names[build + 1] == "A Host moves between two nodes over SSH"
     context = NODE_CONTEXT.relative_to(WORKFLOW.parents[2]).as_posix()
     command = ["docker", "build", "-t", NODE_IMAGE, context]
-    assert _step("test", names[build])["run"].split() == command
+    assert _step("test-docker", names[build])["run"].split() == command
 
 
 def test_vitest_runs_this_shard_of_the_frontend_tests() -> None:
