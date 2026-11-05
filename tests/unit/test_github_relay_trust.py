@@ -97,6 +97,30 @@ def test_the_trust_is_installed_once_per_container_and_ca_as_root(monkeypatch, t
     assert len(execs) == 2
 
 
+def test_rolling_the_ca_back_installs_it_again(monkeypatch, tmp_path):
+    # A, then B, then A again in one sandbox manager process: the container
+    # holds B after the second install, so the third must write A, not take
+    # A's earlier record as current.
+    first, second = _CA, _CA.replace("AAAA", "BBBB")
+    ca = _relay(monkeypatch, tmp_path, first)
+    spec = _spec()
+    manager, proven, execs = _fake_manager([])
+    proven.record(spec, SimpleNamespace(container_id="sha256:one"))
+
+    for pem in (first, second, first):
+        ca.write_text(pem)
+        assert ensure_github_relay_trust(manager, spec) == trust_env()
+
+    assert [install["input_bytes"] for install in execs] == [
+        first.encode(),
+        second.encode(),
+        first.encode(),
+    ]
+    # And the CA now in place is remembered: no fourth install.
+    assert ensure_github_relay_trust(manager, spec) == trust_env()
+    assert len(execs) == 3
+
+
 def test_a_failed_install_leaves_the_process_on_the_images_roots(monkeypatch, tmp_path):
     _relay(monkeypatch, tmp_path)
     spec = _spec()

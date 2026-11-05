@@ -101,7 +101,8 @@ def ensure_github_relay_trust(manager: ChatSandboxManager, spec: ChatSandboxSpec
     """Have the container trust the GitHub relay, and say how a process uses it.
 
     Written once per container and CA, then remembered like a root helper
-    (``ProvenContainers.note_helper``). Without a relay configured there is
+    (``ProvenContainers.note_helper``); writing another CA forgets the record
+    of every earlier one, since only the last written is in place. Without a relay configured there is
     nothing to trust and nothing changes. A failed install leaves the process
     on the image's own roots, as without the relay, rather than refusing to
     start it, and the next process tries again.
@@ -115,6 +116,10 @@ def ensure_github_relay_trust(manager: ChatSandboxManager, spec: ChatSandboxSpec
         return trust_env()
     with install_lock(spec.container_name):
         if not manager._proven.holds_helper(proven, key):
+            # The bundle is about to be replaced, so what any earlier CA's
+            # record said about it no longer holds: after A, B, then A again,
+            # A's record would otherwise skip the install while B is in place.
+            manager._proven.forget_helpers(proven, f"{CA_BUNDLE_PATH}@")
             try:
                 install_github_relay_trust(manager, spec, ca_pem)
             except SandboxError as exc:
