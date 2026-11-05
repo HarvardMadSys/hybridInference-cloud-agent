@@ -37,15 +37,12 @@ from cloud_agent_host.chat_sandbox_exec import standing_network_proof
 from cloud_agent_host.group_lifecycle import Operation
 
 if TYPE_CHECKING:
-    from cloud_agent_host.shared_session_supervisor import (
-        SharedChatSessionSupervisor,
-        _Group,
-        _SameRun,
-    )
+    from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.shared_session_state import _Group, _SameRun
 
 
 def admit_running(
-    supervisor: SharedChatSessionSupervisor,
+    lifecycle: GroupLifecycleController,
     group: _Group,
     *,
     start_seq: int | _SameRun | None,
@@ -57,51 +54,51 @@ def admit_running(
     Returns when the proof the admission stands on began (monotonic), and
     records it for the group's lifecycle generation either way.
     """
-    with supervisor._lock:
+    with lifecycle.state.lock:
         generation = group.lifecycle_generation
         recorded = group.network_proof
         reuse = reuse and not group.start_failed
     if reuse and recorded is not None and recorded[0] == generation:
-        standing = _standing_proof(supervisor, group, generation)
+        standing = _standing_proof(lifecycle, group, generation)
         if standing is not None:
             return standing
     proved_from = time.monotonic()
-    supervisor._ensure_running(group, start_seq=start_seq)
-    with supervisor._lock:
+    lifecycle.ensure_running(group, start_seq=start_seq)
+    with lifecycle.state.lock:
         group.network_proof = (generation, proved_from)
     return proved_from
 
 
 def _standing_proof(
-    supervisor: SharedChatSessionSupervisor, group: _Group, generation: int
+    lifecycle: GroupLifecycleController, group: _Group, generation: int
 ) -> float | None:
     """When the proof the running container may still be admitted on began, if any."""
-    current = supervisor._manager.inspect(group.spec.container_name)
+    current = lifecycle.state.manager.inspect(group.spec.container_name)
     if current is None:
         return None
     proved_from = standing_network_proof(
-        supervisor._manager, group.spec, current, max_age_s=TURN_NETWORK_PROOF_S
+        lifecycle.state.manager, group.spec, current, max_age_s=TURN_NETWORK_PROOF_S
     )
     if proved_from is None:
         return None
-    with supervisor._lock:
+    with lifecycle.state.lock:
         if group.lifecycle_generation != generation or group.start_failed:
             return None
         # The group's identity fence: a different container is lost, as on a start.
-        supervisor._accept_inspection_locked(group, current)
+        lifecycle.state.accept_inspection_locked(group, current)
         group.network_proof = (generation, proved_from)
     return proved_from
 
 
 def ensure_running(
-    supervisor: SharedChatSessionSupervisor, group: _Group, *, start_seq: int | _SameRun | None
+    lifecycle: GroupLifecycleController, group: _Group, *, start_seq: int | _SameRun | None
 ) -> None:
     """Start the group if it is stopped, and prove its network for this request."""
-    current = supervisor._manager.inspect(group.spec.container_name)
+    current = lifecycle.state.manager.inspect(group.spec.container_name)
     if current is None:
         raise RetainedChatLost("shared sandbox container is missing")
     group.lifecycle.admit(Operation.RUN)
-    group.inspection = supervisor._start_and_prove(group, start_seq=start_seq)
+    group.inspection = lifecycle.start_and_prove(group, start_seq=start_seq)
 
 
 def backend_proved_at(group: _Group, network_proved_at: float | None) -> float | None:

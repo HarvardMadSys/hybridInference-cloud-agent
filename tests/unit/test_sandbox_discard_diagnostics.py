@@ -29,10 +29,8 @@ from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDel
 from cloud_agent_host.sandbox_deletion_diagnostics import KNOWN_REASONS
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-)
+from cloud_agent_host.shared_session_state import SharedMemberManifest
+from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.logging_utils import JsonLogFormatter
 
 _CONTAINER = "0f1e2d3c4b5a" + "0" * 52

@@ -54,6 +54,7 @@ from cloud_agent_host.manager_api.terminal_manager import (
 )
 from cloud_agent_host.manager_api.terminals import _terminal_sse_frame
 from cloud_agent_host.manager_api.workspace_commands import _run_git, _run_sandbox
+from cloud_agent_host.member_sessions import SharedTurnTelemetry
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
 from cloud_agent_host.sandbox import (
@@ -68,11 +69,7 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorClient,
     SessionSupervisorError,
 )
-from cloud_agent_host.shared_session_supervisor import (
-    SharedSessionDescriptor,
-    SharedSessionLease,
-    SharedTurnTelemetry,
-)
+from cloud_agent_host.shared_session_state import SharedSessionDescriptor, SharedSessionLease
 from cloud_agent_host.terminal_session import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,

@@ -805,10 +805,8 @@ def _discarded(
         ArchiveIdentity,
         SandboxDeletionBackupService,
     )
-    from cloud_agent_host.shared_session_supervisor import (
-        SharedChatSessionSupervisor,
-        SharedMemberManifest,
-    )
+    from cloud_agent_host.shared_session_state import SharedMemberManifest
+    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
     spec = ChatSandboxSpec(
         thread_id="thread-origin", sandbox_id="sandbox-1", generation=2, runtime_id="claude-code"

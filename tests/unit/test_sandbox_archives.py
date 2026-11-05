@@ -36,7 +36,7 @@ from cloud_agent_host.sandbox_archives import (
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
 )
-from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+from cloud_agent_host.shared_session_state import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 

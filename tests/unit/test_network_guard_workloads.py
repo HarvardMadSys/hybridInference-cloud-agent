@@ -232,7 +232,7 @@ def test_unavailable_inventory_and_failed_rule_check_stops_starting_group() -> N
     manager = _RecordingManager()
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(_spec(), _members())
-    group = supervisor._groups[_spec().sandbox_id]
+    group = supervisor.state.groups[_spec().sandbox_id]
     group.inspection = replace(group.inspection, running=False)
     group.starting = True
     manager.exact.run = lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="")  # type: ignore[method-assign]
@@ -412,7 +412,7 @@ def test_guard_exact_stops_a_stopping_group_then_its_archive_finishes() -> None:
     stopping = threading.Thread(target=stop_group)
     stopping.start()
     assert prepare_entered.wait(timeout=2)
-    assert supervisor._members["athr_source"].stopping is True
+    assert supervisor.state.members["athr_source"].stopping is True
 
     manager.host_rule_failures = 2
     try:

@@ -452,7 +452,7 @@ def test_a_finished_stop_stops_requeueing_recovery_and_admits_discard(monkeypatc
 
     for _ in range(4):
         supervisor.reconcile()
-    group = supervisor._groups[spec.sandbox_id]
+    group = supervisor.state.groups[spec.sandbox_id]
 
     assert finals == [SANDBOX], "a retained record re-ran final recovery"
     assert _record(docker, name) is None
@@ -460,7 +460,7 @@ def test_a_finished_stop_stops_requeueing_recovery_and_admits_discard(monkeypatc
     assert not (group.stop_archive_pending or group.orphan_finalization_pending)
     _admit_discard(supervisor, spec)
     assert docker.container(SANDBOX) is None
-    assert spec.sandbox_id not in supervisor._groups
+    assert spec.sandbox_id not in supervisor.state.groups
 
 
 @pytest.mark.parametrize("failure", ["archive", "network"])

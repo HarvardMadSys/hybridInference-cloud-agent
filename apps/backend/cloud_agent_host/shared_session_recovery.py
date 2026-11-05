@@ -11,12 +11,17 @@ from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cloud_agent_host.chat_sandbox import ChatSandboxInspection
-    from cloud_agent_host.shared_session_supervisor import (
-        SharedChatSessionSupervisor,
+    from cloud_agent_host.shared_session_state import (
         SharedSessionDescriptor,
+        SharedSessionState,
         _LifecycleCheck,
     )
+
+    #: Recover one reserved group: ``(check, inspection, *, discovered, read_marker)``.
+    RecoverGroup = Callable[..., list[SharedSessionDescriptor]]
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +29,14 @@ logger = logging.getLogger(__name__)
 class SharedSessionRecovery:
     """Drain finalization before closing archive services, never on ASGI's pool.
 
-    The supervisor reserves each exact group's lifecycle check before submit.
+    The reconciler reserves each exact group's lifecycle check before submit.
     That reservation deduplicates listings and fences mutations until recovery
     finishes. Explicit reconciliation and startup stay synchronous.
     """
 
-    def __init__(self, owner: SharedChatSessionSupervisor) -> None:
-        self._owner = owner
+    def __init__(self, state: SharedSessionState, recover: RecoverGroup) -> None:
+        self._state = state
+        self._recover_group = recover
         self._lock = threading.Lock()
         self._executor: ThreadPoolExecutor | None = None
         self._closed = False
@@ -101,7 +107,7 @@ class SharedSessionRecovery:
         read_marker: bool,
     ) -> list[SharedSessionDescriptor] | None:
         try:
-            return self._owner._reconcile_checked_group(
+            return self._recover_group(
                 check, inspection, discovered=discovered, read_marker=read_marker
             )
         except SandboxError as exc:
@@ -121,5 +127,5 @@ class SharedSessionRecovery:
             self._finish(check)
 
     def _finish(self, check: _LifecycleCheck) -> None:
-        with self._owner._lock:
-            self._owner._end_lifecycle_check_locked(check)
+        with self._state.lock:
+            self._state.end_lifecycle_check_locked(check)

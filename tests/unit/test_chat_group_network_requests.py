@@ -29,10 +29,8 @@ from cloud_agent_host.chat_sandbox import (
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend
 from cloud_agent_host.sandbox_manager import create_app
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-)
+from cloud_agent_host.shared_session_state import SharedMemberManifest
+from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
 
 class _KataExecDocker(FakeDocker):

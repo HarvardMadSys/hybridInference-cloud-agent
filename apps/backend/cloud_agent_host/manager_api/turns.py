@@ -27,12 +27,9 @@ from cloud_agent_host.manager_api.models import (
     SharedTurnRequest,  # noqa: TC001 — FastAPI resolves it.
 )
 from cloud_agent_host.manager_api.routing import route
+from cloud_agent_host.member_sessions import SharedTurnBoundaryError, SharedTurnTelemetry
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.shared_session_supervisor import (
-    SharedTurnBoundaryError,
-    SharedTurnTelemetry,
-)
 from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
 
 if TYPE_CHECKING:

@@ -15,7 +15,7 @@ from tests.unit.test_shared_session_supervisor import (
     _spec,
 )
 
-from cloud_agent_host import shared_session_supervisor
+from cloud_agent_host import group_environment
 from cloud_agent_host.chat_sandbox import ChatSandboxStatus
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_shared.environment import BoundEnvironment
@@ -72,13 +72,13 @@ def _started_or_proved(manager: _Manager) -> int:
 def _answers(monkeypatch) -> list:
     """What the shortcut answered, once per preparation: ``None`` takes the full path."""
     answered: list = []
-    shortcut = shared_session_supervisor.ready_boot
+    shortcut = group_environment.ready_boot
 
     def recorded(*args):
         answered.append(shortcut(*args))
         return answered[-1]
 
-    monkeypatch.setattr(shared_session_supervisor, "ready_boot", recorded)
+    monkeypatch.setattr(group_environment, "ready_boot", recorded)
     return answered
 
 
@@ -97,7 +97,7 @@ def test_a_prepared_boot_is_answered_without_a_start_or_a_proof(tmp_path):
     assert prepared["ready"] is True
     assert (prepared["container_id"], prepared["boot_id"]) == (_CONTAINER, "boot-two")
     assert _started_or_proved(manager) == 0
-    assert supervisor._members["athr_source"].inspection.started_at == "boot-two"
+    assert supervisor.state.members["athr_source"].inspection.started_at == "boot-two"
 
 
 def _fall_through_cases():
@@ -133,20 +133,20 @@ def _fall_through_cases():
         return _ready(), lease.token
 
     def failed_start(manager, supervisor, lease):
-        supervisor._members["athr_source"].start_failed = True
+        supervisor.state.members["athr_source"].start_failed = True
         return _ready(), lease.token
 
     def archive_completion(manager, supervisor, lease):
-        group = supervisor._members["athr_source"]
+        group = supervisor.state.members["athr_source"]
         group.start_archive_completion_pending = True
         return _ready(), lease.token
 
     def container_lost(manager, supervisor, lease):
-        supervisor._members["athr_source"].container_lost = True
+        supervisor.state.members["athr_source"].container_lost = True
         return _ready(), lease.token
 
     def capturing(manager, supervisor, lease):
-        supervisor._members["athr_source"].snapshotting = True
+        supervisor.state.members["athr_source"].snapshotting = True
         return _ready(), lease.token
 
     def removed(manager, supervisor, lease):
@@ -188,13 +188,13 @@ def test_a_start_finishing_during_the_reads_gets_its_own_boot_prepared(monkeypat
     """A start replaces the group's inspection without a new lifecycle generation."""
     manager, supervisor, lease = _leased()
     name = _spec().container_name
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     inspect = manager.inspect
 
     def raced(container_name):
         seen = inspect(container_name)
         # Another request's start finishes just after this read, on a new boot.
-        with supervisor._lock:
+        with supervisor.state.lock:
             group.inspection = manager.items[name] = replace(seen, started_at="boot-three")
         manager.inspect = inspect
         return seen
@@ -213,8 +213,8 @@ def test_a_start_finishing_during_the_reads_gets_its_own_boot_prepared(monkeypat
 
 def test_a_group_known_to_be_stopped_is_left_to_the_full_path_unread(monkeypatch):
     _manager, supervisor, lease = _leased()
-    group = supervisor._members["athr_source"]
-    with supervisor._lock:
+    group = supervisor.state.members["athr_source"]
+    with supervisor.state.lock:
         group.inspection = replace(
             group.inspection, running=False, status=ChatSandboxStatus.STOPPED
         )
@@ -242,9 +242,9 @@ def test_a_lifecycle_change_during_the_reads_takes_the_full_path():
     reads: list[int] = []
 
     def status(_backend, _binding_id):
-        group = supervisor._members["athr_source"]
+        group = supervisor.state.members["athr_source"]
         if not reads:
-            with supervisor._lock:
+            with supervisor.state.lock:
                 group.lifecycle_generation += 1
         reads.append(group.lifecycle_generation)
         return _ready()

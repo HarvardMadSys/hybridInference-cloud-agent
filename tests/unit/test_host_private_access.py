@@ -32,7 +32,7 @@ HOST = REPO / "apps" / "backend" / "cloud_agent_host"
 _OWN_PACKAGES = ("cloud_agent", "cloud_agent_host", "cloud_agent_shared")
 
 #: Cross-module underscore accesses in cloud_agent_host. Only ever lower it.
-BASELINE = 51
+BASELINE = 29
 
 
 def _private(name: str) -> bool:

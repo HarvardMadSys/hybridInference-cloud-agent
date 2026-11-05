@@ -33,7 +33,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor, _Group
+    from cloud_agent_host.shared_session_state import _Group
+    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
 logger = get_logger(__name__)
 
@@ -175,7 +176,7 @@ def _group_state(
 ) -> dict[str, Any]:
     """The fields of ``group`` a deletion's fences read. The caller holds the lock."""
     try:
-        bridge = supervisor._manager.network.network_for(group.spec) in group.inspection.networks
+        bridge = supervisor.state.manager.network.network_for(group.spec) in group.inspection.networks
     except Exception:
         bridge = None
     request = group.archive_request_id
@@ -200,8 +201,8 @@ def _group_state(
 
 
 def _state(supervisor: SharedChatSessionSupervisor, identity: ArchiveIdentity) -> dict[str, Any]:
-    with supervisor._lock:
-        group = supervisor._members.get(identity.thread_id)
+    with supervisor.state.lock:
+        group = supervisor.state.members.get(identity.thread_id)
         if group is None:
             return {"member_known": False}
         return {"member_known": True, **_group_state(supervisor, group, identity)}
