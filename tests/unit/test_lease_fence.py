@@ -42,7 +42,7 @@ from cloud_agent.storage.repositories import attempt_commands
 
 REPO = Path(__file__).resolve().parents[2]
 BACKEND = REPO / "apps" / "backend"
-COMMANDS = REPO / "apps" / "backend" / "cloud_agent/storage/repositories/attempt_commands.py"
+COMMANDS = REPO / "apps" / "backend" / "cloud_agent/storage/repositories/attempt_commands/reaper.py"
 
 
 class _Transaction:
