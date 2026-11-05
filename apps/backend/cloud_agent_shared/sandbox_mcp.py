@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from cloud_agent_shared.secret_redaction import MASKED
+from cloud_agent_shared.secret_redaction import MASKED, MIN_SECRET_CHARS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -130,9 +130,17 @@ class SandboxMcpServer(BaseModel):
         }
 
     def secrets(self) -> dict[str, str]:
-        """This server's own keys by name, for the output redactor."""
+        """This server's own keys by name, for the output redactor.
+
+        A value shorter than an environment Secret may be (``MIN_SECRET_CHARS``)
+        is left out: masking ``"1"`` would blank every 1 in the turn's output,
+        and nothing that short is a key worth hiding. Saving does not refuse
+        one yet, so a stored short value runs but is not masked.
+        """
         return {
-            f"sandbox-mcp:{self.alias}:{name}": value for name, value in self.secret_env.items()
+            f"sandbox-mcp:{self.alias}:{name}": value
+            for name, value in self.secret_env.items()
+            if len(value.strip()) >= MIN_SECRET_CHARS
         }
 
     def runner_secrets(self, environment: Mapping[str, str]) -> dict[str, str]:
