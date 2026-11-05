@@ -127,7 +127,7 @@ def test_repeated_listing_finishes_once_and_allows_discard(node: Node, monkeypat
         supervisor.reconcile()
     assert archived == [container_id]
     assert name not in manager.exact.require_exact(spec, container_id).networks
-    group = supervisor._groups[spec.sandbox_id]
+    group = supervisor.state.groups[spec.sandbox_id]
     assert group.lifecycle_check is None
     assert not group.stop_archive_pending
     supervisor.begin_archive(

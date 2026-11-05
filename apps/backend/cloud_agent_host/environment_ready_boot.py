@@ -17,11 +17,11 @@ from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.session_lifecycle import SessionBusy
 
 if TYPE_CHECKING:
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+    from cloud_agent_host.shared_session_state import SharedSessionState
 
 
 def ready_boot(
-    supervisor: SharedChatSessionSupervisor,
+    state: SharedSessionState,
     thread_id: str,
     environment: Any,
     preparer: Any,
@@ -41,39 +41,39 @@ def ready_boot(
     lifecycle work, or anything unreadable, takes the full path, which then
     answers or fails as it always has.
     """
-    with supervisor._lock:
-        group, member = supervisor._member(thread_id)
+    with state.lock:
+        group, member = state.member(thread_id)
         observed = group.inspection
         generation = group.lifecycle_generation
-        if not observed.running or not _admitted(supervisor, group):
+        if not observed.running or not _admitted(group):
             return None
     try:
-        backend = RetainedChatBackend(supervisor._manager, group.spec)
+        backend = RetainedChatBackend(state.manager, group.spec)
         receipt = preparer.status(backend, environment.binding_id)
         # Docker is asked only once the receipt could answer.
         if not receipt.get("ready") or receipt.get("container_id") != observed.container_id:
             return None
-        current = supervisor._manager.inspect(group.spec.container_name)
+        current = state.manager.inspect(group.spec.container_name)
     except Exception:
         return None
-    with supervisor._lock:
+    with state.lock:
         if (
             current is None
             or current.container_id != observed.container_id
             or not prepared_in(receipt, current)
             or group.inspection != observed
-            or supervisor._members.get(thread_id) is not group
+            or state.members.get(thread_id) is not group
             or group.members.get(thread_id) is not member
             or group.lifecycle_generation != generation
             or (activation_owner is not None and member.lease_token != activation_owner)
-            or not _admitted(supervisor, group)
+            or not _admitted(group)
         ):
             return None
-        supervisor._accept_inspection_locked(group, current)
+        state.accept_inspection_locked(group, current)
     return receipt
 
 
-def _admitted(supervisor: SharedChatSessionSupervisor, group: Any) -> bool:
+def _admitted(group: Any) -> bool:
     """Whether the group is still its container's, started cleanly, and open to mutations."""
     if group.container_lost or group.start_failed:
         return False

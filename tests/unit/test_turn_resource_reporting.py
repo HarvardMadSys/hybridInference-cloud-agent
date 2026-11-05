@@ -439,7 +439,7 @@ def test_the_sandbox_manager_and_the_runner_agree_about_where_the_summary_lives(
     """
     from cloud_agent_host.guest_observer import GuestObservation
     from cloud_agent_host.manager_api.turns import build_turn_resources
-    from cloud_agent_host.shared_session_supervisor import SharedTurnTelemetry
+    from cloud_agent_host.member_sessions import SharedTurnTelemetry
     from cloud_agent_host.tool_windows import ToolWindowTracker
 
     payload = _snapshot()

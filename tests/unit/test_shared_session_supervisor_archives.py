@@ -69,7 +69,7 @@ def test_initial_archive_waits_out_a_start_that_begins_under_its_barrier(monkeyp
         manifest=_members(),
     )
     running, _ = supervisor.operation_opened("athr_peer")
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     # A second read passes its first admission, then is held before its check.
     entered, release = _gated_inspect(manager, monkeypatch, _spec().container_name)
     manager.hold_start = True
@@ -128,7 +128,7 @@ def test_initial_archive_reports_busy_once_a_request_outlasts_its_wait() -> None
             "athr_source", lease.token, capture=lambda *_args: captured.append(True) or {}
         )
 
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert captured == []
     assert group.snapshotting is False
     # The barrier is gone: the request finishes, and the next attempt captures.
@@ -223,7 +223,7 @@ def test_failed_marked_initial_archive_waits_for_concurrent_guard_stop() -> None
     capture_finished = threading.Event()
     capture_errors: list[BaseException] = []
     guard_errors: list[BaseException] = []
-    stop_if_idle = supervisor.stop_if_idle
+    stop_if_idle = supervisor._lifecycle.stop_if_idle
 
     def observed_stop_if_idle(*args, **kwargs):
         try:
@@ -233,7 +233,7 @@ def test_failed_marked_initial_archive_waits_for_concurrent_guard_stop() -> None
                 preservation_collided.set()
             raise
 
-    supervisor.stop_if_idle = observed_stop_if_idle  # type: ignore[method-assign]
+    supervisor._lifecycle.stop_if_idle = observed_stop_if_idle  # type: ignore[method-assign]
 
     def capture(*_args):
         manager.initial_archive_marker = b"prepared-initial-marker"
@@ -1458,7 +1458,7 @@ def test_a_reaped_activation_ends_with_its_residency_so_its_group_can_idle(turn)
     with pytest.raises(SessionLeaseLost):
         supervisor.settle("athr_source", dead.token, job_id="ajob_dead", context_status="live")
     # No activation, turn or workspace request is left holding the group.
-    assert supervisor._groups[_spec().sandbox_id].lifecycle.is_quiescent()
+    assert supervisor.state.groups[_spec().sandbox_id].lifecycle.is_quiescent()
     now[0] += 60
     assert [stopped.running for stopped in supervisor.sweep()] == [False]
     assert manager.items[_spec().container_name].running is False
@@ -1630,7 +1630,7 @@ def test_a_loss_during_its_turn_ends_the_activation_once_its_stream_closes_the_t
     with pytest.raises(SessionLeaseLost):
         supervisor.settle("athr_source", hung.token, job_id="ajob_hung", context_status="live")
     # No activation, turn or workspace request is left holding the group.
-    assert supervisor._groups[_spec().sandbox_id].lifecycle.is_quiescent()
+    assert supervisor.state.groups[_spec().sandbox_id].lifecycle.is_quiescent()
 
 
 def test_a_lost_turn_whose_stream_never_closes_it_is_closed_by_the_sweep():
@@ -1643,7 +1643,7 @@ def test_a_lost_turn_whose_stream_never_closes_it_is_closed_by_the_sweep():
     """
     now = [1000.0]
     manager, supervisor, hung, turn = _hung_turn_with_a_live_sibling(now)
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     supervisor.residency_lost("athr_source", generation=1)
 
     supervisor.sweep()
@@ -1688,7 +1688,7 @@ def test_supervisor_close_releases_an_active_turn_observation_and_member_lock():
         model="glm-5.1",
         reasoning_effort=None,
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
 
     supervisor.close()
 
@@ -1708,7 +1708,7 @@ def test_supervisor_close_does_not_steal_an_initialization_lock():
         has_settled_context=False,
         manifest=_members(),
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     member.turn_lock.acquire()
 
     supervisor.close()
@@ -1745,7 +1745,7 @@ def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch
     def fail_cleanup(*_args, **_kwargs):
         raise RuntimeError("cleanup failed")
 
-    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    monkeypatch.setattr(supervisor._sessions, "complete_turn", fail_cleanup)
     supervisor.abandon("athr_source", lease.token, lost=True)
 
     assert manager.events[-1] == ("observe-finish", 11001)
@@ -1767,13 +1767,13 @@ def test_abandon_releases_the_member_lock_of_the_turn_it_detaches(monkeypatch):
     supervisor.start_turn(
         "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     assert member.turn_lock.locked() is True
 
     def fail_cleanup(*_args, **_kwargs):
         raise RuntimeError("cleanup failed")
 
-    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    monkeypatch.setattr(supervisor._sessions, "complete_turn", fail_cleanup)
     supervisor.abandon("athr_source", lease.token, lost=False)
 
     assert member.turn_lock.locked() is False
@@ -1832,7 +1832,7 @@ def test_a_turn_detached_by_complete_turn_releases_its_lock_even_if_it_then_fail
     turn = supervisor.start_turn(
         "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     factory.transports[0].failing = True
 
     with pytest.raises(RuntimeError, match="process table"):
@@ -1869,7 +1869,7 @@ def test_abandon_leaves_a_resident_start_its_own_member_lock():
         has_settled_context=True,
         manifest=_members(),
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     errors: list[BaseException] = []
 
     def start() -> None:
@@ -1926,7 +1926,7 @@ def test_abandon_leaves_a_turn_in_admission_its_own_member_lock():
         lease.token,
         _launch("athr_source", native_session_id="native-source", slot=0),
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     errors: list[BaseException] = []
 
     def admit() -> None:

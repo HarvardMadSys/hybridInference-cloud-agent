@@ -82,7 +82,7 @@ if TYPE_CHECKING:
         SandboxCheckpointReceipt,
     )
     from cloud_agent_host.sandbox_initial_uploads import SpooledInitialUpload
-    from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+    from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 
 

@@ -57,7 +57,7 @@ if TYPE_CHECKING:
         InitialUploadSpool,
         SpooledInitialUpload,
     )
-    from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+    from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 
 logger = logging.getLogger(__name__)

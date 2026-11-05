@@ -46,10 +46,8 @@ from cloud_agent.storage._sql.hosts import (
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointReceipt, SandboxCheckpointStore
 from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-)
+from cloud_agent_host.shared_session_state import SharedMemberManifest
+from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, RESTORE_RETRY_DELAYS_S
 
 if TYPE_CHECKING:

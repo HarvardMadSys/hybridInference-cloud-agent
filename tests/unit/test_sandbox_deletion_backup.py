@@ -24,10 +24,8 @@ from cloud_agent_host.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-)
+from cloud_agent_host.shared_session_state import SharedMemberManifest
+from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
 
 class _Manager:
@@ -511,7 +509,7 @@ def test_prepare_rejects_running_or_stale_identity(archive_setup, change):
 )
 def test_deletion_preserves_lifecycle_archive_fences(archive_setup, monkeypatch, flag):
     manager, supervisor, service, identity, spec, _members = archive_setup
-    group = supervisor._groups[spec.sandbox_id]
+    group = supervisor.state.groups[spec.sandbox_id]
     setattr(group, flag, True)
     with pytest.raises(SessionBusy, match="lifecycle archive"):
         service.prepare(identity)

@@ -190,7 +190,7 @@ def test_a_new_group_falls_back_to_the_image_whatever_the_snapshot_does(hook, fa
 
     assert manager.created[-1]["image"] == image
     assert (manager.created[-1]["environment_snapshot"] is not None) == (failure is None)
-    assert supervisor._groups[_spec().sandbox_id].environment_snapshot_failure == failure
+    assert supervisor.state.groups[_spec().sandbox_id].environment_snapshot_failure == failure
 
 
 # -- preparation in a container from a snapshot -----------------------------------

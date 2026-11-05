@@ -1,6 +1,6 @@
 """Whether a shared sandbox group admits an operation now, decided from one table.
 
-A group (``shared_session_supervisor._Group``) keeps its lifecycle in separate
+A group (``shared_session_state._Group``) keeps its lifecycle in separate
 fields: the operations in progress (``starting``, ``stopping``,
 ``snapshotting``), records of what happened (``start_failed``,
 ``container_lost``), barriers that wait for unfinished work (the ``*_pending``
@@ -26,7 +26,7 @@ from cloud_agent_host.session_lifecycle import SessionBusy
 
 if TYPE_CHECKING:
     from cloud_agent_host.sandbox import SandboxError
-    from cloud_agent_host.shared_session_supervisor import _Group
+    from cloud_agent_host.shared_session_state import _Group
 
 
 class Operation(Enum):

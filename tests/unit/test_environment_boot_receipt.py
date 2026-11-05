@@ -152,7 +152,7 @@ def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkey
     locked_inspections: list[str] = []
 
     def observed_inspect(name):
-        if supervisor._lock._is_owned():
+        if supervisor.state.lock._is_owned():
             locked_inspections.append(name)
         return inspect(name)
 

@@ -1781,7 +1781,7 @@ class BenchTransportFactory:
 
 def _startup_manifest(*, native_session_id: str | None) -> list[Any]:
     """Return the control plane's member manifest for the one bench member."""
-    from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+    from cloud_agent_host.shared_session_state import SharedMemberManifest
 
     return [
         SharedMemberManifest(

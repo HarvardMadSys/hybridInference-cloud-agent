@@ -38,7 +38,7 @@ from cloud_agent_host.sandbox import TerminalProcess
 from cloud_agent_host.terminal_session import _TerminalSession
 
 if TYPE_CHECKING:
-    from cloud_agent_host.shared_session_supervisor import SharedSessionLease
+    from cloud_agent_host.shared_session_state import SharedSessionLease
 
 
 def test_a_lease_claims_a_bridge_proof_only_for_a_call_that_made_one():

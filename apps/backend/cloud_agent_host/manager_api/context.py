@@ -22,7 +22,7 @@ from cloud_agent_host.operation_call import closed
 from cloud_agent_host.retained_workspace import RetainedWorkspaceError
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
-from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+from cloud_agent_host.shared_session_state import SharedMemberManifest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,10 +36,8 @@ if TYPE_CHECKING:
     from cloud_agent_host.operation_call import SandboxManagerCall
     from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
     from cloud_agent_host.sandbox_archives import SandboxArchiveService
-    from cloud_agent_host.shared_session_supervisor import (
-        SharedChatSessionSupervisor,
-        SharedSessionDescriptor,
-    )
+    from cloud_agent_host.shared_session_state import SharedSessionDescriptor
+    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
     from cloud_agent_shared.sandbox_manager_wire import SharedMember
 
 

@@ -278,8 +278,8 @@ def test_a_new_lifecycle_generation_needs_a_new_proof() -> None:
     manager, supervisor, spec = _supervised()
     _operate(supervisor)
     starts = len(manager.starts)
-    with supervisor._lock:
-        supervisor._groups[spec.sandbox_id].lifecycle_generation += 1
+    with supervisor.state.lock:
+        supervisor.state.groups[spec.sandbox_id].lifecycle_generation += 1
 
     _operate(supervisor)
 
