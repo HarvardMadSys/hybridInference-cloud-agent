@@ -191,7 +191,9 @@ def test_the_manager_runs_each_program_as_guest_root_trusting_only_root(
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     # The final marker's methods first check that this is the exact running container.
     monkeypatch.setattr(
-        manager, "_require", lambda _spec: SimpleNamespace(container_id=CONTAINER, running=True)
+        manager.exact,
+        "require",
+        lambda _spec: SimpleNamespace(container_id=CONTAINER, running=True),
     )
     calls: list[tuple[list[str], dict[str, object]]] = []
 

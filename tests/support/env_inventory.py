@@ -902,7 +902,7 @@ ENVIRONMENT_COPIES: dict[tuple[str, str], str] = {
     ("apps/backend/cloud_agent_host/chat_sandbox.py", "ChatSandboxManager.export_archive"): (
         "docker cp, configured by the host's Docker client variables"
     ),
-    ("apps/backend/cloud_agent_host/chat_sandbox.py", "ChatSandboxManager._run_bytes"): (
+    ("apps/backend/cloud_agent_host/exact_container.py", "ExactContainer.run_bytes"): (
         "a Docker CLI call, configured by the host's Docker client variables"
     ),
     ("apps/backend/cloud_agent_host/docker_engine.py", "run_docker"): (

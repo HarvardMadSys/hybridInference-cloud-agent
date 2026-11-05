@@ -91,6 +91,7 @@ class _Manager:
         self.pruned_observed: list[ChatSandboxInspection] | None = None
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
         self.initial_archive_marker: bytes | None = None
+        self.exact = self  # The stand-in is its own identity gate.
 
     @staticmethod
     def _inspection(spec: ChatSandboxSpec, *, running: bool = True) -> ChatSandboxInspection:
@@ -132,10 +133,9 @@ class _Manager:
     def list(self) -> list[ChatSandboxInspection]:
         return list(self.items.values())
 
-    def _run(self, *_args, **_kwargs):
-        return SimpleNamespace(
-            returncode=0, stdout="\n".join(f"{x.name}\t" for x in self.items.values() if x.running)
-        )
+    def run(self, *_args, **_kwargs):
+        running = "\n".join(f"{x.name}\t" for x in self.items.values() if x.running)
+        return SimpleNamespace(returncode=0, stdout=running)
 
     def ensure_downloaded_runtime(self, _spec: ChatSandboxSpec, runtime: str, version: str) -> None:
         """The image already holds every version these tests launch."""
@@ -4853,7 +4853,7 @@ def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fen
             self.marker_writes = 0
             self.marker_clears = 0
 
-        def _require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+        def require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
             return self.items[spec.container_name]
 
         def read_final_archive_marker(self, spec, *, expected_container_id) -> bytes:
@@ -4869,7 +4869,7 @@ def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fen
             )
 
         def export_archive(self, spec, path, destination, **kwargs) -> int:
-            current = self._require(spec)
+            current = self.require(spec)
             assert current.container_id == kwargs["expected_container_id"]
             assert current.running is False
             assert path == f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
@@ -4903,7 +4903,7 @@ def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fen
             return current
 
         def clear_final_archive_marker(self, spec, *, expected_container_id) -> None:
-            current = self._require(spec)
+            current = self.require(spec)
             assert current.container_id == expected_container_id
             assert current.running is True
             self.marker = None

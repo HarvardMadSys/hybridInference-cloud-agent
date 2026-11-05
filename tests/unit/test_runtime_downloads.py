@@ -1089,16 +1089,21 @@ class FakeManager:
             return SimpleNamespace(returncode=self.activate_exit, stderr=b"file is not protected")
         return SimpleNamespace(returncode=0, stderr=b"")
 
-    def _require(self, _spec):
+    @property
+    def exact(self):
+        """The stand-in is its own identity gate."""
+        return self
+
+    def require(self, _spec):
         # The real one is a ``docker container inspect``: recorded with Docker's other calls.
         subprocess.run(["docker", "container", "inspect", "chat"], check=False)
         return SimpleNamespace(container_id="chat-container")
 
-    def _run(self, argv, *, timeout):
+    def run(self, argv, *, timeout):
         self.runs.append(argv)
         return SimpleNamespace(returncode=0, stdout="source-container\n", stderr="")
 
-    def _run_bytes(self, argv, *, timeout, stdin=None, input_bytes=None):
+    def run_bytes(self, argv, *, timeout, stdin=None, input_bytes=None):
         self.copies.append(argv)
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
@@ -1172,8 +1177,8 @@ def test_a_cleanup_that_fails_still_removes_the_source_and_hides_no_failure(down
                 raise SandboxError("chat sandbox exec failed: timed out")
             return super().exec_capture(spec, argv, **kwargs)
 
-        def _run(self, argv, *, timeout):
-            ran = super()._run(argv, timeout=timeout)
+        def run(self, argv, *, timeout):
+            ran = super().run(argv, timeout=timeout)
             if argv[1] == "rm":
                 raise SandboxError("Docker lifecycle command failed: timed out")
             return ran
@@ -1210,8 +1215,8 @@ def test_a_chat_gone_mid_call_says_so_before_any_image_is_looked_up(downloaded):
     """Even for a version this host never downloaded: the chat is what went missing."""
 
     class Gone(FakeManager):
-        def _require(self, spec):
-            super()._require(spec)
+        def require(self, spec):
+            super().require(spec)
             raise SandboxError("chat sandbox is missing")
 
     with pytest.raises(SandboxError, match="chat sandbox is missing"):
@@ -1231,16 +1236,16 @@ def test_a_runner_restarting_mid_copy_leaves_the_copy_alone(downloaded):
     class Manager(FakeManager):
         """Creates the source container through Docker."""
 
-        def _run(self, argv, *, timeout):
+        def run(self, argv, *, timeout):
             self.runs.append(argv)
             return subprocess.run(
                 argv, capture_output=True, text=True, timeout=timeout, check=False
             )
 
-        def _run_bytes(self, argv, *, timeout, stdin=None, input_bytes=None):
+        def run_bytes(self, argv, *, timeout, stdin=None, input_bytes=None):
             # The runner restarts while the files stream into the chat.
             _downloads()._remove_leftovers()
-            return super()._run_bytes(argv, timeout=timeout, stdin=stdin)
+            return super().run_bytes(argv, timeout=timeout, stdin=stdin)
 
     manager = Manager()
     runtime_install.ensure_downloaded_runtime(manager, None, "claude-code", "2.1.300")
@@ -1258,7 +1263,7 @@ def _leak_a_copy_source(docker: FakeDocker, version: str) -> str:
     """
 
     class Dying(FakeManager):
-        def _run(self, argv, *, timeout):
+        def run(self, argv, *, timeout):
             self.runs.append(argv)
             if argv[1] == "rm":
                 return SimpleNamespace(returncode=0, stdout="", stderr="")

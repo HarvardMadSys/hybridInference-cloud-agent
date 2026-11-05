@@ -108,7 +108,7 @@ def _world(monkeypatch, spec):
     backend._network_guard = FakeGuard()  # type: ignore[assignment]
     manager = ChatSandboxManager(backend)
     docker = _StoppedDocker(config)
-    monkeypatch.setattr(manager, "_run", docker)
+    monkeypatch.setattr(manager.exact, "run", docker)
     docker.add_sandbox(spec, running=True)
     name = manager._network_lifecycle._ensure_group_network(spec)
     network = docker.network(name)
@@ -158,7 +158,7 @@ def _after_first_missing_read(monkeypatch, manager, docker, name, mutate):
             mutate()
         return result
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
 
 
 # ── the manager's release ─────────────────────────────────────────────
@@ -176,7 +176,7 @@ def test_release_clears_the_stopped_record_and_converges(monkeypatch, bridge_rem
     released = manager.release_stopped_networks(spec, expected_container_id=SANDBOX)
 
     assert released.networks == ()
-    assert manager._require_exact(spec, SANDBOX).networks == ()
+    assert manager.exact.require_exact(spec, SANDBOX).networks == ()
     assert docker.network(name) is None
     if bridge_removed:
         # Only the name addresses the record; the old id would exit 1.
@@ -233,7 +233,7 @@ def test_an_unreadable_network_refuses_without_touching_the_record(monkeypatch, 
                     return subprocess.CompletedProcess(argv, 1, "", "input/output error")
             return docker(argv, **kwargs)
 
-        monkeypatch.setattr(manager, "_run", run)
+        monkeypatch.setattr(manager.exact, "run", run)
     docker.calls.clear()
 
     with pytest.raises(SandboxError, match="network inspect failed"):
@@ -343,7 +343,7 @@ def test_a_changed_record_on_an_existing_bridge_refuses_before_disconnect(monkey
             mutate(docker, spec, manager)
         return result
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     with pytest.raises(SandboxError):
         manager.release_stopped_networks(spec, expected_container_id=SANDBOX)
     assert docker.network(name)["Id"] == old_id

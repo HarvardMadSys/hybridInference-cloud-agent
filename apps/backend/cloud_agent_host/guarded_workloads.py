@@ -40,7 +40,7 @@ _MALFORMED_STOP_TIMEOUT_S = 10
 def exact_stop_unidentified(manager: ChatSandboxManager, container_id: str) -> bool:
     """Stop an owned running ID whose full inspection cannot be trusted."""
     try:
-        result = manager._run(
+        result = manager.exact.run(
             [
                 manager.backend.docker_binary,
                 "stop",

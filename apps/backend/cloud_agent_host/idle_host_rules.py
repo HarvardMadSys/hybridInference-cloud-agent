@@ -35,7 +35,7 @@ def running_deployment_container_ids(
 ) -> list[str] | None:
     """List exact running container ids, or ``None`` when Docker cannot answer."""
     try:
-        result = containers._run(
+        result = containers.exact.run(
             [
                 containers.backend.docker_binary,
                 "container",

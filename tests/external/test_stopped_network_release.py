@@ -46,7 +46,7 @@ def _stopped_group(node: Node, monkeypatch):
             timeout=kwargs.get("timeout", 30),
         )
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     # This regression is Docker metadata and finalization, not firewall policy.
     # No host guard is installed or changed; its separate packet tests own that.
     monkeypatch.setattr(manager.network, "_drop_relay_exceptions", lambda _name: None)
@@ -79,7 +79,7 @@ def _stopped_group(node: Node, monkeypatch):
     raw = json.loads(node.docker("inspect", container_id))[0]
     assert raw["NetworkSettings"]["Networks"][name]["EndpointID"] == ""
     assert raw["NetworkSettings"]["Networks"][name]["NetworkID"] == network_id
-    assert name in manager._require_exact(spec, container_id).networks
+    assert name in manager.exact.require_exact(spec, container_id).networks
     return manager, spec, name, network_id, container_id
 
 
@@ -92,7 +92,7 @@ def test_final_release_clears_stopped_network_intent(node: Node, monkeypatch, br
     assert not released.running
     assert name not in released.networks, "a stale bridge name retriggers final-archive recovery"
     # Re-read Docker; changing only the returned inspection cannot pass.
-    assert name not in manager._require_exact(spec, container_id).networks
+    assert name not in manager.exact.require_exact(spec, container_id).networks
     assert manager.stop(spec, expected_container_id=container_id) == released
 
 
@@ -126,7 +126,7 @@ def test_repeated_listing_finishes_once_and_allows_discard(node: Node, monkeypat
     for _ in range(3):
         supervisor.reconcile()
     assert archived == [container_id]
-    assert name not in manager._require_exact(spec, container_id).networks
+    assert name not in manager.exact.require_exact(spec, container_id).networks
     group = supervisor._groups[spec.sandbox_id]
     assert group.lifecycle_check is None
     assert not group.stop_archive_pending

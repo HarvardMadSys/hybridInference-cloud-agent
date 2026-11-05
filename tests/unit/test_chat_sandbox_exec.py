@@ -26,8 +26,8 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     RetainedChatLost,
 )
-from cloud_agent_host.chat_sandbox_exec import ProvenContainers
 from cloud_agent_host.chat_sandbox_inspect import INSPECT_BATCH
+from cloud_agent_host.exact_container import ProvenContainers
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 
 _NAMESPACE = "this-stack"
@@ -159,14 +159,14 @@ def _world(monkeypatch, *, runtime: str | None = None):
     backend = ContainerBackend(image="img", runtime=runtime, sandbox_namespace=_NAMESPACE)
     manager = ChatSandboxManager(backend)
     docker = _Docker()
-    monkeypatch.setattr(manager, "_run", docker.run)
+    monkeypatch.setattr(manager.exact, "run", docker.run)
     monkeypatch.setattr(chat_sandbox_mod.subprocess, "run", docker.capture)
     # The group network is not what these tests are about: its proof is the
     # one test_chat_group_network.py runs against a model of Docker.
     monkeypatch.setattr(
         manager._network_lifecycle,
         "_require_group_network",
-        lambda spec, _current, *_snapshot: manager._require(spec),
+        lambda spec, _current, *_snapshot: manager.exact.require(spec),
     )
     monkeypatch.setattr(manager._network_lifecycle, "_sync_kata_guest_network", lambda *_args: None)
     return manager, docker
@@ -297,7 +297,7 @@ def test_a_privileged_helper_enters_a_proven_kata_container_by_id(monkeypatch):
         monkeypatch, runtime=KATA_RUNTIME, container_runtime=KATA_RUNTIME
     )
 
-    manager._kata_privileged_exec(spec, ["true"])
+    manager.exact.guest_root_exec(spec, ["true"])
 
     assert docker.inspections() == []
     assert docker.calls == [
@@ -319,7 +319,7 @@ def test_a_privileged_helper_is_still_refused_a_proven_container_not_under_kata(
     manager, docker, spec = _proven(monkeypatch, runtime=KATA_RUNTIME, container_runtime="runc")
 
     with pytest.raises(SandboxError, match="inspected Kata container"):
-        manager._kata_privileged_exec(spec, ["true"])
+        manager.exact.guest_root_exec(spec, ["true"])
 
     assert docker.calls == []
 
@@ -348,11 +348,11 @@ def test_creating_a_container_forgets_the_proof_its_name_held(monkeypatch):
             return subprocess.CompletedProcess(argv, 0, "container-two\n", "")
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", create)
+    monkeypatch.setattr(manager.exact, "run", create)
 
     manager.create(spec)
 
-    assert manager._proven.get(spec) is None
+    assert manager.exact.proven.get(spec) is None
 
 
 # ── the host listing ──────────────────────────────────────────────────
@@ -395,7 +395,7 @@ def test_the_listing_skips_a_container_gone_since_ls_but_not_a_daemon_error(monk
             docker.containers.pop("owned-1", None)
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", removed_after_ls)
+    monkeypatch.setattr(manager.exact, "run", removed_after_ls)
     assert [item.container_id for item in manager.list()] == ["owned-0"]
 
     error = "Cannot connect to the Docker daemon"
@@ -405,7 +405,7 @@ def test_the_listing_skips_a_container_gone_since_ls_but_not_a_daemon_error(monk
             return subprocess.CompletedProcess(argv, 1, "", error)
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", daemon_error)
+    monkeypatch.setattr(manager.exact, "run", daemon_error)
     with pytest.raises(SandboxError, match="Cannot connect"):
         manager.list()
     # "Not found" only means a container that went away when it names one.

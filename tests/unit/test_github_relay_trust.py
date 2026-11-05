@@ -20,7 +20,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
 )
-from cloud_agent_host.chat_sandbox_exec import ProvenContainers
+from cloud_agent_host.exact_container import ProvenContainers
 from cloud_agent_host.github_relay_trust import (
     _INSTALL,
     CA_BUNDLE_PATH,
@@ -57,7 +57,7 @@ def _fake_manager(exec_results):
         return subprocess.CompletedProcess(argv, returncode, b"", stderr)
 
     proven = ProvenContainers()
-    manager = SimpleNamespace(_proven=proven, exec_capture=exec_capture)
+    manager = SimpleNamespace(exact=SimpleNamespace(proven=proven), exec_capture=exec_capture)
     return manager, proven, execs
 
 

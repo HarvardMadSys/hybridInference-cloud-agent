@@ -483,7 +483,7 @@ def test_identity_accepts_a_checkpoint_image_only_for_the_checkpoint_it_names():
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     labelled = {**spec.docker_labels(), CHAT_CHECKPOINT_LABEL: _CHECKPOINT}
 
-    manager._verify_identity(_inspection(spec, image=_REFERENCE, labels=labelled), spec)
+    manager.exact.verify_identity(_inspection(spec, image=_REFERENCE, labels=labelled), spec)
     for image, labels in (
         # A checkpoint image without the label that says which checkpoint.
         (_REFERENCE, spec.docker_labels()),
@@ -491,7 +491,7 @@ def test_identity_accepts_a_checkpoint_image_only_for_the_checkpoint_it_names():
         (checkpoint_image_reference("asbx_shared", "d" * 32), labelled),
     ):
         with pytest.raises(SandboxError, match="outside this chat/generation"):
-            manager._verify_identity(_inspection(spec, image=image, labels=labels), spec)
+            manager.exact.verify_identity(_inspection(spec, image=image, labels=labels), spec)
 
 
 def _stopped_container(
@@ -560,7 +560,7 @@ def test_deleting_a_restored_group_removes_the_checkpoint_image_it_ran(monkeypat
     spec = _moved_spec()
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     daemon = _Daemon(_stopped_container(spec, checkpoint_id=checkpoint_id))
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     manager.remove_stopped_archived(spec, container_id="container-restored")
 
@@ -574,14 +574,14 @@ def test_a_superseded_restored_container_takes_its_checkpoint_image_with_it(monk
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     older = "d" * 32
     daemon = _Daemon(_stopped_container(spec, checkpoint_id=older, generation=1))
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     assert manager.remove_superseded(spec)
     assert daemon.removed_images() == [checkpoint_image_reference(spec.sandbox_id, older)]
 
     # The checkpoint about to be loaded again stays, so it is not downloaded twice.
     daemon = _Daemon(_stopped_container(spec, checkpoint_id=_CHECKPOINT, generation=1))
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     assert manager.remove_superseded(spec, keep_checkpoint=_CHECKPOINT)
     assert daemon.removed_images() == []
@@ -602,7 +602,7 @@ def test_a_container_that_fails_its_checks_once_created_is_removed_with_its_volu
     volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     with pytest.raises(SandboxError, match="forbidden volume mount"):
         manager.create(spec, image=_REFERENCE, checkpoint_id=_CHECKPOINT)
@@ -610,7 +610,7 @@ def test_a_container_that_fails_its_checks_once_created_is_removed_with_its_volu
     assert daemon.container is None
 
     daemon = _Daemon(built)
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     with pytest.raises(SandboxError, match="forbidden volume mount"):
         manager.create(spec, image=_REFERENCE, checkpoint_id=_CHECKPOINT)
@@ -723,7 +723,7 @@ def test_a_restore_refused_once_created_leaves_neither_container_nor_image(monke
     volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
     supervisor = hooked_supervisor(
         manager, restore_checkpoint=lambda _sandbox_id, _checkpoint: _REFERENCE
     )

@@ -79,14 +79,14 @@ def test_privileged_exec_checks_the_container_runtime_and_uses_its_id(monkeypatc
             )
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     if actual_runtime == KATA_RUNTIME:
-        manager._kata_privileged_exec(spec, [GUEST_OBSERVER_BINARY, "--self-test"])
+        manager.exact.guest_root_exec(spec, [GUEST_OBSERVER_BINARY, "--self-test"])
         assert "inspected-container-id" in calls[-1]
         assert spec.container_name not in calls[-1]
     else:
         with pytest.raises(SandboxError, match="inspected Kata container"):
-            manager._kata_privileged_exec(spec, [GUEST_OBSERVER_BINARY, "--self-test"])
+            manager.exact.guest_root_exec(spec, [GUEST_OBSERVER_BINARY, "--self-test"])
         assert not any(call[1] == "exec" for call in calls)
 
 
@@ -133,8 +133,8 @@ def test_kata_exec_delivers_eof_and_preserves_input_and_literal_arguments(monkey
     literal = "spaces ' \" $HOME $(false) `false`\nnext line"
     real_run = subprocess.run
     monkeypatch.setattr(
-        manager,
-        "_require",
+        manager.exact,
+        "require",
         lambda spec: SimpleNamespace(running=True, container_id=container_id),
     )
 
@@ -243,9 +243,9 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
             stderr="no lifecycle events",
         )
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     monkeypatch.setattr(manager, "exec_capture", capture)
-    monkeypatch.setattr(manager, "_kata_privileged_exec", privileged)
+    monkeypatch.setattr(manager.exact, "guest_root_exec", privileged)
     # `marker_transport` is a race the probe now retries; the suite does not
     # need to sit out the interval to see the verdict.
     monkeypatch.setattr(chat_sandbox.time, "sleep", lambda _seconds: None)
@@ -340,7 +340,7 @@ def test_a_probe_removes_only_its_own_namespaces_abandoned_probes(monkeypatch):
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     manager._remove_abandoned_probes()
     assert [argv[-1] for argv in calls if argv[1:3] == ["rm", "--force"]] == ["abandoned"]
 
@@ -355,7 +355,7 @@ def test_retained_discovery_never_adopts_a_probe(monkeypatch):
             return SimpleNamespace(returncode=0, stdout=json.dumps(row), stderr="")
         raise AssertionError(f"a probe must not be inspected or adopted: {argv}")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     assert manager.list() == []
 
 
@@ -445,7 +445,7 @@ def test_guest_network_sync_replaces_relays_and_resolver_and_is_idempotent(monke
         exec(compile(argv[3], "<guest-network>", "exec"), {})
         return SimpleNamespace(returncode=0, stderr="")
 
-    monkeypatch.setattr(manager, "_kata_privileged_exec", run)
+    monkeypatch.setattr(manager.exact, "guest_root_exec", run)
     manager._network_lifecycle._sync_kata_guest_network(spec, current)
     first = hosts.read_text()
     assert "127.0.0.1 localhost" in first
@@ -501,7 +501,7 @@ def test_guest_network_sync_refuses_a_file_the_guest_user_could_rewrite(monkeypa
             return SimpleNamespace(returncode=1, stderr=str(exc))
         return SimpleNamespace(returncode=0, stderr="")
 
-    monkeypatch.setattr(manager, "_kata_privileged_exec", run)
+    monkeypatch.setattr(manager.exact, "guest_root_exec", run)
     with pytest.raises(SandboxError, match=r"resolv\.conf"):
         manager._network_lifecycle._sync_kata_guest_network(spec, current)
     assert resolv.read_text() == "nameserver 10.0.0.2\n"
@@ -511,8 +511,8 @@ def _self_test_manager(monkeypatch):
     """A manager whose privileged exec answers the observer self-test."""
     manager = _manager()
     monkeypatch.setattr(
-        manager,
-        "_kata_privileged_exec",
+        manager.exact,
+        "guest_root_exec",
         lambda spec, argv, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
     return manager
@@ -603,11 +603,11 @@ def _probe_stubs(monkeypatch, manager, *, cursor, observations):
             return SimpleNamespace(returncode=0, stdout=json.dumps(status).encode(), stderr=b"")
         return SimpleNamespace(returncode=0, stdout=b"freeinference-tool-mark-v1\n", stderr=b"")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     monkeypatch.setattr(manager, "exec_capture", capture)
     monkeypatch.setattr(
-        manager,
-        "_kata_privileged_exec",
+        manager.exact,
+        "guest_root_exec",
         lambda spec, argv, **kwargs: SimpleNamespace(
             returncode=0,
             stdout=(

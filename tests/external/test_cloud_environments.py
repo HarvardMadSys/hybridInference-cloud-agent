@@ -160,7 +160,7 @@ def test_real_snapshot_freezes_and_thaws_environment_services_and_actions(
         cols=80,
     )
     time.sleep(0.3)
-    container_id = backend.manager._require(backend.spec).container_id
+    container_id = backend.manager.exact.require(backend.spec).container_id
     manifest = backend.manager.freeze_shared_writers(
         backend.spec, slot_ids=[], token=uuid.uuid4().hex, expected_container_id=container_id
     )

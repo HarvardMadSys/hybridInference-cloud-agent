@@ -33,7 +33,7 @@ def install_trusted_file(
     what: str,
 ) -> None:
     """Make ``directory/name`` exactly ``content``, root-owned with ``mode``."""
-    current = manager._require(spec)
+    current = manager.exact.require(spec)
     digest = hashlib.sha256(content).hexdigest()
     target = f"{directory}/{name}"
     probe = manager.exec_capture(
@@ -64,7 +64,7 @@ def install_trusted_file(
         # when a development runner's checkout belongs to a non-root UID.
         entry.uid = entry.gid = 0
         tar.addfile(entry, io.BytesIO(content))
-    copied = manager._run_bytes(
+    copied = manager.exact.run_bytes(
         [manager.backend.docker_binary, "cp", "-", f"{current.container_id}:{directory}"],
         timeout=30,
         input_bytes=archive.getvalue(),

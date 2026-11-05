@@ -24,7 +24,7 @@ TEST_LIMIT = 2000
 BASELINE = {
     "apps/backend/cloud_agent_host/shared_session_supervisor.py": 4887,
     "apps/backend/cloud_agent_host/runner.py": 4686,
-    "apps/backend/cloud_agent_host/chat_sandbox.py": 4044,
+    "apps/backend/cloud_agent_host/chat_sandbox.py": 3858,
     "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3815,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 3228,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3326,
@@ -38,7 +38,7 @@ BASELINE = {
     "apps/backend/cloud_agent/storage/repositories/environments.py": 1931,
     "apps/backend/cloud_agent/api/mcp_relay.py": 1795,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
-    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1569,
+    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1556,
 }
 
 #: Exact line counts of test modules over their calibrated limit after #894's

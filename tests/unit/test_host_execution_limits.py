@@ -36,7 +36,7 @@ def test_bounded_command_cleanup_preserves_a_running_sibling(monkeypatch, tmp_pa
     )
     manager = ChatSandboxManager(ContainerBackend(image="test", uid=os.getuid(), gid=os.getgid()))
     monkeypatch.setattr(
-        manager, "_require", lambda _spec: SimpleNamespace(running=True, container_id="test")
+        manager.exact, "require", lambda _spec: SimpleNamespace(running=True, container_id="test")
     )
     monkeypatch.setattr(manager, "require_network", lambda *_args, **_kw: None)
     monkeypatch.setattr(manager, "build_exec_command", lambda _spec, argv, **_kw: argv)
@@ -91,7 +91,7 @@ def _local_receipt_manager(monkeypatch, tmp_path):
     )
     manager = ChatSandboxManager(ContainerBackend(image="test", uid=os.getuid(), gid=os.getgid()))
     monkeypatch.setattr(
-        manager, "_require", lambda _spec: SimpleNamespace(running=True, container_id="test")
+        manager.exact, "require", lambda _spec: SimpleNamespace(running=True, container_id="test")
     )
     monkeypatch.setattr(manager, "build_exec_command", lambda _spec, argv, **_kw: argv)
     monkeypatch.setattr(
