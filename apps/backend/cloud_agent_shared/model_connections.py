@@ -31,8 +31,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from cloud_agent_shared.secret_redaction import MASKED
 
 #: A host advertises this when its runner and sandbox manager can launch a
 #: member on an owner connection: the exact Base URL instead of the host-local
@@ -195,7 +198,7 @@ class ModelConnectionAccess(BaseModel):
     base_url: str = Field(..., min_length=8, max_length=MAX_BASE_URL_CHARS)
     #: What the connection's URL speaks: the upstream protocol of the plan.
     protocol: str
-    api_key: str = Field(..., repr=False)
+    api_key: Annotated[str, MASKED] = Field(..., repr=False)
     #: What the member's CLI speaks, when the plan translates; empty is direct,
     #: and then left out, so a direct claim is what it was before translation.
     client_protocol: str = Field("", exclude_if=lambda value: not value)
@@ -204,7 +207,7 @@ class ModelConnectionAccess(BaseModel):
     #: with its own platform key for this member, connection revision, plan
     #: and model, so a sibling holding the same provider key cannot compute
     #: it. A secret like the key: masked in output, never in a repr.
-    local_token: str = Field("", repr=False, exclude_if=lambda value: not value)
+    local_token: Annotated[str, MASKED] = Field("", repr=False, exclude_if=lambda value: not value)
 
     @field_validator("connection_id")
     @classmethod
