@@ -47,6 +47,7 @@ from cloud_agent.api._workspace_access import (
     _workspace_not_ready,
 )
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.api.threads import _SSE_HEADERS
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.measurement import measurement_writer
@@ -131,14 +132,8 @@ def _require_store(store: _WorkspaceStorage | None) -> _WorkspaceStorage:
 def _terminal_sandbox_manager_http_error(exc: SandboxManagerError) -> HTTPException:
     """Preserve terminal errors while presenting a missing workspace as a conflict."""
     if _workspace_not_materialized(exc):
-        return HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no live terminal workspace.",
-                }
-            },
+        return typed_error(
+            409, "workspace_unavailable", "This chat has no live terminal workspace."
         )
     return _sandbox_manager_http_error(exc)
 
@@ -176,10 +171,7 @@ async def _require_workspace_entitlement(
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
+        raise typed_error(403, "repo_not_allowed", str(exc)) from exc
 
 
 async def _terminal_owner_workspace(
@@ -219,14 +211,8 @@ async def _terminal_owner_workspace(
         )
     sandbox_manager = await _sandbox_manager_for_job(job_store, job)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This deployment has no live sandbox manager.",
-                }
-            },
+        raise typed_error(
+            409, "workspace_unavailable", "This deployment has no live sandbox manager."
         )
     if job.get("terminal_resume_pending"):
         # The sandbox manager resolved a few lines up is this job's own host's, so the
@@ -237,14 +223,8 @@ async def _terminal_owner_workspace(
             job_id=job_id,
             sandbox_manager=sandbox_manager,
         ):
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "type": "workspace_unavailable",
-                        "message": "The settled terminal workspace is still resuming.",
-                    }
-                },
+            raise typed_error(
+                503, "workspace_unavailable", "The settled terminal workspace is still resuming."
             )
         await job_store.sandbox.mark_terminal_resume_complete(job_id=job_id)
         job["terminal_resume_pending"] = False
@@ -316,10 +296,7 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
     try:
         safe_path = normalize_workspace_path(path)
     except WorkspacePathError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_path", "message": str(exc)}},
-        ) from exc
+        raise typed_error(400, "invalid_path", str(exc)) from exc
 
     await _require_workspace_entitlement(
         job=job, user=user, store=job_store, app_credentials=app_credentials
@@ -329,15 +306,7 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
     scope = root_scope(FILES_LIST, job, service=ROUTE_FILES, candidates=candidates)
     sandbox_manager = await _sandbox_manager_for_job(job_store, job)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no owning sandbox manager.",
-                }
-            },
-        )
+        raise typed_error(409, "workspace_unavailable", "This chat has no owning sandbox manager.")
     recorded = False
     with measured_operation(FILES_LIST, scope, continuing=continuation(request.headers)) as measure:
         try:
@@ -360,14 +329,8 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
                 )
             except SandboxManagerError as exc:
                 if _workspace_not_materialized(exc):
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "error": {
-                                "type": "workspace_unavailable",
-                                "message": "This chat has no retained workspace.",
-                            }
-                        },
+                    raise typed_error(
+                        409, "workspace_unavailable", "This chat has no retained workspace."
                     ) from exc
                 raise _sandbox_manager_http_error(exc) from exc
             if measure is not None:
@@ -449,26 +412,10 @@ async def download_agent_job_workspace(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
     if job.get("thread_sandbox") is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no retained workspace.",
-                }
-            },
-        )
+        raise typed_error(409, "workspace_unavailable", "This chat has no retained workspace.")
     sandbox_manager = await _sandbox_manager_for_job(job_store, job)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no owning sandbox manager.",
-                }
-            },
-        )
+        raise typed_error(409, "workspace_unavailable", "This chat has no owning sandbox manager.")
     try:
         stream = await sandbox_manager.workspace_archive(_workspace_id(job))
     except SandboxManagerError as exc:
@@ -509,10 +456,7 @@ async def write_agent_job_workspace_file(
     try:
         safe_path = normalize_workspace_path(path)
     except WorkspacePathError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_path", "message": str(exc)}},
-        ) from exc
+        raise typed_error(400, "invalid_path", str(exc)) from exc
     if not safe_path:
         raise HTTPException(status_code=400, detail="A file path is required.")
     await _require_workspace_entitlement(
@@ -521,14 +465,8 @@ async def write_agent_job_workspace_file(
     await _require_mutable_workspace_ready(job=job, store=job_store.sandbox)
     sandbox_manager = await _sandbox_manager_for_job(job_store, job)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This deployment has no live sandbox manager.",
-                }
-            },
+        raise typed_error(
+            409, "workspace_unavailable", "This deployment has no live sandbox manager."
         )
     try:
         return AgentWorkspaceResponse(
@@ -536,14 +474,8 @@ async def write_agent_job_workspace_file(
         )
     except SandboxManagerError as exc:
         if _workspace_not_materialized(exc):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "type": "workspace_unavailable",
-                        "message": "This retained workspace is not materialized.",
-                    }
-                },
+            raise typed_error(
+                409, "workspace_unavailable", "This retained workspace is not materialized."
             ) from exc
         raise _sandbox_manager_http_error(exc) from exc
 

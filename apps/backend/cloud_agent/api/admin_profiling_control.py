@@ -36,6 +36,7 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
+from cloud_agent.api.errors import typed_error
 from cloud_agent.application.profiling_control import (
     ProfilingControlService,
     Refusal,
@@ -409,26 +410,10 @@ def _mode_explanation(mode: str) -> str:
 def _reject_unknown_keys(payload: Any, allowed: set[str]) -> None:
     """Refuse a body field this endpoint does not accept."""
     if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "type": CONTROL_REFUSED_INVALID,
-                    "message": "the request body must be a JSON object",
-                }
-            },
-        )
+        raise typed_error(422, CONTROL_REFUSED_INVALID, "the request body must be a JSON object")
     unknown = sorted(str(key) for key in payload if str(key) not in allowed)
     if unknown:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "type": CONTROL_REFUSED_INVALID,
-                    "message": f"Unsupported request field: {unknown[0]}.",
-                }
-            },
-        )
+        raise typed_error(422, CONTROL_REFUSED_INVALID, f"Unsupported request field: {unknown[0]}.")
 
 
 def _as_int(value: Any) -> int:

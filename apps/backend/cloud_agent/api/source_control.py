@@ -26,6 +26,7 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
+from cloud_agent.api.errors import typed_error
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
@@ -107,17 +108,12 @@ def _oauth_error(exc: Exception) -> HTTPException:
     else:
         message = "The source-control authorization could not be completed. Please try again."
         error_type = "source_control_connect_failed"
-    return HTTPException(
-        status_code=400,
-        detail={"error": {"type": error_type, "message": message}},
-    )
+    return typed_error(400, error_type, message)
 
 
 def _repository_error(status: int, error_type: str, message: str) -> HTTPException:
     """Build a stable creation error containing no upstream credential material."""
-    return HTTPException(
-        status_code=status, detail={"error": {"type": error_type, "message": message}}
-    )
+    return typed_error(status, error_type, message)
 
 
 @router.post("/repositories", response_model=CreateGitHubRepositoryResponse, status_code=201)
@@ -769,15 +765,7 @@ async def connect_github(
     """
     job_store = _require_store(store)
     if app_credentials is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "unavailable",
-                    "message": "No GitHub App is configured for this deployment.",
-                }
-            },
-        )
+        raise typed_error(503, "unavailable", "No GitHub App is configured for this deployment.")
     try:
         return await _connect_github_for_user(
             body=body,
@@ -835,10 +823,7 @@ async def list_repo_branches(
             repo, user["user_id"], store=job_store.source_control, app_credentials=app_credentials
         )
     except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
+        raise typed_error(403, "repo_not_allowed", str(exc)) from exc
     if app_credentials is None:
         return RepoBranchesResponse()
     try:

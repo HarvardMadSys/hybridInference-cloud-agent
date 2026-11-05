@@ -36,6 +36,7 @@ from cloud_agent.api.deps import (
     require_agent_access,
     resolve_agent_access,
 )
+from cloud_agent.api.errors import typed_error
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -106,14 +107,8 @@ async def authenticate_agent_owner(
     presented = bearer_token(authorization)
     cookie = local_session_from_cookies(request.cookies)
     if not cookie and looks_like_agent_token(presented):
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": {
-                    "type": "insufficient_scope",
-                    "message": "This credential is a sandbox's, not an owner's.",
-                }
-            },
+        raise typed_error(
+            403, "insufficient_scope", "This credential is a sandbox's, not an owner's."
         )
 
     return await get_current_user(request=request, authorization=authorization, storage=storage)
@@ -173,7 +168,4 @@ async def _require_owned_job(
 
 
 def _no_such_job(job_id: str) -> HTTPException:
-    return HTTPException(
-        status_code=404,
-        detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-    )
+    return typed_error(404, "not_found", f"No such agent job: {job_id}")

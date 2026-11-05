@@ -33,6 +33,7 @@ from cloud_agent.api.deps import (
     log_admin_action,
     verify_admin_access,
 )
+from cloud_agent.api.errors import typed_error
 from cloud_agent.application.host_commands import HostCommandError, HostCommands, SandboxPlacement
 from cloud_agent.capacity_protocol import (
     DEFAULT_HISTORY_RANGE,
@@ -118,10 +119,7 @@ async def _apply(command: Awaitable[_Result]) -> _Result:
         return await command
     except HostCommandError as exc:
         if exc.code is not None:
-            raise HTTPException(
-                status_code=exc.status,
-                detail={"error": {"type": exc.code, "message": str(exc)}},
-            ) from None
+            raise typed_error(exc.status, exc.code, str(exc)) from None
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
 

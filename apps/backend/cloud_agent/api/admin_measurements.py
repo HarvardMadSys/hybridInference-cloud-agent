@@ -24,9 +24,10 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 — FastAPI resolves this at runtime.
 from typing import Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 
 from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
+from cloud_agent.api.errors import typed_error
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.measurement import measurement_writer
 
@@ -76,14 +77,8 @@ def _reject_unknown_query(request: Request, allowed: frozenset[str]) -> None:
     """Refuse a selector this endpoint does not accept, before any work."""
     unknown = sorted(set(request.query_params) - allowed)
     if unknown:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "type": "unexpected_query_parameter",
-                    "message": f"Unsupported query parameter: {unknown[0]}.",
-                }
-            },
+        raise typed_error(
+            422, "unexpected_query_parameter", f"Unsupported query parameter: {unknown[0]}."
         )
 
 
@@ -140,10 +135,7 @@ async def summarize_profiling_run(
     except ValueError as exc:
         # A caller naming a dimension that does not exist is refused rather
         # than silently handed a coarser grouping than it asked for.
-        raise HTTPException(
-            status_code=422,
-            detail={"error": {"type": "invalid_group_by", "message": str(exc)}},
-        ) from exc
+        raise typed_error(422, "invalid_group_by", str(exc)) from exc
     return {"run_id": run_id, "groups": groups}
 
 
@@ -194,10 +186,7 @@ async def list_measurements(
     if after:
         anchor = await capability.get_operation_measurement(after)
         if anchor is None:
-            raise HTTPException(
-                status_code=404,
-                detail={"error": {"type": "unknown_cursor", "message": "No such measurement."}},
-            )
+            raise typed_error(404, "unknown_cursor", "No such measurement.")
         keyset = (anchor["received_at"], anchor["measurement_id"])
     rows = await capability.list_operation_measurements(
         run_id=run_id,
@@ -257,8 +246,5 @@ async def get_measurement(
         measurement_id
     )
     if row is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": "No such measurement."}},
-        )
+        raise typed_error(404, "not_found", "No such measurement.")
     return row
