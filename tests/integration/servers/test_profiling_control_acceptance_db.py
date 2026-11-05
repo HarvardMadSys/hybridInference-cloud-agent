@@ -64,7 +64,7 @@ from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.app import create_app
 from cloud_agent.application.profiling_control import ProfilingControlService
 from cloud_agent.domain.host_pool import hash_secret
-from cloud_agent.profiling_control_config import profiling_control_deployment
+from cloud_agent.profiling.profiling_control_config import profiling_control_deployment
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import mint_host_token
 from cloud_agent.workers.profiling_control import ProfilingPolicyWorker

@@ -18,9 +18,9 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.accounts.settings_registry import ACCOUNT_SETTINGS
-from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
-from cloud_agent.deployment_setup import BOOTSTRAP as BOOTSTRAP, bootstrap_snapshot
-from cloud_agent.domain_cipher import settings_root_key
+from cloud_agent.crypto.credential_cipher import CredentialCipher, CredentialCipherError
+from cloud_agent.crypto.domain_cipher import settings_root_key
+from cloud_agent.deployment.deployment_setup import BOOTSTRAP as BOOTSTRAP, bootstrap_snapshot
 from cloud_agent.setting_definition import (
     MINIMUM_CREDENTIAL_BYTES as MINIMUM_CREDENTIAL_BYTES,
     Setting,

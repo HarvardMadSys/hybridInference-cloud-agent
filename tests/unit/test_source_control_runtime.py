@@ -535,7 +535,8 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "lifespan-wiring-encryption-key")
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
+        "cloud_agent.deployment.identity_namespace.ensure_local_namespace",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock(return_value=None))
 
@@ -567,7 +568,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # also stay idle instead of resolving the test-only database hostname.
         "cloud_agent.bootstrap.lifespan.listen",
         "cloud_agent.capacity_history.prune_host_capacity_history",
-        "cloud_agent.operational_health.monitor_queue",
+        "cloud_agent.deployment.operational_health.monitor_queue",
         "cloud_agent.mcp.runtime.maintain_host_sessions",
         "cloud_agent.mcp.catalog.McpCatalog.run",
         "cloud_agent.workers.profiling_control.ProfilingPolicyWorker.run",

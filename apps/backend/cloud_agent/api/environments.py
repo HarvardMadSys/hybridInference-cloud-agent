@@ -20,7 +20,7 @@ from cloud_agent.api.deps import (
     require_store,
 )
 from cloud_agent.api.worker import verify_claiming_host
-from cloud_agent.environments import (
+from cloud_agent.environments.environments import (
     EnvironmentConflict,
     EnvironmentForbidden,
     EnvironmentNotFound,
@@ -323,7 +323,7 @@ async def rebuild_snapshot(
         user["user_id"], environment_id
     )
     await _entitled(store, user["user_id"], repo, credentials)
-    from cloud_agent.environment_source import resolve_test_commit
+    from cloud_agent.environments.environment_source import resolve_test_commit
 
     sha = await resolve_test_commit(repo, body.ref, credentials)
     await snapshots.discard(user["user_id"], environment_id, team=team)
@@ -585,7 +585,7 @@ async def test_environment(
     if not repo:
         raise HTTPException(422, "Choose a repository environment to test")
     await _entitled(store, user["user_id"], repo, credentials)
-    from cloud_agent.environment_source import resolve_test_commit
+    from cloud_agent.environments.environment_source import resolve_test_commit
 
     sha = await resolve_test_commit(repo, body.ref, credentials)
     return await store.environments.create_environment_run(
@@ -648,7 +648,7 @@ async def claim_environment_test(
         await require_agent_access(owners, run["user_id"])
         await _entitled(store, run["user_id"], run["repo"], credentials)
         bound = await store.environments.get_environment_binding(run["user_id"], run["binding_id"])
-        from cloud_agent.environment_source import read_repository_token
+        from cloud_agent.environments.environment_source import read_repository_token
 
         clone_token = await read_repository_token(run["repo"], credentials)
     except Exception:
@@ -770,7 +770,7 @@ async def suggest_script(
 ) -> dict[str, Any]:
     """Suggest reviewed lockfile commands without executing source code."""
     await _entitled(require_store(store), user["user_id"], body.repo, credentials)
-    from cloud_agent.environment_source import script_suggestions
+    from cloud_agent.environments.environment_source import script_suggestions
 
     return await script_suggestions(body.repo, body.ref, credentials)
 

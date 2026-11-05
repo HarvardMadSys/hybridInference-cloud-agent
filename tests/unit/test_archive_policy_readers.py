@@ -30,7 +30,10 @@ from tests.unit.test_autoscaling_archive_policy import (
     _observe,
 )
 
-from cloud_agent.sandbox_archive_credentials import seal_archive_storage, stored_archive_policy
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import (
+    seal_archive_storage,
+    stored_archive_policy,
+)
 from cloud_agent.storage._sql.move_out import move_out_blocker
 from cloud_agent.storage._sql.runner_policy import heartbeat_policy
 from cloud_agent.storage.repositories import attempt_commands
@@ -283,7 +286,7 @@ async def test_environment_snapshots_are_on_only_under_a_policy_they_can_read(
 #: Where the control plane parses a policy mapping, and why each may.
 PARSES = {
     # Opens a stored key before it parses: every reader's way in.
-    "sandbox_archive_credentials.py:stored_archive_policy",
+    "sandbox_archive/sandbox_archive_credentials.py:stored_archive_policy",
     # The administrator's request, which holds the key as they typed it.
     "storage/repositories/host_pool.py:PostgresHostPoolRepository.set_sandbox_archive_settings",
 }

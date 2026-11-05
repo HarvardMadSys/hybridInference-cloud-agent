@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.launch import LaunchPlanError, build_launch_plan
 from cloud_agent.mcp.models import AuthKind, ConnectionStatus, ExecutionLocation, Transport

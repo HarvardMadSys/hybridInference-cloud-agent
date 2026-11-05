@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent.profile.user_profile import ProfileConflict
 from cloud_agent.schemas.user_profile import ProfileView
-from cloud_agent.user_profile import ProfileConflict
 
 if TYPE_CHECKING:
     import asyncpg

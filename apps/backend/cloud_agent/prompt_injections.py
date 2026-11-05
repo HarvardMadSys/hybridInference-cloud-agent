@@ -21,11 +21,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.agent_memory import fit_task_memories, prompt_with_agent_memories
 from cloud_agent.application.sandbox_incidents import BROWSER_NOTE, SandboxNotes
 from cloud_agent.application.ssh_servers import prompt_with_ssh_servers
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.goals.prompts import prompt_with_goal
+from cloud_agent.memory.agent_memory import fit_task_memories, prompt_with_agent_memories
 from cloud_agent.skills.selection import prompt_with_skills
 from cloud_agent_shared.text_tokens import split_counts
 

@@ -34,7 +34,7 @@ from cloud_agent.domain.pending_messages import QUEUE_PAUSED_STOPPED
 from cloud_agent.domain.runtimes import resolve_runtime_version
 from cloud_agent.domain.sandbox_group import GroupState
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_archive_credentials import stored_archive_policy
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
 from cloud_agent.storage._sql.event_batches import append_attempt_events

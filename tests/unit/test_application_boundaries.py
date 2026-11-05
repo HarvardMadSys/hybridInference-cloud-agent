@@ -151,7 +151,7 @@ def test_every_port_import_exception_is_still_needed() -> None:
     "source",
     [
         "from cloud_agent.goals.models import GoalInput",
-        "if TYPE_CHECKING:\n    from cloud_agent.agent_memory import MemoryTask",
+        "if TYPE_CHECKING:\n    from cloud_agent.memory.agent_memory import MemoryTask",
         "from ..usage import owner_usage",
         "import cloud_agent_host.runner",
         "def deferred():\n    from ..storage import assembly",

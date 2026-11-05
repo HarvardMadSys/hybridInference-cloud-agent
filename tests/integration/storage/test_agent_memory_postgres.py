@@ -15,7 +15,8 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.agent_memory import (
+from cloud_agent.domain.agent_memory import MemoryTask
+from cloud_agent.memory.agent_memory import (
     ACTIVE_LIMIT,
     AgentMemoryConflict,
     AgentMemoryDisabled,
@@ -23,7 +24,6 @@ from cloud_agent.agent_memory import (
     AgentMemoryNotFound,
     AgentMemoryTaskEnded,
 )
-from cloud_agent.domain.agent_memory import MemoryTask
 from cloud_agent.storage.repositories.agent_memory import (
     PostgresAgentMemoryRepository,
     _archive_page_sql,

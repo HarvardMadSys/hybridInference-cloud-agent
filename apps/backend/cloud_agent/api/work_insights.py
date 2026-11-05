@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, Response
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
-from cloud_agent.insights_cache import current_insights
-from cloud_agent.work_insights import ACTIVITY_LIMIT, WorkInsights
+from cloud_agent.insights.insights_cache import current_insights
+from cloud_agent.insights.work_insights import ACTIVITY_LIMIT, WorkInsights
 
 router = APIRouter(prefix="/v1/agent/insights", tags=["insights"])
 

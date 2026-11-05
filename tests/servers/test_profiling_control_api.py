@@ -23,7 +23,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from cloud_agent import profiling_control_config
 from cloud_agent.api import admin_profiling_control, host_profiling
 from cloud_agent.application.profiling_control import ProfilingControlService
 from cloud_agent.domain.profiling_control import (
@@ -37,6 +36,7 @@ from cloud_agent.domain.profiling_control import (
     LIFECYCLE_STOPPED,
     ControlCommandResult,
 )
+from cloud_agent.profiling import profiling_control_config
 from cloud_agent_shared import operation_profiling
 
 ADMIN = {"Authorization": "Bearer test-admin-token"}

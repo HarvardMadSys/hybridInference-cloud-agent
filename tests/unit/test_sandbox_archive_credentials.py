@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
-from cloud_agent.sandbox_archive_credentials import seal_archive_storage, stored_archive_policy
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import (
+    seal_archive_storage,
+    stored_archive_policy,
+)
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,

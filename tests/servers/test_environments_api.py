@@ -13,7 +13,7 @@ from tests.support.owners import SESSIONS, account_record
 from cloud_agent.api import environments
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
-from cloud_agent.environments import EnvironmentNotFound
+from cloud_agent.environments.environments import EnvironmentNotFound
 
 pytestmark = pytest.mark.asyncio
 
@@ -170,7 +170,7 @@ async def test_unrelated_job_validation_keeps_field_detail_and_internal_errors_s
 
 async def test_only_environment_encryption_errors_use_the_environment_handler():
     from cloud_agent.app import create_app
-    from cloud_agent.environments import EnvironmentEncryptionError
+    from cloud_agent.environments.environments import EnvironmentEncryptionError
     from cloud_agent.source_control.source_control import SourceControlError
 
     app = create_app()
@@ -470,7 +470,7 @@ async def test_workspace_get_only_reads_and_redacts_without_persistence(monkeypa
 
 
 async def test_a_team_environment_is_created_for_its_team_and_refusals_say_why(monkeypatch):
-    from cloud_agent.environments import EnvironmentForbidden
+    from cloud_agent.environments.environments import EnvironmentForbidden
 
     repository = SimpleNamespace(
         save_environment=AsyncMock(

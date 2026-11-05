@@ -14,7 +14,7 @@ import httpx
 
 from cloud_agent.domain.compute import RECLAIMED_QUIET_SECONDS
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_archive import (
+from cloud_agent.sandbox_archive.sandbox_archive import (
     S3SandboxArchiveStore,
     SandboxArchiveError,
     SandboxArchiveUnavailable,

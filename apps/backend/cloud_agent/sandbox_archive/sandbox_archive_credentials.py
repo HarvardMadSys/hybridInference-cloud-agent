@@ -16,8 +16,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
-from cloud_agent.domain_cipher import settings_root_key
+from cloud_agent.crypto.credential_cipher import CredentialCipher, CredentialCipherError
+from cloud_agent.crypto.domain_cipher import settings_root_key
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,

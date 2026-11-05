@@ -22,7 +22,7 @@ import secrets
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from cloud_agent.application.residency import close_released_residencies
-from cloud_agent.credential_cipher import (
+from cloud_agent.crypto.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,

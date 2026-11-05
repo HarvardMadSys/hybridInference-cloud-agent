@@ -7,7 +7,7 @@ import hmac
 
 from cryptography.fernet import InvalidToken
 
-from cloud_agent.domain_cipher import domain_fernet
+from cloud_agent.crypto.domain_cipher import domain_fernet
 
 # This deployed name is retained for compatibility even though the key protects
 # more than source-control credentials.

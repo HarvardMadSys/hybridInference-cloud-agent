@@ -74,7 +74,8 @@ async def test_a_rebuild_freezes_the_current_configuration_and_replaces_old_snap
     store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="c" * 40)
+        "cloud_agent.environments.environment_source.resolve_test_commit",
+        AsyncMock(return_value="c" * 40),
     )
     async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
         response = await http.post("/v1/agent/environments/env/snapshot", json={})
@@ -89,7 +90,7 @@ async def test_a_rebuild_freezes_the_current_configuration_and_replaces_old_snap
 
 
 async def test_an_owner_deletes_only_their_own_environments_snapshots():
-    from cloud_agent.environments import EnvironmentNotFound
+    from cloud_agent.environments.environments import EnvironmentNotFound
 
     environments_repo = SimpleNamespace(
         get_environment=AsyncMock(
@@ -118,7 +119,8 @@ async def test_a_team_environments_snapshots_are_its_editors_to_throw_away(monke
     store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="c" * 40)
+        "cloud_agent.environments.environment_source.resolve_test_commit",
+        AsyncMock(return_value="c" * 40),
     )
     async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
         deleted = await http.delete("/v1/agent/environments/env/snapshot")
@@ -146,7 +148,8 @@ def _claimed(monkeypatch, run, snapshots):
     )
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.environment_source.read_repository_token", AsyncMock(return_value=None)
+        "cloud_agent.environments.environment_source.read_repository_token",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr(environments, "require_agent_access", AsyncMock())
     return SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)

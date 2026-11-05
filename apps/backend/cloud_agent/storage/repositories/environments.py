@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from cloud_agent.domain.execution_profiles import default_execution_profile
-from cloud_agent.environments import (
+from cloud_agent.environments.environments import (
     EnvironmentAccessRevoked,
     EnvironmentBusy,
     EnvironmentCipher,

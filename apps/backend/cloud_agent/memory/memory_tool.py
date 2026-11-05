@@ -11,14 +11,14 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.agent_memory import (
+from cloud_agent.logging_utils import get_logger
+from cloud_agent.memory.agent_memory import (
     MEMORY_CONTENT_LIMIT,
     AgentMemoryDisabled,
     AgentMemoryFull,
     AgentMemoryNotFound,
     AgentMemoryTaskEnded,
 )
-from cloud_agent.logging_utils import get_logger
 from cloud_agent_shared.shared_protocol import PLATFORM_MCP_SERVER_PREFIX
 
 if TYPE_CHECKING:

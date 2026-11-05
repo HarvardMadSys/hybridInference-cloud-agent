@@ -13,8 +13,8 @@ from cloud_agent.api._body_limits import payload_too_large, read_bounded_body
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_owner_directory, get_storage, require_store
-from cloud_agent.user_avatar import generate_user_avatar
-from cloud_agent.user_profile import (
+from cloud_agent.profile.user_avatar import generate_user_avatar
+from cloud_agent.profile.user_profile import (
     MAX_PROFILE_REQUEST_BYTES,
     ProfileConflict,
     ProfileResponse,

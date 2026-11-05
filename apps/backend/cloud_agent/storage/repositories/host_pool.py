@@ -28,7 +28,7 @@ from cloud_agent.domain.sandbox_group import DeletionState, GroupState
 from cloud_agent.host_settings_import import plan_settings_import
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
-from cloud_agent.sandbox_archive_credentials import (
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import (
     archive_settings_payload,
     seal_archive_storage,
     stored_archive_policy,

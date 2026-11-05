@@ -39,7 +39,7 @@ from cloud_agent.application.model_connections import (
     unusable_error,
 )
 from cloud_agent.application.residency import residency_ttl_s
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.execution import SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.model_connections import ModelConnectionUnusable

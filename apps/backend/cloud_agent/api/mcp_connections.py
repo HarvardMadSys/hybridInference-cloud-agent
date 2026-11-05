@@ -56,7 +56,7 @@ from cloud_agent.api.mcp_thread_bindings import (
     ReplaceBindingsRequest,
     router as thread_bindings_router,
 )
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import (

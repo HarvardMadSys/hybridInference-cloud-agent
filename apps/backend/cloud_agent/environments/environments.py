@@ -1,6 +1,6 @@
 """Safe domain failures for owner environment configuration and execution."""
 
-from cloud_agent.credential_cipher import (
+from cloud_agent.crypto.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,

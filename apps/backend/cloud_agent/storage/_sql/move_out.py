@@ -12,7 +12,7 @@ from typing import Any
 
 from cloud_agent.domain.execution_profiles import KATA_RUNTIME, ExecutionProfile
 from cloud_agent.domain.sandbox_group import GroupState, sql_list
-from cloud_agent.sandbox_archive_credentials import stored_archive_policy
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent.storage._sql.hosts import COVERED_GROUP_SQL, UNDELETED_GROUP_SQL
 from cloud_agent.storage._sql.rows import load_json
