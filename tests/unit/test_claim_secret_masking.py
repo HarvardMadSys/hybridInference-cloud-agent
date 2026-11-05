@@ -244,3 +244,19 @@ def test_a_programs_own_key_is_masked_under_its_server():
     assert redacted == "key=[secret:sandbox-mcp:search:API_KEY]"
     # A plain env value and a secret:// reference are configuration, not secrets.
     assert "eu" not in values.values() and "secret://API_KEY" not in values.values()
+
+
+def test_a_programs_short_key_does_not_blank_the_output():
+    """A one-character key is not masked: it would replace every such character."""
+    short = SandboxMcpServer(
+        alias="pin",
+        command="npx",
+        args=("pkg@1.2.3",),
+        env={"API_PIN": "secret://API_PIN"},
+        secret_env={"API_PIN": "1"},
+    )
+    values = claim_secret_values(replace(_BARE, sandbox_mcp_servers=(short,)))
+    assert values == {}
+    output = "Ran 12 tests in 1.0s"
+    assert SecretRedactor(values).text(output) == output
+
