@@ -19,12 +19,12 @@ from cloud_agent_host.archive.sandbox_deletion_backup import (
     ArchiveIdentity,
     SandboxDeletionBackupService,
 )
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError
+from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_state import SharedMemberManifest

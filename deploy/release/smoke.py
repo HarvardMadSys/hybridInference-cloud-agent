@@ -563,7 +563,7 @@ def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
             command=(
                 "-c",
                 "import cloud_agent_host.runner, cloud_agent_host.sandbox_manager, "
-                "cloud_agent_host.sandbox, cloud_agent_host.network.network_guard; print('imports ok')",
+                "cloud_agent_host.container.sandbox, cloud_agent_host.network.network_guard; print('imports ok')",
             ),
         )
         container.wait()

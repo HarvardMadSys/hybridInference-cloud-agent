@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_STATE_DIR,
     LEGACY_MEMBER_HOME_COLLECTIONS,
     PRIVATE_MEMBER_HOME_COLLECTIONS,

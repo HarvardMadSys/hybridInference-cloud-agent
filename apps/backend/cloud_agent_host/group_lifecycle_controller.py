@@ -21,7 +21,7 @@ from cloud_agent_host.archive.archive_failure_diagnostics import (
     _archive_failure_diagnostic,
     logged_stopped_archive_failure,
 )
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
@@ -29,6 +29,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
     SandboxActionFacts,
 )
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.network.guarded_workloads import (
     GuardedWorkload,
@@ -40,7 +41,6 @@ from cloud_agent_host.network.guarded_workloads import (
     workloads_with_known,
 )
 from cloud_agent_host.network.idle_host_rules import IdleHostRules
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,

@@ -18,7 +18,7 @@ from tests.unit.test_chat_group_network import (
     _world,
 )
 
-from cloud_agent_host.chat_sandbox import CHAT_NAMESPACE_LABEL, CHAT_NETWORK_LABEL
+from cloud_agent_host.container.chat_sandbox import CHAT_NAMESPACE_LABEL, CHAT_NETWORK_LABEL
 from cloud_agent_host.environment_tests import environment_run_spec
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 

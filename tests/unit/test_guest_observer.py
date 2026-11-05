@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend
 from cloud_agent_host.observe import guest_observer
 from cloud_agent_host.observe.guest_observer import (
     GUEST_BOOT_ID_PATH,
@@ -41,7 +42,6 @@ from cloud_agent_host.observe.guest_observer import (
 from cloud_agent_host.observe.guest_observer_locks import GuestObserverLocks
 from cloud_agent_host.observe.guest_observer_scripts import BEGIN_SCRIPT
 from cloud_agent_host.observe.tool_windows import TOOL_MARK_HELPER, ToolMark, ToolWindow
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

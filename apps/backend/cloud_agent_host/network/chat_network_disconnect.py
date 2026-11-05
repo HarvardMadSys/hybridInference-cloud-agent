@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import RetainedChatLost
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.chat_sandbox_models import RetainedChatLost
+from cloud_agent_host.container.sandbox import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
     from cloud_agent_host.network.chat_sandbox_network import ChatSandboxNetwork
 
 

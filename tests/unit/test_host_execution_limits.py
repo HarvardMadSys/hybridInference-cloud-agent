@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent_host import bounded_output, chat_sandbox, sandbox
+from cloud_agent_host import bounded_output
 from cloud_agent_host.bounded_output import (
     OUTPUT_CHUNK_BYTES,
     OUTPUT_QUEUE_ITEMS,
@@ -22,9 +22,19 @@ from cloud_agent_host.bounded_output import (
     protocol_lines,
     text_chunks,
 )
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
+from cloud_agent_host.container import chat_sandbox, sandbox
+from cloud_agent_host.container.chat_sandbox import (
+    ChatSandboxManager,
+    ChatSandboxSpec,
+    RetainedChatBackend,
+)
+from cloud_agent_host.container.sandbox import (
+    ContainerBackend,
+    ProcessBackend,
+    SandboxError,
+    SandboxSpec,
+)
 from cloud_agent_host.manager_api.workspace_commands import _run_sandbox
-from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError, SandboxSpec
 
 
 @pytest.mark.parametrize("failure", ["timeout", "output"])

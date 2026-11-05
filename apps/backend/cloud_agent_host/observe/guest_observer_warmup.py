@@ -23,11 +23,11 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.sandbox import KATA_RUNTIME
+from cloud_agent_host.container.sandbox import KATA_RUNTIME
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
 
 logger = logging.getLogger("cloud_agent_host.guest_observer_warmup")
 

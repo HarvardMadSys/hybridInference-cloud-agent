@@ -35,7 +35,8 @@ from cloud_agent_host.archive.sandbox_deletion_backup import (
     SandboxDeletionBackupService,
 )
 from cloud_agent_host.archive.sandbox_initial_uploads import INITIAL_UPLOAD_DIRNAME
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.sandbox import ContainerBackend, build_backend_from_env
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.group_archive_policy import (
     ControllerArchivePolicy,
@@ -67,7 +68,6 @@ from cloud_agent_host.manager_api.terminals import TerminalRoutes
 from cloud_agent_host.manager_api.turns import TurnRoutes
 from cloud_agent_host.manager_api.workspaces import WorkspaceRoutes
 from cloud_agent_host.observe.sandbox_resources import SandboxResourceCollector
-from cloud_agent_host.sandbox import ContainerBackend, build_backend_from_env
 from cloud_agent_host.sandbox_incident_routes import install_incident_routes, sandbox_incidents_for
 from cloud_agent_host.session_lifecycle import DEFAULT_CHAT_IDLE_TIMEOUT_S
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
@@ -85,7 +85,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from cloud_agent_host.archive.sandbox_archives import SandboxArchiveService
-    from cloud_agent_host.sandbox import SandboxBackend
+    from cloud_agent_host.container.sandbox import SandboxBackend
 
 logger = get_logger(__name__)
 

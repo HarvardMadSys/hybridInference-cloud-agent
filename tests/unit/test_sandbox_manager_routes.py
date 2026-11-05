@@ -17,7 +17,7 @@ import pytest
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent_host.sandbox import ProcessBackend
+from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.sandbox_manager import create_app
 
 _ANY = "dict[str, typing.Any]"

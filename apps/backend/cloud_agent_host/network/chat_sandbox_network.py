@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_each
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_inspect import containers_by_ref, inspect_each
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_GENERATION_LABEL,
     CHAT_NAMESPACE_LABEL,
     CHAT_NETWORK_GENERATION_LABEL,
@@ -34,6 +34,7 @@ from cloud_agent_host.chat_sandbox_models import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.network.chat_network_disconnect import (
     disconnect_endpoint,
     forget_stopped_network,
@@ -44,16 +45,15 @@ from cloud_agent_host.network.chat_network_ownership import (
     require_service_peers,
 )
 from cloud_agent_host.network.network_guard import GUARD_RENEW_S
-from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 
 if TYPE_CHECKING:
     import builtins
     import subprocess
     from collections.abc import Iterator, Sequence
 
-    from cloud_agent_host.exact_container import ExactContainer
+    from cloud_agent_host.container.exact_container import ExactContainer
+    from cloud_agent_host.container.sandbox import ContainerBackend
     from cloud_agent_host.network.network_guard import HeldExceptions
-    from cloud_agent_host.sandbox import ContainerBackend
     from cloud_agent_shared.egress import SandboxNetwork
     from cloud_agent_shared.operation_profiling import StageObserver
 
@@ -188,7 +188,7 @@ class ChatNetworkContainers(Protocol):
         The group network's one guest-root operation, with no argv of its own.
         Running a helper as guest root is not one of :attr:`exact`'s
         operations: only the sandbox manager has it
-        (:mod:`cloud_agent_host.guest_root_exec`).
+        (:mod:`cloud_agent_host.container.guest_root_exec`).
         """
         ...
 

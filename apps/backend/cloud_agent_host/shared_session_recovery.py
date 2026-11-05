@@ -7,13 +7,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxInspection
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxInspection
     from cloud_agent_host.shared_session_state import (
         SharedSessionDescriptor,
         SharedSessionState,

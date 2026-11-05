@@ -19,9 +19,9 @@ from tests.support.claude_cli import FakeAnthropicGateway
 
 import cloud_agent_host.drivers as drivers
 import cloud_agent_host.runtimes.claude.session as claude_session
+from cloud_agent_host.container.sandbox import ProcessBackend, SandboxSpec
 from cloud_agent_host.runtimes import ERROR, ClaudeCodeRuntime
 from cloud_agent_host.runtimes.live import driver_for
-from cloud_agent_host.sandbox import ProcessBackend, SandboxSpec
 
 pytestmark = pytest.mark.external
 MODEL = "deepseek-v4-flash"

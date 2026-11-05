@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.bounded_output import OutputPump, TextTail
-from cloud_agent_host.sandbox import SandboxSpec
+from cloud_agent_host.container.sandbox import SandboxSpec
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
 if TYPE_CHECKING:

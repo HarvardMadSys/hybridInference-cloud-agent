@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from cloud_agent_host.chat_sandbox import CHAT_WORKDIR, ArchiveExportTooLarge
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR, ArchiveExportTooLarge
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.manager_api.context import supervisor_error
 from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI resolves the request models.
     EnvironmentPrepareRequest,
@@ -24,7 +25,6 @@ from cloud_agent_host.retained_workspace import (
     read_retained_file,
     write_retained_file,
 )
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.ssh_access import apply_ssh_access
 from cloud_agent_host.workspace_download import write_workspace_download
 from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
@@ -34,7 +34,7 @@ from cloud_agent_shared.workspace_browser import WorkspacePathError, normalize_w
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent_host.chat_sandbox import RetainedChatBackend
+    from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
     from cloud_agent_host.manager_api.context import ManagerContext
     from cloud_agent_host.operation_call import SandboxManagerCall
 

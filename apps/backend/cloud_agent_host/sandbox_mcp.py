@@ -36,14 +36,14 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.sandbox_incidents import MEMBER_CREDENTIALS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 
 logger = logging.getLogger(__name__)

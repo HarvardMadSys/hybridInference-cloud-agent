@@ -18,8 +18,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod, chat_sandbox_writers as writers
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container import (
+    chat_sandbox as chat_sandbox_mod,
+    chat_sandbox_writers as writers,
+)
+from cloud_agent_host.container.chat_sandbox import (
     ACTIVATION_TMPFS,
     ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
     CHAT_BOOTSTRAP_NETWORK,
@@ -46,9 +49,15 @@ from cloud_agent_host.chat_sandbox import (
     _RetainedTerminalProcess,
     claude_member_config_dir,
 )
-from cloud_agent_host.chat_sandbox_markers import (
+from cloud_agent_host.container.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_NAME,
     INITIAL_ARCHIVE_MARKER_ROOT,
+)
+from cloud_agent_host.container.sandbox import (
+    KATA_RUNTIME,
+    ContainerBackend,
+    SandboxError,
+    SandboxSpec,
 )
 from cloud_agent_host.network.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.observe.guest_observer import (
@@ -62,7 +71,6 @@ from cloud_agent_host.observe.guest_observer import (
     GuestObserverStatus,
 )
 from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime, registered_runtimes
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError, SandboxSpec
 
 
 def _spec() -> ChatSandboxSpec:
@@ -861,7 +869,7 @@ def test_retained_storage_preflight_reads_daemon_root_without_mounting_it(monkey
         calls.append(list(argv))
         return SimpleNamespace(returncode=0, stdout="/mnt/agent-docker\n", stderr="")
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     assert manager.require_docker_data_root("/mnt/agent-docker") == "/mnt/agent-docker"
     assert calls == [["docker", "info", "--format", "{{.DockerRootDir}}"]]
@@ -999,7 +1007,7 @@ def test_inspect_rejects_a_tmpfs_over_chat_state(monkeypatch, tmpfs, mounts):
     payload = json.loads(_inspect_payload(spec, mounts=mounts))
     payload[0]["HostConfig"]["Tmpfs"] = {f"{ACTIVATION_TMPFS}": "rw,noexec", **tmpfs}
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout=json.dumps(payload), stderr=""
         ),
@@ -1019,7 +1027,7 @@ def test_inspect_accepts_the_platforms_own_tmpfs_mounts(monkeypatch):
         GUEST_OBSERVER_ROOT: "rw,noexec",
     }
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout=json.dumps(payload), stderr=""
         ),
@@ -1046,7 +1054,7 @@ def test_inspect_rejects_a_bind_or_volume_even_when_labels_match(monkeypatch):
         mounts=[{"Type": "bind", "Source": "/host", "Destination": CHAT_WORKDIR}],
     )
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1060,7 +1068,7 @@ def test_existing_container_must_have_been_created_from_the_pinned_image(monkeyp
     payload = json.loads(_inspect_payload(spec))
     payload[0]["Config"]["Image"] = "sha256:different"
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0,
             stdout=json.dumps(payload),
@@ -1107,7 +1115,7 @@ def test_create_start_stop_retains_the_same_container(monkeypatch):
             return SimpleNamespace(returncode=0, stdout=spec.container_name, stderr="")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     created = manager.create(spec)
     started = manager.start(spec)
@@ -1160,7 +1168,7 @@ def test_lifecycle_command_never_adopts_a_same_name_post_command_replacement(
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     with pytest.raises(RetainedChatLost, match="identity changed during"):
         getattr(manager, operation)(spec)
@@ -1173,7 +1181,7 @@ def test_an_existing_name_with_other_ownership_is_never_adopted(monkeypatch):
     wrong[CHAT_THREAD_LABEL] = "athr_other"
     payload = _inspect_payload(spec, labels=wrong)
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1186,7 +1194,7 @@ def test_start_refuses_paused_state_instead_of_calling_it_stopped(monkeypatch):
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     payload = _inspect_payload(spec, status="running", running=True, paused=True)
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1208,7 +1216,7 @@ def test_exec_is_bound_to_the_inspected_container_and_workspace(monkeypatch):
             return SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     result = manager.exec_capture(
         spec,
@@ -1469,7 +1477,7 @@ def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1477,7 +1485,7 @@ def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
         popen_calls.append((list(argv), kwargs))
         return Process()
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
 
     pidfile = f"{MEMBER_TMPFS_ROOT}/0/resident-{'a' * 32}.pid"
     manager.spawn(
@@ -1548,7 +1556,7 @@ def test_every_runtime_credential_reaches_a_resident_exec_by_name_only(monkeypat
             return None
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1556,7 +1564,7 @@ def test_every_runtime_credential_reaches_a_resident_exec_by_name_only(monkeypat
         popen_calls.append((list(argv), kwargs))
         return Process()
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
 
     manager.spawn(
         spec,
@@ -2657,7 +2665,7 @@ def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(
             return 0
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -2665,7 +2673,7 @@ def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(
         popen_calls.append((list(argv), kwargs))
         return Process()
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
 
     terminal = manager.spawn_terminal(spec, rows=31, cols=101)
     assert terminal.wait() == 0
@@ -2741,7 +2749,7 @@ def test_stale_terminal_reaper_matches_pidfile_and_wrapper_argv(monkeypatch):
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     manager.reap_stale_terminal_processes(spec)
 
@@ -2768,7 +2776,7 @@ def test_unsettled_retry_reset_targets_only_the_two_container_owned_roots(monkey
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     manager.reset_unsettled_state(spec)
 
@@ -2794,7 +2802,7 @@ def test_base_bundle_import_uses_activation_tmpfs_and_preserves_git_state(monkey
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
     commit = "a" * 40
 
     bundle = io.BytesIO(b"bundle bytes")
@@ -2826,7 +2834,7 @@ def test_archive_import_streams_a_file_to_docker_cp(monkeypatch, tmp_path):
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
     archive_path = tmp_path / "checkout.tar"
     archive_path.write_bytes(b"\0" * 1024)
     # Sparse, so the test asserts the timeout for a 3 GiB archive without
@@ -2918,8 +2926,8 @@ def test_killing_a_bounded_command_signals_only_its_own_process_group(monkeypatc
         clients.append(client)
         return client
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
     monkeypatch.setattr(manager, "require_network", lambda *_args, **_kwargs: None)
     backend = RetainedChatBackend(manager, spec)
 

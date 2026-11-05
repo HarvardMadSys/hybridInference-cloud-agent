@@ -1687,7 +1687,7 @@ _BACKEND_ENV = {**_ENV, "AGENT_SANDBOX_BACKEND": "container", "AGENT_SANDBOX_IMA
 
 def test_only_a_backend_built_to_keep_one_gives_its_guard_a_long_lived_helper() -> None:
     """A turn's own process builds its backend plainly, so its guard runs disposable helpers."""
-    from cloud_agent_host.sandbox import ContainerBackend, build_backend_from_env
+    from cloud_agent_host.container.sandbox import ContainerBackend, build_backend_from_env
 
     plain = build_backend_from_env(dict(_BACKEND_ENV))
     kept = build_backend_from_env(dict(_BACKEND_ENV), keep_network_helper=True)

@@ -16,7 +16,7 @@ on one the same way, within limits that keep it exactly as strong:
 * only for the exact container it proved, still running, not restarted, on
   exactly the bridge object it was proved on, with no proof of it failed
   since and no start of it unproven
-  (:func:`~cloud_agent_host.chat_sandbox_exec.standing_network_proof`);
+  (:func:`~cloud_agent_host.container.chat_sandbox_exec.standing_network_proof`);
 * only while the host guard can still show its rules, which it checks again
   once its own verification lapses;
 * and every other admission check (membership, the lifecycle fences, the
@@ -32,8 +32,8 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox import TURN_NETWORK_PROOF_S, RetainedChatLost
-from cloud_agent_host.chat_sandbox_exec import standing_network_proof
+from cloud_agent_host.container.chat_sandbox import TURN_NETWORK_PROOF_S, RetainedChatLost
+from cloud_agent_host.container.chat_sandbox_exec import standing_network_proof
 from cloud_agent_host.group_lifecycle import Operation
 
 if TYPE_CHECKING:

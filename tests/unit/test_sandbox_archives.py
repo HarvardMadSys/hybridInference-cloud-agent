@@ -29,7 +29,7 @@ from cloud_agent_host.archive.sandbox_archives import (
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
 )
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,

@@ -18,17 +18,17 @@ import pytest
 from tests.support.owners import connection_access
 
 from cloud_agent_host import group_reservation, shared_live_attempt
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_REAPER_TARGET,
     ChatSandboxManager,
     ChatSandboxSpec,
 )
-from cloud_agent_host.chat_sandbox_inspect import container_inspection
-from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_shared import shared_protocol
 
 

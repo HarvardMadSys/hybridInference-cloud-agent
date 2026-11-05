@@ -13,9 +13,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxSpec,
 )
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.drivers import DialectRuntime
 from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.resident_transport import (
@@ -23,7 +24,6 @@ from cloud_agent_host.resident_transport import (
     ResidentTransport,
     ResidentTransportFactory,
 )
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,

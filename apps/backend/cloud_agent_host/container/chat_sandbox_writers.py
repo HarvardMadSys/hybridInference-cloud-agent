@@ -20,17 +20,17 @@ import contextlib
 import re
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     ACTIVATION_TMPFS,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
 )
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
-from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
 
 #: Seconds a shared-writer census may hold writers stopped before it gives up
 #: and resumes them itself. Its exec allows 20, which leaves that resume time to

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.manager_api.context import supervisor_error
 from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI resolves the request models.
     TerminalCoordinationRequest,
@@ -21,7 +22,6 @@ from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI res
 )
 from cloud_agent_host.manager_api.routing import route
 from cloud_agent_host.operation_call import open_call
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
 from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER, parse_start_fence
 

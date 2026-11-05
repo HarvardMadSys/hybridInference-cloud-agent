@@ -23,14 +23,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
-from cloud_agent_host.docker_engine import run_docker
-from cloud_agent_host.exact_container import ExactContainer
+from cloud_agent_host.container.chat_sandbox_models import MEMBER_UID_BASE
+from cloud_agent_host.container.docker_engine import run_docker
+from cloud_agent_host.container.exact_container import ExactContainer
+from cloud_agent_host.container.sandbox import ContainerBackend, runtime_bin_dir
 from cloud_agent_host.member_setup.runtime_install import ensure_downloaded_runtime
 from cloud_agent_host.runtime_downloads import RuntimeDownloads
 from cloud_agent_host.runtime_images import discover
 from cloud_agent_host.runtime_probe import probe_runtime
-from cloud_agent_host.sandbox import ContainerBackend, runtime_bin_dir
 
 pytestmark = pytest.mark.external
 

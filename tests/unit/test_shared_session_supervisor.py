@@ -23,7 +23,7 @@ from tests.support.archive_policy import hooked_supervisor
 from tests.support.owners import launch_connection
 
 from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_UID_BASE,
     ChatSandboxInspection,
     ChatSandboxManager,
@@ -33,10 +33,11 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
     claude_member_config_dir,
 )
-from cloud_agent_host.chat_sandbox_markers import (
+from cloud_agent_host.container.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_NAME,
     INITIAL_ARCHIVE_MARKER_ROOT,
 )
+from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.drivers import DriverError, InputOutcome
 from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest
 from cloud_agent_host.member_setup.member_homes import legacy_member_state_dir, member_state_dir
@@ -48,7 +49,6 @@ from cloud_agent_host.resident_transport import (
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.http_bridge import member as http_member
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_state import SharedMemberManifest, SharedSessionDescriptor

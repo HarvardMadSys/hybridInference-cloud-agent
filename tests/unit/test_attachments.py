@@ -25,7 +25,7 @@ from cloud_agent.attachments.selection import (
     prompt_with_attachments,
     resolve_attachments,
 )
-from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, CHAT_WORKDIR
+from cloud_agent_host.container.chat_sandbox import CHAT_UPLOADS_DIR, CHAT_WORKDIR
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,

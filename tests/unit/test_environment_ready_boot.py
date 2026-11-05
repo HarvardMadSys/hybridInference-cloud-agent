@@ -16,7 +16,7 @@ from tests.unit.test_shared_session_supervisor import (
 )
 
 from cloud_agent_host import group_environment
-from cloud_agent_host.chat_sandbox import ChatSandboxStatus
+from cloud_agent_host.container.chat_sandbox import ChatSandboxStatus
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_shared.environment import BoundEnvironment
 

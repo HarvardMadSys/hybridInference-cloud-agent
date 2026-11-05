@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, override
 
-from cloud_agent_host.chat_sandbox import MEMBER_UID_BASE
+from cloud_agent_host.container.chat_sandbox import MEMBER_UID_BASE
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.member_setup.member_homes import (
     PRIVATE_MEMBER_HOME_PROLOGUE,
@@ -25,7 +25,7 @@ from cloud_agent_host.runtimes.http_bridge.kilo_mcp import KILO_MCP_VERSION
 from cloud_agent_host.runtimes.member_launch import MemberLaunch
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_host.launch.facet import PrepareContext
     from cloud_agent_host.launch.runtime import RuntimeFacet
     from cloud_agent_host.resident_transport import ResidentLaunch

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.bounded_output import TextTail, byte_chunks, protocol_lines, text_chunks
-from cloud_agent_host.docker_engine import DockerEngine, engine_from_env
+from cloud_agent_host.container.docker_engine import DockerEngine, engine_from_env
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.runtime_images import DownloadedVersions
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
@@ -890,7 +890,7 @@ class ContainerBackend(SandboxBackend):
             )
         if self.runtime == KATA_RUNTIME:
             # Import here: retained operations depend on these base primitives.
-            from cloud_agent_host.chat_sandbox import ChatSandboxManager
+            from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
 
             # The observer probe already boots a fresh container with the
             # production runtime and image. Observe its kernel too, instead

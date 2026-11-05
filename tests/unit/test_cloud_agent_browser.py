@@ -22,10 +22,10 @@ from types import SimpleNamespace
 import pytest
 from tests.support.owners import launch_connection
 
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_browser import LAUNCHER, ensure_browser_service
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

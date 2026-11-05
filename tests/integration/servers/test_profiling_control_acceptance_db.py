@@ -212,7 +212,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     # The sandbox manager application, served on its own socket. It is built through its
     # own factory with the same token the runner would present, so the push
     # below is the real route with the real credential check in front of it.
-    from cloud_agent_host.sandbox import ProcessBackend
+    from cloud_agent_host.container.sandbox import ProcessBackend
     from cloud_agent_host.sandbox_manager import create_app as create_sandbox_manager_app
     from cloud_agent_host.sandbox_manager_profiling_policy import reset_applied_state
 

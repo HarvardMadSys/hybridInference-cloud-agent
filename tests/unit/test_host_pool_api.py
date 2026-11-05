@@ -1157,7 +1157,7 @@ async def test_a_host_holding_more_versions_than_a_menu_may_list_is_still_heard(
     (``test_host_report_bounds.py``).
     """
     from cloud_agent.schemas import HOST_VERSION_MENU_MAX_ITEMS, WorkerClaimAttestation
-    from cloud_agent_host.sandbox import ContainerBackend
+    from cloud_agent_host.container.sandbox import ContainerBackend
 
     async_client, store = client
     credential = await _enroll(async_client, store)
@@ -1179,7 +1179,7 @@ async def test_a_host_holding_more_versions_than_a_menu_may_list_is_still_heard(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     with monkeypatch.context() as patched:
-        patched.setattr("cloud_agent_host.sandbox.subprocess.run", docker)
+        patched.setattr("cloud_agent_host.container.sandbox.subprocess.run", docker)
         stamp = ContainerBackend(image="img:1").version_stamp()
 
     response = await async_client.post(

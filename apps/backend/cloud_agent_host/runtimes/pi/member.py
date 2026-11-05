@@ -13,7 +13,7 @@ from cloud_agent_host.member_setup.other_plugins import install_other_runtime_pl
 from cloud_agent_host.runtimes.member_launch import MemberLaunch, append_system_prompt
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_host.resident_transport import ResidentLaunch
 
 

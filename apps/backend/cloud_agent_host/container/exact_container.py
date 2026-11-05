@@ -10,7 +10,7 @@ live in one place instead of being rebuilt by each caller. :meth:`run` and
 reach a container only after :meth:`require` or a recorded proof, and only
 :meth:`record_proof` records one, of an inspection that is exactly the spec's.
 Running a helper as Kata guest root is not one of its operations: it is the
-sandbox manager's own (:mod:`cloud_agent_host.guest_root_exec`).
+sandbox manager's own (:mod:`cloud_agent_host.container.guest_root_exec`).
 
 A container's labels, mounts, tmpfs, runtime and image never change for its
 id, and Docker refuses an exec into one that is stopped, paused or removed.
@@ -35,23 +35,26 @@ import time
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from cloud_agent_host.archive.sandbox_checkpoints import checkpoint_image_reference
-from cloud_agent_host.chat_sandbox_inspect import container_inspection
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_CHECKPOINT_LABEL,
     CHAT_DISK_LIMIT_LABEL,
     CHAT_ENVIRONMENT_SNAPSHOT_LABEL,
     CHAT_NAMESPACE_LABEL,
     RetainedChatLost,
 )
-from cloud_agent_host.docker_engine import run_docker
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.docker_engine import run_docker
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_shared.environment_snapshots import snapshot_image_reference
 
 if TYPE_CHECKING:
     from typing import BinaryIO
 
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection, ChatSandboxSpec
-    from cloud_agent_host.sandbox import ContainerBackend
+    from cloud_agent_host.container.chat_sandbox_models import (
+        ChatSandboxInspection,
+        ChatSandboxSpec,
+    )
+    from cloud_agent_host.container.sandbox import ContainerBackend
 
 NOT_RUNNING = "chat sandbox must be started before exec"
 

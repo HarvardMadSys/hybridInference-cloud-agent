@@ -29,9 +29,9 @@ from cloud_agent_host import (
     shared_live_attempt,
     source_preparation,
 )
-from cloud_agent_host.chat_sandbox import CHAT_WORKDIR
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_host.source_prefetch import SourcePrefetch
 from cloud_agent_host.source_preparation import WorktreeError
 from cloud_agent_shared.environment import BoundEnvironment

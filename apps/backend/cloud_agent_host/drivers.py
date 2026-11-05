@@ -33,6 +33,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
+from cloud_agent_host.container.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_host.harness_event import LINE, HarnessEvent
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -41,7 +42,6 @@ from cloud_agent_host.runtimes import (
     ReplyPreview,
     RuntimeMCPConfig,
 )
-from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_host.stream_deltas import DeltaBatcher, StreamDelta
 from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import (
@@ -55,7 +55,7 @@ from cloud_agent_shared.shared_protocol import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from cloud_agent_host.sandbox import SandboxProcess
+    from cloud_agent_host.container.sandbox import SandboxProcess
 
 
 class DialectRuntime(Protocol):

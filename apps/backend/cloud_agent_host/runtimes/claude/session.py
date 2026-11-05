@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.container.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_host.drivers import (
     TURN_STARTED,
     DriverError,
@@ -39,7 +40,6 @@ from cloud_agent_host.runtimes.claude.background import (
     SessionTasks,
     is_task_notification,
 )
-from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
     INPUT_TURN_ENDED,
@@ -48,7 +48,7 @@ from cloud_agent_shared.shared_protocol import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from cloud_agent_host.sandbox import SandboxProcess
+    from cloud_agent_host.container.sandbox import SandboxProcess
 
 
 #: Claude answers a message it had not read by its result as a new turn of its

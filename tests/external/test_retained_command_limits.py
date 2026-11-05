@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ACTIVATION_TMPFS,
     CHAT_NAMESPACE_LABEL,
     CHAT_WORKDIR,
@@ -30,9 +30,9 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     RetainedChatBackend,
 )
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxProcess, SandboxSpec
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.manager_api.workspace_commands import _run_sandbox
-from cloud_agent_host.sandbox import ContainerBackend, SandboxProcess, SandboxSpec
 
 if TYPE_CHECKING:
     from pathlib import Path

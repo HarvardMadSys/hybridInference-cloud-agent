@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     _GUEST_NETWORK_CHECK,
     CHAT_BOOTSTRAP_NETWORK,
     CHAT_NAMESPACE_LABEL,
@@ -49,8 +49,8 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.network.network_guard import HostNetworkGuard
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
 _NAMESPACE = "this-stack"

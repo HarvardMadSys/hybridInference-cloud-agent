@@ -29,9 +29,9 @@ import re
 
 import pytest
 
+from cloud_agent_host.container.sandbox import SANDBOX_PATH
 from cloud_agent_host.observe import member_resources
 from cloud_agent_host.observe.guest_observer import GUEST_OBSERVER_VERSION
-from cloud_agent_host.sandbox import SANDBOX_PATH
 from cloud_agent_shared import shared_protocol
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]

@@ -30,8 +30,8 @@ from tests.unit.test_shared_session_supervisor import _members, _spec
 
 from cloud_agent_host.archive.archive_failure_diagnostics import NETWORK_RELEASE_FAILURES
 from cloud_agent_host.archive.sandbox_deletion_backup import SandboxDeletionBackupService
-from cloud_agent_host.chat_sandbox_models import RetainedChatLost
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.chat_sandbox_models import RetainedChatLost
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy
 from cloud_agent_shared.logging_utils import JsonLogFormatter
 

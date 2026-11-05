@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from cloud_agent_host.archive.sandbox_deletion_backup import ArchiveIdentity
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.manager_api.context import shared_spec, supervisor_error
 from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI resolves the request models.
     SandboxArchiveCommitRequest,
@@ -17,7 +18,6 @@ from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI res
     SharedInitialArchiveStatusRequest,
 )
 from cloud_agent_host.manager_api.routing import route
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.shared_session_supervisor import archive_failure_http_detail
 from cloud_agent_host.workspace_git import COMMIT_SHA as _COMMIT_SHA
 

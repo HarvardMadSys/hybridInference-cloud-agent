@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
-from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
+from cloud_agent_host.container.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.environment_tests import environment_run_spec
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI resolves the request models.
@@ -15,7 +16,6 @@ from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI res
     EnvironmentSnapshotDeleteRequest,
 )
 from cloud_agent_host.manager_api.routing import route
-from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
     from cloud_agent_host.manager_api.context import ManagerContext

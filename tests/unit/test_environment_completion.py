@@ -28,9 +28,9 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host import environment_process
+from cloud_agent_host.container.sandbox import SandboxError, _PopenProcess
 from cloud_agent_host.environment_preparation import run_step
 from cloud_agent_host.environment_process import EnvironmentProcess
-from cloud_agent_host.sandbox import SandboxError, _PopenProcess
 from cloud_agent_host.setup import SCRIPT_OUTPUT_WAIT_S, run_setup
 
 #: How long a script's last output takes to arrive once its receipt is read:

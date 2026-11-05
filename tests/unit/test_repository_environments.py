@@ -11,8 +11,8 @@ from pydantic import ValidationError
 
 from cloud_agent.source_control.source_control import SourceControlCipher, SourceControlError
 from cloud_agent_host import environment_preparation
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.environment import (
     ENVIRONMENT_DOMAIN,
     BoundEnvironment,

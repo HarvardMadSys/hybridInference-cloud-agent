@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from cloud_agent_host.member_setup.plugins import run_plugin_command
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 PLUGIN_PATHS_ENV = "AGENT_PLUGIN_PATHS"
 

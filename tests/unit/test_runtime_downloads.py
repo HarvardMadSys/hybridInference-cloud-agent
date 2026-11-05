@@ -21,7 +21,7 @@ import pytest
 
 from cloud_agent_host import runtime_downloads, runtime_images
 from cloud_agent_host.archive.sandbox_checkpoints import checkpoint_image_reference
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_RUNTIME_LABEL,
     CHAT_RUNTIME_VERSION_LABEL,

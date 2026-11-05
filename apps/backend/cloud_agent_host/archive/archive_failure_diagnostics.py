@@ -23,11 +23,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.archive.sandbox_deletion_diagnostics import _container, _render, _safe_id
-from cloud_agent_host.chat_sandbox_models import RetainedChatLost
+from cloud_agent_host.container.chat_sandbox_models import RetainedChatLost
 from cloud_agent_host.logging_utils import get_logger
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
 
 logger = get_logger("cloud_agent_host.archive_failure_diagnostics")
 

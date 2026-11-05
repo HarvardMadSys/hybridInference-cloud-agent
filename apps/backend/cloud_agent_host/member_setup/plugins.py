@@ -17,11 +17,11 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING
 
 from cloud_agent_host.bounded_output import OutputPump, TextTail
-from cloud_agent_host.chat_sandbox import CHAT_WORKDIR, MEMBER_TMPFS_ROOT, MEMBER_UID_BASE
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR, MEMBER_TMPFS_ROOT, MEMBER_UID_BASE
 from cloud_agent_host.drivers import DriverError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 PLUGIN_INSTALL_TIMEOUT_S = 900.0
 

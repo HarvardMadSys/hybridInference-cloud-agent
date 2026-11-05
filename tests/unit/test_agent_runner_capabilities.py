@@ -9,7 +9,7 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
 )
 
 from cloud_agent_host import host_capabilities
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container.sandbox import ContainerBackend
 
 
 def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch):

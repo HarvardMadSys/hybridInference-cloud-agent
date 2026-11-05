@@ -20,14 +20,17 @@ import tarfile
 import tempfile
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import RetainedChatLost
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.chat_sandbox_models import RetainedChatLost
+from cloud_agent_host.container.sandbox import SandboxError
 
 if TYPE_CHECKING:
     import subprocess
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox_models import (
+        ChatSandboxInspection,
+        ChatSandboxSpec,
+    )
 
 #: Sandbox Manager-owned durable receipt for the immutable pre-prompt archive. It is
 #: deliberately outside every agent-writable or archived root.  Guest root

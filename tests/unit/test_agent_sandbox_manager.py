@@ -28,16 +28,23 @@ from tests.support.owners import launch_connection
 from cloud_agent.sandbox_manager import sandbox_manager_client as control_plane_client
 from cloud_agent.schemas import RetainedSandboxStop
 from cloud_agent_host import sandbox_manager as sandbox_manager_mod
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ACTIVATION_TMPFS,
     ChatSandboxManager,
     RetainedChatBackend,
     _RetainedExecProcess,
 )
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     ENVIRONMENT_TEST_LABEL,
     ChatSandboxInspection,
     ChatSandboxStatus,
+)
+from cloud_agent_host.container.sandbox import (
+    ContainerBackend,
+    ProcessBackend,
+    SandboxError,
+    SandboxSpec,
+    TerminalProcess,
 )
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.group_archive_policy import (
@@ -58,13 +65,6 @@ from cloud_agent_host.observe.guest_observer import GuestObservation, GuestProce
 from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
-from cloud_agent_host.sandbox import (
-    ContainerBackend,
-    ProcessBackend,
-    SandboxError,
-    SandboxSpec,
-    TerminalProcess,
-)
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.sandbox_manager_client import (
     SandboxManagerClient,

@@ -20,7 +20,7 @@ from tests.support.follow_ups import append_follow_up
 from cloud_agent.schemas.goals import GoalInput
 from cloud_agent.settings import number_setting
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
-from cloud_agent_host.sandbox import KATA_RUNTIME
+from cloud_agent_host.container.sandbox import KATA_RUNTIME
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

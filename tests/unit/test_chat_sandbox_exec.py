@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container import chat_sandbox as chat_sandbox_mod
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_NAMESPACE_LABEL,
     CHAT_PROBE_LABEL,
     ENVIRONMENT_TEST_LABEL,
@@ -26,9 +26,9 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     RetainedChatLost,
 )
-from cloud_agent_host.chat_sandbox_inspect import INSPECT_BATCH
-from cloud_agent_host.exact_container import ProvenContainers
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.container.chat_sandbox_inspect import INSPECT_BATCH
+from cloud_agent_host.container.exact_container import ProvenContainers
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 
 _NAMESPACE = "this-stack"
 #: ``docker exec`` options that take a value, before the container is named.

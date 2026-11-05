@@ -9,7 +9,7 @@ from cloud_agent_shared.environment_snapshots import snapshot_image_reference
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
 
 
 def require_create_image(

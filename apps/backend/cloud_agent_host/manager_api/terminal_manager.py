@@ -13,17 +13,17 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from cloud_agent_host.action_receipts import ActionReceipts
-from cloud_agent_host.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.container.sandbox import SandboxError, SandboxSpec, TerminalNotSupportedError
 from cloud_agent_host.environment_process import tool_environment
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.sandbox import SandboxError, SandboxSpec, TerminalNotSupportedError
 from cloud_agent_host.terminal_session import _TerminalLimits, _TerminalSession
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from cloud_agent_host.sandbox import SandboxBackend, TerminalProcess
+    from cloud_agent_host.container.sandbox import SandboxBackend, TerminalProcess
     from cloud_agent_shared.environment import BoundEnvironment, EnvironmentAction
 
 # The sandbox manager's own logger: its terminal events keep their name.

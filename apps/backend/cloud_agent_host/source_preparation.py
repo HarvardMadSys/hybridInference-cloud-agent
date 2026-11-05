@@ -24,14 +24,14 @@ import time
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from cloud_agent_host.bounded_output import OutputPump
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
     RetainedChatBackend,
 )
+from cloud_agent_host.container.sandbox import SandboxBackend, SandboxSpec
 from cloud_agent_host.local_settings import source_import_max_bytes
-from cloud_agent_host.sandbox import SandboxBackend, SandboxSpec
 from cloud_agent_host.source_prefetch import SourcePrefetch
 from cloud_agent_shared.environment_snapshots import (
     MAX_LOCKFILES,

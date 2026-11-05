@@ -23,9 +23,9 @@ from cloud_agent.sandbox_manager.sandbox_manager_client import (
 )
 from cloud_agent_host import environment_tests
 from cloud_agent_host.action_receipts import ActionReceipts
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.manager_api.terminal_manager import _TerminalManager
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.environment import (
     BoundEnvironment,
     EnvironmentAction,
