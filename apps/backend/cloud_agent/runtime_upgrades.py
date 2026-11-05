@@ -321,7 +321,28 @@ def default_version(runtime: str, hosts: list[dict[str, Any]]) -> str | None:
     return versions.pop() if len(versions) == 1 else None
 
 
-def upgrade_state(  # noqa: PLR0912 complexity baseline, #771
+def _host_reports(
+    runtime: str, version: str, nonce: str, eligible: list[dict[str, Any]]
+) -> tuple[list[str], list[int]]:
+    """Each eligible host's failure for this request, and its progress on it."""
+    failures: list[str] = []
+    progress: list[int] = []
+    for host in eligible:
+        report = find_report(host["runtime_downloads"], runtime, version)
+        if report is not None and report.nonce != nonce:
+            report = None  # about an earlier request
+        if report is not None and report.state == FAILED:
+            failures.append(f"{host['host']}: {report.error or 'download failed'}")
+        if version in (host["runtime_versions_available"].get(runtime) or []) or (
+            report is not None and report.state == READY
+        ):
+            progress.append(100)
+        else:
+            progress.append(0 if report is None else report.progress)
+    return failures, progress
+
+
+def upgrade_state(
     runtime: str, target: dict[str, Any] | None, hosts: list[dict[str, Any]]
 ) -> UpgradeState | None:
     """Reduce every host's report on ``target`` to one state and one number.
@@ -342,21 +363,7 @@ def upgrade_state(  # noqa: PLR0912 complexity baseline, #771
         return None
     version = str(target["version"])
     nonce = str(target.get("nonce") or "")
-    eligible = _eligible(hosts)
-    failures: list[str] = []
-    progress: list[int] = []
-    for host in eligible:
-        report = find_report(host["runtime_downloads"], runtime, version)
-        if report is not None and report.nonce != nonce:
-            report = None  # about an earlier request
-        if report is not None and report.state == FAILED:
-            failures.append(f"{host['host']}: {report.error or 'download failed'}")
-        if version in (host["runtime_versions_available"].get(runtime) or []) or (
-            report is not None and report.state == READY
-        ):
-            progress.append(100)
-        else:
-            progress.append(0 if report is None else report.progress)
+    failures, progress = _host_reports(runtime, version, nonce, _eligible(hosts))
     activated = target.get("activated_at")
     kind = KIND_SELECTION if target.get("kind") == KIND_SELECTION else KIND_UPDATE
     if kind == KIND_SELECTION and not failures:

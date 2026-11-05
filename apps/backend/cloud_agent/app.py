@@ -187,7 +187,58 @@ def _install_api_docs(app: FastAPI) -> None:
         return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
-def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
+def _install_environment_errors(app: FastAPI) -> None:
+    """Answer every environment failure with its status code and no-store."""
+    from fastapi.responses import JSONResponse
+
+    from cloud_agent.environments import (
+        EnvironmentAccessRevoked,
+        EnvironmentBusy,
+        EnvironmentConflict,
+        EnvironmentEncryptionError,
+        EnvironmentForbidden,
+        EnvironmentNotFound,
+    )
+
+    async def environment_failure(request: Request, exc: Exception) -> JSONResponse:
+        if isinstance(exc, EnvironmentNotFound):
+            code, detail = 404, "Environment not found"
+        elif isinstance(exc, EnvironmentForbidden):
+            code, detail = 403, str(exc)
+        elif isinstance(exc, EnvironmentEncryptionError):
+            code, detail = 503, "Environment encryption is unavailable"
+        else:
+            code, detail = 409, str(exc)
+        return JSONResponse(
+            status_code=code, content={"detail": detail}, headers={"Cache-Control": "no-store"}
+        )
+
+    for failure in (
+        EnvironmentNotFound,
+        EnvironmentConflict,
+        EnvironmentBusy,
+        EnvironmentEncryptionError,
+        EnvironmentForbidden,
+        EnvironmentAccessRevoked,
+    ):
+        app.add_exception_handler(failure, environment_failure)
+
+
+def _install_healthz(app: FastAPI) -> None:
+    """Mount the liveness probe."""
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        """Liveness only — deliberately not readiness.
+
+        A readiness probe here would have to decide what a degraded control
+        plane is (no mail transport? no git credential?), and every answer to that
+        belongs to whoever operates it.
+        """
+        return {"status": "ok"}
+
+
+def create_app() -> FastAPI:
     """Build the control plane application."""
     configure_process_logging()
 
@@ -262,39 +313,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     # public edge, so a sandbox's ``mcp`` token carried out and replayed there
     # must find no tool route at all, not one that merely refuses it.
     app.include_router(skills.router)
-    from fastapi.responses import JSONResponse
-
-    from cloud_agent.environments import (
-        EnvironmentAccessRevoked,
-        EnvironmentBusy,
-        EnvironmentConflict,
-        EnvironmentEncryptionError,
-        EnvironmentForbidden,
-        EnvironmentNotFound,
-    )
-
-    async def environment_failure(request: Request, exc: Exception) -> JSONResponse:
-        if isinstance(exc, EnvironmentNotFound):
-            code, detail = 404, "Environment not found"
-        elif isinstance(exc, EnvironmentForbidden):
-            code, detail = 403, str(exc)
-        elif isinstance(exc, EnvironmentEncryptionError):
-            code, detail = 503, "Environment encryption is unavailable"
-        else:
-            code, detail = 409, str(exc)
-        return JSONResponse(
-            status_code=code, content={"detail": detail}, headers={"Cache-Control": "no-store"}
-        )
-
-    for failure in (
-        EnvironmentNotFound,
-        EnvironmentConflict,
-        EnvironmentBusy,
-        EnvironmentEncryptionError,
-        EnvironmentForbidden,
-        EnvironmentAccessRevoked,
-    ):
-        app.add_exception_handler(failure, environment_failure)
+    _install_environment_errors(app)
 
     app.include_router(environments.router)
     app.include_router(work_insights.router)
@@ -364,15 +383,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         app.include_router(local_router)
     app.include_router(site_config.router)
 
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        """Liveness only — deliberately not readiness.
-
-        A readiness probe here would have to decide what a degraded control
-        plane is (no mail transport? no git credential?), and every answer to that
-        belongs to whoever operates it.
-        """
-        return {"status": "ok"}
+    _install_healthz(app)
 
     return app
 

@@ -913,7 +913,29 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
             )
 
 
-def initial_settings(  # noqa: C901, PLR0912 complexity baseline, #771
+def _parse_env_value(setting: Setting, raw: str) -> Any:
+    """Convert one non-empty environment value, raising on an invalid one."""
+    value: Any
+    if setting.kind == "integer":
+        value = int(raw)
+    elif setting.kind == "number":
+        value = float(raw)
+    elif setting.kind == "boolean":
+        if raw.lower() not in {"true", "false", "yes", "no", "1", "0"}:
+            raise ValueError("invalid boolean")
+        value = raw.lower() in {"true", "yes", "1"}
+    else:
+        value = raw.strip() if not setting.secret else raw
+    if setting.key == "log_level":
+        value = raw.strip().upper()
+        value = {"WARN": "WARNING", "FATAL": "CRITICAL"}.get(value, value)
+    elif setting.key == "log_format":
+        normalized = raw.strip().lower()
+        value = normalized if normalized in {"text", "json"} else "text"
+    return setting.validate(value, saved=True)
+
+
+def initial_settings(
     *, keys: set[str] | None = None, problems: list[str] | None = None
 ) -> dict[str, Any]:
     """Import only registered environment variables into the initial settings row.
@@ -950,23 +972,7 @@ def initial_settings(  # noqa: C901, PLR0912 complexity baseline, #771
             value = ""
         elif raw:
             try:
-                if setting.kind == "integer":
-                    value = int(raw)
-                elif setting.kind == "number":
-                    value = float(raw)
-                elif setting.kind == "boolean":
-                    if raw.lower() not in {"true", "false", "yes", "no", "1", "0"}:
-                        raise ValueError("invalid boolean")
-                    value = raw.lower() in {"true", "yes", "1"}
-                else:
-                    value = raw.strip() if not setting.secret else raw
-                if setting.key == "log_level":
-                    value = raw.strip().upper()
-                    value = {"WARN": "WARNING", "FATAL": "CRITICAL"}.get(value, value)
-                elif setting.key == "log_format":
-                    normalized = raw.strip().lower()
-                    value = normalized if normalized in {"text", "json"} else "text"
-                value = setting.validate(value, saved=True)
+                value = _parse_env_value(setting, raw)
             except (ValueError, OverflowError) as exc:
                 if keys is None and not setting.invalid_env_uses_default:
                     if isinstance(exc, SettingTooShort):

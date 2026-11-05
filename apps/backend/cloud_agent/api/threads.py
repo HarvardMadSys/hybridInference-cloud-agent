@@ -54,6 +54,7 @@ from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI re
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from cloud_agent.domain.execution import JobStreamState
     from cloud_agent.ports import ConversationQueries, ExecutionQueries
 
 
@@ -247,8 +248,50 @@ async def list_agent_job_events(
     )
 
 
+async def _finished_job_frames(
+    job_store: _ThreadsStorage, job_id: str, cursor: int, stream_state: JobStreamState
+) -> AsyncIterator[str]:
+    """Drain a finished job's remaining events, then announce its end.
+
+    Drain to exhaustion before announcing the end. A single extra page is not
+    enough: a client attaching to a finished job with more than two pages of
+    backlog would see job_finished, close, and lose the rest.
+    """
+    while True:
+        tail = await job_store.execution_queries.list_events_after(
+            job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
+        )
+        if not tail:
+            break
+        for event in tail:
+            cursor = event["id"]
+            yield _sse_frame(event)
+    final = json.dumps(
+        {
+            "state": stream_state.state,
+            "published_pr_url": stream_state.published_pr_url,
+            "last_event_id": cursor,
+        },
+        separators=(",", ":"),
+    )
+    yield f"event: job_finished\ndata: {final}\n\n"
+
+
+async def _await_next_read(
+    signal: JobEventSignal | None, woken: asyncio.Event | None, remaining: float
+) -> None:
+    """Wait for the job's notification, or the poll clock, never past ``remaining``."""
+    if signal is None or woken is None:
+        await asyncio.sleep(min(_POLL_INTERVAL_S, remaining))
+    else:
+        await signal.wait(
+            woken,
+            min(_IDLE_READ_S if signal.listening else _POLL_INTERVAL_S, remaining),
+        )
+
+
 @router.get("/jobs/{job_id}/stream")
-async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
+async def stream_agent_job_events(
     job_id: str,
     request: Request,
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
@@ -277,7 +320,7 @@ async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
         with contextlib.suppress(ValueError):
             cursor = int(last_event_id)
 
-    async def event_source() -> AsyncIterator[Any]:  # noqa: PLR0912 complexity baseline, #771
+    async def event_source() -> AsyncIterator[Any]:
         nonlocal cursor
         clock = asyncio.get_running_loop().time
         last_frame = clock()
@@ -325,39 +368,14 @@ async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
                         last_frame = clock()
 
                     if stream_state.state in TERMINAL_STATES:
-                        # Drain to exhaustion before announcing the end. A
-                        # single extra page is not enough: a client attaching
-                        # to a finished job with more than two pages of backlog
-                        # would see job_finished, close, and lose the rest.
-                        while True:
-                            tail = await job_store.execution_queries.list_events_after(
-                                job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
-                            )
-                            if not tail:
-                                break
-                            for event in tail:
-                                cursor = event["id"]
-                                yield _sse_frame(event)
-                        final = json.dumps(
-                            {
-                                "state": stream_state.state,
-                                "published_pr_url": stream_state.published_pr_url,
-                                "last_event_id": cursor,
-                            },
-                            separators=(",", ":"),
-                        )
-                        yield f"event: job_finished\ndata: {final}\n\n"
+                        async for frame in _finished_job_frames(
+                            job_store, job_id, cursor, stream_state
+                        ):
+                            yield frame
                         return
 
                     # No wait runs past the cap, so the stream ends on time.
-                    remaining = closes_at - clock()
-                    if signal is None or woken is None:
-                        await asyncio.sleep(min(_POLL_INTERVAL_S, remaining))
-                    else:
-                        await signal.wait(
-                            woken,
-                            min(_IDLE_READ_S if signal.listening else _POLL_INTERVAL_S, remaining),
-                        )
+                    await _await_next_read(signal, woken, closes_at - clock())
         except asyncio.CancelledError:
             # Client disconnect: the subscription ends with its block, the
             # event log is durable and the client can resume by cursor.
