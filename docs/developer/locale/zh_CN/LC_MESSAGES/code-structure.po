@@ -486,59 +486,180 @@ msgstr ""
 msgid "Follow a host execution"
 msgstr "跟着一次主机执行走"
 
-#: ../developer/code-structure.md:125
+#: ../developer/code-structure.md:132
 msgid ""
-"`runner.py` is the command line. The host service in `host_service.py` "
-"enrolls the host, heartbeats, claims turns up to its limit, and drains on"
-" SIGTERM; `host_capabilities.py` holds what it advertises and the proof "
-"each claim carries. Each claimed turn runs in a child process "
-"(`turn_child.py`) that preflights, answers the handover, and then runs "
-"the attempt under the lease `attempt_lease.py` renews: "
-"`group_reservation.py` checks and reserves its sandbox group, "
-"`shared_live_attempt.py` runs it as a sequence of stages, and "
-"`turn_stream.py` relays the admitted turn. `source_preparation.py` is the"
-" trusted Git work on a chat's source outside the sandbox. "
-"`claimed_job.py` defines claim payloads and lease errors; "
-"`control_plane_client.py` owns attempt-scoped worker HTTP calls, request "
-"deadlines, and event replay. The client queues a turn's events on the "
-"ordered sender in `event_sender.py`, which uploads them in batches."
-msgstr ""
-"`runner.py` 是命令行入口。`host_service.py` 里的主机服务负责注册主机、发送心跳、在上限内认领轮次，并在收到 "
-"SIGTERM 时排空；`host_capabilities.py` 负责主机对外声明的能力，以及每次认领附带的证明。每个认领到的轮次都在一个子进程"
-"（`turn_child.py`）里运行：它先做预检、回应交接，再在 `attempt_lease.py` 续期的租约下执行这次 "
-"attempt：`group_reservation.py` 检查并预留它的 sandbox 组，`shared_live_attempt.py` "
-"按一串固定的阶段执行它，`turn_stream.py` 负责转发已准入的轮次。`source_preparation.py` 是 runner 在 "
-"sandbox 外对会话源码做的可信 Git 操作。`claimed_job.py` "
-"定义认领的数据结构和租约错误；`control_plane_client.py` 负责以 attempt 为范围的 worker HTTP "
-"调用、请求超时和事件重放。客户端把一个轮次的事件放进 `event_sender.py` 里的有序发送器排队，由它分批上传。"
+"The host package groups its modules by concern. Paths below are relative "
+"to `cloud_agent_host/`; a module named without a directory sits at its "
+"top level."
+msgstr "主机包按职责把模块分组。下文的路径都相对于 `cloud_agent_host/`；没写目录的模块就在包的顶层。"
 
-#: ../developer/code-structure.md:133
+#: ../developer/code-structure.md
+msgid "Package"
+msgstr "包"
+
+#: ../developer/code-structure.md
+msgid "`service/`"
+msgstr ""
+
+#: ../developer/code-structure.md
 msgid ""
-"`chat_sandbox_models.py` holds retained-container specs, inspection/status "
-"values, ownership labels, and identity bounds. Group bridges, relay "
-"membership, Kata guest route synchronization, and network proof/release live"
-" in the composed `chat_sandbox_network.py` component. It consumes a narrow "
-"container protocol; exact container identity, bounded exec, and fail-stop "
-"operations stay with the manager. Existing manager network entry points "
-"delegate to that owner. Network snapshots remain scoped to one operation, "
-"and operational log names are stable. `chat_sandbox.py` manages retained "
-"groups and their members; `sandbox.py` owns the container/process boundary. "
-"The Sandbox Manager and session supervisor coordinate native sessions and "
+"The long-lived host service: enrollment, heartbeats, the claim loop, "
+"draining, what the host advertises, and starting each turn's child"
+msgstr "常驻的主机服务：注册、心跳、认领循环、排空、主机对外声明的能力，以及为每个轮次启动子进程"
+
+#: ../developer/code-structure.md
+msgid "`turn/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"One claimed turn in its child process: reservation, source preparation, "
+"the attempt's stages, and the stream it relays"
+msgstr "在子进程里运行的一个已认领轮次：预留、源码准备、attempt 的各个阶段，以及它转发的流"
+
+#: ../developer/code-structure.md
+msgid "`container/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"The Docker/Kata boundary: retained chat containers, their models and "
+"markers, and the exact-container identity gate"
+msgstr "Docker/Kata 边界：保留的对话容器、它们的数据模型和标记，以及精确容器的身份关卡"
+
+#: ../developer/code-structure.md
+msgid "`network/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"The sandbox network: this deployment's host rules, per-group bridges, and"
+" the workloads that depend on them"
+msgstr "沙箱网络：本部署的主机规则、每个沙箱组的网桥，以及依赖它们的工作负载"
+
+#: ../developer/code-structure.md
+msgid "`supervisor/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"The shared-session supervisor: one group's lifecycle, registration and "
+"reconciliation, its members and their native sessions"
+msgstr "共享会话 supervisor：一个沙箱组的生命周期、注册与对账，以及组内成员和它们的原生会话"
+
+#: ../developer/code-structure.md
+msgid "`archive/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"Sandbox archives, restorable checkpoints, and verified deletion of "
+"stopped sandboxes"
+msgstr "沙箱归档、可恢复的检查点，以及经过核实再删除已停止的沙箱"
+
+#: ../developer/code-structure.md
+msgid "`observe/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"The guest observer, member execution windows, tool windows, and Docker "
+"resource samples"
+msgstr "guest 观测器、成员执行窗口、工具窗口，以及 Docker 资源采样"
+
+#: ../developer/code-structure.md
+msgid "`member_setup/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"What the trusted host installs into a member before its CLI starts: "
+"plugins, MCP helpers, runtimes, trusted files"
+msgstr "成员的 CLI 启动前，可信主机装进成员里的东西：插件、MCP 辅助程序、运行时和可信文件"
+
+#: ../developer/code-structure.md
+msgid "`launch/`, `runtimes/`, `manager_api/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"Launch facets, the Agent CLI adapters, and the Sandbox Manager's HTTP "
+"layer"
+msgstr "启动 facet、Agent CLI 适配器，以及 Sandbox Manager 的 HTTP 层"
+
+#: ../developer/code-structure.md:147
+msgid ""
+"The top level keeps the process entry points (`runner.py`, "
+"`sandbox_manager.py`, `candidate_check.py`, and the `host_capacity` and "
+"`storage_attestation` commands deployment runs inside a runner) and the "
+"modules several packages share, such as `claimed_job.py`, "
+"`control_plane_client.py`, `drivers.py`, `resident_transport.py` and "
+"`session_lifecycle.py`."
+msgstr ""
+"顶层保留各个进程入口（`runner.py`、`sandbox_manager.py`、`candidate_check.py`，以及部署流程在 "
+"runner 里运行的 `host_capacity` 和 `storage_attestation` 命令），还有几个包共用的模块，例如 "
+"`claimed_job.py`、`control_plane_client.py`、`drivers.py`、`resident_transport.py`"
+" 和 `session_lifecycle.py`。"
+
+#: ../developer/code-structure.md:153
+msgid ""
+"`runner.py` is the command line. The host service in "
+"`service/host_service.py` enrolls the host, heartbeats, claims turns up "
+"to its limit, and drains on SIGTERM; `service/host_capabilities.py` holds"
+" what it advertises and the proof each claim carries. Each claimed turn "
+"runs in a child process (`turn/turn_child.py`) that preflights, answers "
+"the handover, and then runs the attempt under the lease "
+"`service/attempt_lease.py` renews: `turn/group_reservation.py` checks and"
+" reserves its sandbox group, `turn/shared_live_attempt.py` runs it as a "
+"sequence of stages, and `turn/turn_stream.py` relays the admitted turn. "
+"`turn/source_preparation.py` is the trusted Git work on a chat's source "
+"outside the sandbox. `claimed_job.py` defines claim payloads and lease "
+"errors; `control_plane_client.py` owns attempt-scoped worker HTTP calls, "
+"request deadlines, and event replay. The client queues a turn's events on"
+" the ordered sender in `event_sender.py`, which uploads them in batches."
+msgstr ""
+"`runner.py` 是命令行入口。`service/host_service.py` "
+"里的主机服务负责注册主机、发送心跳、在上限内认领轮次，并在收到 SIGTERM "
+"时排空；`service/host_capabilities.py` "
+"负责主机对外声明的能力，以及每次认领附带的证明。每个认领到的轮次都在一个子进程（`turn/turn_child.py`）里运行：它先做预检、回应交接，再在"
+" `service/attempt_lease.py` 续期的租约下执行这次 "
+"attempt：`turn/group_reservation.py` 检查并预留它的 sandbox "
+"组，`turn/shared_live_attempt.py` 按一串固定的阶段执行它，`turn/turn_stream.py` "
+"负责转发已准入的轮次。`turn/source_preparation.py` 是 runner 在 sandbox 外对会话源码做的可信 Git"
+" 操作。`claimed_job.py` 定义认领的数据结构和租约错误；`control_plane_client.py` 负责以 attempt"
+" 为范围的 worker HTTP 调用、请求超时和事件重放。客户端把一个轮次的事件放进 `event_sender.py` "
+"里的有序发送器排队，由它分批上传。"
+
+#: ../developer/code-structure.md:168
+msgid ""
+"`container/chat_sandbox_models.py` holds retained-container specs, "
+"inspection/status values, ownership labels, and identity bounds. Group "
+"bridges, relay membership, Kata guest route synchronization, and network "
+"proof/release live in the composed `network/chat_sandbox_network.py` "
+"component. It consumes a narrow container protocol; exact container "
+"identity, bounded exec, and fail-stop operations stay with the manager. "
+"Existing manager network entry points delegate to that owner. Network "
+"snapshots remain scoped to one operation, and operational log names are "
+"stable. `container/chat_sandbox.py` manages retained groups and their "
+"members; `container/sandbox.py` owns the container/process boundary. The "
+"Sandbox Manager and session supervisor coordinate native sessions and "
 "workspace operations. The supervisor's metadata lock protects in-memory "
 "ownership only. Stop, orphan recovery, and archive deletion reserve one "
-"group's lifecycle before Docker or marker I/O, then revalidate its group, "
-"member, container, and lifecycle identities before accepting the result. "
-"Other groups remain available; failed checks release their temporary "
+"group's lifecycle before Docker or marker I/O, then revalidate its group,"
+" member, container, and lifecycle identities before accepting the result."
+" Other groups remain available; failed checks release their temporary "
 "reservation, while durable archive and native-flush barriers remain in "
-"force. Public sandbox model imports through `chat_sandbox` continue to work."
+"force. Public sandbox model imports through `chat_sandbox` continue to "
+"work."
 msgstr ""
-"`chat_sandbox_models.py` "
+"`container/chat_sandbox_models.py` "
 "里放的是保留容器的规格、检查和状态值、归属标签，以及身份字段的上下限。沙箱组的网桥、中继成员关系、Kata guest "
-"路由同步，以及网络的证明和释放，都放在单独拆出来的 `chat_sandbox_network.py` "
+"路由同步，以及网络的证明和释放，都放在单独拆出来的 `network/chat_sandbox_network.py` "
 "组件里。这个组件只依赖一个很窄的容器协议；精确的容器身份、有限制的 exec，以及出错就停的操作仍然由 manager 负责。manager "
-"原有的网络入口都转交给这个组件处理。网络快照仍只在一次操作内有效，运维日志的名称保持不变。`chat_sandbox.py` "
-"管理保留的沙箱组和组内成员；容器和进程之间的边界归 `sandbox.py`。原生会话和工作区操作由 Sandbox Manager 和会话 "
-"supervisor 共同协调。supervisor 的元数据锁只保护内存里的归属关系。停止、孤儿恢复和归档删除在动 Docker "
+"原有的网络入口都转交给这个组件处理。网络快照仍只在一次操作内有效，运维日志的名称保持不变。`container/chat_sandbox.py` "
+"管理保留的沙箱组和组内成员；容器和进程之间的边界归 `container/sandbox.py`。原生会话和工作区操作由 Sandbox "
+"Manager 和会话 supervisor 共同协调。supervisor 的元数据锁只保护内存里的归属关系。停止、孤儿恢复和归档删除在动 "
+"Docker "
 "或读写标记文件之前，会先占住这一个沙箱组的生命周期；拿到结果后，先重新核对组、成员、容器和生命周期的身份，核对通过才采纳。其他沙箱组不受影响。核对失败会释放临时占用，但持久的归档屏障和原生刷新屏障依然有效。原来通过"
 " `chat_sandbox` 导入公开沙箱模型的写法照样可用。"
 
@@ -659,22 +780,23 @@ msgid ""
 "steps"
 msgstr "每种 CLI 的常驻会话类、打开它的驱动，以及它的启动步骤"
 
-#: ../developer/code-structure.md:165
+#: ../developer/code-structure.md:203
 msgid ""
 "`drivers.py` keeps the generic Driver, Session and Turn contract and the "
 "base classes the sessions share. `resident_transport.py` opens member "
 "processes and journals native Forks. It does not branch on the CLI to "
 "launch one: each CLI's `member` module defines that CLI's launch steps "
 "(its member config or private home, trusted helpers, plugin installer, "
-"where platform instructions go, and Claude's commit attribution), and the "
-"factory calls them. Native Fork still branches on the CLI there. "
-"`member_homes.py` holds the private provider homes that Codex, OpenCode "
-"and Kilo members use."
+"where platform instructions go, and Claude's commit attribution), and the"
+" factory calls them. Native Fork still branches on the CLI there. "
+"`member_setup/member_homes.py` holds the private provider homes that "
+"Codex, OpenCode and Kilo members use."
 msgstr ""
 "`drivers.py` 只保留通用的 Driver、Session、Turn "
 "契约，以及各会话共用的基类。`resident_transport.py` 负责启动成员进程、为原生 Fork 记日志。启动成员时它不按 CLI "
-"分支：每种 CLI 的 `member` 模块定义这种 CLI 自己的启动步骤（成员配置或私有主目录、可信辅助程序、插件安装、平台说明放在哪里，以及 "
-"Claude 的提交署名），由它来调用。原生 Fork 在这里仍按 CLI 分支。`member_homes.py` 管 Codex、OpenCode 和 Kilo "
+"分支：每种 CLI 的 `member` 模块定义这种 CLI "
+"自己的启动步骤（成员配置或私有主目录、可信辅助程序、插件安装、平台说明放在哪里，以及 Claude 的提交署名），由它来调用。原生 Fork "
+"在这里仍按 CLI 分支。`member_setup/member_homes.py` 管 Codex、OpenCode 和 Kilo "
 "成员各自私有的服务商主目录。"
 
 #: ../developer/code-structure.md:171

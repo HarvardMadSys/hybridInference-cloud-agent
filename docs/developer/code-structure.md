@@ -129,35 +129,59 @@ wire changes require the contract update described in the developer guide.
 
 ## Follow a host execution
 
-`runner.py` is the command line. The host service in `host_service.py` enrolls
-the host, heartbeats, claims turns up to its limit, and drains on SIGTERM;
-`host_capabilities.py` holds what it advertises and the proof each claim
-carries. Each claimed turn runs in a child process (`turn_child.py`) that
-preflights, answers the handover, and then runs the attempt under the lease
-`attempt_lease.py` renews: `group_reservation.py` checks and reserves its
-sandbox group, `shared_live_attempt.py` runs it as a sequence of stages, and
-`turn_stream.py` relays the admitted turn. `source_preparation.py` is the
-trusted Git work on a chat's source outside the sandbox. `claimed_job.py`
+The host package groups its modules by concern. Paths below are relative to
+`cloud_agent_host/`; a module named without a directory sits at its top level.
+
+| Package | Owns |
+|---|---|
+| `service/` | The long-lived host service: enrollment, heartbeats, the claim loop, draining, what the host advertises, and starting each turn's child |
+| `turn/` | One claimed turn in its child process: reservation, source preparation, the attempt's stages, and the stream it relays |
+| `container/` | The Docker/Kata boundary: retained chat containers, their models and markers, and the exact-container identity gate |
+| `network/` | The sandbox network: this deployment's host rules, per-group bridges, and the workloads that depend on them |
+| `supervisor/` | The shared-session supervisor: one group's lifecycle, registration and reconciliation, its members and their native sessions |
+| `archive/` | Sandbox archives, restorable checkpoints, and verified deletion of stopped sandboxes |
+| `observe/` | The guest observer, member execution windows, tool windows, and Docker resource samples |
+| `member_setup/` | What the trusted host installs into a member before its CLI starts: plugins, MCP helpers, runtimes, trusted files |
+| `launch/`, `runtimes/`, `manager_api/` | Launch facets, the Agent CLI adapters, and the Sandbox Manager's HTTP layer |
+
+The top level keeps the process entry points (`runner.py`, `sandbox_manager.py`,
+`candidate_check.py`, and the `host_capacity` and `storage_attestation`
+commands deployment runs inside a runner) and the modules several packages
+share, such as `claimed_job.py`, `control_plane_client.py`, `drivers.py`,
+`resident_transport.py` and `session_lifecycle.py`.
+
+`runner.py` is the command line. The host service in `service/host_service.py`
+enrolls the host, heartbeats, claims turns up to its limit, and drains on
+SIGTERM; `service/host_capabilities.py` holds what it advertises and the proof
+each claim carries. Each claimed turn runs in a child process
+(`turn/turn_child.py`) that preflights, answers the handover, and then runs the
+attempt under the lease `service/attempt_lease.py` renews:
+`turn/group_reservation.py` checks and reserves its sandbox group,
+`turn/shared_live_attempt.py` runs it as a sequence of stages, and
+`turn/turn_stream.py` relays the admitted turn. `turn/source_preparation.py` is
+the trusted Git work on a chat's source outside the sandbox. `claimed_job.py`
 defines claim payloads and lease errors; `control_plane_client.py` owns
 attempt-scoped worker HTTP calls, request deadlines, and event replay. The
 client queues a turn's events on the ordered sender in `event_sender.py`, which
 uploads them in batches.
 
-`chat_sandbox_models.py` holds retained-container specs, inspection/status
-values, ownership labels, and identity bounds. Group bridges, relay membership,
-Kata guest route synchronization, and network proof/release live in the composed
-`chat_sandbox_network.py` component. It consumes a narrow container protocol;
-exact container identity, bounded exec, and fail-stop operations stay with the
-manager. Existing manager network entry points delegate to that owner. Network
-snapshots remain scoped to one operation, and operational log names are stable.
-`chat_sandbox.py` manages retained groups and their members; `sandbox.py` owns the container/process
-boundary. The Sandbox Manager and session supervisor coordinate native
-sessions and workspace operations. The supervisor's metadata lock protects
-in-memory ownership only. Stop, orphan recovery, and archive deletion reserve
-one group's lifecycle before Docker or marker I/O, then revalidate its group,
-member, container, and lifecycle identities before accepting the result. Other
-groups remain available; failed checks release their temporary reservation,
-while durable archive and native-flush barriers remain in force. Public sandbox model imports through
+`container/chat_sandbox_models.py` holds retained-container specs,
+inspection/status values, ownership labels, and identity bounds. Group bridges,
+relay membership, Kata guest route synchronization, and network proof/release
+live in the composed `network/chat_sandbox_network.py` component. It consumes a
+narrow container protocol; exact container identity, bounded exec, and
+fail-stop operations stay with the manager. Existing manager network entry
+points delegate to that owner. Network snapshots remain scoped to one
+operation, and operational log names are stable.
+`container/chat_sandbox.py` manages retained groups and their members;
+`container/sandbox.py` owns the container/process boundary. The Sandbox Manager
+and session supervisor coordinate native sessions and workspace operations. The
+supervisor's metadata lock protects in-memory ownership only. Stop, orphan
+recovery, and archive deletion reserve one group's lifecycle before Docker or
+marker I/O, then revalidate its group, member, container, and lifecycle
+identities before accepting the result. Other groups remain available; failed
+checks release their temporary reservation, while durable archive and
+native-flush barriers remain in force. Public sandbox model imports through
 `chat_sandbox` continue to work.
 
 The runtime adapters are a package under `cloud_agent_host/runtimes/`, with one
@@ -182,7 +206,7 @@ journals native Forks. It does not branch on the CLI to launch one: each
 CLI's `member` module defines that CLI's launch steps (its member config or
 private home, trusted helpers, plugin installer, where platform instructions
 go, and Claude's commit attribution), and the factory calls them. Native Fork
-still branches on the CLI there. `member_homes.py` holds the private provider homes that Codex, OpenCode
+still branches on the CLI there. `member_setup/member_homes.py` holds the private provider homes that Codex, OpenCode
 and Kilo members use.
 
 Existing callers use `cloud_agent_host.runtimes`; the package explicitly

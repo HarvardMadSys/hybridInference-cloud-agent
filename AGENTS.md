@@ -62,13 +62,13 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/mcp/runtime.py` | Process-local MCP host, fenced session maintenance, and shutdown |
 | `apps/backend/cloud_agent/source_control/` (`github_relay_policy.py`, `source_control.py`), `api/github_relay.py` | The GitHub relay and its policy, and the GitHub/GitLab credentials behind them |
 | `apps/backend/cloud_agent/schemas/admin_observability.py` | The cross-user admin reading surface and its audit |
-| `apps/backend/cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
-| `apps/backend/cloud_agent_host/host_service.py`, `turn_child.py` | The host service that claims, heartbeats and drains on SIGTERM, and the child process that executes one turn (`runner.py` is their command line) |
+| `apps/backend/cloud_agent_host/service/enrollment.py` | Host registration and the persisted host credential |
+| `apps/backend/cloud_agent_host/service/host_service.py`, `turn/turn_child.py` | The host service that claims, heartbeats and drains on SIGTERM, and the child process that executes one turn (`runner.py` is their command line) |
 | `apps/backend/cloud_agent_host/claimed_job.py`, `control_plane_client.py` | Claim payloads, lease errors, and attempt-scoped worker HTTP calls |
-| `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
-| `apps/backend/cloud_agent_host/chat_sandbox_network.py` | Per-group bridge and relay lifecycle, guest network proof, and exact network release |
-| `apps/backend/cloud_agent_host/chat_sandbox_models.py` | Retained-container specs, inspection/status values, and identity vocabulary |
-| `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
+| `apps/backend/cloud_agent_host/container/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
+| `apps/backend/cloud_agent_host/network/chat_sandbox_network.py` | Per-group bridge and relay lifecycle, guest network proof, and exact network release |
+| `apps/backend/cloud_agent_host/container/chat_sandbox_models.py` | Retained-container specs, inspection/status values, and identity vocabulary |
+| `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
 | `apps/backend/cloud_agent_host/runtimes/`, `cloud_agent_shared/runtime_catalog.py`, `shared_protocol.py` | The five Agent CLI adapters, shared discovery facts, and version pins |
 
 [Code structure](docs/developer/code-structure.md) maps module responsibilities and
@@ -221,7 +221,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   ([design](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
   Each group gets its own routable bridge, and before anything joins one the
   host installs this deployment's nftables table (`cloud_agent_shared/egress.py`
-  renders it, `cloud_agent_host/network_guard.py` installs and verifies it):
+  renders it, `cloud_agent_host/network/network_guard.py` installs and verifies it):
   - public IPv4 on TCP 80/443, so curl, pip, npm and Git over HTTPS work;
   - the one named resolver on TCP/UDP 53;
   - the MCP relay's service port on the group's own bridge, which reaches the
