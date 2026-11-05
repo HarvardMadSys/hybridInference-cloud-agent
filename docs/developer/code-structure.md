@@ -90,6 +90,10 @@ do not own service startup or shutdown.
 The storage assembly exposes capabilities such as `store.host_pool` and
 `store.pending_messages`. Callers type against the capabilities they use. They
 do not import Postgres repositories or reach through the assembly to its pool.
+Outside `storage/`, the assembly is the only storage module a caller imports.
+A port imports only `domain/`, `schemas/`, `cloud_agent_shared`, other ports and
+libraries, because its caller and its implementation both depend on whatever it
+names: a type a new port needs moves to `domain/` or `schemas/` first.
 Application flows may use the existing FastAPI exception contracts; moving
 files does not imply those interfaces have become framework-independent.
 

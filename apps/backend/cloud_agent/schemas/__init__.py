@@ -161,6 +161,7 @@ from cloud_agent.schemas.events import (
 )
 from cloud_agent.schemas.goals import (
     GoalClearedResponse,
+    GoalInput,
     GoalRequest,
     GoalResponse,
     GoalRevisionRequest,
@@ -226,6 +227,7 @@ from cloud_agent.schemas.messages import (
     PendingMessageState,
     QueuePausedReason,
 )
+from cloud_agent.schemas.model_preferences import ModelPreferenceView
 from cloud_agent.schemas.resources import (
     MAX_TRAJECTORY_TIMING_ATTEMPTS,
     MAX_TRAJECTORY_TIMING_JOBS,
@@ -295,6 +297,7 @@ from cloud_agent.schemas.teams import (
     TeamResponse,
     TransferOwnershipRequest,
 )
+from cloud_agent.schemas.user_profile import ProfileView
 from cloud_agent.schemas.workers import (
     MAX_LEASE_TTL_SECONDS,
     MAX_WORK_WAIT_SECONDS,
@@ -490,6 +493,7 @@ __all__ = [
     "GitHubConnectRequest",
     "GitHubConnectionResponse",
     "GoalClearedResponse",
+    "GoalInput",
     "GoalRequest",
     "GoalResponse",
     "GoalRevisionRequest",
@@ -520,6 +524,7 @@ __all__ = [
     "McpConnectionSummary",
     "McpIntegrationResponse",
     "ModelConnectionOption",
+    "ModelPreferenceView",
     "OAuthConnectRequest",
     "OkResponse",
     "OwnJoinRequestListResponse",
@@ -534,6 +539,7 @@ __all__ = [
     "PhoneSignupRequest",
     "PhoneVerifyRequest",
     "ProcessObservation",
+    "ProfileView",
     "PurgedResponse",
     "QueuePausedReason",
     "ReleaseHostDrainFenceRequest",

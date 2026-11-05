@@ -18,7 +18,6 @@ from cloud_agent.user_profile import (
     MAX_PROFILE_REQUEST_BYTES,
     ProfileConflict,
     ProfileResponse,
-    ProfileView,
     UpdateProfile,
     sanitize_profile_image,
 )
@@ -27,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from cloud_agent.ports.user_profile import UserProfileRepository
+    from cloud_agent.schemas.user_profile import ProfileView
 
 
 class _ProfileRoute(SensitiveRoute):

@@ -11,6 +11,8 @@ import warnings
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from cloud_agent.schemas.user_profile import ProfileView
+
 MAX_PROFILE_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_PROFILE_IMAGE_DATA_URL = 4 * ((MAX_PROFILE_IMAGE_BYTES + 2) // 3) + 32
 MAX_PROFILE_REQUEST_BYTES = MAX_PROFILE_IMAGE_DATA_URL + 4096
@@ -20,15 +22,6 @@ _IMAGE_FORMATS = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"
 
 class ProfileConflict(ValueError):
     """The profile changed after the owner opened its editor."""
-
-
-class ProfileView(BaseModel):
-    """An owner's saved display fields and their current revision."""
-
-    first_name: str = ""
-    last_name: str = ""
-    image_data_url: str | None = None
-    revision: int = 0
 
 
 class ProfileResponse(ProfileView):

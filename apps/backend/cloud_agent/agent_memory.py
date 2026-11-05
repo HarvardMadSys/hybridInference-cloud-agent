@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003 - Pydantic resolves the view schema.
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -82,17 +81,6 @@ class AgentMemoryDisabled(ValueError):
 
 class AgentMemoryTaskEnded(ValueError):
     """The task's attempt is no longer the running one, so it may not write."""
-
-
-@dataclass(frozen=True)
-class MemoryTask:
-    """The running attempt an agent writes memory from, as its token names it."""
-
-    user_id: str
-    job_id: str
-    attempt_id: int
-    lease_generation: int
-    residency_generation: int | None = None
 
 
 def describe(content: str) -> str:

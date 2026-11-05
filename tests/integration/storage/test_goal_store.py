@@ -29,10 +29,10 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401
 )
 from tests.support.follow_ups import append_follow_up
 
-from cloud_agent.goals.decision import GoalAction
-from cloud_agent.goals.models import GoalConflict, GoalInput
-from cloud_agent.goals.report import GoalReportEnvelope
+from cloud_agent.domain.goals import GoalAction, GoalReportEnvelope
+from cloud_agent.goals.models import GoalConflict
 from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
+from cloud_agent.schemas.goals import GoalInput
 from cloud_agent.settings import integer_setting, number_setting
 from cloud_agent.storage._sql.goals import arm_finish_wakeup
 from cloud_agent.storage.repositories.goal_wakeups import _WAKEUP_COLUMNS
@@ -89,7 +89,7 @@ async def _create_job_with_goal(store, *, objective: str = "ship it", **override
     ``set_goal``: that is the path where the thread is created already owning a
     goal, and it is the one whose counters have to line up.
     """
-    from cloud_agent.goals.models import GoalInput
+    from cloud_agent.schemas.goals import GoalInput
 
     return await _create_job(store, goal=GoalInput(objective=objective, max_rounds=5), **overrides)
 

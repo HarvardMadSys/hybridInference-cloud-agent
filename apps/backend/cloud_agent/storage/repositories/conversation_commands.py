@@ -40,7 +40,7 @@ from cloud_agent.storage.repositories.goals import new_goal_id
 from cloud_agent.task_titles import fallback_title
 
 if TYPE_CHECKING:
-    from cloud_agent.goals.models import GoalInput
+    from cloud_agent.schemas.goals import GoalInput
 
 
 def _goal_round_metadata(inherited: Any) -> dict[str, Any]:

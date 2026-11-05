@@ -13,16 +13,10 @@ really created.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import TYPE_CHECKING
 
-
-class ModelPreferenceView(BaseModel):
-    """The model and connection the owner's newest turn ran on."""
-
-    last_model: str | None = None
-    #: The owner connection ``last_model`` ran on. Null for a turn from before
-    #: model connections, which no new task starts on.
-    last_model_connection_id: str | None = None
+if TYPE_CHECKING:
+    from cloud_agent.schemas.model_preferences import ModelPreferenceView
 
 
 def resolve_connection_default(

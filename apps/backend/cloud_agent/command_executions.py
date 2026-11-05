@@ -45,6 +45,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.admin_observability import decode_cursor, encode_cursor
+from cloud_agent.domain.command_executions import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
+    CommandFilter,
+    CommandSort,
+)
 
 #: A command at or over this many milliseconds is "slow".
 #:
@@ -76,8 +80,6 @@ DEFAULT_COMMAND_PAGE = 50
 MAX_COMMAND_SEARCH = 200
 
 CommandStatus = Literal["running", "completed", "failed", "unknown"]
-CommandFilter = Literal["all", "failed", "slow", "background"]
-CommandSort = Literal["latest", "slowest"]
 DurationBasis = Literal["recorded", "events"]
 ParseBasis = Literal["executable", "shell"]
 CUMULATIVE_BASIS = Literal["recorded", "mixed", "events", "none"]

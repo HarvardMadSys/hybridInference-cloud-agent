@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     import asyncpg
 
-    from cloud_agent.agent_memory import MemoryTask
+    from cloud_agent.domain.agent_memory import MemoryTask
 
 _COLUMNS = (
     "id, repo, content, description, status, origin, source_job_ids, version, "

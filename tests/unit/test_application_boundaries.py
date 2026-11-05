@@ -68,6 +68,135 @@ def test_domain_and_ports_do_not_import_storage_or_http_frameworks(layer: str) -
     assert not offenders, f"{layer} imports an adapter or framework: {offenders}"
 
 
+#: What a port may name besides the standard library and third-party packages:
+#: vocabulary, wire models, shared contracts and other ports.
+PORT_DEPENDENCIES = (
+    "cloud_agent.domain",
+    "cloud_agent.schemas",
+    "cloud_agent.ports",
+    "cloud_agent_shared",
+)
+#: First-party packages, of which a port may import only the ones above.
+FIRST_PARTY = ("cloud_agent", "cloud_agent_host", "cloud_agent_shared")
+
+#: Ports that still name a type outside the packages above, and why it has not
+#: moved yet. Each is ``(port module, imported module)``; an entry is removed
+#: when its type moves, and a stale one fails the test below.
+PORT_IMPORT_EXCEPTIONS = {
+    # A value, not a type: the default retention window, which the protocol
+    # states and its repository applies.
+    ("ports/host_capacity.py", "cloud_agent.capacity_protocol"),
+    # Each of the following names part of a response-model tree whose siblings
+    # live in the same module; moving the one a port names would split the
+    # tree. The code-structure plan moves these modules' models to schemas/
+    # whole, one pull request per module.
+    ("ports/admin_queries.py", "cloud_agent.admin_conversations"),
+    ("ports/admin_queries.py", "cloud_agent.admin_database"),
+    ("ports/admin_queries.py", "cloud_agent.admin_observability"),
+    ("ports/admin_queries.py", "cloud_agent.admin_sandbox_inventory"),
+    ("ports/admin_queries.py", "cloud_agent.admin_sandboxes"),
+    ("ports/context_queries.py", "cloud_agent.context.context_dna"),
+    ("ports/context_queries.py", "cloud_agent.context.context_insights"),
+    ("ports/context_queries.py", "cloud_agent.context.context_request"),
+    ("ports/file_activity.py", "cloud_agent.file_activity.models"),
+    ("ports/owner_usage.py", "cloud_agent.usage.owner_usage"),
+}
+
+
+def _port_imports() -> dict[str, set[str]]:
+    """Every port module's first-party imports, keyed by its path under ``cloud_agent``."""
+    found = {}
+    for path in sorted((CONTROL / "ports").rglob("*.py")):
+        targets = file_imports(path, root=CONTROL, package_name="cloud_agent")
+        found[path.relative_to(CONTROL).as_posix()] = {
+            target
+            for target in targets
+            if any(matches_package(target, package) for package in FIRST_PARTY)
+        }
+    assert found, "no port modules found"
+    return found
+
+
+def _excepted(port: str, target: str) -> bool:
+    return any(
+        port == excepted and matches_package(target, module)
+        for excepted, module in PORT_IMPORT_EXCEPTIONS
+    )
+
+
+def test_ports_import_only_vocabulary_schemas_and_shared_contracts() -> None:
+    """A port names the values it trades in; it does not depend on a feature's code.
+
+    A port is what a caller and an implementation both import. Whatever it
+    names, both of them depend on, so a port that imports a feature module makes
+    every repository behind it depend on that feature as well.
+    """
+    offenders = []
+    for port, targets in _port_imports().items():
+        forbidden = sorted(
+            target
+            for target in targets
+            if not any(matches_package(target, allowed) for allowed in PORT_DEPENDENCIES)
+            and not _excepted(port, target)
+        )
+        if forbidden:
+            offenders.append(f"{port}: {forbidden}")
+    assert not offenders, f"a port imports outside domain/, schemas/ and shared: {offenders}"
+
+
+def test_every_port_import_exception_is_still_needed() -> None:
+    """An exception whose import is gone is removed, so the list only shrinks."""
+    imports = _port_imports()
+    stale = sorted(
+        (port, module)
+        for port, module in PORT_IMPORT_EXCEPTIONS
+        if not any(matches_package(target, module) for target in imports.get(port, ()))
+    )
+    assert not stale, f"port import exceptions no longer needed: {stale}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from cloud_agent.goals.models import GoalInput",
+        "if TYPE_CHECKING:\n    from cloud_agent.agent_memory import MemoryTask",
+        "from ..usage import owner_usage",
+        "import cloud_agent_host.runner",
+        "def deferred():\n    from ..storage import assembly",
+    ],
+)
+def test_port_import_scanner_refuses_feature_modules(source: str) -> None:
+    """Negative controls: type-only, relative and deferred imports are all seen."""
+    targets = imported_modules(source, package="cloud_agent.ports")
+    assert any(
+        any(matches_package(target, package) for package in FIRST_PARTY)
+        and not any(matches_package(target, allowed) for allowed in PORT_DEPENDENCIES)
+        for target in targets
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from cloud_agent.domain.goals import GoalAction",
+        "if TYPE_CHECKING:\n    from ..schemas.goals import GoalInput",
+        "from .errors import PortError",
+        "from cloud_agent_shared.shared_protocol import GOAL_REPORT_CAPABILITY",
+        "from pydantic import BaseModel",
+        "from collections.abc import AsyncIterator",
+        "import cloud_agent_shared_extra",
+    ],
+)
+def test_port_import_scanner_allows_vocabulary_and_libraries(source: str) -> None:
+    """Domain, schemas, shared contracts, other ports and libraries are all fine."""
+    targets = imported_modules(source, package="cloud_agent.ports")
+    assert not any(
+        any(matches_package(target, package) for package in FIRST_PARTY)
+        and not any(matches_package(target, allowed) for allowed in PORT_DEPENDENCIES)
+        for target in targets
+    )
+
+
 @pytest.mark.parametrize("layer", ["application", "domain"])
 def test_application_and_domain_do_not_import_web_frameworks(layer: str) -> None:
     """Flows and rules refuse with domain errors; only the API maps them onto HTTP.

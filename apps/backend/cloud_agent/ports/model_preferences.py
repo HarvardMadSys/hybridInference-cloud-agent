@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from cloud_agent.model_preference import ModelPreferenceView
+    from cloud_agent.schemas.model_preferences import ModelPreferenceView
 
 
 class ModelPreferenceRepository(Protocol):

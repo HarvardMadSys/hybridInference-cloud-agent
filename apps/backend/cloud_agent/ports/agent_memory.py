@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from cloud_agent.agent_memory import MemoryTask
+    from cloud_agent.domain.agent_memory import MemoryTask
 
 
 class AgentMemoryRepository(Protocol):

@@ -17,12 +17,12 @@ from cloud_agent.agent_memory import (
     AgentMemoryFull,
     AgentMemoryNotFound,
     AgentMemoryTaskEnded,
-    MemoryTask,
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent_shared.shared_protocol import PLATFORM_MCP_SERVER_PREFIX
 
 if TYPE_CHECKING:
+    from cloud_agent.domain.agent_memory import MemoryTask
     from cloud_agent.ports.agent_memory import AgentMemoryRepository
 
 logger = get_logger(__name__)
