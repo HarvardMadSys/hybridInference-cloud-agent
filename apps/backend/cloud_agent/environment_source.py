@@ -9,7 +9,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import HTTPException
 
-from cloud_agent.github_app import AppNotInstalled, GitHubAppError
+from cloud_agent.source_control.github_app import AppNotInstalled, GitHubAppError
 
 
 async def read_repository_token(repo: str, credentials: Any) -> str | None:
@@ -27,8 +27,8 @@ async def read_repository_token(repo: str, credentials: Any) -> str | None:
 
 
 async def _get(repo: str, suffix: str, credentials: Any) -> dict[str, Any]:
-    from cloud_agent.github_app import GITHUB_API
     from cloud_agent.settings import setting_env
+    from cloud_agent.source_control.github_app import GITHUB_API
 
     api_base = (
         getattr(getattr(credentials, "config", None), "api_base", None)

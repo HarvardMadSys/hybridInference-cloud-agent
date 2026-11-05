@@ -37,10 +37,10 @@ import asyncio
 import re
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.github_app import AppNotInstalled, UserAuthorizationRevoked
-from cloud_agent.github_user_token import forget_revoked_token, user_access_token
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
+from cloud_agent.source_control.github_app import AppNotInstalled, UserAuthorizationRevoked
+from cloud_agent.source_control.github_user_token import forget_revoked_token, user_access_token
 
 if TYPE_CHECKING:
     from cloud_agent.ports import SourceControlRepository

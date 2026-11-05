@@ -16,7 +16,7 @@ from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
     validate_sandbox_manager_url,
 )
-from cloud_agent.source_control import SourceControlCipher
+from cloud_agent.source_control.source_control import SourceControlCipher
 
 
 @pytest.fixture(autouse=True)

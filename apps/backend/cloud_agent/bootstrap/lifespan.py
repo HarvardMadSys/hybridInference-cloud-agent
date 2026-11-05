@@ -177,7 +177,7 @@ def _build_source_control(app: FastAPI) -> None:
     failed to load is loaded again (issue #47) — so what is attached is the
     runtime, never a client captured at startup.
     """
-    from cloud_agent.source_control_runtime import SourceControlRuntime
+    from cloud_agent.source_control.source_control_runtime import SourceControlRuntime
 
     app.state.source_control = SourceControlRuntime.from_env()
 

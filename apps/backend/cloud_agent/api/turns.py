@@ -69,7 +69,7 @@ from cloud_agent.schemas import (
     AgentThreadQuestionsResponse,
     AgentThreadQueueResponse,
 )
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.

@@ -26,8 +26,8 @@ from cloud_agent.application.job_admission import (
     resolve_skill_selection,
 )
 from cloud_agent.domain.errors import Refused
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.schemas import RESET_REASONING_EFFORT
+from cloud_agent.source_control.entitlement import RepoNotAllowed, require_entitled_repo
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (

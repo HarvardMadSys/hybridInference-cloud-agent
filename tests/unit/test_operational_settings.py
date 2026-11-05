@@ -8,8 +8,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import capacity_history, entitlement, operational_health, settings
+from cloud_agent import capacity_history, operational_health, settings
 from cloud_agent.api import mcp_connections
+from cloud_agent.source_control import entitlement
 from cloud_agent.storage.repositories import host_pool
 
 

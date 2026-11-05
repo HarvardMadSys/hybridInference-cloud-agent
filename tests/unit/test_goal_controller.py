@@ -590,7 +590,7 @@ async def test_repository_outages_preserve_goal_scheduling_retries(monkeypatch):
     """An unavailable permission lookup waits without spending the retry budget."""
     from unittest.mock import AsyncMock
 
-    from cloud_agent.entitlement import RepoAccessUnavailable
+    from cloud_agent.source_control.entitlement import RepoAccessUnavailable
 
     store = FakeStore(goal=goal_row(), turns=[turn(id="job-1")])
     row = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
@@ -1096,7 +1096,7 @@ async def test_an_unloaded_github_app_leaves_the_wakeup_unclaimed_until_it_loads
     before the claim — for more passes than a real failure is allowed — and the
     same wakeup is consumed once the App loads.
     """
-    from cloud_agent.source_control_runtime import SourceControlUnavailable
+    from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 
     store = FakeStore(goal=goal_row(), turns=[turn(id="job-1", input_seq_at_create=1)], input_seq=1)
     wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")

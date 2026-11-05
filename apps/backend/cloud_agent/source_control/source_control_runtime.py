@@ -41,10 +41,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from weakref import WeakSet
 
-from cloud_agent.github_app import AppConfig, GitHubAppCredentials, GitHubAppError, build_app_jwt
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, settings_environment
-from cloud_agent.source_control import (
+from cloud_agent.source_control.github_app import (
+    AppConfig,
+    GitHubAppCredentials,
+    GitHubAppError,
+    build_app_jwt,
+)
+from cloud_agent.source_control.source_control import (
     ENV_ENCRYPTION_KEY,
     GitLabOAuthClient,
     GitLabOAuthConfig,
@@ -86,8 +91,8 @@ _GITLAB_ENV_KEYS = (
 class SourceControlUnavailable(Exception):
     """A configured provider this process could not load, and is retrying.
 
-    Deliberately not :class:`~cloud_agent.entitlement.RepoNotAllowed` and not a
-    :class:`~cloud_agent.source_control.SourceControlError`: every caller that
+    Deliberately not :class:`~cloud_agent.source_control.entitlement.RepoNotAllowed` and not a
+    :class:`~cloud_agent.source_control.source_control.SourceControlError`: every caller that
     catches one of those would turn a deployment fault into the user's problem.
     """
 

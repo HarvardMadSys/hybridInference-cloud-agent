@@ -171,7 +171,7 @@ async def test_unrelated_job_validation_keeps_field_detail_and_internal_errors_s
 async def test_only_environment_encryption_errors_use_the_environment_handler():
     from cloud_agent.app import create_app
     from cloud_agent.environments import EnvironmentEncryptionError
-    from cloud_agent.source_control import SourceControlError
+    from cloud_agent.source_control.source_control import SourceControlError
 
     app = create_app()
 

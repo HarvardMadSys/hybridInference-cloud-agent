@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository,
     )
-    from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.source_control.source_control_runtime import GitHubAppSource
 
 logger = get_logger("cloud_agent.app")
 

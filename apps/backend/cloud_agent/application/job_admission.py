@@ -26,12 +26,10 @@ from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.model_connections import ModelConnectionUnusable
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.domain.ssh_servers import SshServerUnavailable
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.execution_profiles import (
     RESERVED_EXECUTION_METADATA_KEYS,
     default_execution_profile,
 )
-from cloud_agent.github_app import CommitNotOnBranch
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.models import ALIAS_PATTERN, ToolPolicy
@@ -42,6 +40,8 @@ from cloud_agent.schemas import (
 )
 from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
+from cloud_agent.source_control.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.source_control.github_app import CommitNotOnBranch
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.runtime_catalog import (

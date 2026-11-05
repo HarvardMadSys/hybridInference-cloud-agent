@@ -14,8 +14,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from cloud_agent.domain.errors import Unavailable
-from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.source_control.github_app import AppNotInstalled
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AttemptCommands

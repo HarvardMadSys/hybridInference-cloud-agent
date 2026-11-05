@@ -36,7 +36,6 @@ from cloud_agent.api.deps import (
 from cloud_agent.application.job_admission import create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
-from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
@@ -59,7 +58,8 @@ from cloud_agent.schemas import (
     GoalResponse,
     GoalRevisionRequest,
 )
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.entitlement import REPO_PATTERN
+from cloud_agent.source_control.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
 from cloud_agent.terminal_coordination import resume_settled_terminal
@@ -80,7 +80,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
-    from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.source_control.source_control_runtime import GitHubAppSource
 
 
 from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute

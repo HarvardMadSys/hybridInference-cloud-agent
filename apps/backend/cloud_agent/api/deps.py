@@ -40,7 +40,7 @@ from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.source_control_runtime import (
     GitHubAppState,
     LoadStatus,
     SourceControlRuntime,
@@ -246,7 +246,7 @@ def get_agent_gitlab_oauth(
 
     ``None`` when GitLab is unconfigured or failed to load, as before: GitLab is
     not offered to connect, and it is never retried (see
-    :mod:`cloud_agent.source_control_runtime`).
+    :mod:`cloud_agent.source_control.source_control_runtime`).
     """
     return None if source_control is None else source_control.gitlab.client
 

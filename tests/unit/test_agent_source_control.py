@@ -10,9 +10,9 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-import cloud_agent.source_control as source_control
+import cloud_agent.source_control.source_control as source_control
 from cloud_agent.settings import number_setting
-from cloud_agent.source_control import (
+from cloud_agent.source_control.source_control import (
     GitLabOAuthClient,
     GitLabOAuthConfig,
     OAuthStateError,
@@ -597,7 +597,9 @@ async def test_a_lost_gitlab_refresh_returns_the_replacement_not_its_own_token()
 async def test_a_lost_gitlab_refresh_is_unavailable_when_nothing_valid_is_stored(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("cloud_agent.source_control._GITLAB_REFRESH_WAIT_INTERVAL_S", 0)
+    monkeypatch.setattr(
+        "cloud_agent.source_control.source_control._GITLAB_REFRESH_WAIT_INTERVAL_S", 0
+    )
     cipher = SourceControlCipher("server-secret")
     store = MemoryStore()
     store.reject_write = True
@@ -630,7 +632,9 @@ async def test_a_lost_gitlab_refresh_is_unavailable_when_nothing_valid_is_stored
 async def test_a_gitlab_refresh_without_the_lease_is_unavailable_once_the_token_lapses(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("cloud_agent.source_control._GITLAB_REFRESH_WAIT_INTERVAL_S", 0)
+    monkeypatch.setattr(
+        "cloud_agent.source_control.source_control._GITLAB_REFRESH_WAIT_INTERVAL_S", 0
+    )
     cipher = SourceControlCipher("server-secret")
     store = MemoryStore()
     store.lease_held = True

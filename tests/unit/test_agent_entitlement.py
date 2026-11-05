@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from cloud_agent.entitlement import (
+from cloud_agent.source_control.entitlement import (
     RepoNotAllowed,
     allowed_repos,
     repo_is_allowed,

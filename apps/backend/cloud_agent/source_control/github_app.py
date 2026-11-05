@@ -35,10 +35,10 @@ import httpx
 import jwt
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from cloud_agent.github_cache import RepositoryCache
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
-from cloud_agent.source_control import SourceControlCipher
+from cloud_agent.source_control.github_cache import RepositoryCache
+from cloud_agent.source_control.source_control import SourceControlCipher
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

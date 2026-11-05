@@ -29,7 +29,7 @@ from cloud_agent.owner_access import (
     AgentAccessUnavailable,
     owner_may_use_agent,
 )
-from cloud_agent.source_control_runtime import SourceControlUnavailable
+from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
-    from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.source_control.source_control_runtime import GitHubAppSource
 
 logger = get_logger(__name__)
 

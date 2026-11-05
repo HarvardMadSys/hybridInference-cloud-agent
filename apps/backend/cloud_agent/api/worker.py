@@ -48,7 +48,6 @@ from cloud_agent.application.ssh_servers import push_ssh_access
 from cloud_agent.application.turn_claim import ClaimRefusal, hand_over_claim
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.domain.execution import QUEUED, RUNNING, TERMINAL_STATES
-from cloud_agent.git_identity import residency_github_fields
 from cloud_agent.goals.controller import continue_after_finish
 from cloud_agent.goals.report import (
     GoalReportEnvelope,
@@ -95,7 +94,8 @@ from cloud_agent.schemas import (
     WorkerWaitRequest,
     WorkerWaitResponse,
 )
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.git_identity import residency_github_fields
+from cloud_agent.source_control.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
 from cloud_agent.tokens import (

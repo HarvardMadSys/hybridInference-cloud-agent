@@ -293,7 +293,7 @@ async def test_claim_delivers_the_threads_plugins(claim, monkeypatch):
 
 
 async def test_an_unavailable_repository_lookup_delays_the_claim(claim, monkeypatch):
-    from cloud_agent.entitlement import RepoAccessUnavailable
+    from cloud_agent.source_control.entitlement import RepoAccessUnavailable
 
     async def unavailable(*args: Any, **kwargs: Any) -> None:
         raise RepoAccessUnavailable("GitHub is temporarily unavailable")
@@ -364,7 +364,7 @@ async def test_an_unconfirmed_agent_access_hands_the_job_back(claim, owners):
 @pytest.mark.parametrize("refusal", ["not_allowed", "unavailable"])
 async def test_a_repository_refusal_is_decided_before_any_credential(claim, monkeypatch, refusal):
     """A job that cannot run reads no key: ended or delayed, no credential is in play."""
-    from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed
+    from cloud_agent.source_control.entitlement import RepoAccessUnavailable, RepoNotAllowed
 
     async def refused(*args: Any, **kwargs: Any) -> None:
         if refusal == "not_allowed":

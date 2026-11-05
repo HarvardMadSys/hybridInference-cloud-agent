@@ -20,7 +20,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from cloud_agent.github_app import (
+from cloud_agent.source_control.github_app import (
     AppConfig,
     GitHubAppCredentials,
     GitHubAppError,
@@ -130,7 +130,7 @@ def test_jwt_signing_parses_the_key_once(keypair, monkeypatch):
     """
     import jwt.algorithms
 
-    import cloud_agent.github_app as github_app_module
+    import cloud_agent.source_control.github_app as github_app_module
 
     calls = 0
 
@@ -159,7 +159,7 @@ def test_a_second_config_with_the_same_key_parses_again(keypair, monkeypatch):
     a memo computed for an earlier key."""
     import jwt.algorithms
 
-    import cloud_agent.github_app as github_app_module
+    import cloud_agent.source_control.github_app as github_app_module
 
     calls = 0
 
@@ -393,7 +393,7 @@ async def test_a_reinstalled_app_is_looked_up_again_rather_than_minted_against_f
 @pytest.mark.parametrize("still_named", [True, False])
 async def test_an_installation_gone_for_good_is_settled_not_an_outage(config, still_named):
     """A mint refused again after a fresh lookup means the App does not cover the repo."""
-    from cloud_agent.github_app import AppNotInstalled
+    from cloud_agent.source_control.github_app import AppNotInstalled
 
     lookups: list[int] = []
 
@@ -412,7 +412,7 @@ async def test_an_installation_gone_for_good_is_settled_not_an_outage(config, st
 
 
 async def test_a_repository_s_installation_is_not_remembered_forever(config, monkeypatch):
-    import cloud_agent.github_app as github_app
+    import cloud_agent.source_control.github_app as github_app
 
     lookups: list[int] = []
 
@@ -565,7 +565,7 @@ async def test_a_token_handed_to_a_holder_is_its_own(config):
 
 async def test_holder_token_cache_is_bounded_lru(config, monkeypatch):
     """Holder churn cannot retain a token for every conversation ever seen."""
-    import cloud_agent.github_app as github_app
+    import cloud_agent.source_control.github_app as github_app
 
     monkeypatch.setattr(github_app, "_INSTALLATION_TOKEN_CACHE_MAX", 2)
     minted: list[str] = []
@@ -589,7 +589,7 @@ async def test_holder_token_cache_is_bounded_lru(config, monkeypatch):
 
 async def test_cache_access_prunes_expired_token_strings(config, monkeypatch):
     """A cache hit also releases expired slots that belong to other holders."""
-    import cloud_agent.github_app as github_app
+    import cloud_agent.source_control.github_app as github_app
 
     now = [1_000_000.0]
     monkeypatch.setattr(github_app.time, "time", lambda: now[0])
@@ -611,7 +611,7 @@ async def test_cache_access_prunes_expired_token_strings(config, monkeypatch):
 
 async def test_failed_mint_still_prunes_expired_token_strings(config, monkeypatch):
     """A GitHub outage cannot keep already expired holder secrets resident."""
-    import cloud_agent.github_app as github_app
+    import cloud_agent.source_control.github_app as github_app
 
     now = [1_000_000.0]
     monkeypatch.setattr(github_app.time, "time", lambda: now[0])
@@ -684,7 +684,7 @@ async def test_cross_thread_retirement_clears_tokens_on_the_owning_loop(config, 
 
 async def test_an_expired_holder_s_token_is_not_kept(config, monkeypatch):
     """A slot per conversation must not grow with every conversation ever held."""
-    import cloud_agent.github_app as github_app
+    import cloud_agent.source_control.github_app as github_app
 
     now = [1_000_000.0]
     monkeypatch.setattr(github_app.time, "time", lambda: now[0])
@@ -709,7 +709,7 @@ async def test_an_uninstalled_repository_is_distinguishable_from_an_outage(confi
     Collapsing the two is what lets a momentary outage be handled as "no
     credential needed" and terminally fail a private repository's job.
     """
-    from cloud_agent.github_app import AppNotInstalled
+    from cloud_agent.source_control.github_app import AppNotInstalled
 
     def not_found(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"message": "Not Found"})
@@ -854,7 +854,7 @@ async def test_a_ref_to_resolve_can_only_ever_name_a_ref(config):
     ],
 )
 def test_ref_names_follow_git_s_own_rules(ref, accepted):
-    from cloud_agent.github_app import is_ref_name
+    from cloud_agent.source_control.github_app import is_ref_name
 
     assert is_ref_name(ref) is accepted
 
@@ -1103,7 +1103,7 @@ async def test_a_token_that_does_not_expire_has_nothing_to_renew(config):
 
 
 async def test_renewing_spends_the_refresh_token_with_the_app_s_own_secret(config):
-    from cloud_agent.github_app import UserAuthorizationRevoked
+    from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
     sent = []
     request_timeouts = []
@@ -1135,7 +1135,7 @@ async def test_renewing_spends_the_refresh_token_with_the_app_s_own_secret(confi
 
 async def test_github_down_while_renewing_is_not_a_revoked_authorization(config):
     """A 502 must not make the user reconnect: the stored token stays."""
-    from cloud_agent.github_app import UserAuthorizationRevoked
+    from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(502, text="bad gateway"))
@@ -1160,7 +1160,7 @@ async def test_a_refusal_that_is_not_about_the_refresh_token_keeps_the_connectio
     config, status, headers, body
 ):
     """A rate limit or the App's own refused secret must not make the user reconnect."""
-    from cloud_agent.github_app import UserAuthorizationRevoked
+    from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
     def respond(request):
         if isinstance(body, str):
@@ -1178,7 +1178,7 @@ async def test_a_refusal_that_is_not_about_the_refresh_token_keeps_the_connectio
 @pytest.mark.parametrize(("status", "error"), [(200, "bad_refresh_token"), (400, "invalid_grant")])
 async def test_a_finished_refresh_token_is_a_revoked_authorization(config, status, error):
     """GitHub's own code and the OAuth standard's both settle it: connect again."""
-    from cloud_agent.github_app import UserAuthorizationRevoked
+    from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(status, json={"error": error}))
@@ -1270,7 +1270,7 @@ async def test_an_unsettled_targeted_permission_answer_is_an_outage(config, stat
 
 
 async def test_a_refused_token_during_a_targeted_permission_check_requires_reconnect(config):
-    from cloud_agent.github_app import UserAuthorizationRevoked
+    from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(401, json={}))
@@ -1315,7 +1315,7 @@ async def test_a_rate_limited_listing_is_an_outage_not_a_lost_installation(
 
 
 async def test_a_refused_user_token_is_a_revoked_authorization_and_an_outage_is_not(config):
-    from cloud_agent.github_app import UserAuthorizationRevoked
+    from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
     statuses = iter([401, 500])
     async with httpx.AsyncClient(
@@ -1356,7 +1356,7 @@ async def test_withdrawing_the_authorization_names_the_token_under_the_app_s_own
 def test_a_users_repositories_are_remembered_for_a_minute_and_forgotten_on_change(
     config, monkeypatch
 ):
-    import cloud_agent.github_app as github_app
+    import cloud_agent.source_control.github_app as github_app
 
     now = [1000.0]
     ttl = [60.0]
@@ -1402,7 +1402,7 @@ def test_a_users_repositories_are_remembered_for_a_minute_and_forgotten_on_chang
 
 
 def test_targeted_repository_permission_cache_is_bounded(config, monkeypatch):
-    import cloud_agent.github_app as github_app
+    import cloud_agent.source_control.github_app as github_app
 
     monkeypatch.setattr(github_app, "_USER_REPOSITORY_PERMISSIONS_MAX", 2)
     credentials = GitHubAppCredentials(config)
@@ -1418,8 +1418,8 @@ def test_targeted_repository_permission_cache_is_bounded(config, monkeypatch):
 
 
 async def test_repository_caches_bound_distinct_key_churn(config, monkeypatch):
-    import cloud_agent.github_app as github_app
-    from cloud_agent.github_cache import REPOSITORY_CACHE_SIZE
+    import cloud_agent.source_control.github_app as github_app
+    from cloud_agent.source_control.github_cache import REPOSITORY_CACHE_SIZE
 
     async def request(*args, **kwargs):
         return {"id": 77}
@@ -1573,7 +1573,7 @@ async def test_repository_creation_distinguishes_settled_errors_without_retrying
     config, status, body, headers, reason
 ):
     """Callers need a safe next step and must never replay an uncertain POST."""
-    from cloud_agent.github_app import RepositoryCreationError
+    from cloud_agent.source_control.github_app import RepositoryCreationError
 
     requests = []
 
@@ -1596,7 +1596,7 @@ async def test_repository_creation_distinguishes_settled_errors_without_retrying
 
 async def test_repository_creation_rejects_a_revoked_user_authorization(config):
     """An invalid user token must trigger the existing reconnect flow."""
-    from cloud_agent.github_app import UserAuthorizationRevoked
+    from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
     requests = []
 
@@ -1618,7 +1618,7 @@ async def test_repository_creation_rejects_a_revoked_user_authorization(config):
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError])
 async def test_repository_creation_network_errors_leave_the_result_uncertain(config, error_type):
     """GitHub may have committed a timed-out request, so it cannot be retried."""
-    from cloud_agent.github_app import RepositoryCreationError
+    from cloud_agent.source_control.github_app import RepositoryCreationError
 
     requests = []
 
@@ -1655,7 +1655,7 @@ async def test_repository_creation_malformed_success_is_uncertain_and_never_retr
     config, content
 ):
     """A success that cannot identify the new repository is not safe to replay."""
-    from cloud_agent.github_app import RepositoryCreationError
+    from cloud_agent.source_control.github_app import RepositoryCreationError
 
     requests = []
 
@@ -1760,7 +1760,7 @@ async def test_an_ancestor_of_the_named_branch_is_accepted(config, status):
 )
 async def test_a_commit_outside_the_branch_history_is_refused(config, status, body):
     """A fork's pull request head fetches by hash but is not the branch's history."""
-    from cloud_agent.github_app import CommitNotOnBranch
+    from cloud_agent.source_control.github_app import CommitNotOnBranch
 
     requests: list[httpx.Request] = []
     respond = _branch_history(
@@ -1774,7 +1774,7 @@ async def test_a_commit_outside_the_branch_history_is_refused(config, status, bo
 @pytest.mark.parametrize("named", [None, _FORK_HEAD, "refs/pull/5/head", "fork-owner:main"])
 async def test_without_a_named_branch_the_default_branch_is_the_anchor(config, named):
     """A tag, commit, pull ref or cross-repository name is not a branch of this repository."""
-    from cloud_agent.github_app import CommitNotOnBranch
+    from cloud_agent.source_control.github_app import CommitNotOnBranch
 
     requests: list[httpx.Request] = []
     respond = _branch_history(
@@ -1791,7 +1791,7 @@ async def test_without_a_named_branch_the_default_branch_is_the_anchor(config, n
 
 async def test_failing_to_read_the_branch_is_not_a_refusal(config):
     """An outage must stay distinguishable from a settled 'not on this branch'."""
-    from cloud_agent.github_app import CommitNotOnBranch
+    from cloud_agent.source_control.github_app import CommitNotOnBranch
 
     def respond(request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, text="bad gateway")
