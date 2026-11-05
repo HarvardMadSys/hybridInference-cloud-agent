@@ -32,6 +32,7 @@ from cloud_agent.host_pool import (
 )
 from cloud_agent.host_settings_import import plan_settings_import
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.sandbox_archive_credentials import (
     archive_settings_payload,
     seal_archive_storage,
@@ -388,13 +389,13 @@ class PostgresHostPoolRepository:
             ):
                 # Removal may have invalidated this token after consumption but
                 # before registration acquired the topology fence.
-                raise ValueError("enrollment_token_removed")
+                raise StorageConflict(ConflictCode.ENROLLMENT_TOKEN_REMOVED)
             existing = await conn.fetchrow(
                 "SELECT drain_fence_active FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
             )
             if existing is not None and existing["drain_fence_active"]:
-                raise ValueError("host_drain_fenced")
+                raise StorageConflict(ConflictCode.HOST_DRAIN_FENCED)
             retiring = await conn.fetchval(
                 """SELECT 1 FROM agent_runner_hosts h
                 JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -404,7 +405,7 @@ class PostgresHostPoolRepository:
                 host,
             )
             if retiring:
-                raise ValueError("resource_retiring")
+                raise StorageConflict(ConflictCode.RESOURCE_RETIRING)
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO agent_runner_hosts
