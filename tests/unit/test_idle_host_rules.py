@@ -68,7 +68,7 @@ def _host(monkeypatch, *, network: bool = True) -> tuple[ChatSandboxManager, _Do
     backend._network_guard = guard  # type: ignore[assignment]
     manager = ChatSandboxManager(backend)
     docker = _Docker()
-    monkeypatch.setattr(manager, "_run", docker.run)
+    monkeypatch.setattr(manager.exact, "run", docker.run)
     return manager, docker, guard
 
 

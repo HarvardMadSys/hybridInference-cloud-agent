@@ -9,7 +9,6 @@ proof of it failed since, and with the host rules still required.
 
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -24,11 +23,8 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.chat_sandbox_exec import (
-    ProvenContainers,
-    network_proof,
-    standing_network_proof,
-)
+from cloud_agent_host.chat_sandbox_exec import network_proof, standing_network_proof
+from cloud_agent_host.exact_container import ExactContainer
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
@@ -55,9 +51,7 @@ class _ProofManager:
     """The parts of a manager a standing proof reads, with the real proof records."""
 
     def __init__(self) -> None:
-        self._proven = ProvenContainers()
-        self._unproven_guests: set[str] = set()
-        self._unproven_guests_lock = threading.Lock()
+        self.exact = ExactContainer(SimpleNamespace(), state_roots=())
         self.host_rule_checks = 0
         self.host_rules_fail = False
         self.network = SimpleNamespace(
@@ -71,8 +65,8 @@ class _ProofManager:
 
     def prove(self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection) -> float:
         proved_from = time.monotonic()
-        self._proven.record(spec, inspection)
-        self._proven.note_proof(spec, proved_from)
+        self.exact.proven.record(spec, inspection)
+        self.exact.proven.note_proof(spec, proved_from)
         return proved_from
 
 
@@ -144,7 +138,7 @@ def test_a_proof_does_not_stand_for_an_unproven_guest() -> None:
     manager = _ProofManager()
     spec = _spec()
     manager.prove(spec, _running(spec))
-    manager._unproven_guests.add("container-shared")
+    manager.exact.note_unproven_start("container-shared")
 
     assert _standing(manager, spec, _running(spec)) is None
 
@@ -165,12 +159,12 @@ def test_a_failed_proof_withdraws_the_one_before_it_and_any_begun_earlier() -> N
     manager.prove(spec, _running(spec))
     begun_before_failure = time.monotonic()
 
-    manager._proven.withdraw_proof(spec)
+    manager.exact.proven.withdraw_proof(spec)
     assert _standing(manager, spec, _running(spec)) is None
 
     # A proof that began before the failure and passed after it proves
     # nothing about the state the failure saw.
-    manager._proven.note_proof(spec, begun_before_failure)
+    manager.exact.proven.note_proof(spec, begun_before_failure)
     assert _standing(manager, spec, _running(spec)) is None
 
     proved_from = manager.prove(spec, _running(spec))
@@ -182,7 +176,7 @@ def test_forgetting_a_container_drops_its_proof() -> None:
     spec = _spec()
     manager.prove(spec, _running(spec))
 
-    manager._proven.forget(spec)
+    manager.exact.proven.forget(spec)
 
     assert _standing(manager, spec, _running(spec)) is None
 
@@ -195,7 +189,7 @@ def test_a_proving_method_keeps_its_proof_or_withdraws_it_on_failure() -> None:
         def start(self, spec: ChatSandboxSpec, *, current: ChatSandboxInspection):
             if self.fail:
                 raise SandboxError("guest network sync failed")
-            return self._proven.record(spec, current)
+            return self.exact.proven.record(spec, current)
 
     manager = Prover()
     spec = _spec()
@@ -222,9 +216,7 @@ class _ProvingManager(_Manager):
 
     def __init__(self) -> None:
         super().__init__()
-        self._proven = ProvenContainers()
-        self._unproven_guests: set[str] = set()
-        self._unproven_guests_lock = threading.Lock()
+        self.exact = ExactContainer(SimpleNamespace(), state_roots=())
         self.host_rule_requirements = 0
         self.fail_start = False
 
@@ -232,7 +224,7 @@ class _ProvingManager(_Manager):
     def start(self, spec: ChatSandboxSpec, **kwargs: Any) -> ChatSandboxInspection:
         if self.fail_start:
             raise SandboxError("group network changed during activation")
-        return self._proven.record(spec, super().start(spec, **kwargs))
+        return self.exact.proven.record(spec, super().start(spec, **kwargs))
 
     def require_host_rules(self) -> None:
         self.host_rule_requirements += 1
@@ -267,7 +259,7 @@ def test_a_second_workspace_operation_stands_on_the_first_ones_proof() -> None:
     backend = supervisor.backend("athr_source", network_proved_at=time.monotonic())
     proved_at = backend._network_proved_at
     assert proved_at is not None and before <= proved_at
-    assert proved_at == manager._proven.standing_proof(spec)[1]  # type: ignore[index]
+    assert proved_at == manager.exact.proven.standing_proof(spec)[1]  # type: ignore[index]
 
 
 def test_a_terminal_admission_proves_the_network_again() -> None:

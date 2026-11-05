@@ -151,14 +151,14 @@ def test_a_snapshot_container_runs_its_image_and_is_never_taken_for_a_test():
             spec, image=reference, checkpoint_id="c" * 32, environment_snapshot=(OWNER, SNAPSHOT)
         )
     labelled = {**spec.docker_labels(), CHAT_ENVIRONMENT_SNAPSHOT_LABEL: f"{OWNER}:{SNAPSHOT}"}
-    manager._verify_identity(_inspection(spec, image=reference, labels=labelled), spec)
+    manager.exact.verify_identity(_inspection(spec, image=reference, labels=labelled), spec)
     with pytest.raises(SandboxError, match="outside this chat/generation"):
-        manager._verify_identity(
+        manager.exact.verify_identity(
             _inspection(spec, image=reference, labels=spec.docker_labels()), spec
         )
     with pytest.raises(SandboxError, match="outside this chat/generation"):
         other = snapshot_image_reference(OWNER, "6" * 32)
-        manager._verify_identity(_inspection(spec, image=other, labels=labelled), spec)
+        manager.exact.verify_identity(_inspection(spec, image=other, labels=labelled), spec)
 
 
 class _SnapshotManager(_Manager):

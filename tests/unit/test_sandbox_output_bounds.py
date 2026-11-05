@@ -124,7 +124,7 @@ def test_the_retained_exec_reads_both_streams_in_bounded_pieces(monkeypatch, tmp
         mounts=(),
         networks=("agent-net",),
     )
-    monkeypatch.setattr(manager, "_require", lambda _spec: running)
+    monkeypatch.setattr(manager.exact, "require", lambda _spec: running)
     real_popen = subprocess.Popen
 
     def flood(_argv, **kwargs):

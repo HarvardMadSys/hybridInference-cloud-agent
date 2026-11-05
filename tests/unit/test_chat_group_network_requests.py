@@ -75,7 +75,7 @@ def _hot_kata_workspace(monkeypatch, *, stopped_groups: int = 0):
     backend._network_guard = FakeGuard()  # type: ignore[assignment]
     manager = ChatSandboxManager(backend)
     docker = _KataExecDocker(config)
-    monkeypatch.setattr(manager, "_run", docker)
+    monkeypatch.setattr(manager.exact, "run", docker)
     run, popen = subprocess.run, subprocess.Popen
 
     def exec_run(argv, **kwargs):

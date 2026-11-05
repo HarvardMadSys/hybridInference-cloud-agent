@@ -156,7 +156,7 @@ def test_prune_reads_whose_bridge_it_is_from_the_listing_it_is_given(monkeypatch
     docker.add_sandbox(live_spec, running=True)
     live, live_network = _group_bridge(manager, docker, live_spec, age_s=3600)
     docker.connect(live_network["Id"], "sandbox-container", [])
-    listed = [manager._require(live_spec)]
+    listed = [manager.exact.require(live_spec)]
     docker.calls.clear()
 
     manager.network.prune_orphan_networks([live_spec], listed)

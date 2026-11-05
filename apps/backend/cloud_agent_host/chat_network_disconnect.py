@@ -20,7 +20,7 @@ def disconnect_endpoint(
     network_name: str | None = None,
 ) -> None:
     """Disconnect one endpoint, allowing an already-removed immutable network."""
-    disconnected = owner._containers._run(
+    disconnected = owner._containers.exact.run(
         [owner.backend.docker_binary, "network", "disconnect", "--force", network, container_id],
         timeout=30,
     )
@@ -46,7 +46,7 @@ def stopped_network_record(
     container_id: str,
 ) -> bool:
     """Prove one exact stopped container still holds the expected network intent."""
-    current = owner._containers._require_exact(spec, container_id)
+    current = owner._containers.exact.require_exact(spec, container_id)
     if current.running:
         raise SandboxError("chat sandbox restarted during network release")
     named = owner._containers.inspect(spec.container_name)
@@ -77,7 +77,7 @@ def forget_stopped_network(
     if owner._inspect_network(network_name) is not None:
         raise SandboxError("group network reappeared during stopped intent cleanup")
     owner._disconnect_endpoint(network_name, container_id)
-    released = owner._containers._require_exact(spec, container_id)
+    released = owner._containers.exact.require_exact(spec, container_id)
     if released.running:
         raise SandboxError("chat sandbox restarted during network release")
     if network_name in released.networks:

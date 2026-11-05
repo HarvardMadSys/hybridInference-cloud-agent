@@ -111,15 +111,15 @@ def ensure_github_relay_trust(manager: ChatSandboxManager, spec: ChatSandboxSpec
     if ca_pem is None:
         return {}
     key = trust_key(ca_pem)
-    proven = manager._proven.get(spec)
-    if manager._proven.holds_helper(proven, key):
+    proven = manager.exact.proven.get(spec)
+    if manager.exact.proven.holds_helper(proven, key):
         return trust_env()
     with install_lock(spec.container_name):
-        if not manager._proven.holds_helper(proven, key):
+        if not manager.exact.proven.holds_helper(proven, key):
             # The bundle is about to be replaced, so what any earlier CA's
             # record said about it no longer holds: after A, B, then A again,
             # A's record would otherwise skip the install while B is in place.
-            manager._proven.forget_helpers(proven, f"{CA_BUNDLE_PATH}@")
+            manager.exact.proven.forget_helpers(proven, f"{CA_BUNDLE_PATH}@")
             try:
                 install_github_relay_trust(manager, spec, ca_pem)
             except SandboxError as exc:
@@ -128,5 +128,5 @@ def ensure_github_relay_trust(manager: ChatSandboxManager, spec: ChatSandboxSpec
                     extra={"sandbox_id": spec.sandbox_id, "detail": str(exc)[:300]},
                 )
                 return {}
-            manager._proven.note_helper(proven, key)
+            manager.exact.proven.note_helper(proven, key)
     return trust_env()

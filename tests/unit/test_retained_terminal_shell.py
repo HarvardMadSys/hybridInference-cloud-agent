@@ -44,8 +44,8 @@ def _wrapper_script(monkeypatch) -> str:
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     monkeypatch.setattr(
-        manager,
-        "_require",
+        manager.exact,
+        "require",
         lambda _spec: SimpleNamespace(running=True, container_id="container-01"),
     )
     captured: list[list[str]] = []

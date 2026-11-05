@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     import subprocess
     from collections.abc import Iterator, Sequence
 
+    from cloud_agent_host.exact_container import ExactContainer
     from cloud_agent_host.network_guard import HeldExceptions
     from cloud_agent_host.sandbox import ContainerBackend
     from cloud_agent_shared.egress import SandboxNetwork
@@ -166,30 +167,14 @@ class ChatNetworkContainers(Protocol):
         """Return the deployment's Docker and sandbox-network configuration."""
         ...
 
-    def _run(
-        self, argv: builtins.list[str], *, timeout: float
-    ) -> subprocess.CompletedProcess[str]: ...
-
-    def _require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection: ...
-
-    def _require_exact(self, spec: ChatSandboxSpec, container_id: str) -> ChatSandboxInspection: ...
-
-    def _verify_identity(
-        self, inspection: ChatSandboxInspection, spec: ChatSandboxSpec, *, require_name: bool = True
-    ) -> None: ...
+    @property
+    def exact(self) -> ExactContainer:
+        """Return the identity gate every Docker operation on a chat goes through."""
+        ...
 
     def inspect(self, container_name: str) -> ChatSandboxInspection | None:
         """Inspect a container without replacing its immutable identity."""
         ...
-
-    def _kata_privileged_exec(
-        self,
-        spec: ChatSandboxSpec,
-        argv: builtins.list[str],
-        *,
-        detach: bool = False,
-        timeout_s: float = 30,
-    ) -> subprocess.CompletedProcess[str]: ...
 
     def exec_capture(
         self,
@@ -264,7 +249,7 @@ class ChatSandboxNetwork:
         }
 
     def _inspect_network(self, network: str) -> dict[str, Any] | None:
-        result = self._containers._run(
+        result = self._containers.exact.run(
             [self.backend.docker_binary, "network", "inspect", network], timeout=30
         )
         if result.returncode != 0:
@@ -333,7 +318,9 @@ class ChatSandboxNetwork:
 
     def _inspect_containers(self, container_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
         """Inspect many containers in one call, keyed by the id asked for."""
-        return containers_by_ref(self._containers._run, self.backend.docker_binary, container_ids)
+        return containers_by_ref(
+            self._containers.exact.run, self.backend.docker_binary, container_ids
+        )
 
     @staticmethod
     def _endpoint_aliases(raw: dict[str, Any], network: str) -> set[str] | None:
@@ -506,7 +493,7 @@ class ChatSandboxNetwork:
         )
         resolver = str(self._network().dns_server)
         argv = ["python3", "-I", "-c", script, json.dumps(addresses), resolver]
-        result = self._containers._kata_privileged_exec(spec, argv, timeout_s=30)
+        result = self._containers.exact.guest_root_exec(spec, argv, timeout_s=30)
         if result.returncode != 0:
             raise SandboxError("Kata guest network sync failed: " + result.stderr[:300])
 
@@ -564,7 +551,7 @@ class ChatSandboxNetwork:
         for alias in sorted(aliases):
             command += ["--alias", alias]
         command += [network, container_id]
-        connected = self._containers._run(command, timeout=30)
+        connected = self._containers.exact.run(command, timeout=30)
         observed = self._relay_endpoint(container_id, network)
         if connected.returncode != 0 and observed is None:
             raise SandboxError(
@@ -608,7 +595,7 @@ class ChatSandboxNetwork:
         if sandbox is None:
             sandbox = self._containers.inspect(spec.container_name)
         if sandbox is not None:
-            self._containers._verify_identity(sandbox, spec)
+            self._containers.exact.verify_identity(sandbox, spec)
             permitted.add(sandbox.container_id)
 
         required_aliases = set(service_aliases)
@@ -618,7 +605,7 @@ class ChatSandboxNetwork:
             endpoint_aliases = peer_aliases.get(container_id)
             if not endpoint_aliases or not endpoint_aliases.intersection(required_aliases):
                 raise SandboxError(f"group network {network!r} contains an unexpected peer")
-            disconnected = self._containers._run(
+            disconnected = self._containers.exact.run(
                 [
                     self.backend.docker_binary,
                     "network",
@@ -704,7 +691,7 @@ class ChatSandboxNetwork:
             for key, value in sorted(self._network_labels(spec).items()):
                 command += ["--label", f"{key}={value}"]
             command.append(expected)
-            created = self._containers._run(command, timeout=30)
+            created = self._containers.exact.run(command, timeout=30)
             network = self._inspect_network(expected)
             if network is not None:
                 # This includes a same-name create won by another process. The
@@ -931,7 +918,7 @@ class ChatSandboxNetwork:
         """Disconnect exact owned endpoints and delete one inactive bridge."""
         sandbox: ChatSandboxInspection | None
         if expected_container_id is not None:
-            sandbox = self._containers._require_exact(spec, expected_container_id)
+            sandbox = self._containers.exact.require_exact(spec, expected_container_id)
             if sandbox.running:
                 raise SandboxError("chat sandbox restarted during network release")
             named = self._containers.inspect(spec.container_name)
@@ -940,7 +927,7 @@ class ChatSandboxNetwork:
         else:
             sandbox = self._containers.inspect(spec.container_name)
             if sandbox is not None:
-                self._containers._verify_identity(sandbox, spec)
+                self._containers.exact.verify_identity(sandbox, spec)
         network = self._inspect_network(network_name)
         if network is None:
             if expected_container_id is not None and not only_if_sandbox_unattached:
@@ -1001,7 +988,7 @@ class ChatSandboxNetwork:
                 container_id,
                 network_name=network_name,
             )
-        removed = self._containers._run(
+        removed = self._containers.exact.run(
             [self.backend.docker_binary, "network", "rm", network_ref],
             timeout=30,
         )
@@ -1052,7 +1039,7 @@ class ChatSandboxNetwork:
                 container_id,
                 network_name=network_name,
             )
-        removed = self._containers._run(
+        removed = self._containers.exact.run(
             [self.backend.docker_binary, "network", "rm", network_id],
             timeout=30,
         )
@@ -1086,7 +1073,7 @@ class ChatSandboxNetwork:
     ) -> ChatSandboxInspection:
         """Release the group bridge after the retained container stops."""
         if expected_container_id is not None:
-            current = self._containers._require_exact(spec, expected_container_id)
+            current = self._containers.exact.require_exact(spec, expected_container_id)
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
         network_ids = dict(current.network_ids)
@@ -1126,9 +1113,9 @@ class ChatSandboxNetwork:
                 "one-time cleanup"
             )
         released = (
-            self._containers._require_exact(spec, expected_container_id)
+            self._containers.exact.require_exact(spec, expected_container_id)
             if expected_container_id is not None
-            else self._containers._require(spec)
+            else self._containers.exact.require(spec)
         )
         if released.running:
             raise SandboxError("chat sandbox restarted during network release")
@@ -1189,7 +1176,7 @@ class ChatSandboxNetwork:
         examined or removed is logged and left for the next pass; it never
         keeps the others, or the caller's reconciliation, from going on.
         """
-        result = self._containers._run(
+        result = self._containers.exact.run(
             [
                 self.backend.docker_binary,
                 "network",
@@ -1205,7 +1192,7 @@ class ChatSandboxNetwork:
         if result.returncode != 0:
             raise SandboxError("group network listing failed: " + result.stderr.strip()[:300])
         networks, unread = inspect_each(
-            self._containers._run, self.backend.docker_binary, "network", result.stdout.split()
+            self._containers.exact.run, self.backend.docker_binary, "network", result.stdout.split()
         )
         for ref, exc in unread.items():
             logger.warning(
@@ -1349,7 +1336,7 @@ class ChatSandboxNetwork:
         # helper container on every first start and wake.
         expected = self._ensure_group_network(spec, current=current, sync_exceptions=False)
         if not self._endpoint_is_current(current, expected):
-            connected = self._containers._run(
+            connected = self._containers.exact.run(
                 [
                     self.backend.docker_binary,
                     "network",
@@ -1360,7 +1347,7 @@ class ChatSandboxNetwork:
                 timeout=30,
             )
             if connected.returncode != 0:
-                refreshed = self._containers._require(spec)
+                refreshed = self._containers.exact.require(spec)
                 if not self._endpoint_is_current(refreshed, expected):
                     raise SandboxError(
                         "retained chat could not attach its group network: "
@@ -1370,7 +1357,7 @@ class ChatSandboxNetwork:
             if source == expected:
                 continue
             self._disconnect_endpoint(source, current.container_id)
-        moved = self._containers._require(spec)
+        moved = self._containers.exact.require(spec)
         if set(moved.networks) != {expected} or not self._endpoint_is_current(moved, expected):
             raise SandboxError("retained chat did not end up on exactly its group bridge")
         # Connect/disconnect may race a relay rollout or bridge replacement.
@@ -1391,7 +1378,7 @@ class ChatSandboxNetwork:
     ) -> ChatSandboxInspection | None:
         """Finish one reconciliation with fresh container and bridge evidence."""
         expected = self.network_for(spec)
-        refreshed = self._containers._require(spec)
+        refreshed = self._containers.exact.require(spec)
         if refreshed.container_id != current.container_id or set(refreshed.networks) != {expected}:
             raise SandboxError("retained chat identity or networks changed during activation")
         network = self._inspect_network(expected)
@@ -1558,7 +1545,7 @@ class ChatSandboxNetwork:
         if raw is None or sandbox is None or not sandbox.running:
             return
         self._verify_group_network(raw, spec)
-        self._containers._verify_identity(sandbox, spec)
+        self._containers.exact.verify_identity(sandbox, spec)
         network_id = str(raw.get("Id") or "")
         if not network_id or not self._endpoint_is_current(sandbox, network, raw):
             return

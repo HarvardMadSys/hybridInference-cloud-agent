@@ -64,8 +64,8 @@ def staged_tree(
     fails never hides a failure before it. ``what`` names the tree in errors.
     """
     docker = manager.backend.docker_binary
-    current = manager._require(spec)
-    created = manager._run(
+    current = manager.exact.require(spec)
+    created = manager.exact.run(
         [
             docker,
             "create",
@@ -112,7 +112,7 @@ def staged_tree(
         except OSError as exc:
             raise SandboxError(f"could not copy {what} into this chat") from exc
         try:
-            copied = manager._run_bytes(
+            copied = manager.exact.run_bytes(
                 [docker, "cp", "-", f"{current.container_id}:{stage}"],
                 timeout=copy_timeout_s,
                 stdin=cast("BinaryIO", reader.stdout),
@@ -142,4 +142,4 @@ def _remove(manager: ChatSandboxManager, spec: ChatSandboxSpec, stage: str, sour
             spec, ["rm", "-rf", stage], workdir="/", timeout_s=60, user_uid=0, user_gid=0
         )
     finally:
-        manager._run([manager.backend.docker_binary, "rm", source_id], timeout=30)
+        manager.exact.run([manager.backend.docker_binary, "rm", source_id], timeout=30)

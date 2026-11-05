@@ -313,7 +313,12 @@ class _Manager:
         self.commands: list[list[str]] = []
         self.backend = SimpleNamespace(docker_binary="docker")
 
-    def _require(self, spec):
+    @property
+    def exact(self):
+        """The stand-in is its own identity gate."""
+        return self
+
+    def require(self, spec):
         return SimpleNamespace(container_id="container-1")
 
     def exec_capture(self, spec, argv, **kwargs):
@@ -322,7 +327,7 @@ class _Manager:
         ok = self.probe_ok or "mv" in argv[2]
         return SimpleNamespace(returncode=0 if ok else 1)
 
-    def _run_bytes(self, argv, *, timeout, input_bytes):
+    def run_bytes(self, argv, *, timeout, input_bytes):
         self.copied.append(input_bytes)
         return SimpleNamespace(returncode=0)
 

@@ -12,8 +12,8 @@ from cloud_agent_host.trusted_files import install_trusted_file
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
-    from cloud_agent_host.chat_sandbox_exec import ProvenContainers
     from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection
+    from cloud_agent_host.exact_container import ProvenContainers
 
 _HELPERS = {
     "pi": ("pi-freeinference", "pi-mcp-bridge.ts"),
@@ -75,15 +75,15 @@ def install_mcp_helpers_once(
     forgotten when it is replaced, so a host that ships other content still
     installs it.
     """
-    proven = manager._proven.get(spec)
+    proven = manager.exact.proven.get(spec)
     missing = [
         helper
         for helper in _helpers(runtime)
-        if not manager._proven.holds_helper(proven, helper.key)
+        if not manager.exact.proven.holds_helper(proven, helper.key)
     ]
     if missing:
         with install_lock(spec.container_name):
-            _install(manager, spec, runtime, missing, found=(manager._proven, proven))
+            _install(manager, spec, runtime, missing, found=(manager.exact.proven, proven))
 
 
 def _install(

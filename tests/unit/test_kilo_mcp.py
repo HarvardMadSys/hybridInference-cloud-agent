@@ -59,14 +59,19 @@ class FakeManager:
             return SimpleNamespace(returncode=self.activate_exit, stderr=b"not protected")
         return SimpleNamespace(returncode=0, stderr=b"")
 
-    def _require(self, _spec):
+    @property
+    def exact(self):
+        """The stand-in is its own identity gate."""
+        return self
+
+    def require(self, _spec):
         return SimpleNamespace(container_id="chat-container")
 
-    def _run(self, argv, *, timeout):
+    def run(self, argv, *, timeout):
         self.runs.append((argv, timeout))
         return SimpleNamespace(returncode=0, stdout="source-container\n", stderr="")
 
-    def _run_bytes(self, argv, *, timeout, **streams):
+    def run_bytes(self, argv, *, timeout, **streams):
         self.copies.append((argv, streams))
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 

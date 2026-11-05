@@ -298,10 +298,10 @@ def require_container(
     """The container ``spec`` names, if it is the expected one, running or stopped as required.
 
     A different container means the sandbox was lost, not that it is busy.
-    Unlike the manager's ``_require_exact``, this looks the container up by
+    Unlike ``ExactContainer.require_exact``, this looks the container up by
     name, as the marker methods always have.
     """
-    current = manager._require(spec)
+    current = manager.exact.require(spec)
     if current.container_id != expected_container_id:
         raise RetainedChatLost(f"chat sandbox container identity changed before {before}")
     if current.running != running:
@@ -550,7 +550,7 @@ def write_stopped_final(
             entry.mtime = 0
             payload_archive.addfile(entry, io.BytesIO(payload))
         archive.seek(0)
-        result = manager._run_bytes(
+        result = manager.exact.run_bytes(
             [
                 manager.backend.docker_binary,
                 "cp",

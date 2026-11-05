@@ -110,11 +110,11 @@ def freeze(
     if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
         raise ValueError("snapshot member slot is outside sandbox capacity")
     if expected_container_id is not None:
-        manager._require_exact(spec, expected_container_id)
+        manager.exact.require_exact(spec, expected_container_id)
     manifest = f"{ACTIVATION_TMPFS}/snapshot-{token}.pids"
     target_uids = [
         manager.backend.uid,
-        *manager._operation_writer_uids(spec),
+        *manager.operation_writer_uids(spec),
         *(MEMBER_UID_BASE + slot for slot in unique_slots),
     ]
     # The container drops every capability.  Even UID 0 therefore cannot
@@ -241,7 +241,7 @@ def freeze(
                 + written.stderr.decode("utf-8", "replace")[:300]
             )
         if expected_container_id is not None:
-            manager._require_exact(spec, expected_container_id)
+            manager.exact.require_exact(spec, expected_container_id)
     except BaseException:
         with contextlib.suppress(Exception):
             _resume(
@@ -277,10 +277,10 @@ def thaw(
     if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
         raise ValueError("snapshot member slot is outside sandbox capacity")
     if expected_container_id is not None:
-        manager._require_exact(spec, expected_container_id)
+        manager.exact.require_exact(spec, expected_container_id)
     target_uids = [
         manager.backend.uid,
-        *manager._operation_writer_uids(spec),
+        *manager.operation_writer_uids(spec),
         *(MEMBER_UID_BASE + slot for slot in unique_slots),
     ]
     read = manager.exec_capture(
@@ -332,7 +332,7 @@ def thaw(
             + removed.stderr.decode("utf-8", "replace")[:300]
         )
     if expected_container_id is not None:
-        manager._require_exact(spec, expected_container_id)
+        manager.exact.require_exact(spec, expected_container_id)
 
 
 def parse_frozen_processes(
