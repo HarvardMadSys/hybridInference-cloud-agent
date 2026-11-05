@@ -30,7 +30,7 @@ from cloud_agent_host.container.sandbox import (
     _split_menu,
 )
 from cloud_agent_host.host_capabilities import claim_attestation as _claim_attestation
-from cloud_agent_host.shared_live_attempt import runtime_version_unavailable
+from cloud_agent_host.turn.shared_live_attempt import runtime_version_unavailable
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef, snapshot_object_key
 from cloud_agent_shared.model_connections import ModelConnectionAccess

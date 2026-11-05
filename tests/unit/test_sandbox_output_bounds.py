@@ -16,7 +16,6 @@ import tracemalloc
 
 import pytest
 
-from cloud_agent_host import source_preparation
 from cloud_agent_host.bounded_output import OUTPUT_CHUNK_BYTES, STDERR_TAIL_BYTES
 from cloud_agent_host.container import chat_sandbox as chat_sandbox_mod
 from cloud_agent_host.container.chat_sandbox import (
@@ -31,6 +30,7 @@ from cloud_agent_host.container.sandbox import (
     SandboxSpec,
 )
 from cloud_agent_host.setup import run_setup
+from cloud_agent_host.turn import source_preparation
 
 #: Larger than every bound involved, the retained stderr tail included.
 _FLOOD_CHARS = 16 * 1024 * 1024

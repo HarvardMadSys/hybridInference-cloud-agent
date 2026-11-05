@@ -3,7 +3,7 @@
 Started as ``python -m cloud_agent_host.runner --turn``. It reads its turn on
 standard input, runs the same preflight a turn needs, answers the handover,
 and only then runs the turn under its lease
-(:mod:`cloud_agent_host.shared_live_attempt`).
+(:mod:`cloud_agent_host.turn.shared_live_attempt`).
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from cloud_agent_host.measurement_sender import _enqueue_delivery
 from cloud_agent_host.runner_stop import drain_on_sigterm as _drain_on_sigterm
 from cloud_agent_host.runtime_qualification import VERDICT_KEY, adopt_verdict
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.shared_live_attempt import _run_shared_live_attempt
+from cloud_agent_host.turn.shared_live_attempt import _run_shared_live_attempt
 from cloud_agent_host.turn_launch import handed_worker_id, read_turn_input
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.host_settings import (

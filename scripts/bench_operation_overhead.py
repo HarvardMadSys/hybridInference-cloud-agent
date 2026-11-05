@@ -29,7 +29,7 @@ Server-request operations (the default; ``--skip-server-ops`` turns them off)
     The four declared startup paths -- ``new_group``, ``resume_stopped``,
     ``resume_running``, ``reuse_live`` -- produced by a real retained container
     and a real :class:`SharedChatSessionSupervisor`, classified by the real
-    ``cloud_agent_host.shared_live_attempt._classify_startup_path``.
+    ``cloud_agent_host.turn.shared_live_attempt._classify_startup_path``.
 
 Cohorts, and what each one really is
 ------------------------------------
@@ -2436,7 +2436,7 @@ async def _await_handoff_deliveries(sender: Any, *, expected: int) -> dict[str, 
 
 def _classify(container_action: str, resident_action: str) -> str:
     """Call the real startup-path classifier."""
-    from cloud_agent_host.shared_live_attempt import _classify_startup_path
+    from cloud_agent_host.turn.shared_live_attempt import _classify_startup_path
 
     return _classify_startup_path(container_action, resident_action)
 

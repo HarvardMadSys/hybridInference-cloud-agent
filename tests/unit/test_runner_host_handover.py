@@ -27,9 +27,10 @@ from tests.unit.test_runner_host_service import (
     service,  # noqa: F401 - the pytest fixture
 )
 
-from cloud_agent_host import host_service, runner_stop, runtime_qualification, turn_child
+from cloud_agent_host import host_service, runner_stop, runtime_qualification
 from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult
 from cloud_agent_host.network.network_guard import VERIFICATION_KEY
+from cloud_agent_host.turn import turn_child
 from cloud_agent_shared.egress import network_from_env
 
 #: The network a turn's child is built with, in the default sandbox namespace.

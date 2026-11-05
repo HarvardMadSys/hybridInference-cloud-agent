@@ -11,12 +11,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from cloud_agent_host import turn_stream
 from cloud_agent_host.claimed_job import LeaseLost
 from cloud_agent_host.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,
 )
+from cloud_agent_host.turn import turn_stream
 
 
 @pytest.fixture

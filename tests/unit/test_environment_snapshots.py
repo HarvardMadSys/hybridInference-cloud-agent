@@ -298,7 +298,7 @@ def _job(snapshot=None):
 def test_a_new_workspace_starts_from_a_snapshot_only_when_everything_matches(
     snapshot, image, lockfiles, new_group, expected
 ):
-    from cloud_agent_host.source_preparation import _choose_environment_snapshot
+    from cloud_agent_host.turn.source_preparation import _choose_environment_snapshot
 
     chosen, outcome = _choose_environment_snapshot(
         _job(snapshot),
@@ -310,7 +310,7 @@ def test_a_new_workspace_starts_from_a_snapshot_only_when_everything_matches(
 
 
 def test_lockfiles_are_fingerprinted_by_git_object(tmp_path):
-    from cloud_agent_host.source_preparation import tracked_lockfiles
+    from cloud_agent_host.turn.source_preparation import tracked_lockfiles
 
     git = ["git", "-C", str(tmp_path), "-c", "user.email=a@b", "-c", "user.name=t"]
     subprocess.run([*git, "init", "-q"], check=True)
@@ -333,7 +333,7 @@ def test_lockfiles_are_fingerprinted_by_git_object(tmp_path):
 
 @pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
 def test_lockfiles_are_found_beside_names_that_are_not_utf8(tmp_path):
-    from cloud_agent_host.source_preparation import tracked_lockfiles
+    from cloud_agent_host.turn.source_preparation import tracked_lockfiles
 
     git = ["git", "-C", str(tmp_path), "-c", "user.email=a@b", "-c", "user.name=t"]
     subprocess.run([*git, "init", "-q"], check=True)
@@ -480,7 +480,7 @@ def _execute(monkeypatch, tmp_path, **run_fields: Any) -> tuple[list[str], dict[
     monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: None)
     monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
     monkeypatch.setattr(environment_tests, "_save_snapshot", save)
-    monkeypatch.setattr("cloud_agent_host.source_preparation.GitSourcePrefetch", _Source)
+    monkeypatch.setattr("cloud_agent_host.turn.source_preparation.GitSourcePrefetch", _Source)
     environment_tests.execute_test(
         client=SimpleNamespace(post=post),
         run={

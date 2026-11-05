@@ -25,14 +25,9 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
     _virtual_clock,
 )
 
-from cloud_agent_host import (
-    control_plane_client,
-    local_settings,
-    runtimes,
-    shared_live_attempt,
-    turn_stream,
-)
+from cloud_agent_host import control_plane_client, local_settings, runtimes
 from cloud_agent_host.claimed_job import LeaseLost
+from cloud_agent_host.turn import shared_live_attempt, turn_stream
 
 
 def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():

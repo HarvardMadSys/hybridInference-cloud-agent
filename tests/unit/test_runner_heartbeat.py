@@ -15,8 +15,8 @@ from cloud_agent_host import (
     control_plane_client,
     local_settings,
     runner,
-    turn_stream,
 )
+from cloud_agent_host.turn import turn_stream
 
 
 def test_brief_control_outage_recovers_before_the_original_lease_expires(monkeypatch):

@@ -27,7 +27,6 @@ import pytest
 from tests.unit.test_agent_runner import _run_shared_boundary_case
 from tests.unit.test_agent_sandbox_manager import _app, _SharedSupervisor
 
-from cloud_agent_host import shared_live_attempt, turn_stream
 from cloud_agent_host.drivers import (
     TURN_COMPLETED,
     USER_MESSAGE_EVENT,
@@ -45,6 +44,7 @@ from cloud_agent_host.runtimes.claude.session import ClaudeCodeLiveSession
 from cloud_agent_host.runtimes.live import driver_for
 from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
 from cloud_agent_host.supervisor.member_sessions import SharedTurnTelemetry
+from cloud_agent_host.turn import shared_live_attempt, turn_stream
 
 if TYPE_CHECKING:
     from collections.abc import Callable

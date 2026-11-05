@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host import source_preparation
 from cloud_agent_host.local_settings import source_import_max_bytes
-from cloud_agent_host.source_preparation import (
+from cloud_agent_host.turn import source_preparation
+from cloud_agent_host.turn.source_preparation import (
     WorktreeError,
     _assert_no_credential_on_disk,
     _auth_env,
