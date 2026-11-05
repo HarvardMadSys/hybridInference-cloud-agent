@@ -1,9 +1,12 @@
 """The storage ports describe the repositories, and nothing else does.
 
-Two properties:
+Three properties:
 
 * every public repository method is claimed by exactly one port, so a
   capability cannot quietly belong to nobody;
+* every admin read model is described by the port named after it, method for
+  method: they share method names (``detail``), so they are paired by class
+  rather than inventoried by name;
 * no port imports ``cloud_agent.storage``, so the dependency keeps pointing
   inward.
 
@@ -21,6 +24,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PORTS_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "ports"
 REPOSITORIES_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "storage" / "repositories"
+#: The admin read models and their ports, checked pairwise rather than by name.
+ADMIN_REPOSITORIES_DIR = REPOSITORIES_DIR / "admin"
+ADMIN_PORTS = PORTS_DIR / "admin_queries.py"
 
 #: Nothing is left unclaimed.
 UNPORTED: set[str] = set()
@@ -57,6 +63,11 @@ def _port_files() -> list[Path]:
     return files
 
 
+def _inventoried_port_files() -> list[Path]:
+    """The ports whose methods are claimed by name; the admin ports are paired instead."""
+    return [path for path in _port_files() if path != ADMIN_PORTS]
+
+
 def _repository_files() -> list[Path]:
     """One module per capability; together, the whole storage implementation."""
     assert REPOSITORIES_DIR.is_dir(), REPOSITORIES_DIR
@@ -85,12 +96,50 @@ def test_every_public_repository_method_is_claimed_once() -> None:
     store = _implementations()
     public = {name for name in store if not name.startswith("_")}
     claimed: dict[str, str] = {}
-    for path in _port_files():
+    for path in _inventoried_port_files():
         for name in _method_names(path, protocols=True):
             assert name not in claimed, f"{name}: both {claimed[name]} and {path.name}"
             claimed[name] = path.name
     assert sorted(public - set(claimed)) == sorted(UNPORTED)
     assert not set(claimed) - public
+
+
+def _public_methods(node: ast.ClassDef) -> set[str]:
+    """Methods a caller can call; a property is an attribute, not a method."""
+    return {
+        child.name
+        for child in node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not child.name.startswith("_")
+        and not any(
+            isinstance(decorator, ast.Name) and decorator.id == "property"
+            for decorator in child.decorator_list
+        )
+    }
+
+
+def test_every_admin_read_model_is_described_by_its_port() -> None:
+    """``PostgresAdminXQueries`` implements ``AdminXQueries``, and nothing is left over."""
+    protocols = {
+        node.name: _public_methods(node)
+        for node in ast.parse(ADMIN_PORTS.read_text()).body
+        if isinstance(node, ast.ClassDef)
+        and any(isinstance(base, ast.Name) and base.id == "Protocol" for base in node.bases)
+    }
+    implemented: set[str] = set()
+    modules = sorted(p for p in ADMIN_REPOSITORIES_DIR.glob("*.py") if p.name != "__init__.py")
+    assert modules, f"no admin read models found under {ADMIN_REPOSITORIES_DIR}"
+    for path in modules:
+        classes = [n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef)]
+        assert len(classes) == 1, f"{path}: expected one class, found {len(classes)}"
+        port = classes[0].name.removeprefix("Postgres")
+        assert port != classes[0].name, f"{path}: {port} is not a Postgres implementation"
+        assert port in protocols, f"{path}: no port {port} in {ADMIN_PORTS.name}"
+        assert _public_methods(classes[0]) == protocols[port], f"{path}: differs from {port}"
+        implemented.add(port)
+    assert implemented == set(protocols), (
+        f"ports with no implementation: {set(protocols) - implemented}"
+    )
 
 
 @pytest.mark.parametrize("path", _port_files(), ids=lambda p: p.stem)

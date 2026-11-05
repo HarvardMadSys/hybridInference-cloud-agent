@@ -13,10 +13,11 @@ from cloud_agent.admin_conversations import (
     AdminConversationTurn,
     ConversationCursor,
     ConversationTurnsCursor,
+    turns_scope,
 )
 from cloud_agent.admin_observability import RunFilters, cursor_scope, encode_cursor
 from cloud_agent.storage._sql.jobs import CONVERSATION_STATE_SQL
-from cloud_agent.storage.admin_queries import _RUN_COLUMNS, _fold_run_resource_summary
+from cloud_agent.storage.repositories.admin.runs import _RUN_COLUMNS, _fold_run_resource_summary
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -63,7 +64,7 @@ _FROM = """
 """
 
 
-class AdminConversationQueries:
+class PostgresAdminConversationQueries:
     """Bounded admin projections, independent of owner-authenticated readers."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
@@ -196,21 +197,3 @@ class AdminConversationQueries:
             turns=turns,
             next_cursor=next_cursor,
         )
-
-
-def turns_scope(
-    thread_id: str,
-    filters: RunFilters,
-    since: datetime | None,
-    until: datetime | None,
-) -> str:
-    """Bind turn pagination to its conversation and optional originating cohort."""
-    return cursor_scope(
-        [
-            "conversation-turns",
-            thread_id,
-            filters.model_dump(),
-            since.isoformat() if since else None,
-            until.isoformat() if until else None,
-        ]
-    )

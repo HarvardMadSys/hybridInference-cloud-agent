@@ -8,7 +8,7 @@ from itertools import pairwise
 
 import pytest
 
-from cloud_agent.storage.admin_usage_queries import UsageQueryUnavailable
+from cloud_agent.ports.admin_queries import UsageQueryUnavailable
 from cloud_agent.usage.admin_usage import aggregate_jobs, breakdown, merge_aggregates
 from cloud_agent.usage.usage_batches import owner_usage
 from cloud_agent.usage.usage_range import (

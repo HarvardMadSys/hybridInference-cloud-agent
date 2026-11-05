@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class AdminSandboxInventory:
+class PostgresAdminSandboxInventory:
     """Store short-lived projected pages; read only changed identities thereafter."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

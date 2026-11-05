@@ -7,7 +7,7 @@ import pytest
 from tests.integration.storage.test_admin_sandbox_queries import seed
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
 
-from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
+from cloud_agent.storage.repositories.admin.sandboxes import PostgresAdminSandboxQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -95,7 +95,7 @@ async def test_admin_views_show_the_newest_checkpoint(db, store):
                 size_bytes=1000 + index,
             ),
         )
-    queries = AdminSandboxQueries(db)
+    queries = PostgresAdminSandboxQueries(db)
 
     detail = await queries.detail("asbx_receipt")
     trajectory = await queries.trajectory("asbx_receipt", cursor=None, limit=10)
@@ -111,7 +111,7 @@ async def test_admin_views_show_the_newest_checkpoint(db, store):
 async def test_a_sandbox_without_checkpoints_reports_none(db, store):
     await seed(db, store, "asbx_receipt")
 
-    detail = await AdminSandboxQueries(db).detail("asbx_receipt")
+    detail = await PostgresAdminSandboxQueries(db).detail("asbx_receipt")
 
     assert detail is not None
     assert detail.latest_checkpoint is None

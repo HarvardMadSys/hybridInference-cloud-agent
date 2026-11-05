@@ -22,8 +22,8 @@ from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
 
 from cloud_agent.admin_observability import RunFilters
-from cloud_agent.storage.admin_queries import AdminRunQueries
-from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
+from cloud_agent.storage.repositories.admin.runs import PostgresAdminRunQueries
+from cloud_agent.storage.repositories.admin.usage import PostgresAdminUsageQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -131,10 +131,10 @@ async def test_the_admin_listings_read_the_window_through_the_index(store, pool)
     now = datetime.now(UTC)
     since = now - timedelta(days=1)
     try:
-        page = await AdminRunQueries(listing_pool).list_runs(
+        page = await PostgresAdminRunQueries(listing_pool).list_runs(
             filters=RunFilters(), since=since, until=now, cursor=None, limit=50
         )
-        cohort, _ = await AdminUsageQueries(listing_pool).selection(
+        cohort, _ = await PostgresAdminUsageQueries(listing_pool).selection(
             since=since,
             until=now,
             user_id=None,

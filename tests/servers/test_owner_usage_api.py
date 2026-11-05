@@ -15,7 +15,7 @@ from tests.support.owners import SESSIONS, use_session_secret
 from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.api import owner_usage
 from cloud_agent.api.deps import get_owner_directory, get_storage
-from cloud_agent.storage.admin_usage_queries import UsageQueryTooLarge, UsageQueryUnavailable
+from cloud_agent.ports.admin_queries import UsageQueryTooLarge, UsageQueryUnavailable
 from cloud_agent.usage.owner_usage import (
     CONTAINER_CURSOR_SCOPE,
     OwnerContainerCursor,

@@ -19,7 +19,7 @@ from pydantic import AwareDatetime  # noqa: TC002 — FastAPI resolves this at r
 from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.storage.admin_usage_queries import (
+from cloud_agent.ports.admin_queries import (
     AdminUsageQueries,
     UsageQueryTooLarge,
     UsageQueryUnavailable,

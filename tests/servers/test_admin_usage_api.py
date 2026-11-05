@@ -16,7 +16,7 @@ from tests.support.owners import use_session_secret
 from cloud_agent.api import admin_usage
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app, create_mcp_app
-from cloud_agent.storage.admin_usage_queries import (
+from cloud_agent.ports.admin_queries import (
     UsageQueryTooLarge,
     UsageQueryUnavailable,
 )

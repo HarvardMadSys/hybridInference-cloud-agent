@@ -25,7 +25,7 @@ from cloud_agent.api.deps import (
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AuditRepository
-    from cloud_agent.storage.admin_database_queries import AdminDatabaseQueries
+    from cloud_agent.ports.admin_queries import AdminDatabaseQueries
 
 
 class _Storage(Protocol):

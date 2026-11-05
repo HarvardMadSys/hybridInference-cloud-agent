@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.execution import TERMINAL_STATES
-from cloud_agent.storage.admin_usage_queries import UsageQueryUnavailable
+from cloud_agent.ports.admin_queries import UsageQueryUnavailable
 from cloud_agent.usage.admin_usage import (
     MAX_USAGE_ATTEMPTS,
     MAX_USAGE_RUNS,
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from datetime import datetime
 
-    from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
+    from cloud_agent.ports.admin_queries import AdminUsageQueries
 
 #: The longest one owner's usage read may take, all batches included.
 OWNER_USAGE_DEADLINE_S = 60.0

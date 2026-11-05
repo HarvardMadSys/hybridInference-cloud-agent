@@ -25,7 +25,7 @@ from cloud_agent.admin_sandboxes import (
     sandbox_cursor_scope,
     sandbox_trajectory_cursor_scope,
 )
-from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
+from cloud_agent.storage.repositories.admin.sandboxes import PostgresAdminSandboxQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -82,7 +82,7 @@ async def member(db, sandbox_id, job, slot, *, attempt=None, fork_from=None):
 
 
 async def listing(db, *, cursor=None, limit=100):
-    return await AdminSandboxQueries(db).list_running(cursor=cursor, limit=limit)
+    return await PostgresAdminSandboxQueries(db).list_running(cursor=cursor, limit=limit)
 
 
 async def stop_request(db, store, sandbox_id, **overrides):

@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
-from cloud_agent.admin_observability import AdminRun
+from cloud_agent.admin_observability import AdminRun, RunFilters, cursor_scope
 
 
 class AdminConversation(BaseModel):
@@ -82,3 +82,21 @@ class AdminConversationDetail(BaseModel):
     conversation: AdminConversation
     turns: list[AdminConversationTurn]
     next_cursor: str | None = None
+
+
+def turns_scope(
+    thread_id: str,
+    filters: RunFilters,
+    since: datetime | None,
+    until: datetime | None,
+) -> str:
+    """Bind turn pagination to its conversation and optional originating cohort."""
+    return cursor_scope(
+        [
+            "conversation-turns",
+            thread_id,
+            filters.model_dump(),
+            since.isoformat() if since else None,
+            until.isoformat() if until else None,
+        ]
+    )

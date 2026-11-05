@@ -128,7 +128,7 @@ def _fold_run_resource_summary(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-class AdminRunQueries:
+class PostgresAdminRunQueries:
     """Admin-only queries, kept separate from ownership-enforcing store reads."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
