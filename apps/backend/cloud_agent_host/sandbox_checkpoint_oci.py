@@ -252,6 +252,46 @@ def _manifest_layers(manifest: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(_descriptor_digest(layer) for layer in layers)
 
 
+def _entry_handle(archive: tarfile.TarFile, member: tarfile.TarInfo) -> IO[bytes]:
+    """Open one regular checkpoint archive entry for reading."""
+    handle = archive.extractfile(member)
+    if handle is None:
+        raise SandboxCheckpointError("checkpoint archive entry is unreadable")
+    return handle
+
+
+def _read_entry(handle: IO[bytes], size: int) -> bytes:
+    """Read a whole small entry, refusing one shorter than its header declares."""
+    body = handle.read()
+    if len(body) != size:
+        raise SandboxCheckpointError("checkpoint archive entry is truncated")
+    return body
+
+
+def _require_blob_digest(body: bytes, digest: str) -> None:
+    if hashlib.sha256(body).hexdigest() != digest:
+        raise SandboxCheckpointError("checkpoint blob does not match its digest")
+
+
+def _sole_manifest(
+    metadata: Mapping[str, bytes],
+    small_blobs: Mapping[str, bytes],
+) -> tuple[str, dict[str, Any]]:
+    """The one image manifest the archive describes."""
+    manifests = _image_manifests(metadata, small_blobs)
+    if len(manifests) != 1:
+        raise SandboxCheckpointError("checkpoint archive must describe exactly one image")
+    return manifests[0]
+
+
+def _image_config(manifest: Mapping[str, Any], small_blobs: Mapping[str, bytes]) -> str:
+    """The digest of the manifest's image config, which the archive must carry."""
+    config_digest = _descriptor_digest(manifest.get("config"))
+    if config_digest not in small_blobs:
+        raise SandboxCheckpointError("checkpoint archive is missing its image config")
+    return config_digest
+
+
 def read_base_layers(save_stream: IO[bytes]) -> frozenset[str]:
     """Return every layer digest a ``docker save`` of the base image provides."""
     metadata: dict[str, bytes] = {}
@@ -278,7 +318,7 @@ def read_base_layers(save_stream: IO[bytes]) -> frozenset[str]:
     return frozenset(layers)
 
 
-def export_checkpoint_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+def export_checkpoint_archive(
     save_stream: IO[bytes],
     output: BinaryIO,
     *,
@@ -313,13 +353,9 @@ def export_checkpoint_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                 _require_entry_space(target.offset, 0, max_bytes)
                 _add_directory(target, member.name, mtime=member.mtime)
                 continue
-            handle = source.extractfile(member)
-            if handle is None:
-                raise SandboxCheckpointError("checkpoint archive entry is unreadable")
+            handle = _entry_handle(source, member)
             if kind == "metadata" or member.size <= _MAX_METADATA_BYTES:
-                body = handle.read()
-                if len(body) != member.size:
-                    raise SandboxCheckpointError("checkpoint archive entry is truncated")
+                body = _read_entry(handle, member.size)
                 assert name is not None
                 if kind == "metadata":
                     metadata[name] = body
@@ -327,8 +363,7 @@ def export_checkpoint_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                     # Held back until the manifest says whether the image uses
                     # it: a classic image store's `docker save` also emits
                     # metadata blobs no manifest names, which a restore refuses.
-                    if hashlib.sha256(body).hexdigest() != name:
-                        raise SandboxCheckpointError("checkpoint blob does not match its digest")
+                    _require_blob_digest(body, name)
                     small_blobs[name] = body
             else:
                 assert name is not None
@@ -343,13 +378,8 @@ def export_checkpoint_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                     mtime=member.mtime,
                 )
                 large_blob_bytes[name] = member.size
-        manifests = _image_manifests(metadata, small_blobs)
-        if len(manifests) != 1:
-            raise SandboxCheckpointError("checkpoint archive must describe exactly one image")
-        manifest_digest, manifest = manifests[0]
-        config_digest = _descriptor_digest(manifest.get("config"))
-        if config_digest not in small_blobs:
-            raise SandboxCheckpointError("checkpoint archive is missing its image config")
+        manifest_digest, manifest = _sole_manifest(metadata, small_blobs)
+        config_digest = _image_config(manifest, small_blobs)
         inherited, added = _split_new_layers(_manifest_layers(manifest), base_layers)
         used = {manifest_digest, config_digest, *added}
         if set(large_blob_bytes) - used:
@@ -490,7 +520,7 @@ def _image_metadata(
     return index_body, docker_manifest, b'{"imageLayoutVersion":"1.0.0"}'
 
 
-def prepare_restore_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+def prepare_restore_archive(
     source: IO[bytes],
     output: IO[bytes],
     *,
@@ -528,46 +558,25 @@ def prepare_restore_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline
             if kind == "directory":
                 continue
             assert name is not None
-            handle = archive.extractfile(member)
-            if handle is None:
-                raise SandboxCheckpointError("checkpoint archive entry is unreadable")
+            handle = _entry_handle(archive, member)
             if kind == "metadata":
-                body = handle.read()
-                if len(body) != member.size:
-                    raise SandboxCheckpointError("checkpoint archive entry is truncated")
-                metadata[name] = body
+                metadata[name] = _read_entry(handle, member.size)
                 continue
-            if name in blob_bytes:
-                raise SandboxCheckpointError("checkpoint archive repeats a blob")
-            _require_entry_space(output.tell(), member.size, max_bytes)
-            if member.size <= _MAX_METADATA_BYTES:
-                body = handle.read()
-                if len(body) != member.size:
-                    raise SandboxCheckpointError("checkpoint archive entry is truncated")
-                if hashlib.sha256(body).hexdigest() != name:
-                    raise SandboxCheckpointError("checkpoint blob does not match its digest")
-                small_blobs[name] = body
-                _add_bytes(target, f"blobs/sha256/{name}", body)
-            else:
-                _copy_verified_blob(
-                    target,
-                    f"blobs/sha256/{name}",
-                    handle,
-                    member.size,
-                    name,
-                    "checkpoint blob does not match its digest",
-                )
-            blob_bytes[name] = member.size
-        manifests = _image_manifests(metadata, small_blobs)
-        if len(manifests) != 1:
-            raise SandboxCheckpointError("checkpoint archive must describe exactly one image")
-        manifest_digest, manifest = manifests[0]
+            _restore_blob(
+                target,
+                handle,
+                name,
+                member.size,
+                output=output,
+                max_bytes=max_bytes,
+                small_blobs=small_blobs,
+                blob_bytes=blob_bytes,
+            )
+        manifest_digest, manifest = _sole_manifest(metadata, small_blobs)
         media_type = manifest.get("mediaType")
         if media_type not in _MANIFEST_TYPES:
             raise SandboxCheckpointError("checkpoint archive has an unknown manifest type")
-        config_digest = _descriptor_digest(manifest.get("config"))
-        if config_digest not in small_blobs:
-            raise SandboxCheckpointError("checkpoint archive is missing its image config")
+        config_digest = _image_config(manifest, small_blobs)
         layers = _manifest_layers(manifest)
         inherited, added = _split_new_layers(layers, base_layers)
         if any(layer not in blob_bytes for layer in added):
@@ -597,6 +606,38 @@ def prepare_restore_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline
         new_layers=added,
         new_layer_bytes=sum(blob_bytes[layer] for layer in added),
     )
+
+
+def _restore_blob(
+    target: tarfile.TarFile,
+    handle: IO[bytes],
+    name: str,
+    size: int,
+    *,
+    output: IO[bytes],
+    max_bytes: int,
+    small_blobs: dict[str, bytes],
+    blob_bytes: dict[str, int],
+) -> None:
+    """Copy one downloaded blob into the restore archive, verified against its digest."""
+    if name in blob_bytes:
+        raise SandboxCheckpointError("checkpoint archive repeats a blob")
+    _require_entry_space(output.tell(), size, max_bytes)
+    if size <= _MAX_METADATA_BYTES:
+        body = _read_entry(handle, size)
+        _require_blob_digest(body, name)
+        small_blobs[name] = body
+        _add_bytes(target, f"blobs/sha256/{name}", body)
+    else:
+        _copy_verified_blob(
+            target,
+            f"blobs/sha256/{name}",
+            handle,
+            size,
+            name,
+            "checkpoint blob does not match its digest",
+        )
+    blob_bytes[name] = size
 
 
 def _descriptor_of(raw: Any, what: str) -> dict[str, Any]:
