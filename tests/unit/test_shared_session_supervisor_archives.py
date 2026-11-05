@@ -1458,7 +1458,7 @@ def test_a_reaped_activation_ends_with_its_residency_so_its_group_can_idle(turn)
     with pytest.raises(SessionLeaseLost):
         supervisor.settle("athr_source", dead.token, job_id="ajob_dead", context_status="live")
     # No activation, turn or workspace request is left holding the group.
-    assert supervisor._is_quiescent(supervisor._groups[_spec().sandbox_id])
+    assert supervisor._groups[_spec().sandbox_id].lifecycle.is_quiescent()
     now[0] += 60
     assert [stopped.running for stopped in supervisor.sweep()] == [False]
     assert manager.items[_spec().container_name].running is False
@@ -1630,7 +1630,7 @@ def test_a_loss_during_its_turn_ends_the_activation_once_its_stream_closes_the_t
     with pytest.raises(SessionLeaseLost):
         supervisor.settle("athr_source", hung.token, job_id="ajob_hung", context_status="live")
     # No activation, turn or workspace request is left holding the group.
-    assert supervisor._is_quiescent(supervisor._groups[_spec().sandbox_id])
+    assert supervisor._groups[_spec().sandbox_id].lifecycle.is_quiescent()
 
 
 def test_a_lost_turn_whose_stream_never_closes_it_is_closed_by_the_sweep():

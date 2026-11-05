@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 
 from cloud_agent_host.chat_sandbox import TURN_NETWORK_PROOF_S, RetainedChatLost
 from cloud_agent_host.chat_sandbox_exec import standing_network_proof
-from cloud_agent_host.session_lifecycle import SessionBusy
+from cloud_agent_host.group_lifecycle import Operation
 
 if TYPE_CHECKING:
     from cloud_agent_host.shared_session_supervisor import (
@@ -100,10 +100,7 @@ def ensure_running(
     current = supervisor._manager.inspect(group.spec.container_name)
     if current is None:
         raise RetainedChatLost("shared sandbox container is missing")
-    if group.stop_archive_pending:
-        raise SessionBusy("shared workspace final archive retry is pending")
-    if group.orphan_finalization_pending:
-        raise SessionBusy("shared workspace orphan finalization is pending")
+    group.lifecycle.admit(Operation.RUN)
     group.inspection = supervisor._start_and_prove(group, start_seq=start_seq)
 
 

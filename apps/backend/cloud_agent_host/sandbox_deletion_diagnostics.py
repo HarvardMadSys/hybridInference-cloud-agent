@@ -86,7 +86,7 @@ KNOWN_REASONS = frozenset(
 _NO_MEMBERSHIP = re.compile(r"chat '[^']*' has no shared sandbox membership")
 
 #: The group state any of which refuses a deletion
-#: (``_require_deletion_lifecycle_admission``, ``_require_mutation_admission``).
+#: (``Operation.IDLE_DELETION`` in ``group_lifecycle.ADMISSION``).
 _BARRIERS = (
     "container_lost",
     "snapshotting",

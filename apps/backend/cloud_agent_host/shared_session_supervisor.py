@@ -37,6 +37,7 @@ from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
 from cloud_agent_host.environment_preparation import prepared_in, runs_no_script
 from cloud_agent_host.environment_ready_boot import ready_boot
 from cloud_agent_host.group_archive_policy import GroupArchivePolicy, NullArchivePolicy
+from cloud_agent_host.group_lifecycle import GroupLifecycle, Operation
 from cloud_agent_host.guarded_workloads import (
     GuardedWorkload,
     exact_stop_unguarded,
@@ -382,6 +383,11 @@ class _Group:
     # it changes the group after its checkpoint was taken.
     sealed_seq: int | None = None
 
+    @property
+    def lifecycle(self) -> GroupLifecycle:
+        """The admission decisions over this group's lifecycle fields."""
+        return GroupLifecycle(self)
+
 
 @dataclass(frozen=True, eq=False)
 class _LifecycleCheck:
@@ -654,10 +660,8 @@ class SharedChatSessionSupervisor:
                 retry_pending = group.stop_archive_pending
                 blocked = group.stop_archive_blocked
                 if retry_pending:
-                    if group.stopping:
-                        failures.append(
-                            SessionBusy("shared sandbox group stop is already in progress")
-                        )
+                    if (refused := group.lifecycle.refusal(Operation.TAKE_STOP)) is not None:
+                        failures.append(refused)
                         continue
                     group.stopping = True
             if retry_pending:
@@ -771,8 +775,7 @@ class SharedChatSessionSupervisor:
 
     def _begin_lifecycle_check_locked(self, group: _Group) -> _LifecycleCheck:
         """Reserve this group, leaving the metadata lock free during external I/O."""
-        if group.lifecycle_check is not None:
-            raise SessionBusy("shared sandbox lifecycle check is in progress")
+        group.lifecycle.admit(Operation.LIFECYCLE_CHECK)
         group.lifecycle_generation += 1
         check = _LifecycleCheck(
             group,
@@ -1004,7 +1007,7 @@ class SharedChatSessionSupervisor:
         prompt. Callers recheck membership and activation after this wait.
         """
         self._wait_while_locked(
-            lambda: "shared workspace start is in progress" if group.starting else None,
+            lambda: group.lifecycle.busy_reason(Operation.START_WAIT),
             deadline=time.monotonic() + 30.0,
         )
         if group.container_lost:
@@ -1031,18 +1034,7 @@ class SharedChatSessionSupervisor:
         """
         with self._lock:
             self._wait_for_start_locked(group, retry_failed=True)
-            if group.lifecycle_check is not None:
-                raise SessionBusy("shared sandbox lifecycle check is in progress")
-            if group.stopping:
-                raise SessionBusy("shared workspace stop is in progress")
-            if group.stop_archive_pending:
-                raise SessionBusy("shared workspace final archive retry is pending")
-            if group.stop_archive_blocked:
-                raise SessionBusy(
-                    "shared workspace final archive is blocked by native flush failure"
-                )
-            if group.orphan_finalization_pending:
-                raise SessionBusy("shared workspace orphan finalization is pending")
+            group.lifecycle.admit(Operation.START)
             group.starting = True
             members = self._archive_members_locked(group)
             expected_container_id = group.inspection.container_id
@@ -1212,7 +1204,7 @@ class SharedChatSessionSupervisor:
                         not inspection.running
                         and inspection.status is not ChatSandboxStatus.CREATED
                         and self._manager.network.network_for(spec) in inspection.networks
-                        and self._is_quiescent(group)
+                        and group.lifecycle.is_quiescent()
                         and not group.stop_archive_blocked
                         and not group.orphan_finalization_pending
                         and not group.stop_archive_pending
@@ -1240,7 +1232,8 @@ class SharedChatSessionSupervisor:
                         found.extend(self._descriptors(group))
                     continue
                 found.extend(
-                    replace(item, group_busy=not self._is_quiescent(group)) for item in reconciled
+                    replace(item, group_busy=not group.lifecycle.is_quiescent())
+                    for item in reconciled
                 )
         self._manager.network.prune_orphan_networks(specs, listed)
         return found
@@ -1387,23 +1380,19 @@ class SharedChatSessionSupervisor:
                     group.stopping = inspection.running
                     blocked = True
                 elif group.orphan_finalization_pending:
-                    if group.stopping:
-                        raise SessionBusy(
-                            "shared sandbox orphan finalization is already in progress"
-                        )
+                    group.lifecycle.admit(Operation.ORPHAN_FINALIZATION)
                     group.stopping = True
                     finalize = True
                     members = self._archive_members_locked(group)
                 elif group.stop_archive_pending:
-                    if group.stopping:
-                        raise SessionBusy("shared sandbox group stop is already in progress")
+                    group.lifecycle.admit(Operation.TAKE_STOP)
                     group.stopping = True
                     retry = True
                 elif (
                     not inspection.running
                     and inspection.status is not ChatSandboxStatus.CREATED
                     and owned_bridge in inspection.networks
-                    and self._is_quiescent(group, allow_lifecycle_check=True)
+                    and group.lifecycle.is_quiescent(allow_lifecycle_check=True)
                 ):
                     # Bridge presence alone is not authority to invent a
                     # clean final archive. Classify the durable marker first:
@@ -1434,10 +1423,7 @@ class SharedChatSessionSupervisor:
                             group.stop_archive_members = members
                             blocked = True
                         else:
-                            if group.stopping:
-                                raise SessionBusy(
-                                    "shared sandbox group stop is already in progress"
-                                )
+                            group.lifecycle.admit(Operation.TAKE_STOP)
                             group.stopping = True
                             finalize = True
 
@@ -1832,8 +1818,7 @@ class SharedChatSessionSupervisor:
         """
         if start_seq is _SAME_RUN:
             return
-        if group.stopping or not group.inspection.running:
-            raise SessionBusy("shared workspace stopped before the request was admitted")
+        group.lifecycle.admit(Operation.JOIN_RUN)
         if start_seq is None:
             group.run_unfenced = True
         elif group.start_seq is None or start_seq > group.start_seq:
@@ -1847,7 +1832,7 @@ class SharedChatSessionSupervisor:
                 return None
             return group.start_seq
 
-    def _install_manifest_locked(  # noqa: C901, PLR0912 complexity baseline, #771
+    def _install_manifest_locked(  # noqa: PLR0912 complexity baseline, #771
         self,
         group: _Group,
         spec: ChatSandboxSpec,
@@ -1861,10 +1846,7 @@ class SharedChatSessionSupervisor:
             raise SandboxError("shared sandbox immutable identity/configuration changed")
         if expected_container_id and group.inspection.container_id != expected_container_id:
             raise RetainedChatLost("shared sandbox container identity changed")
-        if group.lifecycle_check is not None:
-            raise SessionBusy("shared sandbox lifecycle check is in progress")
-        if group.archive_request_id is not None:
-            raise SessionBusy("shared sandbox archive and deletion is in progress")
+        group.lifecycle.admit(Operation.MANIFEST)
 
         wanted = {item.thread_id for item in members}
         for manifest, resident_slot_id in validated_members:
@@ -2010,21 +1992,10 @@ class SharedChatSessionSupervisor:
         with self._lock:
             group, member = self._member(thread_id)
             self._wait_while_locked(
-                lambda: (
-                    "shared workspace snapshot is in progress"
-                    if group.snapshotting
-                    else "shared workspace start is in progress"
-                    if group.starting
-                    else "shared workspace stop is in progress"
-                    if group.stopping
-                    else None
-                ),
+                lambda: group.lifecycle.busy_reason(Operation.ACTIVATION_WAIT),
                 deadline=time.monotonic() + 30.0,
             )
-            if group.stop_archive_pending:
-                raise SessionBusy("shared workspace final archive retry is pending")
-            if group.orphan_finalization_pending:
-                raise SessionBusy("shared workspace orphan finalization is pending")
+            group.lifecycle.admit(Operation.RUN)
             if member.context_status == "lost":
                 raise RetainedChatLost("shared member context was lost")
             if member.lease_token is not None:
@@ -2077,7 +2048,7 @@ class SharedChatSessionSupervisor:
                 or group.lifecycle_generation != lifecycle_generation
             ):
                 raise SessionLeaseLost("shared sandbox lifecycle changed during activation")
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
             if member.lease_token is not None:
                 if member.lease_owner == owner:
                     return self._lease(
@@ -2130,7 +2101,7 @@ class SharedChatSessionSupervisor:
             group, member = self._leased_member(thread_id, token)
             self._wait_for_start_locked(group)
             group, member = self._leased_member(thread_id, token)
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
         # CLI initialization may block. The member lock, not the group lock,
         # leaves siblings able to initialize and execute simultaneously. The
         # lease is checked again around the launch: an activation abandoned
@@ -2164,7 +2135,7 @@ class SharedChatSessionSupervisor:
             group, member = self._leased_member(thread_id, token)
             self._wait_for_start_locked(group)
             group, member = self._leased_member(thread_id, token)
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
             if member.current_turn is not None:
                 raise SessionBusy(f"chat {thread_id!r} already has a running turn")
             transport = member.transport
@@ -2188,7 +2159,7 @@ class SharedChatSessionSupervisor:
             )
             with self._lock:
                 self._wait_for_start_locked(group)
-                self._require_mutation_admission(group)
+                group.lifecycle.admit(Operation.MUTATION)
                 current_group = self._members.get(thread_id)
                 current_member = (
                     current_group.members.get(thread_id) if current_group is not None else None
@@ -3036,7 +3007,7 @@ class SharedChatSessionSupervisor:
             current_group, current_source = self._member(source_thread_id)
             if current_group is not group or current_source is not source:
                 raise SessionLeaseLost("source membership changed before fork admission")
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
             mutex = group.fork_mutex
             activity_token = f"fork:{operation_id}"
             if activity_token in group.operation_tokens:
@@ -3092,7 +3063,7 @@ class SharedChatSessionSupervisor:
         self._ensure_running(group, start_seq=start_seq)
         stale_transport: ResidentTransport[DialectRuntime] | None = None
         with self._lock:
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
             # The Fork's activity token keeps the group from stopping.
             self._join_run_locked(group, start_seq)
             fork_lifecycle_generation = group.lifecycle_generation
@@ -3311,7 +3282,7 @@ class SharedChatSessionSupervisor:
                 raise RetainedChatLost("shared sandbox container identity was lost")
             if receipt.get("ready") and prepared_in(receipt, group.inspection):
                 return receipt
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
             if group.operation_tokens or any(
                 m.current_turn is not None
                 or (m.lease_token is not None and m.lease_token != activation_owner)
@@ -3407,11 +3378,11 @@ class SharedChatSessionSupervisor:
             # writer and lifecycle fence is checked as usual.
             group.snapshotting = False
             try:
-                self._require_mutation_admission(group)
+                group.lifecycle.admit(Operation.MUTATION)
             finally:
                 group.snapshotting = True
         else:
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
         if expected_spec is not None and group.spec != expected_spec:
             raise SandboxError("shared sandbox immutable identity/configuration changed")
         if expected_container_id is not None and group.inspection.container_id != (
@@ -3730,7 +3701,7 @@ class SharedChatSessionSupervisor:
             current_group, current_member = self._member(thread_id)
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost(f"shared membership changed before {kind} admission")
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
             lifecycle_generation = group.lifecycle_generation
         admit_running(self, group, start_seq=start_seq, reuse=not terminal)
         with self._lock:
@@ -3742,7 +3713,7 @@ class SharedChatSessionSupervisor:
                 or group.lifecycle_generation != lifecycle_generation
             ):
                 raise SessionLeaseLost(f"shared sandbox lifecycle changed during {kind} admission")
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
             self._join_run_locked(group, start_seq)
             token = secrets.token_urlsafe(24)
             tokens = group.terminal_tokens if terminal else group.operation_tokens
@@ -3956,12 +3927,7 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost(
                     "shared sandbox member activation changed after stop request"
                 )
-            if group.stopping:
-                raise SessionBusy("shared sandbox group stop is already in progress")
-            if group.starting:
-                raise SessionBusy("shared sandbox group start is in progress")
-            if reason == "idle" and not self._is_quiescent(group):
-                raise SessionBusy("shared sandbox group still has active members")
+            group.lifecycle.admit(Operation.IDLE_STOP if reason == "idle" else Operation.STOP)
             if (
                 reason == "idle"
                 and require_expired_deadline
@@ -3977,7 +3943,7 @@ class SharedChatSessionSupervisor:
             with self._lock:
                 self._end_lifecycle_check_locked(check)
         with self._lock:
-            return replace(result, group_busy=not self._is_quiescent(group))
+            return replace(result, group_busy=not group.lifecycle.is_quiescent())
 
     def _stop_checked_group(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
@@ -4309,11 +4275,9 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost("sandbox archive generation is stale")
             if group.archive_request_id not in (None, request_id):
                 raise SessionBusy("another sandbox archive is in progress")
-            self._require_deletion_lifecycle_admission(group)
-            if group.archive_request_id is None:
-                self._require_mutation_admission(group)
-            if group.archive_request_id is None and not self._is_quiescent(group):
-                raise SessionBusy("sandbox archive requires an idle group")
+            group.lifecycle.admit(
+                Operation.ARCHIVE if group.archive_request_id is None else Operation.DELETION
+            )
             check = self._begin_lifecycle_check_locked(group)
         try:
             current = self._manager.require_stopped_archive(check.spec, container_id=container_id)
@@ -4345,8 +4309,7 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost("sandbox archive identity changed")
             if group.archive_request_id not in (None, request_id):
                 raise SessionLeaseLost("sandbox archive request is stale")
-            if group.lifecycle_check is not None:
-                raise SessionBusy("shared sandbox lifecycle check is in progress")
+            group.lifecycle.admit(Operation.LIFECYCLE_CHECK)
             if group.archive_request_id == request_id:
                 group.archive_request_id = None
                 group.stopping = False
@@ -4366,10 +4329,7 @@ class SharedChatSessionSupervisor:
                 if group.archive_request_id is None and not group.container_lost:
                     # Refusing a busy deletion must not invalidate an active
                     # native fork merely by advancing the lifecycle clock.
-                    self._require_deletion_lifecycle_admission(group)
-                    self._require_mutation_admission(group)
-                    if not self._is_quiescent(group):
-                        raise SessionBusy("sandbox deletion requires an idle group")
+                    group.lifecycle.admit(Operation.IDLE_DELETION)
                 check = self._begin_lifecycle_check_locked(group)
             else:
                 if spec.sandbox_id in self._creating:
@@ -4382,13 +4342,12 @@ class SharedChatSessionSupervisor:
                 if check is not None:
                     self._require_lifecycle_check_locked(check)
                 if current is not None and group is not None:
-                    self._require_deletion_lifecycle_admission(group)
-                    if group.archive_request_id is None:
-                        self._require_mutation_admission(group, allow_lifecycle_check=True)
-                    if group.archive_request_id is None and not self._is_quiescent(
-                        group, allow_lifecycle_check=True
-                    ):
-                        raise SessionBusy("sandbox deletion requires an idle group")
+                    group.lifecycle.admit(
+                        Operation.IDLE_DELETION
+                        if group.archive_request_id is None
+                        else Operation.DELETION,
+                        allow_lifecycle_check=True,
+                    )
                     self._accept_inspection_locked(group, current)
                     group.archive_request_id = request_id
                     group.stopping = True
@@ -4483,7 +4442,7 @@ class SharedChatSessionSupervisor:
                 if group.inspection.running
                 and group.idle_deadline is not None
                 and group.idle_deadline <= now
-                and self._is_quiescent(group)
+                and group.lifecycle.is_quiescent()
             ]
         stopped: builtins.list[SharedSessionDescriptor] = []
         for thread_id, generation in candidates:
@@ -4532,7 +4491,7 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost("member identity changed before process launch")
             if lease_token is not None and member.lease_token != lease_token:
                 raise SessionLeaseLost("shared member activation lease is stale")
-            self._require_mutation_admission(group)
+            group.lifecycle.admit(Operation.MUTATION)
             # The retained member owns the locator. An omitted field in a
             # later activation must not turn a restart into a fresh chat.
             if member.native_session_id:
@@ -4664,7 +4623,7 @@ class SharedChatSessionSupervisor:
         stops it again: armed, the sweep would pick it on every pass.
         """
         if (
-            self._is_quiescent(group, allow_lifecycle_check=allow_lifecycle_check)
+            group.lifecycle.is_quiescent(allow_lifecycle_check=allow_lifecycle_check)
             and group.inspection.running
             and not group.container_lost
             and not group.stop_archive_pending
@@ -4693,56 +4652,6 @@ class SharedChatSessionSupervisor:
         member.transport = None
         member.resident_state = "restarting" if member.native_session_id else "stopped"
         return transport
-
-    @staticmethod
-    def _is_quiescent(group: _Group, *, allow_lifecycle_check: bool = False) -> bool:
-        return (
-            (allow_lifecycle_check or group.lifecycle_check is None)
-            and not group.snapshotting
-            and not group.starting
-            and not group.stopping
-            and not group.operation_tokens
-            and not group.terminal_tokens
-            and all(
-                member.lease_token is None and member.current_turn is None
-                for member in group.members.values()
-            )
-        )
-
-    @staticmethod
-    def _require_deletion_lifecycle_admission(group: _Group) -> None:
-        """Preserve native flush and lifecycle archive fences during deletion."""
-        if group.container_lost:
-            raise RetainedChatLost("shared sandbox container identity was lost")
-        if (
-            group.snapshotting
-            or group.starting
-            or group.initial_archive_preservation_pending
-            or group.stop_archive_pending
-            or group.stop_archive_blocked
-            or group.orphan_finalization_pending
-            or group.start_archive_completion_pending
-        ):
-            raise SessionBusy("sandbox lifecycle archive must finish before deletion")
-
-    @staticmethod
-    def _require_mutation_admission(group: _Group, *, allow_lifecycle_check: bool = False) -> None:
-        if group.lifecycle_check is not None and not allow_lifecycle_check and not group.stopping:
-            raise SessionBusy("shared sandbox lifecycle check is in progress")
-        if group.snapshotting:
-            raise SessionBusy("shared workspace snapshot capture is in progress")
-        if group.stopping:
-            raise SessionBusy("shared workspace stop is in progress")
-        if group.starting:
-            raise SessionBusy("shared workspace start is in progress")
-        if group.stop_archive_blocked:
-            raise SessionBusy("shared workspace final archive is blocked by native flush failure")
-        if group.stop_archive_pending:
-            raise SessionBusy("shared workspace final archive retry is pending")
-        if group.orphan_finalization_pending:
-            raise SessionBusy("shared workspace orphan finalization is pending")
-        if group.start_archive_completion_pending:
-            raise SessionBusy("shared workspace start archive completion is pending")
 
     def _member(self, thread_id: str) -> tuple[_Group, _Member]:
         group = self._members.get(thread_id)
@@ -4815,7 +4724,7 @@ class SharedChatSessionSupervisor:
             container_name=group.inspection.name,
             docker_status=group.inspection.status.value,
             running=group.inspection.running,
-            group_busy=not SharedChatSessionSupervisor._is_quiescent(group),
+            group_busy=not group.lifecycle.is_quiescent(),
             lifecycle_pending=(
                 group.lifecycle_check is not None
                 or group.stopping

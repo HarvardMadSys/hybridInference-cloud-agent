@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
 from cloud_agent_host.environment_preparation import prepared_in
+from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.session_lifecycle import SessionBusy
 
 if TYPE_CHECKING:
@@ -77,7 +78,7 @@ def _admitted(supervisor: SharedChatSessionSupervisor, group: Any) -> bool:
     if group.container_lost or group.start_failed:
         return False
     try:
-        supervisor._require_mutation_admission(group)
+        group.lifecycle.admit(Operation.MUTATION)
     except SessionBusy:
         return False
     return True
