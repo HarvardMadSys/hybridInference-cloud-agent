@@ -58,7 +58,7 @@ class GroupRegistration:
         self._manager = state.manager
         self._archive = state.archive
 
-    def register_manifest(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def register_manifest(
         self,
         spec: ChatSandboxSpec,
         members: builtins.list[SharedMemberManifest],
@@ -77,22 +77,7 @@ class GroupRegistration:
         ``environment_snapshot`` starts from it when it can, and from the
         sandbox image otherwise.
         """
-        if not members:
-            raise ValueError("a shared sandbox manifest cannot be empty")
-        seen_slots: set[int] = set()
-        # The validation pass rejects a manifest with no resident slot before
-        # anything is mutated, so the install pass below reads the slot from
-        # this pair rather than re-deciding what the check above established.
-        validated_members: builtins.list[tuple[SharedMemberManifest, int]] = []
-        for manifest in members:
-            if manifest.resident_slot_id is None:
-                raise ValueError("every ready shared member needs a resident slot")
-            if not 0 <= manifest.resident_slot_id < spec.resident_slot_capacity:
-                raise ValueError("member resident slot is outside sandbox capacity")
-            if manifest.resident_slot_id in seen_slots:
-                raise ValueError("two shared members cannot own one resident slot")
-            seen_slots.add(manifest.resident_slot_id)
-            validated_members.append((manifest, manifest.resident_slot_id))
+        validated_members = self._validated_members(spec, members)
         with self._state.lock:
             deadline = time.monotonic() + 30.0
             group = self._state.groups.get(spec.sandbox_id)
@@ -130,18 +115,15 @@ class GroupRegistration:
             self._state.creating.add(spec.sandbox_id)
         # Docker create, or the exact adoption check, can take minutes. Only registrations of this sandbox wait for it; the
         # metadata lock stays free for every other group and member.
-        snapshot_failure: str | None = None
         try:
-            if expected_container_id:
-                created = self._manager.require_existing(spec, container_id=expected_container_id)
-            elif restore is not None:
-                created = self._restore_group(spec, restore, facts=facts, observer=observer)
-            elif environment_snapshot is not None:
-                created, snapshot_failure = self._create_from_snapshot(
-                    spec, environment_snapshot, facts=facts, observer=observer
-                )
-            else:
-                created = self._manager.create(spec, facts=facts, observer=observer)
+            created, snapshot_failure = self._create_group_container(
+                spec,
+                expected_container_id=expected_container_id,
+                restore=restore,
+                environment_snapshot=environment_snapshot,
+                facts=facts,
+                observer=observer,
+            )
         except BaseException:
             with self._state.lock:
                 self._state.creating.discard(spec.sandbox_id)
@@ -166,6 +148,50 @@ class GroupRegistration:
                 validated_members,
                 expected_container_id=expected_container_id,
             )
+
+    @staticmethod
+    def _validated_members(
+        spec: ChatSandboxSpec, members: builtins.list[SharedMemberManifest]
+    ) -> builtins.list[tuple[SharedMemberManifest, int]]:
+        """Pair each manifest member with its resident slot, refusing an invalid manifest."""
+        if not members:
+            raise ValueError("a shared sandbox manifest cannot be empty")
+        seen_slots: set[int] = set()
+        # The validation pass rejects a manifest with no resident slot before
+        # anything is mutated, so the install pass reads the slot from this
+        # pair rather than re-deciding what the check here established.
+        validated_members: builtins.list[tuple[SharedMemberManifest, int]] = []
+        for manifest in members:
+            if manifest.resident_slot_id is None:
+                raise ValueError("every ready shared member needs a resident slot")
+            if not 0 <= manifest.resident_slot_id < spec.resident_slot_capacity:
+                raise ValueError("member resident slot is outside sandbox capacity")
+            if manifest.resident_slot_id in seen_slots:
+                raise ValueError("two shared members cannot own one resident slot")
+            seen_slots.add(manifest.resident_slot_id)
+            validated_members.append((manifest, manifest.resident_slot_id))
+        return validated_members
+
+    def _create_group_container(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str | None,
+        restore: CheckpointRestore | None,
+        environment_snapshot: EnvironmentSnapshotRef | None,
+        facts: SandboxActionFacts | None,
+        observer: StageRecorder | None,
+    ) -> tuple[ChatSandboxInspection, str | None]:
+        """Adopt, restore or create the group's container, and why a snapshot went unused."""
+        if expected_container_id:
+            return self._manager.require_existing(spec, container_id=expected_container_id), None
+        if restore is not None:
+            return self._restore_group(spec, restore, facts=facts, observer=observer), None
+        if environment_snapshot is not None:
+            return self._create_from_snapshot(
+                spec, environment_snapshot, facts=facts, observer=observer
+            )
+        return self._manager.create(spec, facts=facts, observer=observer), None
 
     def _restore_group(
         self,
@@ -275,7 +301,7 @@ class GroupRegistration:
         self._state.condition.notify_all()
         return None
 
-    def _install_manifest_locked(  # noqa: PLR0912 complexity baseline, #771
+    def _install_manifest_locked(
         self,
         group: _Group,
         spec: ChatSandboxSpec,
@@ -306,65 +332,14 @@ class GroupRegistration:
                 continue
             member = group.members.get(manifest.thread_id)
             if member is None:
-                # A durable observation that the previous sandbox manager owned
-                # a live process is not an attachable local transport. Docker
-                # preserves the native session files, but the replacement
-                # sandbox manager has no stdin/stdout pipes and must resume it
-                # before claiming a HOT hit.
-                resident_state: ResidentState = manifest.resident_state
-                if resident_state == "live":
-                    resident_state = "restarting" if manifest.native_session_id else "stopped"
-                member = _Member(
-                    thread_id=manifest.thread_id,
-                    native_session_id=manifest.native_session_id,
-                    context_status=manifest.context_status,
-                    activation_generation=manifest.activation_generation,
-                    process_generation=manifest.process_generation,
-                    residency_generation=manifest.residency_generation,
-                    resident_state=resident_state,
-                    resident_slot_id=resident_slot_id,
-                    last_settled_job_id=manifest.last_settled_job_id,
-                )
+                member = self._new_member(manifest, resident_slot_id)
                 group.members[manifest.thread_id] = member
                 self._state.members[manifest.thread_id] = group
             else:
                 if member.resident_slot_id != manifest.resident_slot_id:
                     raise SandboxError("member resident slot changed in place")
                 if member.lease_token is None and member.current_turn is None:
-                    member.native_session_id = manifest.native_session_id
-                    member.context_status = (
-                        "lost"
-                        if member.context_status == "lost" or manifest.context_status == "lost"
-                        else manifest.context_status
-                    )
-                    member.activation_generation = max(
-                        member.activation_generation,
-                        manifest.activation_generation,
-                    )
-                    member.process_generation = max(
-                        member.process_generation,
-                        manifest.process_generation,
-                    )
-                    # A durable generation is not proof that the attached
-                    # process was launched with that generation's secret.
-                    # Advance it only when there is no local pipe; with a
-                    # live transport, leaving the old value makes
-                    # ``_ensure_transport`` perform the required re-keyed
-                    # native restart.
-                    if member.transport is None:
-                        member.residency_generation = max(
-                            member.residency_generation,
-                            manifest.residency_generation,
-                        )
-                    member.last_settled_job_id = manifest.last_settled_job_id
-                    if member.transport is None:
-                        member.resident_state = (
-                            "lost" if member.context_status == "lost" else manifest.resident_state
-                        )
-                        if member.resident_state == "live":
-                            member.resident_state = (
-                                "restarting" if member.native_session_id else "stopped"
-                            )
+                    self._refresh_idle_member_locked(member, manifest)
         # Removal is safe only for a manifest member with no live local
         # ownership. A stale manifest never tears down an active process.
         for thread_id, member in list(group.members.items()):
@@ -373,6 +348,65 @@ class GroupRegistration:
             group.members.pop(thread_id, None)
             self._state.members.pop(thread_id, None)
         return self._state.descriptors(group)
+
+    @staticmethod
+    def _new_member(manifest: SharedMemberManifest, resident_slot_id: int) -> _Member:
+        """Build the local record of a manifest member this host has not seen."""
+        # A durable observation that the previous sandbox manager owned a live
+        # process is not an attachable local transport. Docker preserves the
+        # native session files, but the replacement sandbox manager has no
+        # stdin/stdout pipes and must resume it before claiming a HOT hit.
+        resident_state: ResidentState = manifest.resident_state
+        if resident_state == "live":
+            resident_state = "restarting" if manifest.native_session_id else "stopped"
+        return _Member(
+            thread_id=manifest.thread_id,
+            native_session_id=manifest.native_session_id,
+            context_status=manifest.context_status,
+            activation_generation=manifest.activation_generation,
+            process_generation=manifest.process_generation,
+            residency_generation=manifest.residency_generation,
+            resident_state=resident_state,
+            resident_slot_id=resident_slot_id,
+            last_settled_job_id=manifest.last_settled_job_id,
+        )
+
+    @staticmethod
+    def _refresh_idle_member_locked(member: _Member, manifest: SharedMemberManifest) -> None:
+        """Bring an unleased, idle member up to its durable manifest.
+
+        The caller holds the lock.
+        """
+        member.native_session_id = manifest.native_session_id
+        member.context_status = (
+            "lost"
+            if member.context_status == "lost" or manifest.context_status == "lost"
+            else manifest.context_status
+        )
+        member.activation_generation = max(
+            member.activation_generation,
+            manifest.activation_generation,
+        )
+        member.process_generation = max(
+            member.process_generation,
+            manifest.process_generation,
+        )
+        # A durable generation is not proof that the attached process was
+        # launched with that generation's secret. Advance it only when there is
+        # no local pipe; with a live transport, leaving the old value makes
+        # ``_ensure_transport`` perform the required re-keyed native restart.
+        if member.transport is None:
+            member.residency_generation = max(
+                member.residency_generation,
+                manifest.residency_generation,
+            )
+        member.last_settled_job_id = manifest.last_settled_job_id
+        if member.transport is None:
+            member.resident_state = (
+                "lost" if member.context_status == "lost" else manifest.resident_state
+            )
+            if member.resident_state == "live":
+                member.resident_state = "restarting" if member.native_session_id else "stopped"
 
     def owns(self, thread_id: str) -> bool:
         """Whether this supervisor currently knows the membership alias."""
