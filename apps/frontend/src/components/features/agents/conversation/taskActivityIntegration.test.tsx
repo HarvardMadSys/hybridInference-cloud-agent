@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentJobApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { ActivityWindow } from './ActivityWindow';
 import { buildActivityOverview } from './activityOverview';
-import { toDisplayJob } from '../adapt';
+import { toDisplayJob } from '../adapt/jobAdapter';
 import { EventRow } from './ChatMessages';
 import { eventBlockKey } from './conversationTurnNavigation';
 import { ToolActivityDetails } from './ToolActivityDetails';

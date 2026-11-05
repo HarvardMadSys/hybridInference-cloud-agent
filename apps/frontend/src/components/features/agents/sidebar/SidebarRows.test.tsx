@@ -17,7 +17,6 @@ const JOB: AgentJob = {
   branch: 'agent/job-1',
   runtime: 'claude-code',
   model: 'model',
-  timeoutLabel: '',
   sandbox: '',
   attempts: [],
   events: [],

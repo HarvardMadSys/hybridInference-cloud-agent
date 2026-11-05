@@ -7,20 +7,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
-import { getConversationState, toConversationState } from './sidebar/conversationState';
+import { getConversationState, toConversationState } from '../sidebar/conversationState';
 
-import {
-  createDisplayJobAdapter,
-  lifecyclePhaseLabel,
-  ownerFailureMessage,
-  siteMisconfiguredReason,
-  subagentDisplayEvents,
-  toDiffFileDetails,
-  toDiffFiles,
-  toDisplayEvent,
-  toDisplayJob,
-  toDisplayState,
-} from './adapt';
+import { createDisplayJobAdapter, toDisplayJob } from './jobAdapter';
+import { lifecyclePhaseLabel, subagentDisplayEvents, toDisplayEvent } from './events';
+import { ownerFailureMessage, siteMisconfiguredReason, toDisplayState } from './jobState';
+import { toDiffFileDetails, toDiffFiles } from './diff';
 
 describe('owner failure wording', () => {
   it.each([

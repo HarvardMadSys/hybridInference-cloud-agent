@@ -126,7 +126,6 @@ function job(id: string, threadId: string): AgentJob {
     model: 'qwen-test',
     spentUsd: 0,
     hasLedger: false,
-    timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'done' }],
     currentAttemptNo: 1,

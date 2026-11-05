@@ -20,7 +20,7 @@ import type {
   AgentThreadApi,
   AgentThreadEventApi,
 } from '@/lib/api/agents';
-import { createDisplayJobAdapter } from './adapt';
+import { createDisplayJobAdapter } from './adapt/jobAdapter';
 import { resumeAfter } from './conversation/threadHistory';
 import { useThreadHistory, type ThreadHistoryControl } from './conversation/useThreadHistory';
 import { useAgentReads } from './AgentReadProvider';

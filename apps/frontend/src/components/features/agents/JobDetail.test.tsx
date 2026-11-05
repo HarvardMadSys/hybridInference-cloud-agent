@@ -91,7 +91,7 @@ import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
 import { IDLE_QUEUE_POLL_MS } from './composer/usePendingMessages';
 import { watchPullRequestPrompt } from './conversation/watchPullRequest';
 import type { AgentJob } from './types';
-import { toDisplayEvent } from './adapt';
+import { toDisplayEvent } from './adapt/events';
 import { projectProtocolEvents } from './trajectory/trajectoryProtocol';
 
 const renderingWork = vi.hoisted(() => ({
@@ -245,7 +245,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     runtime: 'claude-code',
     model: 'qwen-test',
     modelConnectionId: TEST_CONNECTION,
-    timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
     currentAttemptNo: 1,

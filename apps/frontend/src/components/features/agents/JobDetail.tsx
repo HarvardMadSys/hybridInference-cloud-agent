@@ -20,7 +20,7 @@ import { APIError } from '@/lib/utils/errors';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { ActivityWindow } from './conversation/ActivityWindow';
-import { ownedBySubagent, subagentDisplayEvents } from './adapt';
+import { ownedBySubagent, subagentDisplayEvents } from './adapt/events';
 import { SubagentLinks, type SubagentOfCall } from './conversation/ChatMessages';
 import { composerOverrides } from './composer/ConversationComposer';
 import { FloatingActivityWindow } from './conversation/FloatingActivityWindow';

@@ -194,7 +194,6 @@ function conversation(streamed: AgentEvent[] = []): AgentJob {
     runtime: 'claude-code',
     model: 'qwen-test',
     modelConnectionId: TEST_CONNECTION,
-    timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
     currentAttemptNo: 1,

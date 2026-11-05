@@ -19,7 +19,7 @@ import { useT } from '@/components/providers';
 import { ThreadTurn } from './ThreadTurn';
 export { ThreadTurn } from './ThreadTurn';
 import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
-import { lifecyclePhaseLabel } from '../adapt';
+import { lifecyclePhaseLabel } from '../adapt/events';
 import {
   eventBlockKey,
   messageBlockKey,

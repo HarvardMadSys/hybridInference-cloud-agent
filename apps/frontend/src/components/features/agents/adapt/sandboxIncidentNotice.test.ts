@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobEventApi } from '@/lib/api/agents';
-import { toDisplayEvent } from './adapt';
+import { toDisplayEvent } from './events';
 import { sandboxIncidentMessage } from './sandboxIncidentNotice';
 
 function incident(payload: Record<string, unknown>): AgentJobEventApi {

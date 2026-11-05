@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
-import { toDisplayJob } from '../adapt';
+import { toDisplayJob } from '../adapt/jobAdapter';
 import { agentLiveStatus } from './agentLiveStatus';
 
 const job = { id: 'job', state: 'running', current_attempt_id: 2 } as AgentJobApi;

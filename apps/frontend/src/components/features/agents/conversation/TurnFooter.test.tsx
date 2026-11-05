@@ -5,7 +5,8 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 // No user-event dependency in this repo; fireEvent is the house click.
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { toDisplayJob, toTurnResources } from '../adapt';
+import { toDisplayJob } from '../adapt/jobAdapter';
+import { toTurnResources } from '../adapt/resources';
 import { TurnFooter, formatBytes, formatCpu, formatDuration, toolTimings } from './TurnFooter';
 import type { AgentEvent, AgentJob, TurnResources } from '../types';
 
@@ -37,7 +38,6 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/t',
     runtime: 'claude-code',
     model: 'glm-4.6',
-    timeoutLabel: '',
     sandbox: '',
     attempts: [],
     events: [],

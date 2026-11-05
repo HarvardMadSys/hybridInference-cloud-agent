@@ -89,7 +89,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     runtime: 'codex',
     model: 'shared',
     modelConnectionId: OTHER,
-    timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'finished' }],
     currentAttemptNo: 1,

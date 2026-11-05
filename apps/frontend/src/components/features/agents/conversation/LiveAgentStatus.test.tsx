@@ -18,7 +18,6 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/job',
     runtime: 'codex',
     model: 'model',
-    timeoutLabel: '',
     sandbox: '',
     attempts: [],
     events: [],
