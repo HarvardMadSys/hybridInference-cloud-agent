@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent_host import chat_sandbox_markers as markers, chat_sandbox_writers as writers
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
 from cloud_agent_host.chat_sandbox_exec import network_proof, spawn_target
+from cloud_agent_host.chat_sandbox_export import pump_archive_export, raise_archive_export_failure
+from cloud_agent_host.chat_sandbox_images import require_create_image
 from cloud_agent_host.chat_sandbox_inspect import container_inspection, inspect_many
 from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_MAX_BYTES,
@@ -140,7 +142,7 @@ from cloud_agent_shared.environment import (
     DOCKER_CLIENT_PREFIXES as _DOCKER_CLIENT_ENV_PREFIXES,
     PROXY_ENV,
 )
-from cloud_agent_shared.environment_snapshots import SETUP_MARKER_NAME, snapshot_image_reference
+from cloud_agent_shared.environment_snapshots import SETUP_MARKER_NAME
 from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
@@ -459,7 +461,7 @@ class ChatSandboxManager(GuestRootExec):
             )
         return actual
 
-    def build_create_command(  # noqa: C901, PLR0912 complexity baseline, #771
+    def build_create_command(
         self,
         spec: ChatSandboxSpec,
         *,
@@ -476,20 +478,9 @@ class ChatSandboxManager(GuestRootExec):
         same way.
         """
         self._validate_extra_args()
-        if checkpoint_id is not None and environment_snapshot is not None:
-            raise SandboxError("a chat sandbox comes from a checkpoint or a snapshot, not both")
-        if checkpoint_id is not None:
-            if image != checkpoint_image_reference(spec.sandbox_id, checkpoint_id):
-                raise SandboxError("chat sandbox restore image does not match its checkpoint")
-        elif environment_snapshot is not None:
-            if image != snapshot_image_reference(*environment_snapshot):
-                raise SandboxError("chat sandbox image does not match its environment snapshot")
-        elif (
-            image is not None
-            and spec.sandbox_image_digest is not None
-            and image != spec.sandbox_image_digest
-        ):
-            raise SandboxError("chat sandbox image override does not match its immutable digest")
+        require_create_image(
+            spec, image, checkpoint_id=checkpoint_id, environment_snapshot=environment_snapshot
+        )
         argv = [
             self.backend.docker_binary,
             "create",
@@ -2336,7 +2327,35 @@ class ChatSandboxManager(GuestRootExec):
                 continue
             self.exact.run([self.backend.docker_binary, "rm", "--force", container_id], timeout=30)
 
-    def _probe_guest_observer_once(self) -> str:  # noqa: PLR0912 complexity baseline, #771
+    def _probe_member_isolation(self, isolation: subprocess.CompletedProcess[bytes]) -> str:
+        """Return the probe's guest kernel once member exec proves its isolation."""
+        try:
+            observed = json.loads(isolation.stdout)
+        except (ValueError, TypeError) as exc:
+            raise SandboxError("Kata observer probe could not inspect member isolation") from exc
+        if not isinstance(observed, dict):
+            raise SandboxError("Kata observer probe could not inspect member isolation")
+        guest_kernel = self.backend.validate_guest_kernel(observed.pop("kernel", None))
+        # validate_guest_kernel refuses a shared kernel for Kata; keep that
+        # requirement explicit before any guest-root helper runs.
+        if guest_kernel is None:
+            raise SandboxError("Kata observer probe returned no guest kernel")
+        if (
+            isolation.returncode != 0
+            or observed
+            != {
+                "uid": self.backend.uid,
+                "nnp": 1,
+                "seccomp": 2,
+                "effective": 0,
+                "permitted": 0,
+            }
+            or self.backend.uid == 0
+        ):
+            raise SandboxError("Kata member exec lacks non-root, seccomp or no-new-privileges")
+        return guest_kernel
+
+    def _probe_guest_observer_once(self) -> str:
         """One probe, on a sandbox of its own that is removed however it ends."""
         self._remove_abandoned_probes()
         token = secrets.token_hex(12)
@@ -2377,32 +2396,7 @@ class ChatSandboxManager(GuestRootExec):
                 workdir="/",
                 timeout_s=30,
             )
-            try:
-                observed = json.loads(isolation.stdout)
-            except (ValueError, TypeError) as exc:
-                raise SandboxError(
-                    "Kata observer probe could not inspect member isolation"
-                ) from exc
-            if not isinstance(observed, dict):
-                raise SandboxError("Kata observer probe could not inspect member isolation")
-            guest_kernel = self.backend.validate_guest_kernel(observed.pop("kernel", None))
-            # validate_guest_kernel refuses a shared kernel for Kata; keep
-            # that requirement explicit before any guest-root helper runs.
-            if guest_kernel is None:
-                raise SandboxError("Kata observer probe returned no guest kernel")
-            if (
-                isolation.returncode != 0
-                or observed
-                != {
-                    "uid": self.backend.uid,
-                    "nnp": 1,
-                    "seccomp": 2,
-                    "effective": 0,
-                    "permitted": 0,
-                }
-                or self.backend.uid == 0
-            ):
-                raise SandboxError("Kata member exec lacks non-root, seccomp or no-new-privileges")
+            guest_kernel = self._probe_member_isolation(isolation)
             cleanup = self.exec_capture(
                 spec,
                 ["python3", "-I", MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)],
@@ -3199,7 +3193,7 @@ class ChatSandboxManager(GuestRootExec):
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
-    def export_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def export_archive(
         self,
         spec: ChatSandboxSpec,
         path: str,
@@ -3257,28 +3251,15 @@ class ChatSandboxManager(GuestRootExec):
             selector = selectors.DefaultSelector()
             selector.register(process.stdout, selectors.EVENT_READ)
             try:
-                while True:
-                    remaining = export_deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise SandboxError("chat sandbox archive export timed out")
-                    ready = selector.select(timeout=min(remaining, 1.0))
-                    if not ready:
-                        if process.poll() is None:
-                            continue
-                        chunk = os.read(process.stdout.fileno(), 1024 * 1024)
-                    else:
-                        chunk = os.read(process.stdout.fileno(), 1024 * 1024)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise ArchiveExportTooLarge(
-                            f"chat sandbox archive for {path!r} exceeds its byte limit"
-                        )
-                    if destination.write(chunk) != len(chunk):
-                        raise SandboxError(
-                            "chat sandbox archive destination accepted a short write"
-                        )
+                total = pump_archive_export(
+                    process,
+                    process.stdout,
+                    selector,
+                    destination,
+                    export_deadline=export_deadline,
+                    max_bytes=max_bytes,
+                    path=path,
+                )
                 remaining = export_deadline - time.monotonic()
                 if remaining <= 0:
                     raise SandboxError("chat sandbox archive export timed out")
@@ -3295,16 +3276,8 @@ class ChatSandboxManager(GuestRootExec):
                 selector.close()
                 process.stdout.close()
             if returncode != 0:
-                stderr.seek(0)
-                detail = stderr.read(4096).decode("utf-8", "replace").strip()
-                missing = f"Could not find the file {path} in container {current.container_id}"
-                if total == 0 and detail in {
-                    missing,
-                    f"Error response from daemon: {missing}",
-                }:
-                    raise FileNotFoundError(path)
-                raise SandboxError(
-                    "chat sandbox archive export failed: " + (detail[:300] or "Docker cp failed")
+                raise_archive_export_failure(
+                    stderr, path=path, container_id=current.container_id, total=total
                 )
         return total
 
