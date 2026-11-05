@@ -9,7 +9,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.external.compute_provider import ProviderError
 
 if TYPE_CHECKING:
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
 logger = get_logger(__name__)
 

@@ -31,7 +31,7 @@ from cloud_agent.host_pool import (
     hash_secret,
 )
 from cloud_agent.runtime_upgrades import configured_registry_url
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
     probe_error_for_host,
     probe_sandbox_manager,
@@ -662,7 +662,7 @@ async def _probed_sandbox_manager_error(
     reason. The response is what the runner prints on the machine being
     deployed — which `sandbox_host.sh up` tails, so a misconfigured deploy says
     so while somebody is still watching it. It gets only
-    :func:`~cloud_agent.sandbox_manager_routing.probe_error_for_host`: the host chose
+    :func:`~cloud_agent.sandbox_manager.sandbox_manager_routing.probe_error_for_host`: the host chose
     the address being dialled, so the dial's own error would tell it what this
     control plane can reach.
 

@@ -25,7 +25,7 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from tests.support.owners import launch_connection
 
-from cloud_agent.sandbox_manager_client import SandboxManagerClient
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerClient
 from cloud_agent.schemas import RetainedSandboxStop
 from cloud_agent_host import sandbox_manager as sandbox_manager_mod
 from cloud_agent_host.chat_sandbox import (

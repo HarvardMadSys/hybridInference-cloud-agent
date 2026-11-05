@@ -32,7 +32,10 @@ from tests.unit.test_sandbox_archives import _Uploader
 from tests.unit.test_sandbox_checkpoints import BASE, NEW, _FakeDocker, _Image
 from tests.unit.test_shared_session_supervisor import _FinalMarkerManager, _members
 
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
 from cloud_agent.storage._sql.hosts import superseded_removal_request_id
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, ChatSandboxStatus
 from cloud_agent_host.group_archive_policy import ControllerArchivePolicy

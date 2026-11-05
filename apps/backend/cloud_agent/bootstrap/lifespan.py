@@ -370,7 +370,7 @@ async def lifespan(  # noqa: PLR0915 complexity baseline, #771
     from cloud_agent.measurement.measurement_writer import MeasurementWriter, reset_writer
     from cloud_agent.operational_health import monitor_queue
     from cloud_agent.profiling_control_config import profiling_control_deployment
-    from cloud_agent.sandbox_manager_routing import close_sandbox_manager_clients
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import close_sandbox_manager_clients
     from cloud_agent.settings import (
         initialize_settings,
         reset_settings,

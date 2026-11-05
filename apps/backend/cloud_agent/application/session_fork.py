@@ -37,13 +37,13 @@ from cloud_agent.application.residency import residency_ttl_s
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.model_connections import ModelConnectionUnusable
-from cloud_agent.sandbox_manager_client import (
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S,
     SHARED_SESSION_FORK_TIMEOUT_S,
     SandboxManagerError,
     identity_from_row,
 )
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_job
 from cloud_agent_shared.environment import environment_payload
 from cloud_agent_shared.sandbox_manager_wire import member_manifest
 

@@ -28,11 +28,11 @@ from urllib.parse import urlsplit
 import httpx
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_manager_client import (
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,
 )
-from cloud_agent.sandbox_manager_pool import SandboxManagerPoolLease
+from cloud_agent.sandbox_manager.sandbox_manager_pool import SandboxManagerPoolLease
 from cloud_agent.settings import setting_env
 
 if TYPE_CHECKING:

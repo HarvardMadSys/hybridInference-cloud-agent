@@ -21,9 +21,9 @@ import pytest
 from fastapi import FastAPI
 from tests.support.owners import use_session_secret
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.app import lifespan
 from cloud_agent.github_app import AppConfig, GitHubAppCredentials
+from cloud_agent.sandbox_manager import sandbox_manager_routing
 
 _KEY = "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----"
 

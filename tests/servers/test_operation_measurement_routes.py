@@ -40,7 +40,6 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel, Field
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.measurement import operation_measurement
 from cloud_agent.measurement.operation_measurement import (
     INTERACTION_HEADER,
@@ -48,7 +47,8 @@ from cloud_agent.measurement.operation_measurement import (
     reset as reset_selections,
     root_scope,
 )
-from cloud_agent.sandbox_manager_client import (
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,
     SandboxManagerStream,

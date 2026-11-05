@@ -4,7 +4,7 @@ The sandbox manager is passed in rather than read from the environment here.
 This runs for jobs that have already settled — including from the reaper's
 startup reconciliation, where there is no request and no attempt in hand — so
 "which sandbox manager" is a question only the caller can answer, by looking up the host
-that ran the attempt. See ``cloud_agent.sandbox_manager_routing``.
+that ran the attempt. See ``cloud_agent.sandbox_manager.sandbox_manager_routing``.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
 if TYPE_CHECKING:
-    from cloud_agent.sandbox_manager_client import SandboxManagerClient
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerClient
 
 logger = get_logger(__name__)
 

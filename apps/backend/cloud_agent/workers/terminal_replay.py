@@ -36,7 +36,7 @@ class ReplayCursor:
 
 
 async def _resume(store: TerminalReplayStore, job: dict[str, Any]) -> None:
-    from cloud_agent.sandbox_manager_routing import (
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import (
         hydrate_shared_sandbox_manager,
         sandbox_manager_for_host,
     )

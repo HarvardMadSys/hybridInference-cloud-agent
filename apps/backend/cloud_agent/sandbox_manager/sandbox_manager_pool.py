@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

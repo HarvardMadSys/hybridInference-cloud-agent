@@ -80,7 +80,7 @@ async def _reap_offline_hosts(store: HostPoolRepository) -> None:
     them into two schedules would make the interval between them a race that
     only shows up under load.
     """
-    from cloud_agent.sandbox_manager_routing import (
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import (
         retire_sandbox_manager_hosts,
         sweep_sandbox_manager_clients,
     )
@@ -141,7 +141,7 @@ async def _cleanup_reaped_shared_residencies(
     if not cleanups:
         return
 
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_job
 
     limit = asyncio.Semaphore(RESIDENCY_CLEANUP_CONCURRENCY)
 
@@ -184,7 +184,7 @@ async def _cleanup_failed_session_fork(
     stops its process. One that does not answer is given
     :data:`RESIDENCY_CLEANUP_TIMEOUT_S` per member, like a reaped attempt's.
     """
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_job
 
     sandbox_manager = None
     try:

@@ -292,7 +292,7 @@ async def test_an_action_stopped_while_preparing_does_not_run_untracked(monkeypa
 async def test_lost_terminal_becomes_an_explicit_unknown_result_not_an_endless_404(
     monkeypatch, operation
 ):
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
     run = {"id": "run", "state": "running", "terminal_id": "term_run"}
     repo = SimpleNamespace(
@@ -362,7 +362,7 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
     from starlette.requests import Request
 
     from cloud_agent.api import workspace
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
     from cloud_agent.schemas import AgentTerminalSessionCreateRequest
     from cloud_agent_shared.environment import BoundEnvironment
 
@@ -460,7 +460,7 @@ async def test_workspace_get_only_reads_and_redacts_without_persistence(monkeypa
         )
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
         AsyncMock(return_value=broker),
     )
     result = await environments.workspace_environment("job", user={"user_id": "alice"}, store=store)

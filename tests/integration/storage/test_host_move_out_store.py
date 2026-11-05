@@ -27,7 +27,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
 from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.execution_profiles import KATA_RUNTIME
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.workers import sandbox_deletion
 
 if TYPE_CHECKING:

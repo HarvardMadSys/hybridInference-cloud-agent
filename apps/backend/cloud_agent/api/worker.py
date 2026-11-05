@@ -60,8 +60,8 @@ from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.measurement.measurement_ingest import Owner
 from cloud_agent.measurement.measurement_persistence import persist_measurement
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     ENV_SANDBOX_MANAGER_TOKEN,
     hydrate_shared_sandbox_manager,
     sandbox_manager_for_attempt,
@@ -134,7 +134,7 @@ if TYPE_CHECKING:
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentExecutionRepository
-    from cloud_agent.sandbox_manager_client import SandboxManagerClient
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerClient
 
 
 #: Check the raw report before FastAPI parses JSON or validates its model.

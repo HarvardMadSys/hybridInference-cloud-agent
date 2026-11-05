@@ -434,7 +434,7 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
     from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
     store = _ClaimStore()
@@ -457,7 +457,9 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
             503, "Broker upgrade required"
         )
     route = AsyncMock(return_value=None if compatibility == "missing-broker" else broker)
-    monkeypatch.setattr("cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", route)
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job", route
+    )
     body = {
         "worker_id": "w1",
         "attestation": {
@@ -550,7 +552,7 @@ async def test_snapshot_fields_and_a_snapshot_go_only_to_a_runner_that_reads_the
     )
     broker = SimpleNamespace(require_environment_capability=AsyncMock(return_value=[]))
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
         AsyncMock(return_value=broker),
     )
     capabilities = ["environment-v1"] + (["environment-snapshot-v1"] if snapshot_capable else [])
@@ -684,7 +686,9 @@ async def test_owner_inference_credentials_wait_for_a_runner_that_keeps_them_fro
     store.environment_for_claim = AsyncMock(return_value=bound)
     broker = SimpleNamespace(require_environment_capability=AsyncMock())
     route = AsyncMock(return_value=broker)
-    monkeypatch.setattr("cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", route)
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job", route
+    )
     capabilities = ["environment-v1"] + (["environment-inference-v1"] if inference_capable else [])
     body = {"worker_id": "w1", "attestation": {"runner_capabilities": capabilities}}
     async with AsyncClient(

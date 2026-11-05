@@ -125,7 +125,7 @@ async def _local_owner(api, monkeypatch):
     api.create = create_on_connection
     api.manager = _Manager()
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
         lambda host: api.manager,
     )
 

@@ -17,7 +17,10 @@ from tests.unit.test_agent_sandbox_manager import (
     _wait_for,
 )
 
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
 from cloud_agent_host import environment_tests
 from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_preparation import EnvironmentPreparation

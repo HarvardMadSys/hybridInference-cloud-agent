@@ -181,8 +181,8 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     operation_profiling.reset_cache()
     operation_profiling.reset_policy()
 
-    from cloud_agent import sandbox_manager_routing
     from cloud_agent.measurement import operation_measurement
+    from cloud_agent.sandbox_manager import sandbox_manager_routing
     from cloud_agent_host import runner as runner_mod
 
     operation_measurement.reset()

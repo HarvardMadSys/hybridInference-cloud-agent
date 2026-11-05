@@ -156,9 +156,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.measurement import measurement_writer
 from cloud_agent.measurement.operation_measurement import reset as reset_selections
+from cloud_agent.sandbox_manager import sandbox_manager_routing
 from cloud_agent_host import operation_call
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
@@ -550,7 +550,7 @@ class BenchSandboxManager:
         """Answer a stream attach in headers, the way the sandbox manager's SSE route does."""
         import httpx
 
-        from cloud_agent.sandbox_manager_client import SandboxManagerStream
+        from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerStream
 
         self.calls.append({"op": "stream_terminal", "workspace_id": workspace_id})
         call = self._open(profiling, "terminal.open")

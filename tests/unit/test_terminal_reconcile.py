@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from tests.support.storage import OneFake
 
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.workers.attempts import _reconcile_settled_terminals, reap_expired_attempts
 
 pytestmark = pytest.mark.asyncio
@@ -68,7 +68,7 @@ async def test_a_settled_terminal_resume_retries_until_the_sandbox_manager_confi
         ),
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
         Mock(return_value=sandbox_manager),
     )
 
@@ -89,7 +89,7 @@ async def test_a_missing_owner_sandbox_manager_keeps_the_marker_for_retry(
 ) -> None:
     """A routing/configuration fault must not be reported as recovered."""
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
         Mock(return_value=None),
     )
 
@@ -112,7 +112,8 @@ async def test_a_cancelled_pre_claim_job_has_no_workspace_to_resume(
     ]
     sandbox_manager = Mock()
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host", sandbox_manager
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
+        sandbox_manager,
     )
 
     await _reconcile_settled_terminals(store)
@@ -149,7 +150,7 @@ async def test_one_broken_host_does_not_skip_other_terminal_markers(
         resume_settled_terminals=AsyncMock(return_value={"ok": True}),
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
         Mock(side_effect=[broken, ready]),
     )
 
@@ -182,7 +183,8 @@ async def test_a_sandbox_manager_that_never_answers_does_not_hold_up_the_reaper(
             replay_cancelled.set()
 
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.hydrate_shared_sandbox_manager", silent_sandbox_manager
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.hydrate_shared_sandbox_manager",
+        silent_sandbox_manager,
     )
     store.reap_expired = AsyncMock(return_value=[])
     task = asyncio.create_task(

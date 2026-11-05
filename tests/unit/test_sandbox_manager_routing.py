@@ -14,9 +14,9 @@ from typing import Any
 import pytest
 from tests.support.storage import AllCapabilities
 
-from cloud_agent import sandbox_manager_routing
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     hydrate_shared_sandbox_manager,
     sandbox_manager_for_attempt,
     sandbox_manager_for_job,

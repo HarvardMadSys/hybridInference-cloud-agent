@@ -11,7 +11,6 @@ from tests.servers.test_admin_runs import ADMIN, setup as run_setup  # noqa: F40
 from tests.support.owners import SESSIONS
 from tests.support.usage import END, START
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.admin_sandbox_inventory import SandboxInventoryCursor, inventory_scope
@@ -25,8 +24,12 @@ from cloud_agent.admin_sandboxes import (
 from cloud_agent.api import admin_sandboxes
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app, create_mcp_app
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
-from cloud_agent.sandbox_manager_routing import SandboxManagerUrlRefused
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
+from cloud_agent.sandbox_manager.sandbox_manager_routing import SandboxManagerUrlRefused
 
 PREFIX = "/admin/agent/sandboxes"
 

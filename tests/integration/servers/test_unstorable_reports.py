@@ -25,7 +25,7 @@ from tests.integration.servers.test_pending_message_queue import (
 )
 
 from cloud_agent.api import environments
-from cloud_agent.sandbox_manager_client import SandboxManagerClient
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerClient
 
 if TYPE_CHECKING:
     from tests.integration.servers.test_pending_message_queue import Api
@@ -231,7 +231,7 @@ async def test_a_saved_command_that_printed_a_nul_reports_its_result(api: Api, m
     """
     env = await _environment(api, monkeypatch)
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
         AsyncMock(return_value=None),
     )
     job, binding_id = await _bound_job(api, env)
@@ -263,7 +263,7 @@ async def test_a_preparation_that_printed_a_nul_is_recorded(api: Api, monkeypatc
     """Retrying a workspace's preparation stores the steps its sandbox manager ran."""
     env = await _environment(api, monkeypatch)
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
         AsyncMock(return_value=None),
     )
     job, binding_id = await _bound_job(api, env)
@@ -282,7 +282,7 @@ async def test_a_preparation_that_printed_a_nul_is_recorded(api: Api, monkeypatc
         }
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
         AsyncMock(return_value=sandbox_manager),
     )
     # Only a host that can prepare the environment may claim the chat's turn.

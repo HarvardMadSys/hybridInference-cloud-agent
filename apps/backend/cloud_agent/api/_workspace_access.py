@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from fastapi import HTTPException
 
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     hydrate_shared_sandbox_manager,
     sandbox_manager_for_host,
     sandbox_manager_for_job,
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports import HostPoolRepository, SandboxRepository
     from cloud_agent.ports.sandbox import TerminalControlRoute
-    from cloud_agent.sandbox_manager_client import SandboxManagerClient
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerClient
 
 
 class _WorkspaceAccessStorage(Protocol):
