@@ -1011,7 +1011,7 @@ REAP_EXPIRED_RESIDENCIES_MEMBERS_SQL = """
                 """
 
 
-# -- repositories/compute_resources.py ----------------------------------------
+# -- repositories/compute/move_out.py -----------------------------------------
 
 #: Executed by ``_lose_reclaimed_group``.
 LOSE_RECLAIMED_GROUP_SQL = f"""UPDATE agent_sandboxes
