@@ -426,7 +426,42 @@ class SandboxDeletionBackupService:
                 )
                 raise
 
-    def _discard(self, identity: ArchiveIdentity, *, sandbox_id: str) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
+    def _authorize_discard_locked(
+        self, identity: ArchiveIdentity, directory: Path, *, sandbox_id: str
+    ) -> dict[str, Any]:
+        """Fence the stopped target and fsync the discard authorization record.
+
+        The caller holds the lock. A target the supervisor proves absent is
+        recorded by its sandbox id instead of its spec.
+        """
+        self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.mkdir(mode=0o700, exist_ok=True)
+        record: dict[str, Any]
+        try:
+            spec, _manifest = self._supervisor.begin_archive(
+                identity.thread_id,
+                request_id=identity.request_id,
+                generation=identity.generation,
+                container_id=identity.expected_container_id,
+            )
+        except SandboxError:
+            if not self._supervisor.admin_deletion_target_absent(
+                identity.thread_id,
+                sandbox_id=sandbox_id,
+                container_id=identity.expected_container_id,
+            ):
+                raise
+            record = {
+                "identity": self._identity_dict(identity),
+                "sandbox_id": sandbox_id,
+                "target_absent": True,
+            }
+        else:
+            record = {"identity": self._identity_dict(identity), "spec": asdict(spec)}
+        self._append(directory / "discard.json", record)
+        return record
+
+    def _discard(self, identity: ArchiveIdentity, *, sandbox_id: str) -> dict[str, Any]:
         """Remove the exact stopped container; :meth:`discard` reports a refusal.
 
         The authorization record is fsynced before Docker removal, so a lost
@@ -462,30 +497,7 @@ class SandboxDeletionBackupService:
                 raise SessionLeaseLost("sandbox archive request cannot be discarded")
             record = self._read(directory / "discard.json")
             if record is None:
-                self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                directory.mkdir(mode=0o700, exist_ok=True)
-                try:
-                    spec, _manifest = self._supervisor.begin_archive(
-                        identity.thread_id,
-                        request_id=identity.request_id,
-                        generation=identity.generation,
-                        container_id=identity.expected_container_id,
-                    )
-                except SandboxError:
-                    if not self._supervisor.admin_deletion_target_absent(
-                        identity.thread_id,
-                        sandbox_id=sandbox_id,
-                        container_id=identity.expected_container_id,
-                    ):
-                        raise
-                    record = {
-                        "identity": self._identity_dict(identity),
-                        "sandbox_id": sandbox_id,
-                        "target_absent": True,
-                    }
-                else:
-                    record = {"identity": self._identity_dict(identity), "spec": asdict(spec)}
-                self._append(directory / "discard.json", record)
+                record = self._authorize_discard_locked(identity, directory, sandbox_id=sandbox_id)
             elif record.get("identity") != self._identity_dict(identity):
                 raise SessionLeaseLost("sandbox discard request identity changed")
             absent_sandbox_id: str | None = None
