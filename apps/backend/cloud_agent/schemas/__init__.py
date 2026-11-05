@@ -93,6 +93,7 @@ from cloud_agent.schemas.archive_settings import (
 from cloud_agent.schemas.audit import (
     AdminAuditLogEntry,
     AdminAuditLogResponse,
+    AuditWriteFailures,
 )
 from cloud_agent.schemas.config import (
     AgentConfigResponse,
@@ -430,6 +431,7 @@ __all__ = [
     "AgentWorkspaceResponse",
     "AgentWorkspaceWriteRequest",
     "AttemptResources",
+    "AuditWriteFailures",
     "AuthConfigResponse",
     "AuthOptionsResponse",
     "BindEmailRequest",

@@ -2,7 +2,16 @@ import { describe, expect, it } from 'vitest';
 
 import type { AdminAuditLogEntry, HostSettingDefinition } from '@/lib/api/admin';
 
-import { auditOutcome, describeActor, describeAuditEntry, describeWhen } from './describe';
+import actions from './actions.json';
+import {
+  accountName,
+  auditOutcome,
+  describeActor,
+  describeAuditEntry,
+  describeResult,
+  describeWhen,
+  hasSentence,
+} from './describe';
 
 const TIMEOUT: HostSettingDefinition = {
   key: 'agent_timeout_s',
@@ -16,17 +25,36 @@ const TIMEOUT: HostSettingDefinition = {
   scope: 'runner',
 };
 
-function entry(action: string, details: Record<string, unknown> | null = null): AdminAuditLogEntry {
+function entry(
+  action: string,
+  details: Record<string, unknown> | null = null,
+  over: Partial<AdminAuditLogEntry> = {},
+): AdminAuditLogEntry {
   return {
     id: 1,
     action,
     category: null,
+    kind: 'change',
     actor_id: 'admin:u-1',
+    actor_type: 'admin',
+    actor_account_id: 'u-1',
+    actor_label: 'juncheng',
+    actor_deleted: false,
     admin_ip: '203.0.113.9',
     target_user_id: null,
+    subject_label: null,
+    subject_deleted: false,
+    target_type: 'host',
+    target_id: 'h',
+    target_label: null,
     details,
     success: true,
+    outcome: 'applied',
+    result: null,
+    result_at: null,
+    reason: null,
     created_at: '2026-10-09T12:00:00Z',
+    ...over,
   };
 }
 
@@ -214,7 +242,7 @@ describe('requests and refusals', () => {
     const applied = entry('agent.profiling.stop', { outcome: 'applied', run_id: 'admin-1' });
     expect(describeAuditEntry(applied)).toBe('Turned measurements off');
     expect(auditOutcome(applied)).toBe('done');
-    expect(auditOutcome({ ...applied, success: false })).toBe('failed');
+    expect(auditOutcome({ ...applied, outcome: 'failed' })).toBe('failed');
   });
 
   it('reads a replayed Start or Stop as a repeat that changed nothing', () => {
@@ -230,14 +258,124 @@ describe('requests and refusals', () => {
 });
 
 describe('describeActor', () => {
-  it('calls the signed-in admin "You" and shortens anyone else', () => {
-    expect(describeActor('admin:01KQHVXBB167G0EJ', '01KQHVXBB167G0EJ').label).toBe('You');
-    expect(describeActor('admin:01KQGM0E6VEG598F', '01KQHVXBB167G0EJ')).toEqual({
-      label: '01KQGM0E…',
+  it('calls the signed-in admin "You" and names anyone else with a short id', () => {
+    const own = entry('agent.runner_host.drain', null, { actor_account_id: '01KQHVXBB167G0EJ' });
+    expect(describeActor(own, '01KQHVXBB167G0EJ').label).toBe('You');
+    const other = entry('agent.runner_host.drain', null, {
+      actor_account_id: '01KQGM0E6VEG598F',
+      actor_label: 'juncheng',
+    });
+    expect(describeActor(other, '01KQHVXBB167G0EJ')).toEqual({
+      label: 'juncheng (01KQGM0E…)',
       title: '01KQGM0E6VEG598F',
     });
-    expect(describeActor('admin-token', 'u-1').label).toBe('Admin token');
-    expect(describeActor(null, 'u-1').label).toBe('An admin');
+    const gone = { ...other, actor_label: null, actor_deleted: true };
+    expect(describeActor(gone, null).label).toBe('01KQGM0E…, since deleted');
+  });
+
+  it('marks access that belongs to no account, and quiets automation', () => {
+    const token = entry('agent.runner_host.drain', null, {
+      actor_id: 'admin-token',
+      actor_type: 'break_glass',
+      actor_account_id: null,
+    });
+    expect(describeActor(token, 'u-1')).toMatchObject({ label: 'Admin token', tone: 'alert' });
+    expect(describeActor({ ...token, actor_id: 'operator:realtmxi' }, 'u-1').label).toBe(
+      'Operator realtmxi',
+    );
+    expect(
+      describeActor(
+        { ...token, actor_id: 'service:deploy-pipeline', actor_type: 'service' },
+        'u-1',
+      ),
+    ).toMatchObject({ label: 'deploy-pipeline', tone: 'quiet' });
+    expect(
+      describeActor({ ...token, actor_id: 'signup-policy', actor_type: 'system' }, 'u-1').label,
+    ).toBe('Sign-up policy');
+    expect(
+      describeActor({ ...token, actor_id: 'anonymous', actor_type: 'anonymous' }, 'u-1').label,
+    ).toBe('Not signed in');
+  });
+});
+
+describe('accounts', () => {
+  const about = {
+    target_type: 'account',
+    target_id: '01M6DMPERW045CW6',
+    target_user_id: '01M6DMPERW045CW6',
+    subject_label: 'alice@example.com',
+  };
+
+  it('says which account an administrator decided about', () => {
+    expect(describeAuditEntry(entry('agent.local_account.approve', {}, about))).toBe(
+      'Approved alice@example.com (01M6DMPE…)',
+    );
+    expect(describeAuditEntry(entry('agent.local_account.grant_admin', {}, about))).toBe(
+      'Made alice@example.com (01M6DMPE…) an administrator',
+    );
+    expect(
+      describeAuditEntry(
+        entry('agent.local_account.erase', {}, { ...about, subject_deleted: true }),
+      ),
+    ).toBe('Erased alice@example.com (01M6DMPE…) and all of its data');
+    expect(describeAuditEntry(entry('agent.local_account.signup', {}, about))).toBe(
+      'alice@example.com (01M6DMPE…) signed up',
+    );
+  });
+
+  it('names an account by its id when no name was recorded', () => {
+    expect(accountName('01M6DMPERW045CW6', null)).toBe('01M6DMPE…');
+    expect(accountName(null, null)).toBe('an account');
+  });
+
+  it('says whose sandbox an administrator acted on', () => {
+    expect(
+      describeAuditEntry(
+        entry(
+          'agent.sandbox.delete.requested',
+          { sandbox_id: 'asbx_1' },
+          {
+            target_user_id: 'owner-1',
+            subject_label: 'bob',
+          },
+        ),
+      ),
+    ).toBe("Requested deleting bob (owner-1)'s sandbox asbx_1");
+  });
+
+  it('describes sign-up domains and mail to accounts', () => {
+    expect(
+      describeAuditEntry(
+        entry('agent.local_signup_domain.add', { domain: 'harvard.edu', wildcard: true }),
+      ),
+    ).toBe('Allowed sign-up from *.harvard.edu');
+    expect(describeAuditEntry(entry('agent.local_broadcast.create', { recipients: 1 }))).toBe(
+      'Sent mail to 1 account',
+    );
+  });
+});
+
+describe('describeResult', () => {
+  it('says what came of a request recorded before it ran', () => {
+    const requested = entry('agent.compute.server.add', {}, { outcome: 'requested' });
+    expect(describeResult(requested)).toBe('Still in progress');
+    expect(
+      describeResult({ ...requested, result: 'applied', result_at: '2026-10-09T12:02:30Z' }),
+    ).toBe('Completed 2 min later');
+    expect(
+      describeResult({ ...requested, result: 'failed', result_at: '2026-10-09T15:00:00Z' }),
+    ).toBe('Failed 3 h later');
+    expect(describeResult({ ...requested, result: 'cancelled' })).toBe('Cancelled');
+    expect(describeResult(entry('agent.runner_host.drain'))).toBeNull();
+  });
+});
+
+describe('every declared action', () => {
+  it('has a sentence of its own on this page', () => {
+    // actions.json is the backend's registry, checked against it by
+    // tests/unit/test_audit_registry.py.
+    const missing = actions.map((item) => item.action).filter((action) => !hasSentence(action));
+    expect(missing).toEqual([]);
   });
 });
 

@@ -572,22 +572,66 @@ export async function removeAgentRunnerHost(
 }
 
 /** What an Audit log entry is about; the page filters by it. */
-export type AdminAuditCategory = 'settings' | 'servers' | 'measurements' | 'content' | 'database';
+export type AdminAuditCategory =
+  | 'accounts'
+  | 'settings'
+  | 'servers'
+  | 'sandboxes'
+  | 'measurements'
+  | 'sensitive_access'
+  | 'access_control';
 
-/** One recorded admin action (`GET /admin/agent/audit-log`). */
+/**
+ * Who acted: an administrator's session, access that belongs to no account
+ * (`ADMIN_TOKEN`, first-run setup, the bootstrap command), a named automation,
+ * the control plane's own policy, an account changing itself, or nobody
+ * signed in.
+ */
+export type AdminAuditActorType =
+  | 'admin'
+  | 'break_glass'
+  | 'service'
+  | 'system'
+  | 'user'
+  | 'anonymous';
+
+/** What a request did; `requested` runs later and reports a `result`. */
+export type AdminAuditOutcome = 'applied' | 'requested' | 'refused' | 'failed' | 'replayed';
+
+/** One recorded action (`GET /admin/agent/audit-log`). */
 export interface AdminAuditLogEntry {
   id: number;
   /** Dotted action name, e.g. `agent.runner_host.drain`. */
   action: string;
-  /** The filter this action falls under, or null for none. */
+  /** The filter this action falls under, or null for an action this release does not know. */
   category: AdminAuditCategory | null;
-  /** The administrator who acted; null on rows older than the column. */
+  kind: 'change' | 'access' | 'self_service' | null;
+  /** Who acted, as recorded: `admin:<account id>`, `admin-token`, a worker's name. */
   actor_id: string | null;
+  actor_type: AdminAuditActorType;
+  /** The acting account, for `admin` and `user` actors. */
+  actor_account_id: string | null;
+  /** The acting account's name when the row was written. */
+  actor_label: string | null;
+  actor_deleted: boolean;
   admin_ip: string;
-  /** The user acted upon, such as the owner of content an admin read. */
+  /** The user affected: the account acted on, or the owner of what was. */
   target_user_id: string | null;
+  /** The affected user's name when the row was written. */
+  subject_label: string | null;
+  subject_deleted: boolean;
+  /** What was acted on: `account`, `host`, `sandbox`, `setting` … */
+  target_type: string;
+  target_id: string;
+  target_label: string | null;
   details: Record<string, unknown> | null;
   success: boolean;
+  outcome: AdminAuditOutcome;
+  /** A `requested` row's final result; null while it still runs. */
+  result: 'applied' | 'failed' | 'cancelled' | null;
+  result_at: string | null;
+  /** Why, in the administrator's words. */
+  reason: string | null;
   created_at: string;
 }
 
@@ -595,15 +639,34 @@ export interface AdminAuditLogResponse {
   entries: AdminAuditLogEntry[];
   /** Pass as `before` for the next, older page; null when there is none. */
   next_before: number | null;
+  /** Audit writes that failed in the last seven days; the actions themselves went ahead. */
+  write_failures: { count: number; latest_at: string | null };
 }
 
-/** Recorded admin actions, newest first; polling reads are never included. */
+export interface AdminAuditLogQuery {
+  category?: AdminAuditCategory | null;
+  /** `people` (the default) or `all`, adding automation, policy and self-service. */
+  actors?: 'people' | 'all';
+  /** Only rows about this account or what it owns. */
+  user?: string | null;
+  /** Only rows that acted on this object. */
+  target?: { type: string; id: string } | null;
+  before?: number | null;
+}
+
+/** Recorded actions, newest first. */
 export async function listAdminAuditLog(
-  { category, before }: { category?: AdminAuditCategory | null; before?: number | null } = {},
+  { category, actors, user, target, before }: AdminAuditLogQuery = {},
   signal?: AbortSignal,
 ): Promise<AdminAuditLogResponse> {
   const query = new URLSearchParams();
   if (category) query.set('category', category);
+  if (actors === 'all') query.set('actors', 'all');
+  if (user) query.set('user', user);
+  if (target) {
+    query.set('target_type', target.type);
+    query.set('target_id', target.id);
+  }
   if (before) query.set('before', String(before));
   const qs = query.toString();
   const suffix = qs ? `?${qs}` : '';

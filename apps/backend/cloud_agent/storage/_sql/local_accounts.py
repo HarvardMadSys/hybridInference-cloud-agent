@@ -15,10 +15,10 @@ here derives it again from one identity kind.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from cloud_agent.domain.accounts import AccountNotFound, AccountRecord
+from cloud_agent.storage._sql.admin_audit import insert_audit_row
 
 ACCOUNT_COLUMNS = """
     a.id, e.value AS email, (e.verified_at IS NOT NULL) AS email_verified,
@@ -57,11 +57,6 @@ UPDATE agent_local_accounts SET version = version + 1, updated_at = NOW() WHERE 
 
 #: An account without Agent use, by the shared access view.
 ACCESS_ENDED_SQL = "NOT x.has_use"
-
-AUDIT_SQL = """
-INSERT INTO agent_admin_audit_log (action, actor_id, admin_ip, target_user_id, details, success)
-VALUES ($1, $2, $3, $4, $5::jsonb, TRUE)
-"""
 
 
 class NotBindable(Exception):
@@ -139,9 +134,22 @@ async def write_audit(
     admin_ip: str,
     account_id: str | None,
     details: dict[str, Any],
+    reason: str | None = None,
 ) -> None:
-    """One audit row in the caller's transaction. ``details`` never holds a credential."""
-    await conn.execute(AUDIT_SQL, action, actor_id, admin_ip, account_id, json.dumps(details))
+    """One audit row in the caller's transaction. ``details`` never holds a credential.
+
+    A failed write is logged and counted, never raised: the account change
+    commits without it (:func:`cloud_agent.storage._sql.admin_audit.insert_audit_row`).
+    """
+    await insert_audit_row(
+        conn,
+        action=action,
+        actor_id=actor_id,
+        admin_ip=admin_ip,
+        target_user_id=account_id,
+        details=details,
+        reason=reason,
+    )
 
 
 __all__ = [

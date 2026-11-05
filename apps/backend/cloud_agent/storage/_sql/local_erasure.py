@@ -301,7 +301,8 @@ async def erase_owner_rows(conn: Any, account_id: str) -> dict[str, int]:
             break
     else:
         raise ErasureBlocked("The account's data kept changing while it was being erased.")
-    await conn.execute("DELETE FROM agent_admin_audit_log WHERE target_user_id = $1", account_id)
+    # The admin audit trail is kept whole, names included: who approved,
+    # promoted or suspended an account is still answerable after it is gone.
     return walk.deleted
 
 

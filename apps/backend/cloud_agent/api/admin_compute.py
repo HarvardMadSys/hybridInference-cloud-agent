@@ -210,13 +210,15 @@ async def update_connection(
 @router.post("/compute-connections/{connection_id}/validate")
 async def validate_connection(
     connection_id: str,
-    request: Request,
-    actor: str = Depends(verify_admin_access),
+    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
-    """Validate a configured connection without allocating resources."""
+    """Validate a configured connection without allocating resources.
+
+    A check changes nothing an administrator would look for later, so it is
+    not audited, as the reads above are not.
+    """
     connection = await commands.validate_connection(connection_id)
-    await _audit(request, actor, "connection.validate", connection_id=connection_id)
     return {"connection": connection}
 
 
