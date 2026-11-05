@@ -414,9 +414,7 @@ def test_codex_rollout_rebase_matches_the_home_path_codex_was_given(tmp_path: Pa
     assert Path(rebased).read_text() == "source rollout\n"
 
 
-def test_codex_rollout_rebase_ignores_the_member_python_environment(
-    tmp_path: Path, monkeypatch
-):
+def test_codex_rollout_rebase_ignores_the_member_python_environment(tmp_path: Path, monkeypatch):
     # The containment check is Python the child UID runs. Code on PYTHONPATH,
     # which would shadow the standard library, must not replace it.
     planted = tmp_path / "planted"
