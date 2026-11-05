@@ -120,7 +120,7 @@ class SandboxArchivePolicy:
     # always mean no checkpoints.
     checkpoints_enabled: bool = True
 
-    def __post_init__(self) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
+    def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise SandboxArchivePolicyError("enabled must be a boolean")
         if not isinstance(self.checkpoints_enabled, bool):
@@ -132,32 +132,11 @@ class SandboxArchivePolicy:
             raise SandboxArchivePolicyError("access_key_auth must be a boolean")
         if (self.aws_access_key_id or self.aws_secret_access_key) and not self.access_key_auth:
             object.__setattr__(self, "access_key_auth", True)
-        for name, value in (
-            ("region", self.region),
-            ("kms_key_arn", self.kms_key_arn),
-            ("expected_bucket_owner", self.expected_bucket_owner),
-            ("aws_access_key_id", self.aws_access_key_id),
-            ("aws_secret_access_key", self.aws_secret_access_key),
-        ):
-            if not isinstance(value, str) or value.strip() != value:
-                raise SandboxArchivePolicyError(f"{name} must be a trimmed string")
+        self._check_trimmed_strings()
 
         if self.enabled and not self.region:
             raise SandboxArchivePolicyError("region is required when sandbox archives are enabled")
-        if bool(self.aws_access_key_id) != bool(self.aws_secret_access_key):
-            raise SandboxArchivePolicyError(
-                "aws_access_key_id and aws_secret_access_key must both be set"
-            )
-        if self.aws_access_key_id and _ACCESS_KEY_ID_RE.fullmatch(self.aws_access_key_id) is None:
-            raise SandboxArchivePolicyError(
-                "aws_access_key_id must be a 20-character AWS access key id"
-            )
-        if self.aws_secret_access_key and (
-            _SECRET_ACCESS_KEY_RE.fullmatch(self.aws_secret_access_key) is None
-        ):
-            raise SandboxArchivePolicyError(
-                "aws_secret_access_key must be a 40-character AWS secret access key"
-            )
+        self._check_access_key()
         if self.enabled and not self.access_key_auth and not self.kms_key_arn:
             raise SandboxArchivePolicyError(
                 "kms_key_arn is required when sandbox archives are enabled"
@@ -167,23 +146,7 @@ class SandboxArchivePolicy:
                 "expected_bucket_owner is required when sandbox archives are enabled"
             )
 
-        if self.expected_bucket_owner and not _ACCOUNT_ID_RE.fullmatch(self.expected_bucket_owner):
-            raise SandboxArchivePolicyError(
-                "expected_bucket_owner must be a 12-digit AWS account id"
-            )
-        kms_match = _KMS_KEY_ARN_RE.fullmatch(self.kms_key_arn) if self.kms_key_arn else None
-        if self.kms_key_arn and kms_match is None:
-            raise SandboxArchivePolicyError("kms_key_arn must be a KMS key ARN, not an alias")
-        if kms_match is not None and self.region and kms_match.group("region") != self.region:
-            raise SandboxArchivePolicyError("the KMS key ARN and archive region must match")
-        if (
-            kms_match is not None
-            and self.expected_bucket_owner
-            and kms_match.group("account") != self.expected_bucket_owner
-        ):
-            raise SandboxArchivePolicyError(
-                "the KMS key ARN account and expected bucket owner must match"
-            )
+        self._check_key_owner()
 
         _bounded_int(
             "max_archive_bytes",
@@ -215,6 +178,55 @@ class SandboxArchivePolicy:
             raise SandboxArchivePolicyError("revision must be a non-negative integer")
         if self.revision < 0:
             raise SandboxArchivePolicyError("revision must be a non-negative integer")
+
+    def _check_trimmed_strings(self) -> None:
+        """Every text setting is a string without surrounding whitespace."""
+        for name, value in (
+            ("region", self.region),
+            ("kms_key_arn", self.kms_key_arn),
+            ("expected_bucket_owner", self.expected_bucket_owner),
+            ("aws_access_key_id", self.aws_access_key_id),
+            ("aws_secret_access_key", self.aws_secret_access_key),
+        ):
+            if not isinstance(value, str) or value.strip() != value:
+                raise SandboxArchivePolicyError(f"{name} must be a trimmed string")
+
+    def _check_access_key(self) -> None:
+        """An access key is a well-formed id and secret pair, or absent."""
+        if bool(self.aws_access_key_id) != bool(self.aws_secret_access_key):
+            raise SandboxArchivePolicyError(
+                "aws_access_key_id and aws_secret_access_key must both be set"
+            )
+        if self.aws_access_key_id and _ACCESS_KEY_ID_RE.fullmatch(self.aws_access_key_id) is None:
+            raise SandboxArchivePolicyError(
+                "aws_access_key_id must be a 20-character AWS access key id"
+            )
+        if self.aws_secret_access_key and (
+            _SECRET_ACCESS_KEY_RE.fullmatch(self.aws_secret_access_key) is None
+        ):
+            raise SandboxArchivePolicyError(
+                "aws_secret_access_key must be a 40-character AWS secret access key"
+            )
+
+    def _check_key_owner(self) -> None:
+        """The bucket owner and KMS key are well formed and agree with the region."""
+        if self.expected_bucket_owner and not _ACCOUNT_ID_RE.fullmatch(self.expected_bucket_owner):
+            raise SandboxArchivePolicyError(
+                "expected_bucket_owner must be a 12-digit AWS account id"
+            )
+        kms_match = _KMS_KEY_ARN_RE.fullmatch(self.kms_key_arn) if self.kms_key_arn else None
+        if self.kms_key_arn and kms_match is None:
+            raise SandboxArchivePolicyError("kms_key_arn must be a KMS key ARN, not an alias")
+        if kms_match is not None and self.region and kms_match.group("region") != self.region:
+            raise SandboxArchivePolicyError("the KMS key ARN and archive region must match")
+        if (
+            kms_match is not None
+            and self.expected_bucket_owner
+            and kms_match.group("account") != self.expected_bucket_owner
+        ):
+            raise SandboxArchivePolicyError(
+                "the KMS key ARN account and expected bucket owner must match"
+            )
 
     @property
     def s3_uri(self) -> str:

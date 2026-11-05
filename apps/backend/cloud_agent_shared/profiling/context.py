@@ -253,7 +253,66 @@ def _manifest_control_revision(context: Mapping[str, Any]) -> int:
     return _context_control_revision(raw) if isinstance(raw, Mapping) else 0
 
 
-def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:  # noqa: C901, PLR0912 complexity baseline, #771
+def _continued_run_manifest(
+    context: Mapping[str, Any], manifest: RunManifest | None, local: ProfilingRun | None
+) -> RunManifest | None:
+    """The run a continuation reports under, or None when it names none here."""
+    if manifest is not None:
+        # A child of a selection that states its experiment. The manifest is
+        # that experiment's identity, so it is what this process reports --
+        # there is no local configuration to consult, because a new process
+        # under Admin control has none until its own sync loop runs.
+        return manifest
+    if local is None:
+        return None
+    # A caller written before the manifest travelled -- and the environment
+    # path, where the descriptor really is this process's own configuration.
+    # Nothing has been handed over, so the local run decides.
+    if str(context.get("run_id") or "") != local.run_id:
+        return None
+    admissions = _inherited_admissions(context, continuous=local.continuous)
+    if admissions is None:
+        return None
+    # A same-host handoff keeps the parent's admission owner. The local
+    # environment descriptor remains authoritative for every other field.
+    return (
+        replace(
+            local.manifest,
+            admission_instances=admissions,
+        )
+        if admissions and admissions != local.manifest.admission_instances
+        else local.manifest
+    )
+
+
+def _attached_deadline(
+    inherited: float,
+    manifest: RunManifest | None,
+    local: ProfilingRun | None,
+    run_manifest: RunManifest,
+) -> float | None:
+    """The earliest of every deadline that applies, or None when the manifest has none."""
+    deadline = inherited
+    if manifest is not None:
+        manifest_deadline = _manifest_deadline(manifest)
+        if manifest_deadline is None:
+            return None
+        deadline = min(deadline, manifest_deadline)
+    if local is not None and local.run_id == run_manifest.run_id:
+        deadline = min(deadline, local.deadline_mono)
+    return deadline
+
+
+def _handoff_started_mono_ns(context: Mapping[str, Any]) -> int:
+    """The parent's start when it was handed over, else now."""
+    started = context.get("started_mono_ns")
+    try:
+        return int(started) if started is not None else clock().monotonic_ns()
+    except (TypeError, ValueError):
+        return clock().monotonic_ns()
+
+
+def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:
     """Continue measuring a selection another process already made.
 
     This is for the one case where a root operation outlives the process that
@@ -300,32 +359,8 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         return None
     manifest = carried if mode == MODE_ADMIN else None
     local = _load().run
-    if manifest is not None:
-        # A child of a selection that states its experiment. The manifest is
-        # that experiment's identity, so it is what this process reports --
-        # there is no local configuration to consult, because a new process
-        # under Admin control has none until its own sync loop runs.
-        run_manifest = manifest
-    elif local is not None:
-        # A caller written before the manifest travelled -- and the environment
-        # path, where the descriptor really is this process's own
-        # configuration. Nothing has been handed over, so the local run decides.
-        if str(context.get("run_id") or "") != local.run_id:
-            return None
-        admissions = _inherited_admissions(context, continuous=local.continuous)
-        if admissions is None:
-            return None
-        # A same-host handoff keeps the parent's admission owner. The local
-        # environment descriptor remains authoritative for every other field.
-        run_manifest = (
-            replace(
-                local.manifest,
-                admission_instances=admissions,
-            )
-            if admissions and admissions != local.manifest.admission_instances
-            else local.manifest
-        )
-    else:
+    run_manifest = _continued_run_manifest(context, manifest, local)
+    if run_manifest is None:
         return None
     operation = str(context.get("operation") or "").strip()
     if not operation or operation not in run_manifest.operations:
@@ -339,21 +374,10 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     # context whose stated bound is later than the experiment it names cannot
     # extend that experiment, and one that names an experiment already over is
     # refused outright rather than given the transport's remaining time.
-    deadline = inherited
-    if manifest is not None:
-        manifest_deadline = _manifest_deadline(manifest)
-        if manifest_deadline is None:
-            return None
-        deadline = min(deadline, manifest_deadline)
-    if local is not None and local.run_id == run_manifest.run_id:
-        deadline = min(deadline, local.deadline_mono)
-    if clock().monotonic() > deadline:
+    deadline = _attached_deadline(inherited, manifest, local, run_manifest)
+    if deadline is None or clock().monotonic() > deadline:
         return None
-    started = context.get("started_mono_ns")
-    try:
-        started_mono_ns = int(started) if started is not None else clock().monotonic_ns()
-    except (TypeError, ValueError):
-        started_mono_ns = clock().monotonic_ns()
+    started_mono_ns = _handoff_started_mono_ns(context)
     spans = _restore_handoff_spans(context.get("inherited_spans", []))
     marks = _restore_handoff_marks(context.get("inherited_marks", []))
     if spans is None or marks is None:
