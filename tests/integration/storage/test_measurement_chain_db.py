@@ -30,13 +30,13 @@ from tests.support.migrations import apply_migrations
 
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage
 from cloud_agent.app import create_app
-from cloud_agent.measurement_ingest import Owner
-from cloud_agent.measurement_persistence import (
+from cloud_agent.measurement.measurement_ingest import Owner
+from cloud_agent.measurement.measurement_persistence import (
     manifest_for_run,
     prepare_measurement,
     store_prepared,
 )
-from cloud_agent.measurement_writer import MeasurementWriter
+from cloud_agent.measurement.measurement_writer import MeasurementWriter
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
 from cloud_agent_host.runner import ClaimedJob, ControlPlane, deliver_measurements

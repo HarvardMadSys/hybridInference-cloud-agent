@@ -40,8 +40,9 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel, Field
 
-from cloud_agent import operation_measurement, sandbox_manager_routing
-from cloud_agent.operation_measurement import (
+from cloud_agent import sandbox_manager_routing
+from cloud_agent.measurement import operation_measurement
+from cloud_agent.measurement.operation_measurement import (
     INTERACTION_HEADER,
     LEGACY_MEASUREMENT_HEADER,
     reset as reset_selections,
@@ -98,7 +99,7 @@ async def _running_writer():
     a test that asserts on what was stored has to let the queue run -- which is
     the behaviour under test, not a workaround.
     """
-    from cloud_agent import measurement_writer
+    from cloud_agent.measurement import measurement_writer
 
     writer = measurement_writer.MeasurementWriter()
     measurement_writer.reset_writer(writer)
