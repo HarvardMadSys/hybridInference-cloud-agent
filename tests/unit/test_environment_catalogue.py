@@ -6,6 +6,10 @@ import pytest
 
 from cloud_agent import settings
 from cloud_agent.storage.repositories import environments
+from cloud_agent.storage.repositories.environments import (
+    _common as common_module,
+    catalogue as catalogue_module,
+)
 
 
 class Connection:
@@ -77,13 +81,14 @@ class Connection:
 
 @pytest.mark.parametrize("count", [1, 100, 513])
 async def test_catalogue_and_fingerprints_have_constant_query_counts(monkeypatch, count):
+    for module in (common_module, catalogue_module):
+        monkeypatch.setattr(
+            module,
+            "_cipher",
+            lambda: type("Cipher", (), {"decrypt": staticmethod(lambda value: value)})(),
+        )
     monkeypatch.setattr(
-        environments,
-        "_cipher",
-        lambda: type("Cipher", (), {"decrypt": staticmethod(lambda value: value)})(),
-    )
-    monkeypatch.setattr(
-        environments,
+        catalogue_module,
         "optional_setup_fingerprint",
         lambda script, values: ",".join(v.value for v in values),
     )
@@ -114,13 +119,14 @@ async def test_globals_are_decoded_once_and_never_join_team_setup(monkeypatch):
         return original_decode(variables)
 
     monkeypatch.setattr(repository, "_environment_decode", decode)
+    for module in (common_module, catalogue_module):
+        monkeypatch.setattr(
+            module,
+            "_cipher",
+            lambda: type("Cipher", (), {"decrypt": staticmethod(lambda value: value)})(),
+        )
     monkeypatch.setattr(
-        environments,
-        "_cipher",
-        lambda: type("Cipher", (), {"decrypt": staticmethod(lambda value: value)})(),
-    )
-    monkeypatch.setattr(
-        environments,
+        catalogue_module,
         "optional_setup_fingerprint",
         lambda script, values: ",".join(v.value for v in values),
     )
@@ -141,13 +147,14 @@ async def test_unreadable_globals_fail_closed_without_poisoning_team_fingerprint
             raise environments.EnvironmentEncryptionError("unreadable global ciphertext")
         return value
 
+    for module in (common_module, catalogue_module):
+        monkeypatch.setattr(
+            module,
+            "_cipher",
+            lambda: type("Cipher", (), {"decrypt": staticmethod(decrypt)})(),
+        )
     monkeypatch.setattr(
-        environments,
-        "_cipher",
-        lambda: type("Cipher", (), {"decrypt": staticmethod(decrypt)})(),
-    )
-    monkeypatch.setattr(
-        environments,
+        catalogue_module,
         "optional_setup_fingerprint",
         lambda script, values: ",".join(v.value for v in values),
     )

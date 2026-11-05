@@ -11,6 +11,7 @@ from __future__ import annotations
 from types import FunctionType
 
 from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
+from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent.storage.repositories.mcp import PostgresMcpConnectionRepository
 
@@ -135,4 +136,58 @@ def test_the_mcp_connection_repository_keeps_its_methods() -> None:
         "set_mcp_connection_status",
         "set_mcp_credential",
         "update_mcp_connection",
+    }
+
+
+def test_the_environment_repository_keeps_its_methods() -> None:
+    assert _methods(PostgresEnvironmentRepository) == {
+        "__init__",
+        "_environment_check_merged",
+        "_environment_decode",
+        "_environment_encode",
+        "_environment_installations",
+        "_environment_lock",
+        "_environment_public",
+        "_environment_publish",
+        "_environment_redactor",
+        "_environment_row",
+        "_environment_run_view",
+        "_environment_stored_variables",
+        "_environment_version",
+        "_require_team_binding_access",
+        "_team_access",
+        "_team_environment_audit",
+        "_write_preparation",
+        "archive_environment",
+        "bind_current_environment",
+        "cancel_environment_run",
+        "claim_environment_run",
+        "copy_environment",
+        "create_environment_action_run",
+        "create_environment_run",
+        "current_setup_fingerprints",
+        "environment_for_claim",
+        "fail_environment_preflight",
+        "find_environment_run",
+        "get_environment",
+        "get_environment_action_run",
+        "get_environment_binding",
+        "get_environment_run",
+        "get_global_environment",
+        "get_job_environment",
+        "list_environment_orphans",
+        "list_environment_versions",
+        "list_environments",
+        "maintain_environments",
+        "record_environment_preparation",
+        "record_worker_environment_preparation",
+        "redact_environment_steps",
+        "refresh_runtime_environment",
+        "request_skip_environment_start",
+        "restore_environment",
+        "save_environment",
+        "set_environment_default",
+        "update_environment_action_run",
+        "update_environment_run",
+        "workspace_environment_view",
     }
