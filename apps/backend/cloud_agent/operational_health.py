@@ -85,7 +85,8 @@ async def monitor_queue(
         try:
             async with asyncio.timeout(15):
                 snapshot = await store.queue_health(
-                    expected_deployment_sha=os.environ.get("AGENT_DEPLOYMENT_SHA", "")
+                    expected_deployment_sha=os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
+                    queue_alert_after_s=number_setting("queue_alert_after_s"),
                 )
             event = queue_alarm(snapshot)
         except Exception:

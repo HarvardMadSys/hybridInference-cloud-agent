@@ -154,7 +154,9 @@ class GoalRepository(Protocol):
         """Is any turn of this conversation queued or running right now?"""
         ...
 
-    async def sweep_goal_scheduling(self) -> dict[str, list[str]]:
+    async def sweep_goal_scheduling(
+        self, *, arm_after_seconds: float, stalled_after_seconds: float
+    ) -> dict[str, list[str]]:
         """Recover goals whose scheduling obligation was lost, and pause the rest.
 
         Three shapes are looked for, in this order:
@@ -163,8 +165,13 @@ class GoalRepository(Protocol):
           waiting on anything, or whose conversation has gone idle with no
           wakeup at all. The decision is made again.
         * ``stalled`` — an ``active`` goal with nothing queued, running or
-          pending for longer than the ``goals.stalled_after_seconds`` setting.
-          No path can explain it, so it is paused and said so.
+          pending for longer than ``stalled_after_seconds``. No path can
+          explain it, so it is paused and said so.
+
+        ``arm_after_seconds`` is how recent an idle goal's last write must be
+        for it to be re-armed rather than left to the stall check. The caller
+        reads both from the ``goals.arm_after_seconds`` and
+        ``goals.stalled_after_seconds`` settings.
 
         Returns the thread ids by shape, for the caller's log line.
         """

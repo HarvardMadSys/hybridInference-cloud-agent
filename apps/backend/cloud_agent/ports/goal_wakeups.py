@@ -74,7 +74,9 @@ class GoalWakeupRepository(Protocol):
         will clear ``waiting_job_id``. ``retry_in_seconds`` is for the other
         case — a temporary scheduling failure — and it defers the row's
         ``not_before`` rather than its lease, so a backoff and a dead worker's
-        expiry never look alike. ``lease_owner`` fences a consumer's write.
+        expiry never look alike. The caller bounds it by the
+        ``goals.wakeup_backoff_max_seconds`` setting. ``lease_owner`` fences a
+        consumer's write.
 
         Only a backoff keeps the attempt its claim spent. A release without
         ``retry_in_seconds`` gives it back, so a goal that waited behind its

@@ -38,7 +38,6 @@ from cloud_agent.sandbox_archive_credentials import (
     seal_archive_storage,
     stored_archive_policy,
 )
-from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.compute_admission import (
     host_compute_admission,
     lock_compute_entry,
@@ -1472,7 +1471,9 @@ class PostgresHostPoolRepository:
             "hosts": hosts,
         }
 
-    async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
+    async def queue_health(
+        self, *, expected_deployment_sha: str, queue_alert_after_s: float
+    ) -> dict[str, int]:
         """Observe configured queue stalls without claiming or changing jobs.
 
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
@@ -1554,7 +1555,7 @@ class PostgresHostPoolRepository:
                 """,
                 expected_deployment_sha,
                 KATA_RUNTIME,
-                number_setting("queue_alert_after_s"),
+                queue_alert_after_s,
                 archive_required,
                 archive_revision,
                 json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),

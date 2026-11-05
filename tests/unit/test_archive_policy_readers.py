@@ -248,7 +248,7 @@ async def test_queue_health_counts_a_host_only_under_a_policy_it_can_read(
     )
 
     await PostgresHostPoolRepository(_pool(connection)).queue_health(
-        expected_deployment_sha="test-deployment"
+        expected_deployment_sha="test-deployment", queue_alert_after_s=600.0
     )
     # Archives required, at the revision a serving Host must have applied. A
     # policy it cannot read asks for one no Host has, as the claim refuses them.
