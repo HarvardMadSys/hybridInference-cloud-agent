@@ -64,6 +64,15 @@ class ThreadTiming(BaseModel):
     blocks: dict[str, int] = Field(default_factory=dict)
     segments: list[TimingSegment]
     segments_merged: bool = False
+    # COMPAT(remove-after=2026-12-31): no browser tab still runs a frontend that
+    # reads them. Retired Gateway timing, always these values; a tab opened before
+    # the frontend that stopped reading them must not fail on their absence.
+    executions_split: int = 0
+    model_requests: int = 0
+    output_tps: float | None = None
+    gateway: Literal["not_recorded"] = "not_recorded"
+    gateway_reason: str | None = None
+    requests: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _interval_minus(intervals: Sequence[list[int]], cut: Sequence[list[int]]) -> list[list[int]]:

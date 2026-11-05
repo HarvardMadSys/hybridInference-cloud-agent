@@ -23511,6 +23511,52 @@
             "title": "Executions",
             "type": "integer"
           },
+          "executions_split": {
+            "default": 0,
+            "title": "Executions Split",
+            "type": "integer"
+          },
+          "gateway": {
+            "const": "not_recorded",
+            "default": "not_recorded",
+            "title": "Gateway",
+            "type": "string"
+          },
+          "gateway_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Reason"
+          },
+          "model_requests": {
+            "default": 0,
+            "title": "Model Requests",
+            "type": "integer"
+          },
+          "output_tps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tps"
+          },
+          "requests": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Requests",
+            "type": "array"
+          },
           "segments": {
             "items": {
               "$ref": "#/components/schemas/TimingSegment"
