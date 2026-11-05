@@ -111,7 +111,15 @@ test('mail and phone sign-in show only the selected provider’s fields', async 
   // Choosing Tencent SES shows its fields and the credentials it needs, unsaved.
   await page.getByRole('button', { name: 'Edit Account email settings' }).click();
   await setting(page, 'accounts.smtp_host').fill('draft.example.test');
-  await setting(page, 'accounts.email_provider').fill('tencent_ses');
+  // The provider is a named dropdown; choose with its keyboard typeahead.
+  const provider = page.getByRole('combobox', { name: 'Email provider', exact: true });
+  await expect(provider).toHaveText('SMTP');
+  await provider.focus();
+  await page.keyboard.press('t');
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveText(['SMTP', 'Tencent SES']);
+  await page.keyboard.press('Enter');
+  await expect(provider).toHaveText('Tencent SES');
+  await expect(provider).toBeFocused();
   await expect(setting(page, 'accounts.smtp_host')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Tencent Cloud credentials' })).toBeVisible();
   await setting(page, 'accounts.tencent_ses_from_email').fill('noreply@example.test');
@@ -127,6 +135,7 @@ test('mail and phone sign-in show only the selected provider’s fields', async 
   await expect(dialog.getByText('2 changes')).toBeVisible();
   await dialog.getByRole('button', { name: 'Apply changes' }).click();
   await expect(page.getByText('Account email settings saved.')).toBeVisible();
+  await expect(setting(page, 'accounts.email_provider')).toHaveText('Tencent SES');
   expect(writes).toEqual([
     {
       settings: {

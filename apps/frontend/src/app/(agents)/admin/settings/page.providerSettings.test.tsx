@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSyncExternalStore } from 'react';
 
 import { getAgentAdminSettings } from '@/lib/api/adminSettings';
+import { chooseOption } from '@/components/ui/__tests__/select';
 import AdminSettingsPage from './page';
 import { accountProviderSnapshot } from './settingsTestFixtures';
 
@@ -119,7 +120,7 @@ describe('settings search over provider settings', () => {
     render(<AdminSettingsPage />);
     await screen.findByRole('tab', { name: 'Identity & access' });
     fireEvent.click(screen.getByRole('button', { name: 'Edit Account email settings' }));
-    fireEvent.change(field('accounts.email_provider')!, { target: { value: 'tencent_ses' } });
+    chooseOption(screen.getByRole('combobox', { name: 'Email provider' }), 'Tencent SES');
 
     expect(searchResults('SMTP host')).toEqual([]);
     expect(searchResults('SecretKey')).toEqual([

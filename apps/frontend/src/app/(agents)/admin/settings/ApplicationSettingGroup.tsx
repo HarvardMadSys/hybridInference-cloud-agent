@@ -20,7 +20,7 @@ import type {
 } from '@/lib/api/adminSettings';
 
 import type { ApplicationSettingsState } from './ApplicationSettings';
-import { ARCHIVE_BUCKET, displayValue, parseValue } from './settingValues';
+import { ARCHIVE_BUCKET, namedOptions, parseValue, valueLabel } from './settingValues';
 
 type Changes = Record<string, AdminSettingValue | null>;
 // `snapshot` is what the review shows as current. It applies only at that
@@ -163,7 +163,7 @@ function ReviewChanges({
                         ? review.snapshot.secret_configured[key]
                           ? 'Configured · hidden'
                           : 'Not configured'
-                        : displayValue(current) || '(empty)'}
+                        : valueLabel(key, current) || '(empty)'}
                     </dd>
                   </div>
                   <span aria-hidden="true" className="hidden items-center px-1 text-muted sm:flex">
@@ -188,7 +188,7 @@ function ReviewChanges({
                         ? value === null
                           ? 'Not configured — secret will be cleared'
                           : 'New secret · hidden'
-                        : displayValue(next) || '(empty) — this setting will be cleared'}
+                        : valueLabel(key, next) || '(empty) — this setting will be cleared'}
                     </dd>
                   </div>
                 </dl>
@@ -316,9 +316,21 @@ function describedBy(id: string, error: string | undefined): string {
   return [`${id}-help`, error && `${id}-error`].filter(Boolean).join(' ');
 }
 
-/** A model id is one token, so the free-text line toggle stays off it. */
+/** A dropdown's options: named choices, or the server's own with any unlisted value kept. */
+function selectOptions(field: AdminSettingDefinition, value: string, saved: string) {
+  const named = namedOptions(field.key, saved);
+  if (named || !field.choices?.length) return named;
+  return [
+    ...(field.choices.includes(value) ? [] : [{ value, label: value }]),
+    ...field.choices.map((choice) => ({ value: choice, label: choice || '(empty)' })),
+  ];
+}
+
+/** A model id is one token, so the free-text line toggle stays off it, as off a dropdown. */
 function offersMultiline(field: AdminSettingDefinition, showInput: boolean): boolean {
-  return showInput && field.kind === 'string' && !field.choices?.length;
+  return (
+    showInput && field.kind === 'string' && !field.choices?.length && !namedOptions(field.key, '')
+  );
 }
 
 export function ApplicationSettingGroup({
@@ -499,6 +511,7 @@ export function ApplicationSettingGroup({
           const editable = editing && !field.read_only;
           const showInput = editable && (!field.secret || replacing[key]);
           const value = drafts[key] ?? incoming(field);
+          const options = selectOptions(field, value, incoming(field));
           const error = errors[key];
           const change = (next: string) => {
             setDrafts((previous) => {
@@ -547,7 +560,7 @@ export function ApplicationSettingGroup({
                 </p>
                 {editable && !field.secret && (
                   <p className="mt-2 break-words text-xs text-muted">
-                    Default: {displayValue(field.default) || '(empty)'}
+                    Default: {valueLabel(key, field.default) || '(empty)'}
                   </p>
                 )}
               </div>
@@ -573,7 +586,7 @@ export function ApplicationSettingGroup({
                             {configured ? 'Configured · value hidden' : 'Not configured'}
                           </span>
                         ) : (
-                          displayValue(snapshot?.values[key] ?? field.default) || (
+                          valueLabel(key, snapshot?.values[key] ?? field.default) || (
                             <span className="text-muted">Not set</span>
                           )
                         )}
@@ -589,17 +602,8 @@ export function ApplicationSettingGroup({
                           { value: 'false', label: 'Disabled' },
                         ]}
                       />
-                    ) : field.choices?.length ? (
-                      <Select
-                        {...selectProps}
-                        options={[
-                          ...(field.choices.includes(value) ? [] : [{ value, label: value }]),
-                          ...field.choices.map((choice) => ({
-                            value: choice,
-                            label: choice || '(empty)',
-                          })),
-                        ]}
-                      />
+                    ) : options ? (
+                      <Select {...selectProps} options={options} />
                     ) : field.kind === 'string' && (multiline[key] ?? value.includes('\n')) ? (
                       <textarea
                         {...inputProps}

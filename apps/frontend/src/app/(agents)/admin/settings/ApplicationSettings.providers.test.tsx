@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
-import { chooseOption } from '@/components/ui/__tests__/select';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 
 import ApplicationSettings from './ApplicationSettings';
 import { accountProviderSnapshot } from './settingsTestFixtures';
@@ -48,6 +48,10 @@ function shownKeys(): string[] {
 
 function group(title: string): HTMLElement {
   return screen.getByRole('form', { name: title });
+}
+
+function chooseProvider(name: string) {
+  chooseOption(field('accounts.email_provider')!, name);
 }
 
 function edit(title: string) {
@@ -126,7 +130,7 @@ describe('provider-aware application settings', () => {
     await renderWith({ 'accounts.smtp_host': 'smtp.example.org' });
     edit('Account email');
     fireEvent.change(field('accounts.smtp_host')!, { target: { value: 'draft.example.org' } });
-    fireEvent.change(field('accounts.email_provider')!, { target: { value: 'tencent_ses' } });
+    chooseProvider('Tencent SES');
 
     expect(field('accounts.smtp_host')).toBeNull();
     expect(field('accounts.tencent_ses_from_email')).toBeInTheDocument();
@@ -143,6 +147,9 @@ describe('provider-aware application settings', () => {
     const dialog = screen.getByRole('dialog', { name: 'Review changes' });
     expect(within(dialog).queryByText('SMTP host')).not.toBeInTheDocument();
     expect(within(dialog).getByText('2 changes')).toBeInTheDocument();
+    // The review names the providers; the write below sends their stored values.
+    expect(within(dialog).getByText('SMTP')).toBeInTheDocument();
+    expect(within(dialog).getByText('Tencent SES')).toBeInTheDocument();
 
     write.mockResolvedValue(
       accountProviderSnapshot(
@@ -168,23 +175,63 @@ describe('provider-aware application settings', () => {
     expect(screen.getByRole('heading', { name: 'Tencent Cloud credentials' })).toBeVisible();
   });
 
+  it('offers the built-in mail providers by name in a labelled dropdown', async () => {
+    await renderWith({});
+    expect(field('accounts.email_provider')).toHaveTextContent(/^SMTP$/);
+    edit('Account email');
+    const provider = screen.getByRole('combobox', { name: 'Email provider' });
+    expect(provider).toBe(field('accounts.email_provider'));
+    expect(optionNames(provider)).toEqual(['SMTP', 'Tencent SES']);
+    expect(provider).toHaveTextContent('SMTP');
+    expect(within(group('Account email')).getByText('Default: SMTP')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Use multiple lines for Email provider')).toBeNull();
+  });
+
+  it('keeps a registered provider selectable and replaces it only when another is chosen', async () => {
+    await renderWith({ 'accounts.email_provider': 'acme' });
+    expect(field('accounts.email_provider')).toHaveTextContent(/^acme$/);
+    edit('Account email');
+    const provider = field('accounts.email_provider')!;
+    expect(optionNames(provider)).toEqual(['SMTP', 'Tencent SES', 'acme (current value)']);
+    expect(provider).toHaveTextContent('acme (current value)');
+
+    chooseProvider('SMTP');
+    expect(field('accounts.smtp_host')).toBeInTheDocument();
+    // Choosing the saved value again is no change at all.
+    chooseProvider('acme (current value)');
+    expect(field('accounts.smtp_host')).toBeNull();
+    expect(within(group('Account email')).getByText('No changes yet')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review Account email changes' })).toBeDisabled();
+
+    chooseProvider('Tencent SES');
+    fireEvent.click(screen.getByRole('button', { name: 'Review Account email changes' }));
+    const dialog = screen.getByRole('dialog', { name: 'Review changes' });
+    expect(within(dialog).getByText('acme')).toBeInTheDocument();
+    expect(within(dialog).getByText('Tencent SES')).toBeInTheDocument();
+    write.mockResolvedValue(
+      accountProviderSnapshot({ 'accounts.email_provider': 'tencent_ses' }, { revision: 2 }),
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Apply changes' }));
+    await screen.findByText('Account email settings saved.');
+    expect(write.mock.calls[0][0]).toEqual({ 'accounts.email_provider': 'tencent_ses' });
+  });
+
   it('brings back a hidden draft when switching back and drops the provider draft on cancel', async () => {
     await renderWith({ 'accounts.smtp_host': 'smtp.example.org' });
     edit('Account email');
     fireEvent.change(field('accounts.smtp_host')!, { target: { value: 'draft.example.org' } });
-    const provider = field('accounts.email_provider')!;
-    fireEvent.change(provider, { target: { value: 'tencent_ses' } });
-    fireEvent.change(provider, { target: { value: 'smtp' } });
+    chooseProvider('Tencent SES');
+    chooseProvider('SMTP');
 
     expect(field('accounts.smtp_host')).toHaveValue('draft.example.org');
     expect(field('accounts.tencent_ses_region')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Tencent Cloud credentials' })).toBeNull();
     expect(within(group('Account email')).getByText('1 unsaved change')).toBeInTheDocument();
 
-    fireEvent.change(provider, { target: { value: 'tencent_ses' } });
+    chooseProvider('Tencent SES');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel editing Account email' }));
     expect(field('accounts.smtp_host')).toHaveTextContent('smtp.example.org');
-    expect(field('accounts.email_provider')).toHaveTextContent('smtp');
+    expect(field('accounts.email_provider')).toHaveTextContent('SMTP');
     expect(screen.queryByRole('heading', { name: 'Tencent Cloud credentials' })).toBeNull();
     expect(write).not.toHaveBeenCalled();
   });
@@ -192,13 +239,12 @@ describe('provider-aware application settings', () => {
   it('keeps an unsent credential draft hidden while no consumer needs it', async () => {
     await renderWith({});
     edit('Account email');
-    const provider = field('accounts.email_provider')!;
-    fireEvent.change(provider, { target: { value: 'tencent_ses' } });
+    chooseProvider('Tencent SES');
     edit('Tencent Cloud credentials');
     fireEvent.click(screen.getByRole('button', { name: 'Set Tencent Cloud SecretId' }));
     fireEvent.change(field('accounts.tencent_secret_id')!, { target: { value: 'AKID-draft' } });
 
-    fireEvent.change(provider, { target: { value: 'smtp' } });
+    chooseProvider('SMTP');
     expect(screen.queryByRole('heading', { name: 'Tencent Cloud credentials' })).toBeNull();
     expect(field('accounts.tencent_secret_id')).toBeNull();
     // Nothing on the page can submit it, and leaving does not warn about it.
@@ -209,7 +255,7 @@ describe('provider-aware application settings', () => {
     window.dispatchEvent(leave);
     expect(leave.defaultPrevented).toBe(false);
 
-    fireEvent.change(provider, { target: { value: 'tencent_ses' } });
+    chooseProvider('Tencent SES');
     expect(field('accounts.tencent_secret_id')).toHaveValue('AKID-draft');
     expect(
       within(group('Tencent Cloud credentials')).getByText('1 unsaved change'),
