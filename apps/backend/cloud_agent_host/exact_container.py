@@ -5,7 +5,9 @@ identity is not exactly the spec's (labels, namespace, quota, image, name, no
 state mount), runs the Docker CLI, and remembers what each spec's last start
 or network proof verified. The sandbox manager, the group network and the
 helpers split out of the manager all reach Docker through it, so the checks
-live in one place instead of being rebuilt by each caller.
+live in one place instead of being rebuilt by each caller. :meth:`run` and
+:meth:`run_bytes` are the bare Docker CLI and check nothing themselves: callers
+reach a container only after :meth:`require` or a recorded proof.
 
 A container's labels, mounts, tmpfs, runtime and image never change for its
 id, and Docker refuses an exec into one that is stopped, paused or removed.
@@ -162,6 +164,8 @@ class ExactContainer:
     """Inspect, identity-check and enter retained chat containers through Docker only."""
 
     def __init__(self, backend: ContainerBackend, *, state_roots: tuple[str, ...]) -> None:
+        if not state_roots:
+            raise ValueError("an exact container needs the state roots it refuses as mounts")
         self.backend = backend
         #: Where retained chat state lives: only ever the container's writable layer.
         self._state_roots = state_roots

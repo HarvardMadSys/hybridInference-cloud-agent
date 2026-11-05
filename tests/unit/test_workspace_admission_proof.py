@@ -51,7 +51,7 @@ class _ProofManager:
     """The parts of a manager a standing proof reads, with the real proof records."""
 
     def __init__(self) -> None:
-        self.exact = ExactContainer(SimpleNamespace(), state_roots=())
+        self.exact = ExactContainer(SimpleNamespace(), state_roots=("/workspace", "/agent-state"))
         self.host_rule_checks = 0
         self.host_rules_fail = False
         self.network = SimpleNamespace(
@@ -216,7 +216,7 @@ class _ProvingManager(_Manager):
 
     def __init__(self) -> None:
         super().__init__()
-        self.exact = ExactContainer(SimpleNamespace(), state_roots=())
+        self.exact = ExactContainer(SimpleNamespace(), state_roots=("/workspace", "/agent-state"))
         self.host_rule_requirements = 0
         self.fail_start = False
 
