@@ -1,7 +1,7 @@
 """What one attempt's profile keeps per request and over time, bounded.
 
 Two small accumulators the context profile reducer feeds while it reads an
-attempt's events in order (:mod:`cloud_agent.context_profile`):
+attempt's events in order (:mod:`cloud_agent.context.context_profile`):
 
 - :class:`RunningContent` -- the stored content recorded *before* each model
   request, by category, as a token estimate (``chars_cjk_v1``). A completed

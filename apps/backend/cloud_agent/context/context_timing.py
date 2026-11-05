@@ -34,8 +34,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.context_profile import profile_is_current
-from cloud_agent.context_running import merge_intervals
+from cloud_agent.context.context_profile import profile_is_current
+from cloud_agent.context.context_running import merge_intervals
 
 if TYPE_CHECKING:
     from datetime import datetime

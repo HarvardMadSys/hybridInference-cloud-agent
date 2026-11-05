@@ -11,13 +11,13 @@ from itertools import pairwise
 from types import SimpleNamespace
 from typing import Any
 
-from cloud_agent.context_dashboard import session_tokens, step_durations
-from cloud_agent.context_dna import bands_for, item_key, prepare_rows
-from cloud_agent.context_profile import ContextProfileAccumulator
-from cloud_agent.context_request import RequestScope, walk_composition
-from cloud_agent.context_running import POINT_CATEGORIES, bound_intervals, merge_intervals
-from cloud_agent.context_timing import assemble_timing
-from cloud_agent.context_view import assemble_thread_context
+from cloud_agent.context.context_dashboard import session_tokens, step_durations
+from cloud_agent.context.context_dna import bands_for, item_key, prepare_rows
+from cloud_agent.context.context_profile import ContextProfileAccumulator
+from cloud_agent.context.context_request import RequestScope, walk_composition
+from cloud_agent.context.context_running import POINT_CATEGORIES, bound_intervals, merge_intervals
+from cloud_agent.context.context_timing import assemble_timing
+from cloud_agent.context.context_view import assemble_thread_context
 
 T0 = datetime(2026, 10, 30, 9, tzinfo=UTC)
 CAT = {key: index for index, key in enumerate(POINT_CATEGORIES)}

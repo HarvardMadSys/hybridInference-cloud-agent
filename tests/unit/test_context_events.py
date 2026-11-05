@@ -10,9 +10,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from cloud_agent.context_events import assemble_context_events, event_capabilities
-from cloud_agent.context_insights import RECORDED_CATEGORIES, compose
-from cloud_agent.context_profile import ContextProfileAccumulator
+from cloud_agent.context.context_events import assemble_context_events, event_capabilities
+from cloud_agent.context.context_insights import RECORDED_CATEGORIES, compose
+from cloud_agent.context.context_profile import ContextProfileAccumulator
 from cloud_agent.prompt_injections import claim_prompt
 from cloud_agent_shared.text_tokens import estimate_text_tokens, split_counts
 

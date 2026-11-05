@@ -8,7 +8,7 @@ agent CLIs stream. Two families of numbers stay apart here:
 - **Recorded content** (estimate, ``chars_cjk_v1``): stored text by category.
   A request's vector is what the conversation recorded before it -- the turn
   prompts and what the platform wrapped them in, then each attempt's content
-  up to the request (:mod:`cloud_agent.context_running`). A completed
+  up to the request (:mod:`cloud_agent.context.context_running`). A completed
   compaction starts the carried content over; a retried attempt's content is
   not carried into the next turn (the kept attempt's is). CLI system prompts
   and tool schemas are never stored, so they have no number at all.
@@ -27,8 +27,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.context_profile import profile_is_current
-from cloud_agent.context_running import POINT_CATEGORIES
+from cloud_agent.context.context_profile import profile_is_current
+from cloud_agent.context.context_running import POINT_CATEGORIES
 from cloud_agent_shared.text_tokens import ESTIMATE_BASIS
 
 _INDEX = {key: index for index, key in enumerate(POINT_CATEGORIES)}

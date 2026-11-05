@@ -7,7 +7,7 @@ context profiles: the largest and latest request observed, the window the CLI
 reported, how often it compacted, how many requests it made. Each entry links
 to that conversation's Context view.
 
-Profiles are derived lazily (see :mod:`cloud_agent.context_profile`); a page
+Profiles are derived lazily (see :mod:`cloud_agent.context.context_profile`); a page
 read derives a bounded number of missing ones and says how many remain, so a
 ranking is never presented as complete while it is not.
 """
@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.admin_observability import cursor_scope
 from cloud_agent.admin_usage import AdminUsageAggregate  # noqa: TC001
-from cloud_agent.context_profile import CONTENT_CATEGORIES, TOTAL_FIELDS
+from cloud_agent.context.context_profile import CONTENT_CATEGORIES, TOTAL_FIELDS
 from cloud_agent.usage_range import UsageRange  # noqa: TC001
 from cloud_agent_shared.text_tokens import ESTIMATE_BASIS
 

@@ -26,8 +26,8 @@ from cloud_agent.command_executions import (
     CommandFilter,
     CommandSort,
 )
-from cloud_agent.context_dna import MAX_DNA_REQUESTS, DnaBands
-from cloud_agent.context_insights import (
+from cloud_agent.context.context_dna import MAX_DNA_REQUESTS, DnaBands
+from cloud_agent.context.context_insights import (
     DEFAULT_CONTEXT_PAGE,
     MAX_CONTEXT_PAGE,
     MAX_SEARCH_CHARS,
@@ -47,9 +47,9 @@ from cloud_agent.context_insights import (
     compose,
     context_cursor_scope,
 )
-from cloud_agent.context_request import RequestComposition
-from cloud_agent.context_timing import ThreadTiming, assemble_timing
-from cloud_agent.context_view import ThreadContextView, assemble_thread_context
+from cloud_agent.context.context_request import RequestComposition
+from cloud_agent.context.context_timing import ThreadTiming, assemble_timing
+from cloud_agent.context.context_view import ThreadContextView, assemble_thread_context
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage.admin_usage_queries import UsageQueryTooLarge, UsageQueryUnavailable
 from cloud_agent.usage_batches import owner_usage

@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.context_view import ContextPoint  # noqa: TC001 — Pydantic resolves it.
+from cloud_agent.context.context_view import ContextPoint  # noqa: TC001 — Pydantic resolves it.
 from cloud_agent_shared.text_tokens import ESTIMATE_BASIS, estimate_from_counts
 
 if TYPE_CHECKING:
