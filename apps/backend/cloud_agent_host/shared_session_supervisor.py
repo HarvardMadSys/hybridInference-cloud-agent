@@ -860,7 +860,7 @@ class SharedChatSessionSupervisor:
                 return inspection
             group.stop_archive_pending = True
             group.stop_archive_members = members
-            start_seq = self.start_seq_for(group.spec.sandbox_id)
+            start_seq = None if group.run_unfenced else group.start_seq  # this run's own
         with logged_stopped_archive_failure("final_archive", group.spec, inspection.container_id):
             self._archive.stopped(group.spec, inspection, members, start_seq=start_seq)
         # The owned bridge is the durable marker that a stopped container has

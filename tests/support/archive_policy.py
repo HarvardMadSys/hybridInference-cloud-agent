@@ -40,7 +40,11 @@ class _Hooks:
             self.on_prepare_final(spec, inspection)
 
     def stopped(self, spec, inspection, members, *, start_seq) -> None:
-        if self.on_stopped is not None:
+        if self.on_stopped is None:
+            return
+        if "start_seq" in inspect.signature(self.on_stopped).parameters:
+            self.on_stopped(spec, inspection, members, start_seq=start_seq)
+        else:
             self.on_stopped(spec, inspection, members)
 
     def invalidate_final(self, spec, inspection) -> bool:

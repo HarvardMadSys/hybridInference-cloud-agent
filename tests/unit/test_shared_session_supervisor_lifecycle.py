@@ -907,7 +907,7 @@ def _fenced_supervisor(
     labels: list[int | None] = []
     supervisor = hooked_supervisor(
         manager,
-        stopped=lambda spec, *_args: labels.append(supervisor.start_seq_for(spec.sandbox_id)),
+        stopped=lambda _spec, *_args, start_seq: labels.append(start_seq),
         checkpoint_seq=lambda _spec, _inspection: sealed_by_checkpoint,
     )
     supervisor.register_manifest(_spec(), _members())
