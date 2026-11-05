@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -39,6 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # ``_owner_auth`` and never the reverse, so there is no cycle to reason about.
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_current_user, get_storage, require_local_admission
+from cloud_agent.api.errors import as_http_exception
 from cloud_agent.api.mcp_connections_shared import (
     _bad_request,
     _capability_payload,
@@ -56,8 +55,16 @@ from cloud_agent.api.mcp_thread_bindings import (
     router as thread_bindings_router,
 )
 from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp import config_import, github_oauth, launch, oauth, sandbox_servers as sandbox
+from cloud_agent.mcp import (
+    config_import,
+    github_oauth,
+    launch,
+    oauth,
+    oauth_authorization,
+    sandbox_servers as sandbox,
+)
 from cloud_agent.mcp.errors import (
     McpConnectionCreateConflict,
     McpCredentialWriteRejected,
@@ -1009,7 +1016,7 @@ async def _diagnose(
 
 
 @router.post("/connections/{connection_id}/authorize", response_model=AuthorizeResponse)
-async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+async def authorize_connection(
     connection_id: int,
     body: AuthorizeRequest | None = None,
     user: dict[str, Any] = Depends(require_agent_owner),
@@ -1020,312 +1027,29 @@ async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity basel
     Discovery, registration and the challenge all happen here, so the browser
     is sent to a URL this service built rather than one a caller supplied.
     """
-    from cloud_agent.mcp.transports import HttpMetadataFetcher, TransportError
-
+    # The docstring is the operation's published description, so it stays as
+    # it was; the steps it names are `oauth_authorization.start_authorization`.
     job_store = _require_store(store)
-    row = await job_store.mcp.get_mcp_connection(
-        connection_id=connection_id, user_id=user["user_id"]
-    )
-    if row is None:
-        raise _not_found("no such MCP connection")
-    if body is not None and body.client_id:
-        # Stored before discovery, so the registration choice below sees it and
-        # the flow it starts is the one this client will complete.
-        secret_ciphertext = None
-        if body.client_secret:
-            try:
-                secret_ciphertext = oauth_cipher().encrypt(body.client_secret)
-            except CredentialCipherError as exc:
-                raise _no_encryption_key() from exc
-        stored = await job_store.mcp.set_mcp_client_registration(
+    try:
+        outcome = await oauth_authorization.start_authorization(
+            job_store.mcp,
             connection_id=connection_id,
             user_id=user["user_id"],
-            client_id=body.client_id.strip(),
-            client_secret_ciphertext=secret_ciphertext,
+            client_id=body.client_id if body is not None else None,
+            client_secret=body.client_secret if body is not None else None,
+            base_url=_public_base_url(),
+            policy=_policy(),
+            github_client=_github_browser_client(),
         )
-        if not stored:
-            raise _conflict("this connection changed while you were authorizing it")
-        refreshed = await job_store.mcp.get_mcp_connection(
-            connection_id=connection_id, user_id=user["user_id"]
+    except (Refused, Unavailable) as exc:
+        raise as_http_exception(exc) from exc
+    except oauth_authorization.SignInUnavailable as exc:
+        raise HTTPException(status_code=503, detail={"error": {"message": str(exc)}}) from exc
+    if isinstance(outcome, oauth_authorization.ClientIdNeeded):
+        return AuthorizeResponse(
+            needs_client_id=True, message=outcome.message, redirect_uri=outcome.redirect_uri
         )
-        row = refreshed or row
-    connection = connection_from_row(row)
-    if connection.auth.kind is not AuthKind.OAUTH:
-        raise _bad_request("this connection does not use OAuth")
-    if not connection.config.url:
-        raise _bad_request("this connection has no address to authorize against")
-    base_url = _public_base_url()
-    if not base_url:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "server_error",
-                    "message": (
-                        "Server sign-in is unavailable because this deployment's public "
-                        "callback address is not configured. Please contact the administrator."
-                    ),
-                }
-            },
-        )
-
-    policy = _policy()
-    fetcher = HttpMetadataFetcher()
-    try:
-        resource_metadata, metadata = await oauth.discover_authorization_server(
-            fetcher,
-            resource_url=connection.config.url,
-            policy=policy,
-            preregistered_issuer=connection.auth.oauth.issuer if connection.auth.oauth else None,
-        )
-    except (oauth.OAuthError, TransportError, EndpointRejected) as exc:
-        raise _bad_request(str(exc)) from exc
-
-    settings = row.get("auth_config")
-    configured = settings if isinstance(settings, Mapping) else {}
-    client_id = str(configured.get("client_id") or "") or None
-    github_endpoint = github_oauth.is_endpoint(connection.config.url)
-    managed_client = (
-        _github_browser_client()
-        if github_endpoint
-        and (not client_id or configured.get("managed_github_oauth"))
-        and not (body is not None and body.client_id)
-        else None
-    )
-    try:
-        secret = None
-        if managed_client:
-            # Never send the shared secret to an endpoint supplied by discovery.
-            if (
-                not github_oauth.is_managed(
-                    issuer=metadata.issuer,
-                    token_endpoint=metadata.token_endpoint,
-                    resource=connection.config.url,
-                )
-                or metadata.authorization_endpoint != github_oauth.AUTHORIZATION_ENDPOINT
-            ):
-                raise oauth.OAuthError("GitHub returned unexpected sign-in endpoints.")
-            client_id, secret = managed_client
-        elif configured.get("managed_github_oauth") and not (body is not None and body.client_id):
-            raise _bad_request(
-                "GitHub browser sign-in is unavailable. Ask the service administrator to enable it."
-            )
-        elif row.get("client_secret_ciphertext"):
-            secret = oauth_cipher().decrypt(str(row["client_secret_ciphertext"]))
-        if github_endpoint and not client_id:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "message": "GitHub browser sign-in is not available yet. "
-                        "Use a personal access token or ask the service administrator to enable it."
-                    }
-                },
-            )
-        if github_endpoint and metadata.token_endpoint == github_oauth.TOKEN_ENDPOINT:
-            # GitHub omits this field from metadata (RFC default: Basic), but
-            # documents client_secret in the form body for both app types.
-            metadata = replace(
-                metadata, token_endpoint_auth_methods_supported=("client_secret_post",)
-            )
-        identity = oauth.choose_registration(
-            metadata, preregistered_client_id=client_id, preregistered_client_secret=secret
-        )
-    except oauth.OAuthError as exc:
-        if exc.kind == "client_registration_required":
-            return AuthorizeResponse(
-                needs_client_id=True,
-                message=str(exc),
-                redirect_uri=_callback_url(base_url, connection_id),
-            )
-        raise _bad_request(str(exc)) from exc
-
-    if identity.registration == "dcr":
-        identity = await _register_client(
-            fetcher, metadata, policy=policy, base_url=base_url, connection_id=connection_id
-        )
-
-    scopes = oauth.default_scopes(
-        resource_metadata, metadata, connection.auth.oauth.scopes if connection.auth.oauth else ()
-    )
-    if managed_client:
-        # Avoid requesting every optional toolset scope in GitHub's metadata.
-        scopes = ("repo", "read:org")
-    # The OAuth resource identifier can differ from the MCP transport URL.
-    # Reauthorization may reuse the issuer without fetching resource metadata;
-    # retain a saved resource only while it still describes the current URL.
-    resource = connection.config.url
-    if resource_metadata:
-        resource = resource_metadata.resource
-    elif connection.auth.oauth and connection.auth.oauth.resource:
-        # Editing the URL can leave the previous credential's resource on
-        # the row. Keep the current URL when that saved resource no longer fits.
-        with suppress(oauth.OAuthError):
-            resource = oauth.parse_protected_resource_metadata(
-                {"resource": connection.auth.oauth.resource}, expect=connection.config.url
-            ).resource
-    flow = oauth.OAuthFlow(
-        versions=oauth.FlowVersions(
-            connection_id=str(connection_id),
-            config_revision=connection.config_revision,
-            authorization_epoch=connection.authorization_epoch,
-            oauth_generation=connection.oauth_generation,
-        ),
-        state=oauth.new_state(),
-        pkce=oauth.PkcePair.generate(),
-        client=identity,
-        metadata=metadata,
-        resource=resource,
-        redirect_uri=(
-            oauth.redirect_uri(base_url, "github")
-            if managed_client
-            else _callback_url(base_url, connection_id)
-        ),
-        scopes=scopes,
-    )
-    try:
-        authorization_url = flow.authorization_url()
-    except oauth.OAuthError as exc:
-        raise _bad_request(str(exc)) from exc
-    cipher = oauth_cipher()
-    # The generation is allocated in the store from the value just read. Passing
-    # ``snapshot + 1`` lets two starts both insert a flow for a generation the
-    # row has already left, and lets the later transaction delete the newer one.
-    allocated = await job_store.mcp.create_mcp_oauth_flow(
-        state_hash=oauth.state_hash(flow.state),
-        user_id=user["user_id"],
-        connection_id=connection_id,
-        config_revision=connection.config_revision,
-        authorization_epoch=connection.authorization_epoch,
-        expected_oauth_generation=connection.oauth_generation,
-        code_verifier_ciphertext=cipher.encrypt(flow.pkce.verifier),
-        client_id=identity.client_id,
-        client_secret_ciphertext=(
-            cipher.encrypt(identity.client_secret) if identity.client_secret else None
-        ),
-        client_auth_method=identity.auth_method,
-        registration=identity.registration,
-        issuer=metadata.issuer,
-        resource=flow.resource,
-        redirect_uri=flow.redirect_uri,
-        scopes=list(scopes),
-        authorization_endpoint=metadata.authorization_endpoint,
-        token_endpoint=metadata.token_endpoint,
-        revocation_endpoint=metadata.revocation_endpoint,
-        registration_endpoint=metadata.registration_endpoint,
-        expires_at=datetime.now(UTC) + oauth.FLOW_LIFETIME,
-    )
-    if allocated is None:
-        raise _conflict("this connection changed while you were authorizing it")
-    return AuthorizeResponse(authorization_url=authorization_url)
-
-
-async def _register_client(
-    fetcher: Any,
-    metadata: oauth.AuthorizationServerMetadata,
-    *,
-    policy: EgressPolicy,
-    base_url: str,
-    connection_id: int,
-) -> oauth.ClientIdentity:
-    """Register dynamically, when the server supports nothing better."""
-    from cloud_agent.mcp.transports import TransportError
-
-    if not metadata.registration_endpoint:
-        raise _bad_request("this authorization server has no registration endpoint")
-    body = oauth.registration_request_body(
-        client_name="HybridInference Cloud Agent",
-        # The URI the redirect will actually use, computed the same way, not
-        # the bare path. A server that checks the registered value against the
-        # one in the authorization request -- which the specification requires
-        # it to -- refuses the two that differ, and the mismatch is invisible
-        # until somebody tries to connect.
-        redirect_uris=[_callback_url(base_url, connection_id)],
-        scopes=metadata.scopes_supported,
-    )
-    try:
-        payload = await _post_json(fetcher, metadata.registration_endpoint, body, policy=policy)
-    except TransportError as exc:
-        raise _bad_request(f"client registration failed: {exc}") from exc
-    return oauth.parse_registration_response(payload)
-
-
-async def _post_json(
-    fetcher: Any, url: str, body: Mapping[str, Any], *, policy: EgressPolicy
-) -> Mapping[str, Any]:
-    """POST a JSON body under the same egress policy as everything else.
-
-    Every failure leaves here as a request error the caller can report. A raw
-    ``httpx`` exception or a policy refusal escaping this helper becomes a 500
-    with no diagnosis -- from a URL the *authorization server's* metadata chose,
-    which is the one input in this path the user did not supply.
-    """
-    import httpx
-
-    from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
-    from cloud_agent.mcp.transports import TransportError, pinned_transport, read_bounded
-
-    try:
-        endpoint = validate_endpoint(url, policy)
-        loop_addresses = await _resolve(endpoint.host, endpoint.port)
-        check_addresses(endpoint.host, loop_addresses, policy)
-    except EndpointRejected as exc:
-        raise _bad_request(str(exc)) from exc
-    except OSError as exc:
-        raise _bad_request(f"that address could not be resolved: {exc}") from exc
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0),
-            follow_redirects=False,
-            headers=IDENTITY_ENCODING_HEADERS,
-            transport=pinned_transport(),
-        ) as client:
-            # Streamed, so the size limit is applied while the body arrives
-            # rather than to a body the registration server already chose the
-            # size of. Registration is the one request here whose *response*
-            # contains a client secret.
-            response = await client.send(
-                client.build_request(
-                    "POST",
-                    endpoint.url,
-                    json=dict(body),
-                    headers={"accept": "application/json", **IDENTITY_ENCODING_HEADERS},
-                ),
-                stream=True,
-            )
-            try:
-                status = response.status_code
-                payload = await read_bounded(response)
-            finally:
-                await response.aclose()
-    except (httpx.HTTPError, TransportError) as exc:
-        raise _bad_request(f"the authorization server could not be reached: {exc}") from exc
-    if status >= 400:
-        raise _bad_request(f"the authorization server answered {status} to registration")
-    try:
-        document = json.loads(payload or b"{}")
-    except ValueError as exc:
-        raise _bad_request("the registration response is not JSON") from exc
-    if not isinstance(document, Mapping):
-        raise _bad_request("the registration response is not an object")
-    del fetcher
-    return document
-
-
-async def _resolve(host: str, port: int) -> list[str]:
-    """Resolve a host to its addresses, for the egress check.
-
-    Under the spelling the connection layer dials rather than the one that was
-    typed: ``getaddrinfo`` applies the 2003 IDNA codec, so a unicode label
-    resolves as a different domain from the one httpx connects to.
-    """
-    import asyncio
-
-    from cloud_agent.mcp.net_policy import dial_host
-
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(dial_host(host), port, type=0)
-    return [str(info[4][0]) for info in infos]
+    return AuthorizeResponse(authorization_url=outcome.authorization_url)
 
 
 async def _callback_session_user(
@@ -1566,7 +1290,11 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
 
     try:
         endpoint = validate_endpoint(request.url, policy)
-        check_addresses(endpoint.host, await _resolve(endpoint.host, endpoint.port), policy)
+        check_addresses(
+            endpoint.host,
+            await oauth_authorization.resolve_addresses(endpoint.host, endpoint.port),
+            policy,
+        )
     except EndpointRejected as exc:
         raise TransportError(str(exc), kind=exc.kind) from exc
     except OSError as exc:
@@ -1616,18 +1344,6 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
     if not isinstance(document, Mapping):
         raise TransportError("the token response is not an object")
     return document
-
-
-def _callback_url(base_url: str, connection_id: int) -> str:
-    """The one redirect URI for a connection, used for register, authorize and redeem.
-
-    Defined once because the three have to agree. A server compares the
-    ``redirect_uri`` in the authorization request against the one registered
-    for the client -- the specification requires it to -- so a registration that
-    used a different string, even a prefix of the right one, fails the flow at
-    the browser with nothing in this service's logs.
-    """
-    return oauth.redirect_uri(base_url, str(connection_id))
 
 
 def _callback_redirect(provider: str, *, ok: bool, message: str) -> Response:

@@ -1,11 +1,16 @@
-"""Materializing a native Fork: the saga between prepare and finalize.
+"""A native Fork: the anchor's eligibility, prepare, materialize and finalize.
 
-The handler validates the anchor, asks the store to prepare the operation and
-maps what happens here onto HTTP; this flow does the rest — claim the
-coordinator lease, establish both residencies, mint their credentials, ask the
-retaining host to fork, and record the receipt. It was 186 lines in the middle
-of `fork_agent_job`; a flow that can only be reached through an HTTP request is
-a flow whose failure branches can only be tested through one.
+The handler resolves the owner's job and maps what happens here onto HTTP;
+`fork_settled_turn` does the rest. It refuses an anchor that is not a
+successfully settled turn of a shared-native sandbox, asks the store to
+prepare the operation and answers the store's refusals, and drives a PREPARING
+operation through `materialize_session_fork` — claim the coordinator lease,
+establish both residencies, mint their credentials, ask the retaining host to
+fork, and record the receipt — before the store finalizes the child. The
+materialization was 186 lines in the middle of `fork_agent_job`, and the
+eligibility rules sat above it there; a flow that can only be reached through
+an HTTP request is a flow whose failure branches can only be tested through
+one.
 
 Nothing about the steps changed. The order, the transaction boundaries the
 store owns, the error mapping — every branch still refuses with the same type
@@ -36,7 +41,9 @@ from cloud_agent.application.model_connections import (
 from cloud_agent.application.residency import residency_ttl_s
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
+from cloud_agent.domain.execution import SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.model_connections import ModelConnectionUnusable
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S,
     SHARED_SESSION_FORK_TIMEOUT_S,
@@ -55,6 +62,10 @@ if TYPE_CHECKING:
         SessionForkRepository,
     )
     from cloud_agent.ports.environments import EnvironmentBindingRepository
+
+
+#: The fork logs under the aggregator's logger name, as the handler it left did.
+logger = get_logger("cloud_agent.api.routes")
 
 
 class _ForkMaterializationStorage(Protocol):
@@ -301,3 +312,187 @@ async def materialize_session_fork(
             "invalid_native_fork_receipt",
             "The sandbox host returned a mismatched native Fork receipt.",
         )
+
+
+#: The store's refusals of ``prepare_session_fork``, in the owner's words: its
+#: code, then the wire's ``error.type`` and message. Every one is a conflict.
+_PREPARE_REFUSALS: dict[str, tuple[str, str]] = {
+    "session_archived": (
+        "session_archived",
+        "This conversation is archived. Restore it before creating a side chat.",
+    ),
+    "idempotency_conflict": (
+        "idempotency_conflict",
+        "This Idempotency-Key was already used for a different fork source.",
+    ),
+    "not_settled": (
+        "not_settled",
+        "This turn is still active; stop the run before forking it.",
+    ),
+    "anchor_not_settled": (
+        "historical_snapshot_unavailable",
+        "Native Fork requires a successfully completed assistant turn.",
+    ),
+    "not_shared_live": (
+        "native_fork_unavailable",
+        "This chat does not use a shared-native sandbox.",
+    ),
+    "native_fork_unavailable": (
+        "native_fork_unavailable",
+        "This retained sandbox version cannot fork from a historical turn.",
+    ),
+    "sandbox_not_ready": (
+        "native_context_unavailable",
+        "This chat's retained native context is not safe to fork.",
+    ),
+    "host_removed": (
+        "native_context_unavailable",
+        "This chat's sandbox is on a server that has been removed.",
+    ),
+    "source_busy": (
+        "sandbox_busy",
+        "This chat is currently running a turn; retry after it settles.",
+    ),
+    "fork_in_progress": (
+        "fork_in_progress",
+        "Another native fork is already being prepared from this chat.",
+    ),
+    "resident_capacity_exhausted": (
+        "resident_capacity_exhausted",
+        "This shared sandbox has no free resident Agent CLI slot.",
+    ),
+    "native_context_unavailable": (
+        "native_context_unavailable",
+        "This chat has no settled native session to fork.",
+    ),
+    "runtime_mismatch": (
+        "native_fork_unavailable",
+        "The retained runtime no longer matches this chat.",
+    ),
+}
+
+_PREPARE_REFUSAL_FALLBACK = (
+    "native_fork_unavailable",
+    "The retained native session cannot be forked now.",
+)
+
+
+def refuse_ineligible_anchor(job: dict[str, Any]) -> None:
+    """Refuse a Fork anchor that is not a settled success in a shared-native sandbox.
+
+    Asked of the owner's job as read, before the store prepares anything; the
+    store asks its own version of each question again under its locks.
+
+    Raises:
+        Refused: a conflict naming the first rule the anchor fails.
+    """
+    if job["state"] not in TERMINAL_STATES:
+        raise Refused(
+            "conflict",
+            "not_settled",
+            "This turn is still active; wait for it to settle before forking it.",
+        )
+    if job["state"] != SUCCEEDED:
+        raise Refused(
+            "conflict",
+            "anchor_not_settled",
+            "Only a successfully settled turn can be used as a Fork anchor.",
+        )
+    if job.get("thread_sandbox") is None:
+        raise Refused(
+            "conflict",
+            "native_context_unavailable",
+            "This historical chat has no shared native-session sandbox.",
+        )
+    sandbox = job.get("thread_sandbox") or {}
+    if sandbox.get("shared_live") is not True:
+        raise Refused(
+            "conflict",
+            "native_fork_unavailable",
+            (
+                "This historical retained chat predates shared native-session "
+                "forks. Start a new chat to use same-workspace Fork."
+            ),
+        )
+
+
+async def _prepared_operation(
+    job_store: _ForkMaterializationStorage,
+    *,
+    job_id: str,
+    user_id: str,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    """The store's operation for this Fork, or its refusal in the owner's words."""
+    operation = await job_store.session_fork.prepare_session_fork(
+        source_job_id=job_id,
+        user_id=user_id,
+        idempotency_key=idempotency_key or f"generated:{secrets.token_urlsafe(24)}",
+    )
+    if operation is None:
+        raise Refused("not_found", "not_found", f"No such agent job: {job_id}")
+    error = operation.get("error")
+    if error:
+        error_type, message = _PREPARE_REFUSALS.get(str(error), _PREPARE_REFUSAL_FALLBACK)
+        raise Refused("conflict", error_type, message)
+    if operation["state"] == "failed":
+        raise Refused(
+            "conflict",
+            "native_fork_failed",
+            str(operation.get("last_error") or "Native Fork could not complete."),
+        )
+    return operation
+
+
+async def fork_settled_turn(
+    job_store: _ForkMaterializationStorage,
+    job: dict[str, Any],
+    *,
+    job_id: str,
+    user_id: str,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    """Fork the owner's settled turn ``job`` (``job_id``) into the same shared workspace.
+
+    Returns the child job as the store finalized it. A retry with the same
+    idempotency key returns the same child.
+
+    Raises:
+        Refused: an ineligible anchor, a store refusal, a failed operation,
+            a refusal while materializing, or a fence that changed before
+            finalization.
+        Unavailable: as `materialize_session_fork`.
+        ForkHostFailed: the retaining host's own failure of the fork request.
+    """
+    refuse_ineligible_anchor(job)
+    operation = await _prepared_operation(
+        job_store, job_id=job_id, user_id=user_id, idempotency_key=idempotency_key
+    )
+    operation_id = str(operation["id"])
+    if operation["state"] == "preparing":
+        # Resolve the host only for the state that still needs a native
+        # mutation.  READY and MATERIALIZED are durable control-plane states:
+        # a retry after a lost HTTP response must return/finalize the same
+        # child even when the retaining host has since become unreachable.
+        await materialize_session_fork(operation, job_id=job_id, job_store=job_store)
+
+    forked = await job_store.session_fork.finalize_session_fork(operation_id=operation_id)
+    if forked is None:
+        raise Refused(
+            "conflict",
+            "native_fork_fence_changed",
+            "The source chat changed before native Fork finalization.",
+        )
+    logger.info(
+        "agent_job_forked",
+        extra={
+            "event": "agent_job_forked",
+            "job_id": forked["id"],
+            "thread_id": forked.get("thread_id"),
+            "source_job_id": job_id,
+            "sandbox_clone": False,
+            "workspace_shared": True,
+            "fork_operation_id": operation_id,
+        },
+    )
+    return forked
