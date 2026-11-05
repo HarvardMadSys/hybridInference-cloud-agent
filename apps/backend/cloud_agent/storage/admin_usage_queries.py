@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+#: How long one statement of a selection may run, in milliseconds.
+STATEMENT_TIMEOUT_MS = 5_000
+
 #: Metadata needed to select and group a cohort. A repository belongs to the
 #: thread a run belongs to. Identities are returned whole: two models that share
 #: their first 256 characters are still two groups, and a truncated key would
@@ -150,7 +153,7 @@ class AdminUsageQueries:
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
-            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            await conn.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
             yield conn
 
     async def selection(

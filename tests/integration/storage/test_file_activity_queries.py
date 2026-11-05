@@ -576,7 +576,14 @@ async def test_search_scope_is_unknown_not_assumed(db, store):
     assert view.files[0].searches == 1
 
 
-async def test_large_history_scan_is_bounded_and_says_so(db, store):
+async def test_large_history_scan_is_bounded_and_says_so(db, store, monkeypatch):
+    # This is about how much a scan reads and reports, not how fast. Locally it
+    # takes about 2.5 s of the 8 s deadline; a busy CI database ran past it.
+    # The deadline's own behaviour is tested with a small one, below.
+    monkeypatch.setattr("cloud_agent.storage.repositories.file_activity.READ_DEADLINE_S", 120.0)
+    monkeypatch.setattr(
+        "cloud_agent.storage.repositories.file_activity.STATEMENT_TIMEOUT_MS", 60_000
+    )
     [job] = await conversation(db, store, "fa_large")
     rows: list[tuple[str, dict]] = [("lifecycle", {"phase": "started", "cwd": "/w"})]
     for index in range(2_000):
