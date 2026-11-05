@@ -54,7 +54,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
 | `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, queue and goal recovery, sandbox deletion, notifications and maintenance |
 | `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, pull-request records |
-| `apps/backend/cloud_agent/runtime_usage.py`, `ledger.py`, `admin_usage.py`, `usage/sums.py` | What agents reported about their model calls, per job and summed for the Usage pages; no cost or quota ([usage](docs/developer/operations.md#usage)) |
+| `apps/backend/cloud_agent/usage/` (`runtime_usage.py`, `turn_report.py`, `admin_usage.py`, `sums.py`) | What agents reported about their model calls, per job and summed for the Usage pages; no cost or quota ([usage](docs/developer/operations.md#usage)) |
 | `apps/backend/cloud_agent/agent_access.py` | The admission decision (`agent.use`, `agent.admin`) every protected request reads |
 | `apps/backend/cloud_agent/identity_namespace.py` | Binds an empty database to the account system once, and refuses a Gateway-era one (`--check` reads it without writing) |
 | `apps/backend/cloud_agent/accounts/`, `application/owner_termination.py` | The account system: sign-in, sessions, the waiting list, the account directory, retired-configuration refusal, and stopping a revoked account's work ([guide](docs/developer/local-accounts.md)) |

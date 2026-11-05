@@ -2,7 +2,7 @@
 
 One read answers "who used how much" for runs created in a window, using only
 what each turn's agent reported about its own tokens (see
-:mod:`cloud_agent.runtime_usage`). It never reads content and never asks a
+:mod:`cloud_agent.usage.runtime_usage`). It never reads content and never asks a
 model provider; a turn that reported nothing stays missing and is visible as
 coverage rather than as zero usage. Cost belongs to each owner's provider.
 """
@@ -16,7 +16,15 @@ from typing import Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import AwareDatetime  # noqa: TC002 — FastAPI resolves this at runtime.
 
-from cloud_agent.admin_usage import (
+from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
+from cloud_agent.domain.execution import TERMINAL_STATES
+from cloud_agent.logging_utils import get_logger
+from cloud_agent.storage.admin_usage_queries import (
+    AdminUsageQueries,
+    UsageQueryTooLarge,
+    UsageQueryUnavailable,
+)
+from cloud_agent.usage.admin_usage import (
     MAX_USAGE_ATTEMPTS,
     MAX_USAGE_RESPONSE_BYTES,
     MAX_USAGE_RUNS,
@@ -28,14 +36,6 @@ from cloud_agent.admin_usage import (
     days_breakdown,
     prepare_jobs,
     resolve_usage_window,
-)
-from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
-from cloud_agent.domain.execution import TERMINAL_STATES
-from cloud_agent.logging_utils import get_logger
-from cloud_agent.storage.admin_usage_queries import (
-    AdminUsageQueries,
-    UsageQueryTooLarge,
-    UsageQueryUnavailable,
 )
 
 logger = get_logger(__name__)

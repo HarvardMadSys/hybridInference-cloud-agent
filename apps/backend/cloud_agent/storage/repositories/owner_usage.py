@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.domain.sandbox_group import DeletionState, GroupState, sql_list
-from cloud_agent.owner_usage import (
+from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.usage.owner_usage import (
     ACTIVE_STATES,
     CONTAINER_CURSOR_SCOPE,
     CONTAINER_STATES,
@@ -27,8 +28,7 @@ from cloud_agent.owner_usage import (
     cpu_limit_cores,
     memory_limit_bytes,
 )
-from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.usage_range import bucket_dates
+from cloud_agent.usage.usage_range import bucket_dates
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 if TYPE_CHECKING:

@@ -22,8 +22,8 @@ from cloud_agent.admin_observability import (
 from cloud_agent.api import admin_runs
 from cloud_agent.api._job_views import _attempt_resources
 from cloud_agent.api.deps import get_storage
-from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.usage.turn_report import summarize_job_usage
 
 
 @pytest_asyncio.fixture
