@@ -168,8 +168,8 @@ def service(monkeypatch):
     )
     monkeypatch.setattr(host_service, "ensure_enrolled", lambda **_kw: identity)
     monkeypatch.setattr(host_service, "HostHeartbeat", FakeHeartbeat)
-    monkeypatch.setattr(host_service, "session_supervisor_from_env", _SettingsSandboxManager)
-    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", _SettingsSandboxManager)
+    monkeypatch.setattr(host_service, "sandbox_manager_from_env", _SettingsSandboxManager)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", _SettingsSandboxManager)
     monkeypatch.setattr(host_service, "_start_host_capacity_collector", lambda _b: None)
     # Its worker asks the real Docker daemon, from a thread of its own, and
     # that would race the patched ``time.sleep`` these tests script.

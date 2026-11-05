@@ -24,8 +24,8 @@ from cloud_agent_host import (
     host_capabilities,
     host_service,
     local_settings,
+    sandbox_manager_client,
     session_lifecycle,
-    session_supervisor_client,
     shared_live_attempt,
     turn_child,
     turn_stream,
@@ -34,7 +34,7 @@ from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 from cloud_agent_shared import operation_profiling, shared_protocol
 from cloud_agent_shared.environment import BoundEnvironment
 
@@ -424,7 +424,7 @@ def _run_shared_boundary_case(
     supervisor.acquire_shared.side_effect = acquire_shared
     supervisor.ensure_shared_resident.side_effect = ensure_shared_resident
     supervisor.settle_shared.return_value = {"native_session_id": observed_session_id}
-    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
         shared_live_attempt,
         "_stream_shared_agent_turn",
@@ -627,7 +627,7 @@ def _probe_then_replace(control, supervisor, *, residency: dict) -> None:
 
     def refuse_first(*args, **kwargs):
         if supervisor.ensure_shared_resident.call_count == 1:
-            raise SessionSupervisorError(503, "resident process restart requires a credential")
+            raise SandboxManagerError(503, "resident process restart requires a credential")
         return answer(*args, **kwargs)
 
     supervisor.ensure_shared_resident.side_effect = refuse_first
@@ -749,7 +749,7 @@ def test_a_stop_during_environment_preparation_cancels_the_turn(monkeypatch):
         def prepare(*_args, cancelled, **_kwargs):
             heart.cancel_requested = True
             assert cancelled()
-            raise SessionSupervisorError(
+            raise SandboxManagerError(
                 500,
                 "sandbox manager failed unexpectedly (SandboxError in POST "
                 "/workspaces/{workspace_id}/environment/prepare)",
@@ -786,7 +786,7 @@ def test_a_follow_up_claimed_while_its_sandbox_is_busy_goes_back_to_the_queue(mo
     """
 
     def configure(_control, supervisor, _finish):
-        supervisor.acquire_shared.side_effect = SessionSupervisorError(
+        supervisor.acquire_shared.side_effect = SandboxManagerError(
             409, "shared workspace snapshot is in progress"
         )
 
@@ -1042,7 +1042,7 @@ def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatc
             control.admit_chat_turn.side_effect = [httpx.ReadTimeout("ack lost"), None]
         elif stage == "supervisor_settle":
             supervisor.settle_shared.side_effect = [
-                session_supervisor_client.SessionSupervisorError(503, "ack lost"),
+                sandbox_manager_client.SandboxManagerError(503, "ack lost"),
                 {"native_session_id": "native-existing"},
             ]
         else:
@@ -1067,9 +1067,9 @@ def test_receipt_retry_is_bounded_and_does_not_retry_rejected_fences(monkeypatch
 
     sleep = Mock()
     monkeypatch.setattr(time, "sleep", sleep)
-    error = session_supervisor_client.SessionSupervisorError(status, "rejected")
+    error = sandbox_manager_client.SandboxManagerError(status, "rejected")
     request = Mock(side_effect=error)
-    with pytest.raises(session_supervisor_client.SessionSupervisorError):
+    with pytest.raises(sandbox_manager_client.SandboxManagerError):
         attempt_lease._retry_lifecycle_receipt("settle", "ajob_test", request)
     assert request.call_count == (3 if status == 503 else 1)
     assert sleep.call_count == (2 if status == 503 else 0)
@@ -1526,10 +1526,10 @@ def test_shared_turn_reports_dispatch_before_waiting_for_runtime_output():
 
 def test_shared_turn_does_not_report_dispatch_when_prompt_handoff_is_rejected():
     supervisor = _Supervisor()
-    supervisor.start_shared_turn = Mock(side_effect=SessionSupervisorError(409, "turn rejected"))
+    supervisor.start_shared_turn = Mock(side_effect=SandboxManagerError(409, "turn rejected"))
     control = _Control()
 
-    with pytest.raises(SessionSupervisorError, match="turn rejected"):
+    with pytest.raises(SandboxManagerError, match="turn rejected"):
         turn_stream._stream_shared_agent_turn(
             supervisor=supervisor,
             job=_JOB,
@@ -2233,7 +2233,7 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
             attempts.append(context.get("call_id"))
             if len(attempts) == 1:
                 # The first attempt never answered.
-                raise SessionSupervisorError(503, "sandbox manager restarted mid-call")
+                raise SandboxManagerError(503, "sandbox manager restarted mid-call")
             return {
                 "context_status": "live",
                 "process_generation": 2,

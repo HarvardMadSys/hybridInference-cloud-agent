@@ -8,9 +8,9 @@ import httpx
 import pytest
 
 from cloud_agent_host.runtime_settings import RuntimeSettings
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
 )
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 
@@ -160,8 +160,8 @@ def test_the_runner_never_holds_a_setting_only_the_sandbox_manager_applies():
     assert "terminal_max_sessions" not in settings.turn_settings()
 
 
-def _client(handler) -> SessionSupervisorClient:
-    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
+def _client(handler) -> SandboxManagerClient:
+    client = SandboxManagerClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client = httpx.Client(
         transport=httpx.MockTransport(handler),
         headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
@@ -198,7 +198,7 @@ def test_the_sandbox_manager_client_sends_the_settings_and_returns_the_sandbox_m
 def test_a_sandbox_manager_refusal_is_an_error_not_a_confirmation(status):
     client = _client(lambda _request: httpx.Response(status, json={"detail": "no"}))
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             client.apply_host_settings({})
     finally:
         client.close()

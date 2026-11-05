@@ -1,4 +1,4 @@
-"""Focused request-contract tests for the private Session Supervisor client."""
+"""Focused request-contract tests for the private Sandbox Manager client."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ import httpx
 import pytest
 
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
 )
 
 
@@ -31,8 +31,8 @@ def _spec() -> ChatSandboxSpec:
     )
 
 
-def _client(handler) -> SessionSupervisorClient:
-    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
+def _client(handler) -> SandboxManagerClient:
+    client = SandboxManagerClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(
         transport=httpx.MockTransport(handler),
@@ -171,7 +171,7 @@ def test_initial_archive_preserves_a_sandbox_manager_refusal():
         lambda _request: httpx.Response(409, json={"detail": "initial archive is too late"})
     )
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             client.capture_initial_archive(
                 _spec(),
                 thread_id="athr_origin",
@@ -323,7 +323,7 @@ def test_ordinary_requests_normalize_transport_failures(
 
     client = _client(handler)
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             call(client)
     finally:
         client.close()
@@ -363,7 +363,7 @@ def test_ordinary_success_requires_a_json_object(
         )
     )
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             call(client)
     finally:
         client.close()
@@ -417,7 +417,7 @@ def test_ordinary_success_requires_a_json_object(
 def test_ordinary_refusals_use_the_existing_detail_policy(call, response, expected: str):
     client = _client(lambda _request: response)
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             call(client)
     finally:
         client.close()
@@ -447,7 +447,7 @@ def test_ordinary_refusals_use_the_existing_detail_policy(call, response, expect
 def test_endpoint_specific_fields_remain_validated_after_object_decoding(call, body, expected: str):
     client = _client(lambda _request: httpx.Response(200, json=body))
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             call(client)
     finally:
         client.close()

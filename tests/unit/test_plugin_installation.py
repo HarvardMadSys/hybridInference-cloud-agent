@@ -33,7 +33,7 @@ from cloud_agent_host.runtimes.claude.plugins import install_claude_plugins
 from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.http_bridge import member as http_member
 from cloud_agent_host.runtimes.pi import member as pi_member
-from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -380,7 +380,7 @@ def test_plugin_selections_survive_the_client_and_sandbox_manager_launch_protoco
         seen.append(request)
         return httpx.Response(200, json={"resident_state": "live"})
 
-    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
+    client = SandboxManagerClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
     try:

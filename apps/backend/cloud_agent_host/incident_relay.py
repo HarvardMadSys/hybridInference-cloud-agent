@@ -22,7 +22,7 @@ from cloud_agent_shared.sandbox_incidents import INCIDENTS_ACCEPTED, MAX_INCIDEN
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+    from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
 
 _lock = threading.Lock()
 #: What the beat being built carries, by sandbox.
@@ -51,7 +51,7 @@ def settle(answer: object) -> None:
         _carried.clear()
 
 
-def confirm(client: SessionSupervisorClient) -> None:
+def confirm(client: SandboxManagerClient) -> None:
     """Pass confirmations on to the sandbox manager; keep them if it cannot take them."""
     with _lock:
         pending = {key: list(value) for key, value in _confirmed.items()}

@@ -25,7 +25,7 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from tests.support.owners import launch_connection
 
-from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerClient
+from cloud_agent.sandbox_manager import sandbox_manager_client as control_plane_client
 from cloud_agent.schemas import RetainedSandboxStop
 from cloud_agent_host import sandbox_manager as sandbox_manager_mod
 from cloud_agent_host.chat_sandbox import (
@@ -65,9 +65,9 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.sandbox_manager import create_app
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
 )
 from cloud_agent_host.shared_session_state import SharedSessionDescriptor, SharedSessionLease
 from cloud_agent_host.terminal_session import (
@@ -1306,7 +1306,7 @@ async def test_legacy_lifecycle_and_host_workspace_routes_do_not_exist():
         "abandon_chat_sandbox",
         "chat_sandbox_status",
     ):
-        assert not hasattr(SandboxManagerClient, method)
+        assert not hasattr(control_plane_client.SandboxManagerClient, method)
 
 
 @pytest.mark.asyncio
@@ -1395,7 +1395,7 @@ async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
     assert residents[1][2] == live
 
 
-def _runner_client(app) -> SessionSupervisorClient:
+def _runner_client(app) -> SandboxManagerClient:
     """The runner's own client, wired to this sandbox manager app in-process.
 
     The client is synchronous and the app is ASGI, so each request runs the app
@@ -1423,7 +1423,7 @@ def _runner_client(app) -> SessionSupervisorClient:
 
         return asyncio.run(answer())
 
-    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
+    client = SandboxManagerClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(
         transport=httpx.MockTransport(forward),
@@ -1499,7 +1499,7 @@ def test_a_runtime_refusal_reaches_the_runner_in_the_runtimes_own_words(refusal)
 
     client = _runner_client(_app(_RefusingSupervisor()))
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             client.ensure_shared_resident("athr_source", token="lease", launch=_resident_launch())
     finally:
         client.close()
@@ -1521,7 +1521,7 @@ def test_an_unexpected_sandbox_manager_failure_names_its_type_and_route_but_not_
 
     client = _runner_client(_app(_CrashingSupervisor()))
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             client.ensure_shared_resident("athr_source", token="lease", launch=_resident_launch())
     finally:
         client.close()
@@ -1542,7 +1542,7 @@ def test_a_request_the_sandbox_manager_rejects_names_the_field_but_never_its_val
     credential = "grant-" + "x" * 20_000
     client = _runner_client(_app(_SharedSupervisor()))
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             client.ensure_shared_resident(
                 "athr_source", token="lease", launch=_resident_launch(credential=credential)
             )
@@ -1600,7 +1600,7 @@ async def test_the_sandbox_manager_launches_tools_through_its_hosts_own_mcp_rela
 
 def test_a_crash_an_older_sandbox_manager_answers_as_plain_text_still_names_the_call():
     """A sandbox manager without the JSON answer, mid-rollout, still yields a findable error."""
-    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
+    client = SandboxManagerClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(
         transport=httpx.MockTransport(
@@ -1608,7 +1608,7 @@ def test_a_crash_an_older_sandbox_manager_answers_as_plain_text_still_names_the_
         )
     )
     try:
-        with pytest.raises(SessionSupervisorError) as raised:
+        with pytest.raises(SandboxManagerError) as raised:
             client.settle_shared(
                 "athr_source", token="lease", job_id="ajob_source", context_status="new"
             )

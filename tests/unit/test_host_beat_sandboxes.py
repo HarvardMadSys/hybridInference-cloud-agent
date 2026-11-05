@@ -16,7 +16,7 @@ from unittest.mock import Mock
 import pytest
 
 from cloud_agent_host import host_service
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 
 
 def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
@@ -45,7 +45,7 @@ def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(host_service, "session_supervisor_from_env", lambda **_kwargs: Supervisor())
+    monkeypatch.setattr(host_service, "sandbox_manager_from_env", lambda **_kwargs: Supervisor())
 
     rows = host_service._retained_sandbox_heartbeat_rows()
 
@@ -82,7 +82,7 @@ def test_retained_heartbeat_passes_group_resources_and_terminal_count(
         ],
         close=Mock(),
     )
-    monkeypatch.setattr(host_service, "session_supervisor_from_env", lambda **_kwargs: supervisor)
+    monkeypatch.setattr(host_service, "sandbox_manager_from_env", lambda **_kwargs: supervisor)
     rows = host_service._retained_sandbox_heartbeat_rows()
     assert rows is not None
     assert rows[0]["container_id"] == "container-source"
@@ -181,7 +181,7 @@ def test_residency_cleanup_leaves_the_rest_to_a_later_beat_once_its_time_is_spen
             fenced.append((thread_id, generation))
             # A call that used the whole ceiling before it was answered.
             clock.now += host_service._HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S
-            raise SessionSupervisorError(503, "shared Session Supervisor is unavailable")
+            raise SandboxManagerError(503, "shared Session Supervisor is unavailable")
 
         def close(self):
             pass
@@ -192,7 +192,7 @@ def test_residency_cleanup_leaves_the_rest_to_a_later_beat_once_its_time_is_spen
         timeouts.append(timeout)
         return SandboxManager()
 
-    monkeypatch.setattr(host_service, "session_supervisor_from_env", sandbox_manager)
+    monkeypatch.setattr(host_service, "sandbox_manager_from_env", sandbox_manager)
 
     host_service._handle_host_residencies_lost(
         [{"thread_id": f"athr_{index}", "generation": index + 1} for index in range(3)]
@@ -213,9 +213,7 @@ def test_residency_cleanup_fences_every_named_member_a_prompt_sandbox_manager_ho
         ),
         close=Mock(),
     )
-    monkeypatch.setattr(
-        host_service, "session_supervisor_from_env", lambda **_kwargs: sandbox_manager
-    )
+    monkeypatch.setattr(host_service, "sandbox_manager_from_env", lambda **_kwargs: sandbox_manager)
 
     host_service._handle_host_residencies_lost(
         [
@@ -247,7 +245,7 @@ def test_retained_heartbeat_forwards_the_latest_checkpoint_receipt(monkeypatch, 
         ],
         close=Mock(),
     )
-    monkeypatch.setattr(host_service, "session_supervisor_from_env", lambda **_kwargs: supervisor)
+    monkeypatch.setattr(host_service, "sandbox_manager_from_env", lambda **_kwargs: supervisor)
 
     rows = host_service._retained_sandbox_heartbeat_rows()
 

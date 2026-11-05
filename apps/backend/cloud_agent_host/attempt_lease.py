@@ -22,7 +22,7 @@ from cloud_agent_host.control_plane_client import (
     _log_control_failure,
 )
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,12 +65,12 @@ def _retry_lifecycle_receipt(operation: str, job_id: str, call: Callable[[], Any
     for attempt in range(3):
         try:
             return call()
-        except (httpx.TransportError, httpx.HTTPStatusError, SessionSupervisorError) as exc:
+        except (httpx.TransportError, httpx.HTTPStatusError, SandboxManagerError) as exc:
             status = (
                 exc.response.status_code
                 if isinstance(exc, httpx.HTTPStatusError)
                 else exc.status_code
-                if isinstance(exc, SessionSupervisorError)
+                if isinstance(exc, SandboxManagerError)
                 else None
             )
             if attempt == 2 or (status is not None and status not in _RECEIPT_RETRY_STATUSES):

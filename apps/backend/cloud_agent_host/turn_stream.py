@@ -11,9 +11,9 @@ from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
 from cloud_agent_host.drivers import LINE
 from cloud_agent_host.runtimes import NormalizedEvent
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
 )
 from cloud_agent_shared import operation_profiling
 
@@ -86,7 +86,7 @@ def _reportable_turn_resources(payload: Any) -> dict[str, Any] | None:
 
 def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
-    supervisor: SessionSupervisorClient,
+    supervisor: SandboxManagerClient,
     job: ClaimedJob,
     control: ControlPlane,
     heart: Heartbeater,
@@ -184,7 +184,7 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
             except Exception as exc:
                 if result_frame is not None:
                     break
-                raise SessionSupervisorError(502, str(exc)[:1000]) from exc
+                raise SandboxManagerError(502, str(exc)[:1000]) from exc
             if frame is None:
                 break
             kind = frame.get("kind")
@@ -236,10 +236,10 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                 # converting a completed activation into an opaque 502.
                 if result_frame is not None:
                     break
-                raise SessionSupervisorError(502, str(frame.get("detail") or "shared turn failed"))
-            raise SessionSupervisorError(502, "shared turn returned an unknown frame")
+                raise SandboxManagerError(502, str(frame.get("detail") or "shared turn failed"))
+            raise SandboxManagerError(502, "shared turn returned an unknown frame")
         if result_frame is None:
-            raise SessionSupervisorError(502, "shared turn ended without a result")
+            raise SandboxManagerError(502, "shared turn ended without a result")
         if forced_exit_code is not None:
             return outcome(forced_exit_code)
         status = str(result_frame.get("status") or "failed")

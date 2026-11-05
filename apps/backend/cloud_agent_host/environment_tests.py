@@ -385,7 +385,7 @@ def _save_snapshot(
     container is committed and uploaded by the sandbox manager, which holds
     the bucket's credentials.
     """
-    from cloud_agent_host.session_supervisor_client import session_supervisor_from_env
+    from cloud_agent_host.sandbox_manager_client import sandbox_manager_from_env
     from cloud_agent_host.source_preparation import SAFE_DIRECTORY_ENV
 
     if lockfiles is None:
@@ -415,7 +415,7 @@ def _save_snapshot(
     if removed.returncode != 0:
         raise RuntimeError("the repository could not be removed from the snapshot")
     manager.stop(spec, expected_container_id=container_id)
-    receipt = session_supervisor_from_env().capture_environment_snapshot(
+    receipt = sandbox_manager_from_env().capture_environment_snapshot(
         run_id=str(run["id"]),
         lease_generation=int(run["lease_generation"]),
         container_id=container_id,
@@ -429,13 +429,13 @@ def _save_snapshot(
 def _delete_retired_snapshots(client: httpx.Client) -> None:
     """Delete retired snapshots' stored objects, and drop retired images held here."""
     from cloud_agent_host.sandbox import SandboxError
-    from cloud_agent_host.session_supervisor_client import (
-        SessionSupervisorError,
-        session_supervisor_from_env,
+    from cloud_agent_host.sandbox_manager_client import (
+        SandboxManagerError,
+        sandbox_manager_from_env,
     )
 
     try:
-        supervisor = session_supervisor_from_env()
+        supervisor = sandbox_manager_from_env()
     except SandboxError:
         # Without a Sandbox Manager this host neither stores nor holds snapshots.
         return
@@ -449,7 +449,7 @@ def _delete_retired_snapshots(client: httpx.Client) -> None:
     # many snapshots were retired since.
     try:
         held = supervisor.environment_snapshot_images()
-    except SessionSupervisorError:
+    except SandboxManagerError:
         # An older Sandbox Manager cannot list them.
         return
     for start in range(0, len(held), _RETIRED_IMAGES_BATCH):
