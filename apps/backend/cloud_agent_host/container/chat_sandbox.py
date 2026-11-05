@@ -42,14 +42,11 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent_host.archive.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
 from cloud_agent_host.container import (
+    chat_sandbox_export,
     chat_sandbox_markers as markers,
     chat_sandbox_writers as writers,
 )
 from cloud_agent_host.container.chat_sandbox_exec import network_proof, spawn_target
-from cloud_agent_host.container.chat_sandbox_export import (
-    pump_archive_export,
-    raise_archive_export_failure,
-)
 from cloud_agent_host.container.chat_sandbox_images import require_create_image
 from cloud_agent_host.container.chat_sandbox_inspect import container_inspection, inspect_many
 from cloud_agent_host.container.chat_sandbox_markers import (
@@ -113,12 +110,8 @@ from cloud_agent_host.container.sandbox import (
 )
 from cloud_agent_host.container.stream_input import interactive_input, require_nonempty_rewindable
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
+from cloud_agent_host.member_setup import member_preparation
 from cloud_agent_host.member_setup.install_locks import install_lock
-from cloud_agent_host.member_setup.member_preparation import (
-    TOOL_HOOKS_SCRIPT,
-    MemberStep,
-    run_member_steps,
-)
 from cloud_agent_host.network.chat_sandbox_network import (
     _GUEST_NETWORK_CHECK as _GUEST_NETWORK_CHECK,
     CHAT_BOOTSTRAP_NETWORK as CHAT_BOOTSTRAP_NETWORK,
@@ -133,24 +126,9 @@ from cloud_agent_host.network.chat_sandbox_network import (
     _GroupNetworkSnapshot,
 )
 from cloud_agent_host.network.network_guard import GUARD_RECHECK_S
-from cloud_agent_host.observe.guest_observer import (
-    GUEST_OBSERVER_BINARY,
-    GUEST_OBSERVER_EVENTS,
-    GUEST_OBSERVER_ROOT,
-    GUEST_OBSERVER_ROTATE_BYTES,
-    GuestObservation,
-    GuestObserverController,
-    GuestObserverCursor,
-    GuestObserverRuntimeError,
-    GuestObserverSnapshot,
-)
+from cloud_agent_host.observe import guest_observer, tool_windows
 from cloud_agent_host.observe.guest_observer_locks import GuestObserverLocks
 from cloud_agent_host.observe.guest_observer_scripts import WINDOW_DELTA_SCRIPT
-from cloud_agent_host.observe.tool_windows import (
-    MAX_TOOL_MARK_BYTES,
-    TOOL_MARK_FILE,
-    ToolMarkReader,
-)
 from cloud_agent_shared.environment import (
     DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
     DOCKER_CLIENT_PREFIXES as _DOCKER_CLIENT_ENV_PREFIXES,
@@ -584,7 +562,7 @@ class ChatSandboxManager(GuestRootExec):
                 argv += ["--cap-add", capability]
             argv += [
                 "--tmpfs",
-                f"{GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0",
+                f"{guest_observer.GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0",
             ]
         if self.backend.runtime:
             argv += ["--runtime", self.backend.runtime]
@@ -1606,7 +1584,7 @@ class ChatSandboxManager(GuestRootExec):
             raise ValueError("resident slot is outside this shared sandbox")
         if user_uid != MEMBER_UID_BASE + slot_id:
             raise ValueError("resident slot does not match its member uid")
-        stale = MemberStep(
+        stale = member_preparation.MemberStep(
             (
                 "/bin/sh",
                 "-c",
@@ -1618,7 +1596,7 @@ class ChatSandboxManager(GuestRootExec):
                 "stale resident process cleanup failed: " + stderr.decode("utf-8", "replace")[:300]
             ),
         )
-        run_member_steps(
+        member_preparation.run_member_steps(
             self,
             spec,
             _reap_step(user_uid, b""),
@@ -1671,7 +1649,7 @@ class ChatSandboxManager(GuestRootExec):
         """
         self._validate_member_identity(spec, slot_id=slot_id, user_uid=user_uid)
         step = _reap_step(user_uid, self._encode_member_processes(baseline))
-        run_member_steps(self, spec, step, user_uid=user_uid, user_gid=user_gid)
+        member_preparation.run_member_steps(self, spec, step, user_uid=user_uid, user_gid=user_gid)
 
     @staticmethod
     def _validate_member_identity(
@@ -2426,7 +2404,7 @@ class ChatSandboxManager(GuestRootExec):
                     + cleanup.stderr.decode("utf-8", "replace")[:300]
                 )
             observer = self._kata_privileged_exec(
-                spec, [GUEST_OBSERVER_BINARY, "--self-test"], timeout_s=30
+                spec, [guest_observer.GUEST_OBSERVER_BINARY, "--self-test"], timeout_s=30
             )
             if observer.returncode != 0:
                 raise SandboxError("Kata guest observer self-test failed: " + observer.stderr[:500])
@@ -2538,17 +2516,17 @@ class ChatSandboxManager(GuestRootExec):
         spec: ChatSandboxSpec,
         *,
         after_poll_seq: int | None = None,
-    ) -> GuestObserverSnapshot:
+    ) -> guest_observer.GuestObserverSnapshot:
         """Read an atomic status/size/guest-clock tuple from the root journal."""
         try:
             return self._guest_observer_controller(spec).snapshot(after_poll_seq=after_poll_seq)
-        except GuestObserverRuntimeError as exc:
+        except guest_observer.GuestObserverRuntimeError as exc:
             raise SandboxError(str(exc)) from exc
 
     def member_window_journal_delta(
         self,
         spec: ChatSandboxSpec,
-        cursor: GuestObserverCursor,
+        cursor: guest_observer.GuestObserverCursor,
         *,
         timeout_s: float = 10.0,
     ) -> tuple[bytes, int]:
@@ -2570,7 +2548,7 @@ class ChatSandboxManager(GuestRootExec):
                 "-I",
                 "-c",
                 WINDOW_DELTA_SCRIPT,
-                GUEST_OBSERVER_EVENTS,
+                guest_observer.GUEST_OBSERVER_EVENTS,
                 str(cursor.offset),
                 str(cursor.journal_dev),
                 str(cursor.journal_ino),
@@ -2636,7 +2614,7 @@ class ChatSandboxManager(GuestRootExec):
         spec: ChatSandboxSpec,
         *,
         lock: threading.RLock | None = None,
-    ) -> GuestObserverController:
+    ) -> guest_observer.GuestObserverController:
         """Bind the shared observer contract to this label-verified container.
 
         ``lock`` is that container's observer lock, for a controller that may
@@ -2665,7 +2643,7 @@ class ChatSandboxManager(GuestRootExec):
                 timeout_s=timeout_s,
             )
 
-        return GuestObserverController(
+        return guest_observer.GuestObserverController(
             capture=capture,
             privileged=privileged,
             lock=lock,
@@ -2683,7 +2661,7 @@ class ChatSandboxManager(GuestRootExec):
         *,
         user_uid: int,
         measurement_id: str | None = None,
-    ) -> GuestObserverCursor:
+    ) -> guest_observer.GuestObserverCursor:
         """Fence the journal immediately before one member prompt is admitted.
 
         ``measurement_id`` additionally marks this fence as the start of a
@@ -2692,7 +2670,9 @@ class ChatSandboxManager(GuestRootExec):
         opening census, which is why the identifier travels with it here.
         """
         if self.backend.runtime != KATA_RUNTIME:
-            return GuestObserverCursor.unavailable(user_uid, "sandbox is not a Kata guest")
+            return guest_observer.GuestObserverCursor.unavailable(
+                user_uid, "sandbox is not a Kata guest"
+            )
         with self._guest_observers.container(spec.container_name) as observers:
             controller = self._guest_observer_controller(spec, lock=observers.lock)
             idle = not observers.active
@@ -2704,7 +2684,7 @@ class ChatSandboxManager(GuestRootExec):
                 # makes a later idle begin eligible to restart it.
                 restart_if_missing=idle,
                 # Rotation restarts the helper too: never under an open cursor.
-                rotate_threshold=GUEST_OBSERVER_ROTATE_BYTES if idle else None,
+                rotate_threshold=guest_observer.GUEST_OBSERVER_ROTATE_BYTES if idle else None,
                 measurement_id=measurement_id,
             )
             observers.admit(cursor)
@@ -2713,8 +2693,8 @@ class ChatSandboxManager(GuestRootExec):
     def finish_guest_observation(
         self,
         spec: ChatSandboxSpec,
-        cursor: GuestObserverCursor | None,
-    ) -> GuestObservation:
+        cursor: guest_observer.GuestObserverCursor | None,
+    ) -> guest_observer.GuestObservation:
         """Drain and read exactly one cursor's bounded member event slice."""
         try:
             return self._guest_observer_controller(spec).finish(cursor)
@@ -2723,14 +2703,14 @@ class ChatSandboxManager(GuestRootExec):
                 with self._guest_observers.container(spec.container_name) as observers:
                     observers.release(cursor)
 
-    def tool_mark_reader(self, spec: ChatSandboxSpec) -> ToolMarkReader:
+    def tool_mark_reader(self, spec: ChatSandboxSpec) -> tool_windows.ToolMarkReader:
         """Return a bounded reader for hook marks inside one retained container."""
         if self.backend.runtime == KATA_RUNTIME:
             # Kata accepts marks only through the guest-root observer socket.
             # The agent-owned compatibility file is deliberately not an
             # attribution authority in an untrusted sandbox.
-            return ToolMarkReader(None)
-        path = f"{CHAT_STATE_DIR}/{TOOL_MARK_FILE}"
+            return tool_windows.ToolMarkReader(None)
+        path = f"{CHAT_STATE_DIR}/{tool_windows.TOOL_MARK_FILE}"
 
         def remote_size() -> int:
             script = (
@@ -2754,7 +2734,7 @@ class ChatSandboxManager(GuestRootExec):
             return int(result.stdout.decode("ascii", "strict").strip() or "0")
 
         def remote_read(offset: int, count: int) -> bytes:
-            bounded = min(max(0, count), MAX_TOOL_MARK_BYTES)
+            bounded = min(max(0, count), tool_windows.MAX_TOOL_MARK_BYTES)
             script = (
                 "import os, sys\n"
                 "path, offset, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\n"
@@ -2777,7 +2757,7 @@ class ChatSandboxManager(GuestRootExec):
                 raise SandboxError("tool-mark slice could not be read")
             return result.stdout
 
-        return ToolMarkReader(None, remote_size=remote_size, remote_read=remote_read)
+        return tool_windows.ToolMarkReader(None, remote_size=remote_size, remote_read=remote_read)
 
     def install_tool_hooks(
         self,
@@ -2806,14 +2786,14 @@ class ChatSandboxManager(GuestRootExec):
         if len(payload) > 64 * 1024:
             raise SandboxError("tool hook settings exceed their trusted bound")
         queued = batch is not None and batch.pending
-        step = MemberStep(
+        step = member_preparation.MemberStep(
             (
                 "python3",
                 "-I",
                 "-c",
-                TOOL_HOOKS_SCRIPT,
+                member_preparation.TOOL_HOOKS_SCRIPT,
                 claude_member_config_dir(slot_id, thread_id),
-                f"{CHAT_STATE_DIR}/{TOOL_MARK_FILE}",
+                f"{CHAT_STATE_DIR}/{tool_windows.TOOL_MARK_FILE}",
             ),
             timeout_s=10,
             failure=lambda stderr: SandboxError(
@@ -2823,7 +2803,7 @@ class ChatSandboxManager(GuestRootExec):
             input_bytes=payload,
             soft="tool hooks not installed" if queued else "",
         )
-        run_member_steps(
+        member_preparation.run_member_steps(
             self,
             spec,
             step,
@@ -3265,7 +3245,7 @@ class ChatSandboxManager(GuestRootExec):
             selector = selectors.DefaultSelector()
             selector.register(process.stdout, selectors.EVENT_READ)
             try:
-                total = pump_archive_export(
+                total = chat_sandbox_export.pump_archive_export(
                     process,
                     process.stdout,
                     selector,
@@ -3290,7 +3270,7 @@ class ChatSandboxManager(GuestRootExec):
                 selector.close()
                 process.stdout.close()
             if returncode != 0:
-                raise_archive_export_failure(
+                chat_sandbox_export.raise_archive_export_failure(
                     stderr, path=path, container_id=current.container_id, total=total
                 )
         return total
@@ -3792,9 +3772,9 @@ def member_inference_env_path(slot_id: int) -> str:
     return f"{MEMBER_TMPFS_ROOT}/{slot_id}/inference-env.sh"
 
 
-def _reap_step(user_uid: int, baseline: bytes) -> MemberStep:
+def _reap_step(user_uid: int, baseline: bytes) -> member_preparation.MemberStep:
     """Reap every process of ``user_uid`` that ``baseline`` does not name."""
-    return MemberStep(
+    return member_preparation.MemberStep(
         ("python3", "-I", MEMBER_REAPER_TARGET, "reap", str(user_uid)),
         timeout_s=30,
         failure=lambda stderr: SandboxError(

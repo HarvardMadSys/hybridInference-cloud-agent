@@ -80,7 +80,7 @@ _TIMEOUT_S = 15.0
 READINESS_MARKER_POLL_S = 1.0
 
 #: The one status in which this runner may ask for work — a **mirror** of
-#: ``cloud_agent.host_pool.CLAIMABLE_STATUSES``, which the control plane
+#: ``cloud_agent.domain.host_pool.CLAIMABLE_STATUSES``, which the control plane
 #: enforces and the schema's CHECK constraint bounds.
 #:
 #: Mirrored rather than imported because this package runs on the runner host,

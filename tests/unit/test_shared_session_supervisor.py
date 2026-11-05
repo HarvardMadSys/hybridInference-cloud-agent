@@ -42,10 +42,7 @@ from cloud_agent_host.drivers import DriverError, InputOutcome
 from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest
 from cloud_agent_host.member_setup.member_homes import legacy_member_state_dir, member_state_dir
 from cloud_agent_host.observe.guest_observer import GuestObservation, GuestObserverCursor
-from cloud_agent_host.resident_transport import (
-    ResidentLaunch,
-    ResidentTransportFactory,
-)
+from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.http_bridge import member as http_member

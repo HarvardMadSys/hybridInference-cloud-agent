@@ -60,10 +60,7 @@ from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
 from cloud_agent_host.sandbox_manager import create_app
-from cloud_agent_host.sandbox_manager_client import (
-    SandboxManagerClient,
-    SandboxManagerError,
-)
+from cloud_agent_host.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host.supervisor.group_archive_policy import (
     ControllerArchivePolicy,
     NullArchivePolicy,

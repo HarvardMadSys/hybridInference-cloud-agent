@@ -20,6 +20,7 @@ import pytest
 
 from cloud_agent_host.container import (
     chat_sandbox as chat_sandbox_mod,
+    chat_sandbox_markers,
     chat_sandbox_writers as writers,
 )
 from cloud_agent_host.container.chat_sandbox import (
@@ -49,10 +50,6 @@ from cloud_agent_host.container.chat_sandbox import (
     _RetainedTerminalProcess,
     claude_member_config_dir,
 )
-from cloud_agent_host.container.chat_sandbox_markers import (
-    FINAL_ARCHIVE_MARKER_NAME,
-    INITIAL_ARCHIVE_MARKER_ROOT,
-)
 from cloud_agent_host.container.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -60,16 +57,7 @@ from cloud_agent_host.container.sandbox import (
     SandboxSpec,
 )
 from cloud_agent_host.network.chat_sandbox_network import ChatSandboxNetwork
-from cloud_agent_host.observe.guest_observer import (
-    GUEST_OBSERVER_BINARY,
-    GUEST_OBSERVER_ROOT,
-    GUEST_OBSERVER_VERSION,
-    MAX_OBSERVATION_BYTES,
-    GuestObserverController,
-    GuestObserverCursor,
-    GuestObserverSnapshot,
-    GuestObserverStatus,
-)
+from cloud_agent_host.observe import guest_observer
 from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime, registered_runtimes
 
 
@@ -398,12 +386,12 @@ def _plain_group_network(monkeypatch):
     )
 
 
-def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
+def _observer_snapshot_payload(snapshot: guest_observer.GuestObserverSnapshot) -> bytes:
     status = snapshot.status
     return json.dumps(
         {
             "status": {
-                "version": GUEST_OBSERVER_VERSION,
+                "version": guest_observer.GUEST_OBSERVER_VERSION,
                 "ready": True,
                 "pid": status.pid,
                 "poll_seq": status.poll_seq,
@@ -422,8 +410,8 @@ def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
 
 
 def _observer_drain_payload(
-    closing: GuestObserverSnapshot,
-    flushed: GuestObserverSnapshot,
+    closing: guest_observer.GuestObserverSnapshot,
+    flushed: guest_observer.GuestObserverSnapshot,
     payload: bytes = b"",
 ) -> bytes:
     """The drain script's output: both publications on one line, then the slice."""
@@ -562,7 +550,10 @@ def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
     command = manager.build_create_command(spec)
     joined = " ".join(command)
 
-    assert f"{GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0" in joined
+    assert (
+        f"{guest_observer.GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0"
+        in joined
+    )
     assert "--cap-drop ALL" in joined
     assert "--cap-add BPF" in joined
     assert "--security-opt no-new-privileges" in joined
@@ -570,13 +561,13 @@ def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
 
 
 def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
-    closing = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 20, 8, 0, 0, 0, 7, 19),
+    closing = guest_observer.GuestObserverSnapshot(
+        status=guest_observer.GuestObserverStatus(91, 20, 8, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=2_000_000_000,
     )
-    flushed = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 22, 8, 0, 0, 0, 7, 19),
+    flushed = guest_observer.GuestObserverSnapshot(
+        status=guest_observer.GuestObserverStatus(91, 22, 8, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=2_050_000_000,
     )
@@ -591,11 +582,11 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
             stderr=b"",
         )
 
-    controller = GuestObserverController(
+    controller = guest_observer.GuestObserverController(
         capture=capture,
         privileged=lambda *_args: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
     )
-    cursor = GuestObserverCursor(
+    cursor = guest_observer.GuestObserverCursor(
         uid=MEMBER_UID_BASE,
         offset=0,
         poll_seq=3,
@@ -615,7 +606,7 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
     # full drain happened after that read: the one guest exec, fenced on this
     # cursor's journal, waits for it, and a drain reporting less is refused.
     assert len(drains) == 1
-    assert drains[0][-5:] == ["0", "7", "19", str(MAX_OBSERVATION_BYTES), "3.0"]
+    assert drains[0][-5:] == ["0", "7", "19", str(guest_observer.MAX_OBSERVATION_BYTES), "3.0"]
     published.append(replace(flushed, status=replace(flushed.status, poll_seq=21)))
     refused = controller.finish(cursor)
     assert refused.complete is False
@@ -629,12 +620,12 @@ def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
         calls.append((list(argv), detach))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    ready = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 1, 0, 0, 0, 0, 7, 19),
+    ready = guest_observer.GuestObserverSnapshot(
+        status=guest_observer.GuestObserverStatus(91, 1, 0, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=1,
     )
-    controller = GuestObserverController(
+    controller = guest_observer.GuestObserverController(
         capture=lambda *_args: SimpleNamespace(
             returncode=0,
             stdout=_observer_snapshot_payload(ready),
@@ -647,11 +638,11 @@ def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
 
     cleanup_argv, cleanup_detached = calls[0]
     assert cleanup_detached is False
-    assert cleanup_argv[-1] == GUEST_OBSERVER_BINARY
+    assert cleanup_argv[-1] == guest_observer.GUEST_OBSERVER_BINARY
     compile(cleanup_argv[3], "<guest-observer-cleanup>", "exec")
     assert "os.path.samefile" in cleanup_argv[3]
     assert "stale guest observer did not exit" in cleanup_argv[3]
-    assert calls[1] == ([GUEST_OBSERVER_BINARY], True)
+    assert calls[1] == ([guest_observer.GUEST_OBSERVER_BINARY], True)
 
 
 def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
@@ -660,7 +651,7 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
     payload = json.dumps(
         {
             "status": {
-                "version": GUEST_OBSERVER_VERSION,
+                "version": guest_observer.GUEST_OBSERVER_VERSION,
                 "ready": True,
                 "pid": 91,
                 "poll_seq": 22,
@@ -687,13 +678,13 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
     assert snapshot.status.poll_seq == 22
     command = calls[0]
     compile(command[3], "<guest-observer-snapshot>", "exec")
-    assert command[-3:] == [GUEST_OBSERVER_BINARY, "21", "3.0"]
+    assert command[-3:] == [guest_observer.GUEST_OBSERVER_BINARY, "21", "3.0"]
     assert "os.path.samefile" in command[3]
 
 
 def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
-    snapshot = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 21, 8, 0, 0, 10, 7, 19),
+    snapshot = guest_observer.GuestObserverSnapshot(
+        status=guest_observer.GuestObserverStatus(91, 21, 8, 0, 0, 10, 7, 19),
         journal_size=10,
         guest_mono_ns=2_050_000_000,
     )
@@ -703,11 +694,11 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
         stdout = _observer_drain_payload(closing, snapshot, b"short")
         return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
 
-    controller = GuestObserverController(
+    controller = guest_observer.GuestObserverController(
         capture=capture,
         privileged=lambda *_args: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
     )
-    cursor = GuestObserverCursor(
+    cursor = guest_observer.GuestObserverCursor(
         uid=MEMBER_UID_BASE,
         offset=0,
         observer_pid=91,
@@ -1024,7 +1015,7 @@ def test_inspect_accepts_the_platforms_own_tmpfs_mounts(monkeypatch):
     payload[0]["HostConfig"]["Tmpfs"] = {
         ACTIVATION_TMPFS: "rw,noexec",
         f"{MEMBER_TMPFS_ROOT}/0": "rw,noexec",
-        GUEST_OBSERVER_ROOT: "rw,noexec",
+        guest_observer.GUEST_OBSERVER_ROOT: "rw,noexec",
     }
     monkeypatch.setattr(
         "cloud_agent_host.container.chat_sandbox.subprocess.run",
@@ -1363,7 +1354,7 @@ def test_export_archive_normalizes_the_exact_missing_source_path(monkeypatch):
 
 @pytest.mark.parametrize("prefix", ["", "Error response from daemon: "])
 def test_optional_stopped_final_marker_accepts_exact_docker_path_absence(monkeypatch, prefix):
-    path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
+    path = f"{chat_sandbox_markers.INITIAL_ARCHIVE_MARKER_ROOT}/{chat_sandbox_markers.FINAL_ARCHIVE_MARKER_NAME}"
     detail = f"{prefix}Could not find the file {path} in container sha256:container-one"
     manager, spec = _archive_export_failure(monkeypatch, detail)
 
@@ -1389,7 +1380,7 @@ def test_optional_stopped_final_marker_accepts_exact_docker_path_absence(monkeyp
         ),
         (
             "Error response from daemon: Could not find the file "
-            f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME} "
+            f"{chat_sandbox_markers.INITIAL_ARCHIVE_MARKER_ROOT}/{chat_sandbox_markers.FINAL_ARCHIVE_MARKER_NAME} "
             "in container sha256:another-container"
         ),
     ],

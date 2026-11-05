@@ -35,15 +35,7 @@ from cloud_agent_host.container.chat_sandbox_models import (
     RetainedChatLost,
 )
 from cloud_agent_host.container.sandbox import KATA_RUNTIME, SandboxError
-from cloud_agent_host.network.chat_network_disconnect import (
-    disconnect_endpoint,
-    forget_stopped_network,
-    stopped_network_record,
-)
-from cloud_agent_host.network.chat_network_ownership import (
-    owned_bridge_endpoints,
-    require_service_peers,
-)
+from cloud_agent_host.network import chat_network_disconnect, chat_network_ownership
 from cloud_agent_host.network.network_guard import GUARD_RENEW_S
 
 if TYPE_CHECKING:
@@ -886,7 +878,9 @@ class ChatSandboxNetwork:
         *,
         network_name: str | None = None,
     ) -> None:
-        disconnect_endpoint(self, network, container_id, network_name=network_name)
+        chat_network_disconnect.disconnect_endpoint(
+            self, network, container_id, network_name=network_name
+        )
 
     def _release_sandbox(
         self, spec: ChatSandboxSpec, expected_container_id: str | None
@@ -919,7 +913,7 @@ class ChatSandboxNetwork:
         network = self._inspect_network(network_name)
         if network is None:
             if expected_container_id is not None and not only_if_sandbox_unattached:
-                forget_stopped_network(
+                chat_network_disconnect.forget_stopped_network(
                     self, spec, network_name, expected_network_id, expected_container_id
                 )
             return
@@ -929,7 +923,7 @@ class ChatSandboxNetwork:
             # name. Never let stale cleanup mutate the replacement.
             return
         network_ref = network_id or network_name
-        containers = owned_bridge_endpoints(
+        containers = chat_network_ownership.owned_bridge_endpoints(
             network, namespace=self.backend.sandbox_namespace, spec=spec
         )
         sandbox_id = sandbox.container_id if sandbox is not None else None
@@ -942,7 +936,7 @@ class ChatSandboxNetwork:
             for container_id in sorted(map(str, containers))
             if container_id != sandbox_id
         ]
-        require_service_peers(
+        chat_network_ownership.require_service_peers(
             network_name,
             network.get("Labels") or {},
             peers,
@@ -953,7 +947,9 @@ class ChatSandboxNetwork:
         if (
             expected_container_id is not None
             and not only_if_sandbox_unattached
-            and stopped_network_record(self, spec, network_name, network_id, expected_container_id)
+            and chat_network_disconnect.stopped_network_record(
+                self, spec, network_name, network_id, expected_container_id
+            )
         ):
             endpoint_ids.add(expected_container_id)
         for container_id in sorted(endpoint_ids):
