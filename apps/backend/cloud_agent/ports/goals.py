@@ -21,8 +21,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from cloud_agent.goals.decision import GoalAction
-    from cloud_agent.goals.models import GoalInput, GoalPauseReason
+    from cloud_agent.domain.goals import GoalAction, GoalPauseReason
+    from cloud_agent.schemas.goals import GoalInput
 
 
 class GoalRepository(Protocol):

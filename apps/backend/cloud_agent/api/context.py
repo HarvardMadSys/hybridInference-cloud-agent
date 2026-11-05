@@ -24,8 +24,6 @@ from cloud_agent.command_executions import (
     MAX_COMMAND_PAGE,
     MAX_COMMAND_SEARCH,
     CommandExecutions,
-    CommandFilter,
-    CommandSort,
 )
 from cloud_agent.context.context_dna import MAX_DNA_REQUESTS, DnaBands
 from cloud_agent.context.context_insights import (
@@ -51,6 +49,10 @@ from cloud_agent.context.context_insights import (
 from cloud_agent.context.context_request import RequestComposition
 from cloud_agent.context.context_timing import ThreadTiming, assemble_timing
 from cloud_agent.context.context_view import ThreadContextView, assemble_thread_context
+from cloud_agent.domain.command_executions import (  # noqa: TC001 — FastAPI resolves annotations at runtime.
+    CommandFilter,
+    CommandSort,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.admin_queries import UsageQueryTooLarge, UsageQueryUnavailable
 from cloud_agent.usage.usage_batches import owner_usage

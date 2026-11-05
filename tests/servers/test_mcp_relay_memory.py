@@ -25,9 +25,9 @@ from tests.servers.test_mcp_relay_host import (
 from tests.support.storage import OneFake
 
 from cloud_agent import memory_tool
-from cloud_agent.agent_memory import MemoryTask
 from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
+from cloud_agent.domain.agent_memory import MemoryTask
 
 
 class MemoryStore(FakeStore):

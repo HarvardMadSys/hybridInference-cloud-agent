@@ -14,8 +14,8 @@ from cloud_agent.agent_memory import (
     AgentMemoryFull,
     AgentMemoryNotFound,
     AgentMemoryTaskEnded,
-    MemoryTask,
 )
+from cloud_agent.domain.agent_memory import MemoryTask
 
 TASK = MemoryTask(user_id="alice", job_id="job-1", attempt_id=4, lease_generation=2)
 

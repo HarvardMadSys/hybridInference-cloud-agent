@@ -89,7 +89,7 @@ from cloud_agent_shared.sandbox_restore import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from cloud_agent.goals.report import GoalReportEnvelope
+    from cloud_agent.domain.goals import GoalReportEnvelope
     from cloud_agent.ports.attempt_commands import TurnSummaryWrite
 
 logger = get_logger(__name__)

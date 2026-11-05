@@ -1568,7 +1568,7 @@ async def test_config_offers_the_owners_connections_and_their_last_use_without_t
         id="mconn_" + "d" * 32, name="Off", enabled=False
     )
 
-    from cloud_agent.model_preference import ModelPreferenceView
+    from cloud_agent.schemas.model_preferences import ModelPreferenceView
 
     async def last_on_connection(user_id: str) -> ModelPreferenceView:
         return ModelPreferenceView(last_model="gpt-4.1", last_model_connection_id=row["id"])
@@ -1615,7 +1615,7 @@ async def test_with_the_gate_off_a_task_on_a_connection_is_refused_not_moved(mon
 
 
 def _remembering(store: _TurnStorage, connection_id: str):
-    from cloud_agent.model_preference import ModelPreferenceView
+    from cloud_agent.schemas.model_preferences import ModelPreferenceView
 
     async def preference(user_id: str) -> ModelPreferenceView:
         return ModelPreferenceView(last_model="glm-5.1", last_model_connection_id=connection_id)

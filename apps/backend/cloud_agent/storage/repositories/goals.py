@@ -35,8 +35,8 @@ from cloud_agent.storage._sql.rows import thread_goal
 if TYPE_CHECKING:
     import asyncpg
 
-    from cloud_agent.goals.decision import GoalAction
-    from cloud_agent.goals.models import GoalInput, GoalPauseReason
+    from cloud_agent.domain.goals import GoalAction, GoalPauseReason
+    from cloud_agent.schemas.goals import GoalInput
 
 #: The goal's own columns, read back after every write so the caller always
 #: sees what the row now says rather than what it asked for.

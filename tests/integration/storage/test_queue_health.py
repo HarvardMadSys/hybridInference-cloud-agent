@@ -17,7 +17,7 @@ from tests.integration.storage.test_agent_job_store import (
 )
 from tests.support.follow_ups import append_follow_up
 
-from cloud_agent.goals.models import GoalInput
+from cloud_agent.schemas.goals import GoalInput
 from cloud_agent.settings import number_setting
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent_host.sandbox import KATA_RUNTIME

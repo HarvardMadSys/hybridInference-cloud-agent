@@ -10,17 +10,19 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from cloud_agent.attachments.models import (
     AttachmentRef,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.execution_profiles import ExecutionProfile
-from cloud_agent.goals.models import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
-    GoalInput,
-    GoalRoundKind,
-    GoalView,
-)
-from cloud_agent.goals.report import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
+from cloud_agent.domain.goals import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
     GoalReportOutcome,
     GoalReportParse,
 )
+from cloud_agent.execution_profiles import ExecutionProfile
+from cloud_agent.goals.models import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
+    GoalRoundKind,
+    GoalView,
+)
 from cloud_agent.schemas._prompts import _visible_prompt
+from cloud_agent.schemas.goals import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
+    GoalInput,
+)
 from cloud_agent.schemas.mcp import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
     McpBindingInput,
     McpBindingSummary,

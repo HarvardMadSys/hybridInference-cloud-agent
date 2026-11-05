@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from cloud_agent.domain.goals import GoalReport
 from cloud_agent.goals.decision import GoalContext, decide
 from cloud_agent.goals.models import MAX_REASON_CHARS, MAX_REPORT_REPAIRS
-from cloud_agent.goals.report import GoalReport
 
 
 def context(**overrides) -> GoalContext:

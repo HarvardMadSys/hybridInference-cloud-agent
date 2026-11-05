@@ -22,8 +22,8 @@ from cloud_agent.agent_memory import (
     AgentMemoryFull,
     AgentMemoryNotFound,
     AgentMemoryTaskEnded,
-    MemoryTask,
 )
+from cloud_agent.domain.agent_memory import MemoryTask
 from cloud_agent.storage.repositories.agent_memory import (
     PostgresAgentMemoryRepository,
     _archive_page_sql,

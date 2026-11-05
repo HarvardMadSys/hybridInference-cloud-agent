@@ -24,7 +24,8 @@ import logging
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from cloud_agent.application.pending_messages import settle_queue
-from cloud_agent.goals.decision import GoalAction, GoalContext, decide
+from cloud_agent.domain.goals import GoalAction, GoalReport, GoalReportParse
+from cloud_agent.goals.decision import GoalContext, decide
 from cloud_agent.goals.models import (
     GOAL_REPORT_RUNTIMES,
     MAX_REASON_CHARS,
@@ -32,7 +33,6 @@ from cloud_agent.goals.models import (
     GoalState,
 )
 from cloud_agent.goals.prompts import render_repair_prompt, render_round_prompt
-from cloud_agent.goals.report import GoalReport, GoalReportParse
 from cloud_agent.goals.retry_policy import capped_backoff, is_exhausted, wakeup_backoff
 from cloud_agent.owner_access import (
     AGENT_ACCESS_WITHDRAWN,
