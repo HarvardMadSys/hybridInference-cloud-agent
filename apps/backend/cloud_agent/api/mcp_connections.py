@@ -48,6 +48,7 @@ from cloud_agent.api.mcp_connections_shared import (
     _not_found,
     _require_store,
 )
+from cloud_agent.api.mcp_oauth_callback_checks import _callback_request_refusal, _stale_flow_refusal
 from cloud_agent.api.mcp_thread_bindings import (
     BindingRequest,
     BindingResponse,
@@ -1083,7 +1084,7 @@ _CALLBACK_NEEDS_SESSION = (
 
 
 @router.get("/oauth/callback/{provider}", response_model=None)
-async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
+async def oauth_callback(
     provider: str,
     request: Request,
     state: str = Query(""),
@@ -1104,15 +1105,9 @@ async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
     an authenticated request, rather than from anything this request claims.
     """
     job_store = _require_store(store)
-    if error:
-        message = (
-            "GitHub sign-in was cancelled. You can try again."
-            if provider == "github" and error == "access_denied"
-            else error
-        )
-        return _callback_redirect(provider, ok=False, message=message)
-    if not state or not code:
-        return _callback_redirect(provider, ok=False, message="missing state or code")
+    refusal = _callback_request_refusal(provider, error=error, state=state, code=code)
+    if refusal is not None:
+        return _callback_redirect(provider, ok=False, message=refusal)
     if session_user is None:
         return _callback_redirect(provider, ok=False, message=_CALLBACK_NEEDS_SESSION)
 
@@ -1146,15 +1141,9 @@ async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
     row = await job_store.mcp.get_mcp_connection(connection_id=int(flow["connection_id"]))
     if row is None or row.get("deleted_at") is not None:
         return _callback_redirect(provider, ok=False, message="that connection was removed")
-    for key, message in (
-        ("config_revision", "the connection was reconfigured"),
-        ("authorization_epoch", "the connection was reconnected"),
-        ("oauth_generation", "a newer authorization replaced this one"),
-    ):
-        if int(row.get(key) or 0) != int(flow[key]):
-            # Per-item CAS: each version is compared on its own so the message
-            # names what changed rather than a generic failure.
-            return _callback_redirect(provider, ok=False, message=message)
+    stale = _stale_flow_refusal(row, flow)
+    if stale is not None:
+        return _callback_redirect(provider, ok=False, message=stale)
 
     cipher = oauth_cipher()
     try:
