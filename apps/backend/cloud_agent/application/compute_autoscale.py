@@ -108,6 +108,100 @@ def _seconds(policy: Mapping[str, Any], key: str) -> float:
     return max(0.0, float(value))
 
 
+def _autoscale_gate(
+    members: list[dict[str, Any]], *, enabled: bool, active_host: Any
+) -> tuple[str | None, str | None, dict[str, Any], dict[str, Any] | None]:
+    """Decide whether a blocker or an in-flight operation holds this poll.
+
+    Returns the blocker code and message, the decision to record, and the
+    member whose operation is still in flight.
+    """
+    blocker_code: str | None = None
+    blocker_message: str | None = None
+    decision: dict[str, Any] = {"action": "disabled" if not enabled else "steady"}
+    actionable_members = [member for member in members if member.get("state") != "released"]
+    acquire_failure = next(
+        (
+            member
+            for member in actionable_members
+            if _acquire_state(member) in _ACQUIRE_CIRCUIT_BREAKERS
+        ),
+        None,
+    )
+    acquire_in_flight = next(
+        (member for member in actionable_members if _acquire_state(member) in _ACQUIRE_IN_FLIGHT),
+        None,
+    )
+    retire_failure = next(
+        (
+            member
+            for member in actionable_members
+            if _operation_kind(member) in {"retire", "discard"}
+            and _operation_state(member) in _ACQUIRE_CIRCUIT_BREAKERS
+        ),
+        None,
+    )
+    retire_in_flight = next(
+        (
+            member
+            for member in actionable_members
+            if _operation_kind(member) == "retire"
+            and _operation_state(member) in _ACQUIRE_IN_FLIGHT
+        ),
+        None,
+    )
+    in_flight = acquire_in_flight or retire_in_flight
+    in_flight_kind = "acquire" if acquire_in_flight is not None else "retire"
+    if enabled and active_host is not None:
+        blocker_code = "placement_pinned"
+        blocker_message = "Set server placement to Automatic before enabling autoscaling."
+        decision = {"action": "blocked", "reason": blocker_code}
+    elif enabled and acquire_failure is not None:
+        operation_state = _acquire_state(acquire_failure) or "blocked"
+        blocker_code = f"acquire_{operation_state}"
+        blocker_message = (
+            "An autoscaled acquisition needs administrator resolution before another "
+            "CloudLab experiment can be created."
+        )
+        decision = {"action": "blocked", "reason": blocker_code}
+    elif enabled and retire_failure is not None:
+        operation_state = _operation_state(retire_failure) or "blocked"
+        blocker_code = f"retire_{operation_state}"
+        blocker_message = (
+            "An autoscaled retirement needs administrator resolution before another "
+            "CloudLab experiment can be created."
+        )
+        decision = {"action": "blocked", "reason": blocker_code}
+    elif enabled and in_flight is not None:
+        decision = {
+            "action": f"{in_flight_kind}_in_progress",
+            "allocation_id": in_flight.get("allocation_id"),
+        }
+    return blocker_code, blocker_message, decision, in_flight
+
+
+def _host_slot_target(
+    host: Mapping[str, Any], now: datetime, sampled_at: datetime | None
+) -> tuple[int | None, str | None]:
+    """The slot limit one owned host's fresh capacity sample supports, or its blocker."""
+    blocker: str | None = None
+    target: int | None = None
+    heartbeat_at = _moment(host.get("last_heartbeat_at"))
+    if host.get("status") != "online" or not host.get("enrolled"):
+        blocker = "host_not_ready"
+    elif host.get("launch_error"):
+        blocker = "host_launch_error"
+    elif heartbeat_at is None or (now - heartbeat_at).total_seconds() > FRESH_AFTER_SECONDS:
+        blocker = "host_heartbeat_stale"
+    elif sampled_at is None:
+        blocker = "capacity_missing"
+    elif (now - sampled_at).total_seconds() > FRESH_AFTER_SECONDS:
+        blocker = "capacity_stale"
+    else:
+        target, blocker = desired_slots_v1(host.get("capacity_snapshot"))
+    return target, blocker
+
+
 class CloudLabAutoscaler:
     """Reconcile one durable CloudLab policy on every compute-worker poll."""
 
@@ -126,7 +220,7 @@ class CloudLabAutoscaler:
             else expected_deployment_sha
         ).strip()
 
-    async def reconcile(self) -> None:  # noqa: PLR0912, PLR0915 complexity baseline, #771
+    async def reconcile(self) -> None:
         """Persist timers/status, size ready hosts, and queue at most one action."""
         state = await self.repository.get_cloudlab_autoscaling()
         policy = state["policy"]
@@ -177,71 +271,9 @@ class CloudLabAutoscaler:
             idle_since = now
         cooldown_until = _moment(runtime.get("cooldown_until"))
 
-        blocker_code: str | None = None
-        blocker_message: str | None = None
-        decision = {"action": "disabled" if not enabled else "steady"}
-        actionable_members = [member for member in members if member.get("state") != "released"]
-        acquire_failure = next(
-            (
-                member
-                for member in actionable_members
-                if _acquire_state(member) in _ACQUIRE_CIRCUIT_BREAKERS
-            ),
-            None,
+        blocker_code, blocker_message, decision, in_flight = _autoscale_gate(
+            members, enabled=enabled, active_host=active_host
         )
-        acquire_in_flight = next(
-            (
-                member
-                for member in actionable_members
-                if _acquire_state(member) in _ACQUIRE_IN_FLIGHT
-            ),
-            None,
-        )
-        retire_failure = next(
-            (
-                member
-                for member in actionable_members
-                if _operation_kind(member) in {"retire", "discard"}
-                and _operation_state(member) in _ACQUIRE_CIRCUIT_BREAKERS
-            ),
-            None,
-        )
-        retire_in_flight = next(
-            (
-                member
-                for member in actionable_members
-                if _operation_kind(member) == "retire"
-                and _operation_state(member) in _ACQUIRE_IN_FLIGHT
-            ),
-            None,
-        )
-        in_flight = acquire_in_flight or retire_in_flight
-        in_flight_kind = "acquire" if acquire_in_flight is not None else "retire"
-        if enabled and active_host is not None:
-            blocker_code = "placement_pinned"
-            blocker_message = "Set server placement to Automatic before enabling autoscaling."
-            decision = {"action": "blocked", "reason": blocker_code}
-        elif enabled and acquire_failure is not None:
-            operation_state = _acquire_state(acquire_failure) or "blocked"
-            blocker_code = f"acquire_{operation_state}"
-            blocker_message = (
-                "An autoscaled acquisition needs administrator resolution before another "
-                "CloudLab experiment can be created."
-            )
-            decision = {"action": "blocked", "reason": blocker_code}
-        elif enabled and retire_failure is not None:
-            operation_state = _operation_state(retire_failure) or "blocked"
-            blocker_code = f"retire_{operation_state}"
-            blocker_message = (
-                "An autoscaled retirement needs administrator resolution before another "
-                "CloudLab experiment can be created."
-            )
-            decision = {"action": "blocked", "reason": blocker_code}
-        elif enabled and in_flight is not None:
-            decision = {
-                "action": f"{in_flight_kind}_in_progress",
-                "allocation_id": in_flight.get("allocation_id"),
-            }
 
         updates = {
             "pressure_since": pressure_since,
@@ -327,7 +359,7 @@ class CloudLabAutoscaler:
                     allocation_id=str(candidate["allocation_id"]),
                 )
 
-    async def _size_owned_hosts(  # noqa: PLR0912 complexity baseline, #771
+    async def _size_owned_hosts(
         self,
         *,
         members: list[dict[str, Any]],
@@ -375,22 +407,8 @@ class CloudLabAutoscaler:
             host_name = str(host["host"])
             desired = host.get("slots_desired")
             applied = host.get("slots_total")
-            blocker: str | None = None
-            target: int | None = None
             sampled_at = _moment(host.get("capacity_sampled_at"))
-            heartbeat_at = _moment(host.get("last_heartbeat_at"))
-            if host.get("status") != "online" or not host.get("enrolled"):
-                blocker = "host_not_ready"
-            elif host.get("launch_error"):
-                blocker = "host_launch_error"
-            elif heartbeat_at is None or (now - heartbeat_at).total_seconds() > FRESH_AFTER_SECONDS:
-                blocker = "host_heartbeat_stale"
-            elif sampled_at is None:
-                blocker = "capacity_missing"
-            elif (now - sampled_at).total_seconds() > FRESH_AFTER_SECONDS:
-                blocker = "capacity_stale"
-            else:
-                target, blocker = desired_slots_v1(host.get("capacity_snapshot"))
+            target, blocker = _host_slot_target(host, now, sampled_at)
 
             if not apply and blocker is None:
                 blocker = "autoscaling_inactive"

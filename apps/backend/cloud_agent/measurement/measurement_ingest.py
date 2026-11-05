@@ -491,7 +491,37 @@ def _contains_truncated(items: Any) -> bool:
     return False
 
 
-def _validate_completeness(  # noqa: C901, PLR0912 complexity baseline, #771
+def _completeness_contradictions(
+    record: Mapping[str, Any],
+    *,
+    outcome: str,
+    truncated: bool,
+    dropped: int,
+    boundary_frozen: bool | None,
+) -> list[str]:
+    """Name the evidence in a complete-claiming record that says otherwise."""
+    contradictory: list[str] = []
+    if outcome == "incomplete":
+        contradictory.append("incomplete outcome")
+    if (
+        truncated
+        or _contains_truncated(record.get("stages"))
+        or _contains_truncated(record.get("spans"))
+    ):
+        contradictory.append("truncated timing")
+    if dropped:
+        contradictory.append("dropped spans")
+    if boundary_frozen is False:
+        contradictory.append("unfrozen boundary")
+    for key in ("missing_fragments", "missing_producers", "truncated_fragments"):
+        if record.get(key):
+            contradictory.append(key)
+    if _from_either(record, "profiling_stopped"):
+        contradictory.append("profiling_stopped")
+    return contradictory
+
+
+def _validate_completeness(
     record: Mapping[str, Any],
     *,
     outcome: str,
@@ -522,54 +552,22 @@ def _validate_completeness(  # noqa: C901, PLR0912 complexity baseline, #771
         )
     if not collection_complete:
         return
-    contradictory: list[str] = []
-    if outcome == "incomplete":
-        contradictory.append("incomplete outcome")
-    if (
-        truncated
-        or _contains_truncated(record.get("stages"))
-        or _contains_truncated(record.get("spans"))
-    ):
-        contradictory.append("truncated timing")
-    if dropped:
-        contradictory.append("dropped spans")
-    if boundary_frozen is False:
-        contradictory.append("unfrozen boundary")
-    for key in ("missing_fragments", "missing_producers", "truncated_fragments"):
-        if record.get(key):
-            contradictory.append(key)
-    if _from_either(record, "profiling_stopped"):
-        contradictory.append("profiling_stopped")
+    contradictory = _completeness_contradictions(
+        record,
+        outcome=outcome,
+        truncated=truncated,
+        dropped=dropped,
+        boundary_frozen=boundary_frozen,
+    )
     if contradictory:
         raise MeasurementRejected("collection_complete contradicts " + ", ".join(contradictory))
 
 
-def validate_measurement(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
-    record: Mapping[str, Any], *, owner: Owner | None = None
-) -> StoredMeasurement:
-    """Validate one producer record and return the row it becomes.
+def _validate_operation(record: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    """Check the operation and the producer, scope, kind and boundaries it requires.
 
-    Args:
-        record: The frozen record, as emitted.
-        owner: The attribution resolved from the authenticated request. Keys
-            the payload states for itself are ignored: they are what the
-            producer *thinks* it belongs to, and only the database knows.
-
-    Raises:
-        MeasurementRejected: the record is not one this deployment stores.
+    Returns the operation, producer, coverage scope and request kind.
     """
-    if not isinstance(record, Mapping):
-        raise MeasurementRejected("record must be an object")
-    encoded = json.dumps(record, separators=(",", ":"), default=str).encode("utf-8")
-    if len(encoded) > MAX_RECORD_BYTES:
-        raise MeasurementRejected(f"record exceeds {MAX_RECORD_BYTES} bytes")
-
-    schema_version = record.get("schema_version")
-    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
-        # Named explicitly, because "we do not know what this means" and "this
-        # is malformed" call for different responses from the producer.
-        raise MeasurementRejected(f"unsupported schema_version: {schema_version!r}")
-
     operation = _require(record, "operation")
     if operation not in KNOWN_OPERATIONS:
         raise MeasurementRejected(f"unknown operation: {operation}")
@@ -610,6 +608,11 @@ def validate_measurement(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
             raise MeasurementRejected("start_boundary does not match the operation")
         if end_boundary != expected_boundaries[1]:
             raise MeasurementRejected("end_boundary does not match the operation")
+    return operation, producer, coverage_scope, request_kind
+
+
+def _validate_outcome(record: Mapping[str, Any], operation: str) -> str:
+    """Check the outcome is known and one this operation can end with."""
     outcome = _require(record, "outcome")
     if outcome not in KNOWN_OUTCOMES:
         raise MeasurementRejected(f"unknown outcome: {outcome}")
@@ -620,8 +623,11 @@ def validate_measurement(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
     )
     if outcome not in allowed_outcomes:
         raise MeasurementRejected(f"operation {operation!r} cannot use outcome {outcome!r}")
-    _validate_structure(record)
+    return outcome
 
+
+def _validate_timing(record: Mapping[str, Any]) -> tuple[int, int, bool, bool]:
+    """Check the duration, boundary version and the two completeness flags."""
     duration_us = record.get("duration_us")
     if not isinstance(duration_us, int) or isinstance(duration_us, bool):
         raise MeasurementRejected("duration_us must be an integer")
@@ -640,20 +646,11 @@ def validate_measurement(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
         raise MeasurementRejected("end_to_end_complete must be a boolean")
     if end_to_end_complete:
         raise MeasurementRejected("server-side schema v3 records cannot claim end-to-end coverage")
-    _validate_completeness(
-        record,
-        outcome=outcome,
-        collection_complete=collection_complete,
-        end_to_end_complete=end_to_end_complete,
-    )
+    return duration_us, boundary_version, collection_complete, end_to_end_complete
 
-    startup_path = _from_either(record, "startup_path")
-    runtime_id = _from_either(record, "runtime_id")
-    runtime_version = _from_either(record, "runtime_version")
-    execution_profile = _from_either(record, "execution_profile")
-    # Unknown top-level fields are refused, not dropped. Silently discarding
-    # one would leave the producer believing it had been stored, and the field
-    # it chose might be exactly the content this promise is about.
+
+def _sanitized_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Refuse unknown top-level fields and strip unknown keys from nested entries."""
     unknown = sorted(str(key) for key in record if str(key) not in KNOWN_RECORD_KEYS)
     if unknown:
         raise MeasurementRejected(f"unknown record field(s): {', '.join(unknown)}")
@@ -668,6 +665,57 @@ def validate_measurement(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
             sanitized[key] = [
                 _strip_unknown(item, allowed, where=f"{key} entry") for item in sanitized[key]
             ]
+    return sanitized
+
+
+def validate_measurement(
+    record: Mapping[str, Any], *, owner: Owner | None = None
+) -> StoredMeasurement:
+    """Validate one producer record and return the row it becomes.
+
+    Args:
+        record: The frozen record, as emitted.
+        owner: The attribution resolved from the authenticated request. Keys
+            the payload states for itself are ignored: they are what the
+            producer *thinks* it belongs to, and only the database knows.
+
+    Raises:
+        MeasurementRejected: the record is not one this deployment stores.
+    """
+    if not isinstance(record, Mapping):
+        raise MeasurementRejected("record must be an object")
+    encoded = json.dumps(record, separators=(",", ":"), default=str).encode("utf-8")
+    if len(encoded) > MAX_RECORD_BYTES:
+        raise MeasurementRejected(f"record exceeds {MAX_RECORD_BYTES} bytes")
+
+    schema_version = record.get("schema_version")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        # Named explicitly, because "we do not know what this means" and "this
+        # is malformed" call for different responses from the producer.
+        raise MeasurementRejected(f"unsupported schema_version: {schema_version!r}")
+
+    operation, producer, coverage_scope, request_kind = _validate_operation(record)
+    outcome = _validate_outcome(record, operation)
+    _validate_structure(record)
+
+    duration_us, boundary_version, collection_complete, end_to_end_complete = _validate_timing(
+        record
+    )
+    _validate_completeness(
+        record,
+        outcome=outcome,
+        collection_complete=collection_complete,
+        end_to_end_complete=end_to_end_complete,
+    )
+
+    startup_path = _from_either(record, "startup_path")
+    runtime_id = _from_either(record, "runtime_id")
+    runtime_version = _from_either(record, "runtime_version")
+    execution_profile = _from_either(record, "execution_profile")
+    # Unknown top-level fields are refused, not dropped. Silently discarding
+    # one would leave the producer believing it had been stored, and the field
+    # it chose might be exactly the content this promise is about.
+    sanitized = _sanitized_record(record)
     resolved_owner = owner or Owner()
 
     return StoredMeasurement(
@@ -753,22 +801,8 @@ def require_record_matches_its_experiment(
         )
 
 
-def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:  # noqa: C901, PLR0912 complexity baseline, #771
-    """Validate an experiment manifest, and return what the catalogue stores.
-
-    The boundaries are the collector's: a manifest this service would not have
-    accepted as a descriptor cannot be stored as one either.
-    """
-    if not isinstance(run, Mapping):
-        raise MeasurementRejected("run must be an object")
-    run_id = _require_run_id(run)
-    raw_operations = run.get("operations")
-    if not isinstance(raw_operations, list) or not raw_operations:
-        raise MeasurementRejected("run.operations must be a non-empty list")
-    operations = [str(item) for item in raw_operations]
-    unknown = sorted(name for name in operations if name not in KNOWN_OPERATIONS)
-    if unknown:
-        raise MeasurementRejected(f"run names unknown operations: {', '.join(unknown)}")
+def _normalized_target(run: Mapping[str, Any]) -> dict[str, str]:
+    """Check a manifest's target fields and return them as strings."""
     target = run.get("target") or {}
     if not isinstance(target, Mapping):
         raise MeasurementRejected("run.target must be an object")
@@ -782,16 +816,11 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:  # noqa: C901, PLR09
         if not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value).strip():
             raise MeasurementRejected(f"run.target.{key} must be a non-empty string or integer")
         normalized_target[str(key)] = str(value)
-    continuous = run.get("continuous") is True
-    if continuous and ("expires_at" not in run or run["expires_at"] is not None):
-        raise MeasurementRejected("continuous runs require explicit null expires_at")
-    max_operations = run.get("max_operations", 1)
-    if not isinstance(max_operations, int) or isinstance(max_operations, bool):
-        raise MeasurementRejected("run.max_operations must be an integer")
-    if (continuous and max_operations != 0) or (not continuous and max_operations <= 0):
-        raise MeasurementRejected(
-            "run.max_operations must be zero if continuous, positive otherwise"
-        )
+    return normalized_target
+
+
+def _admission_instances(run: Mapping[str, Any], *, continuous: bool) -> list[dict[str, Any]]:
+    """Check a manifest's per-instance admission budgets."""
     instances = run.get("admission_instances") or []
     if not isinstance(instances, list):
         raise MeasurementRejected("run.admission_instances must be a list")
@@ -813,6 +842,37 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:  # noqa: C901, PLR09
         ):
             raise MeasurementRejected("run admission max_operations must be a positive integer")
         normalized_instances.append({"instance": instance, "max_operations": budget})
+    return normalized_instances
+
+
+def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate an experiment manifest, and return what the catalogue stores.
+
+    The boundaries are the collector's: a manifest this service would not have
+    accepted as a descriptor cannot be stored as one either.
+    """
+    if not isinstance(run, Mapping):
+        raise MeasurementRejected("run must be an object")
+    run_id = _require_run_id(run)
+    raw_operations = run.get("operations")
+    if not isinstance(raw_operations, list) or not raw_operations:
+        raise MeasurementRejected("run.operations must be a non-empty list")
+    operations = [str(item) for item in raw_operations]
+    unknown = sorted(name for name in operations if name not in KNOWN_OPERATIONS)
+    if unknown:
+        raise MeasurementRejected(f"run names unknown operations: {', '.join(unknown)}")
+    normalized_target = _normalized_target(run)
+    continuous = run.get("continuous") is True
+    if continuous and ("expires_at" not in run or run["expires_at"] is not None):
+        raise MeasurementRejected("continuous runs require explicit null expires_at")
+    max_operations = run.get("max_operations", 1)
+    if not isinstance(max_operations, int) or isinstance(max_operations, bool):
+        raise MeasurementRejected("run.max_operations must be an integer")
+    if (continuous and max_operations != 0) or (not continuous and max_operations <= 0):
+        raise MeasurementRejected(
+            "run.max_operations must be zero if continuous, positive otherwise"
+        )
+    normalized_instances = _admission_instances(run, continuous=continuous)
     config_version = run.get("config_version", 1)
     if (
         not isinstance(config_version, int)
