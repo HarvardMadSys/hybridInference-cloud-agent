@@ -5,13 +5,13 @@ from typing import Any
 
 import pytest
 
-from cloud_agent.compute_secrets import (
+from cloud_agent.ports.external.compute_provider import (
+    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
+)
+from cloud_agent.providers.compute.compute_secrets import (
     ComputeSecretError,
     ComputeSecretStore,
     StoredDeploymentResolver,
-)
-from cloud_agent.ports.external.compute_provider import (
-    UNCHECKED_CLOUDLAB_HOST_KEY_REF,
 )
 
 

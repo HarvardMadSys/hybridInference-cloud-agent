@@ -10,8 +10,8 @@ from starlette.datastructures import Headers
 from cloud_agent import settings, tokens
 from cloud_agent.accounts.config import session_cookie_is_secure
 from cloud_agent.api.deps import get_client_ip
-from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.domain.execution_profiles import default_execution_profile
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
     validate_sandbox_manager_url,

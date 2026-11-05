@@ -9,10 +9,10 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from cloud_agent.api._sensitive_routes import SensitiveRoute
-from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import ProviderError
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
 
 # These storage refusals have intentionally public meaning. Other conflicts and
 # every other ValueError remain server faults and never have their raw text

@@ -11,7 +11,7 @@ from tests.integration.storage.test_host_pool_store import db as db, store as st
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.compute_secrets import ComputeSecretStore
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

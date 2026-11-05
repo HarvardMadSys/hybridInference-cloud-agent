@@ -16,8 +16,8 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import compute_registration
 from cloud_agent.application.compute_resources import ComputeCommands
-from cloud_agent.compute_config import ComputeConfiguration
 from cloud_agent.domain.host_pool import hash_secret
+from cloud_agent.providers.compute.compute_config import ComputeConfiguration
 
 TOKEN = "node-token-" + "x" * 40
 KEY = (

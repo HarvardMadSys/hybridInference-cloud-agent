@@ -19,7 +19,6 @@ from cloud_agent.application.cloudlab_inventory import (
     CloudLabNodeInventory,
 )
 from cloud_agent.application.server_queries import ServerQueries
-from cloud_agent.compute_config import current_observation_seconds
 from cloud_agent.domain.compute import (
     ComputeRefusal,
     acquisition_absence_confirmable,
@@ -34,14 +33,18 @@ from cloud_agent.domain.compute import (
 from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
+from cloud_agent.providers.compute.compute_config import current_observation_seconds
 from cloud_agent.schemas.compute import CloudLabAutoscalingPolicy, CloudLabDefaults, RenewalPolicy
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_setup import AutomaticComputeSetup
-    from cloud_agent.compute_config import ComputeConfiguration
-    from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
-    from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
+    from cloud_agent.providers.compute.compute_config import ComputeConfiguration
+    from cloud_agent.providers.compute.compute_registry import (
+        ComputeProviderRegistration,
+        ComputeProviderRegistry,
+    )
+    from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
     from cloud_agent.schemas.compute import (
         AddComputeConnection,
         AddDeploymentProfile,

@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 
 from dotenv import dotenv_values
 
-from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.ports.external.compute_provider import ProviderError
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
@@ -30,6 +29,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     RecordedHostState,
     TransferResult,
 )
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
 from cloud_agent.providers.compute.release_scripts import _INVENTORY, _QUIESCE
 from cloud_agent.providers.compute.ssh import known_hosts_line
 from cloud_agent.providers.compute.transfer_scripts import (

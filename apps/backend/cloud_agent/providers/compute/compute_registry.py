@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Any, Literal
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 
-from cloud_agent.compute_config import current_cloudlab_api_url
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.ports.external.compute_provider import (
     UNCHECKED_CLOUDLAB_HOST_KEY_REF,
 )
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
+from cloud_agent.providers.compute.compute_config import current_cloudlab_api_url
 from cloud_agent.providers.compute.existing_ssh import ExistingSSHProvider
 
 if TYPE_CHECKING:
@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 
     import httpx
 
-    from cloud_agent.compute_config import ComputeConfiguration
     from cloud_agent.ports.external.compute_provider import ComputeProvider, SecretResolver
     from cloud_agent.ports.external.host_bootstrap import SshTransport
+    from cloud_agent.providers.compute.compute_config import ComputeConfiguration
 
 
 @dataclass(frozen=True)

@@ -34,7 +34,8 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
 )
 from tests.support.owners import connection_claim, on_connection
 
-from cloud_agent import memory_tool, web_search
+from cloud_agent import memory_tool
+from cloud_agent.providers import web_search
 
 pytestmark = pytest.mark.asyncio
 
