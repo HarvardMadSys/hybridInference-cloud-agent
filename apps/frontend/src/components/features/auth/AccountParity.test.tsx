@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@/lib/api/accounts';
 import * as self from '@/lib/api/accountSelf';
@@ -74,6 +74,10 @@ const currentStep = () =>
 function fill(label: string | RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
+/** Agree in the Terms dialog sign-up opens by itself. */
+async function agreeToTerms() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Agree' }));
+}
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.getAuthOptions).mockResolvedValue(OPTIONS);
@@ -87,13 +91,17 @@ describe('sign-up', () => {
     render(<SignupPage />);
     const button = await screen.findByRole('button', { name: 'Create account' });
     expect(button).toBeDisabled();
-    expect(screen.getByRole('link', { name: 'Terms of Service' })).toHaveAttribute(
-      'href',
-      'https://lab.example.edu/terms',
-    );
+    // The deployment published only a link: it opens in a new tab, never here.
+    const dialog = await screen.findByRole('dialog', { name: 'Terms of Service' });
+    const link = within(dialog).getByRole('link', { name: 'Open the Terms of Service' });
+    expect(link).toHaveAttribute('href', 'https://lab.example.edu/terms');
+    expect(link).toHaveAttribute('target', '_blank');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
     fill('Name', 'Ada Lovelace');
     fill('How will you use Cloud Agent?', 'Thesis experiments');
-    fireEvent.click(screen.getByRole('checkbox'));
+    expect(button).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Read and agree' }));
+    await agreeToTerms();
     fill('Email', 'ada@example.edu');
     fill('Password', 'Goodpass123');
     fill('Confirm password', 'Goodpass123');
@@ -112,10 +120,10 @@ describe('sign-up', () => {
     vi.mocked(api.signupPhone).mockResolvedValue({ ok: true, requires_approval: true });
     render(<SignupPage />);
     fireEvent.click(await screen.findByRole('tab', { name: 'Phone number' }));
-    // Phone fields stay visible before the Terms checkbox is checked.
+    // Phone fields stay visible before the Terms are agreed to.
     expect(screen.getByLabelText('Phone number')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('checkbox'));
+    await agreeToTerms();
     fill('Phone number', '13800138000');
     fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
     await waitFor(() =>
@@ -139,7 +147,7 @@ describe('sign-up', () => {
   it('shows the email check among the steps only for an email sign-up that needs one', async () => {
     vi.mocked(api.signupAccount).mockResolvedValue({ ok: true });
     render(<SignupPage />);
-    fireEvent.click(await screen.findByRole('checkbox'));
+    await agreeToTerms();
     expect(steps()).toEqual(['Account', 'Verify email', 'Get access']);
     expect(currentStep()).toBe('Account');
     fireEvent.click(screen.getByRole('tab', { name: 'Phone number' }));
@@ -154,7 +162,7 @@ describe('sign-up', () => {
   it('leaves the email check out when only phone sign-up is open', async () => {
     vi.mocked(api.getAuthOptions).mockResolvedValue({ ...OPTIONS, signup_enabled: false });
     render(<SignupPage />);
-    await screen.findByRole('checkbox');
+    await screen.findByRole('button', { name: 'Read and agree' });
     expect(steps()).toEqual(['Account', 'Get access']);
   });
   it('says sign-up is closed when neither method is open', async () => {
