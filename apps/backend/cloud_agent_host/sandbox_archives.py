@@ -320,7 +320,7 @@ class SandboxArchiveService:
     *before* Docker starts copying bytes.
     """
 
-    def __init__(  # noqa: C901, PLR0912 complexity baseline, #771
+    def __init__(
         self,
         manager: ChatSandboxManager,
         *,
@@ -340,22 +340,19 @@ class SandboxArchiveService:
     ) -> None:
         if not namespace:
             raise ValueError("sandbox archive namespace must not be empty")
-        if isinstance(capture_capacity, bool) or not isinstance(capture_capacity, int):
-            raise ValueError("sandbox archive capture capacity must be a positive integer")
-        if capture_capacity <= 0:
-            raise ValueError("sandbox archive capture capacity must be a positive integer")
+        _require_positive_int(
+            capture_capacity, "sandbox archive capture capacity must be a positive integer"
+        )
         if capture_slots is not None and capture_capacity != 1:
             raise ValueError(
                 "an injected sandbox archive capture gate requires capture capacity one"
             )
-        if isinstance(spool_budget_bytes, bool) or not isinstance(spool_budget_bytes, int):
-            raise ValueError("sandbox archive spool budget must be a positive integer")
-        if spool_budget_bytes <= 0:
-            raise ValueError("sandbox archive spool budget must be a positive integer")
-        if isinstance(max_upload_attempts, bool) or not isinstance(max_upload_attempts, int):
-            raise ValueError("sandbox archive upload attempts must be a positive integer")
-        if max_upload_attempts <= 0:
-            raise ValueError("sandbox archive upload attempts must be a positive integer")
+        _require_positive_int(
+            spool_budget_bytes, "sandbox archive spool budget must be a positive integer"
+        )
+        _require_positive_int(
+            max_upload_attempts, "sandbox archive upload attempts must be a positive integer"
+        )
         if (
             isinstance(retry_delay_s, bool)
             or not isinstance(retry_delay_s, (int, float))
@@ -1470,6 +1467,11 @@ class SandboxArchiveService:
                 )
                 return receipt
         raise AssertionError("unreachable final sandbox archive retry state")
+
+
+def _require_positive_int(value: object, message: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(message)
 
 
 def _validate_preparation_id(value: str) -> None:
