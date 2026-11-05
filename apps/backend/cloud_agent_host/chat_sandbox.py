@@ -93,7 +93,16 @@ from cloud_agent_host.chat_sandbox_models import (
     SandboxActionFacts as SandboxActionFacts,
     SandboxRestoreFailed as SandboxRestoreFailed,
 )
-from cloud_agent_host.chat_sandbox_network import (
+from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
+from cloud_agent_host.exact_container import ExactContainer
+from cloud_agent_host.guest_root_exec import GuestRootExec
+from cloud_agent_host.member_setup.install_locks import install_lock
+from cloud_agent_host.member_setup.member_preparation import (
+    TOOL_HOOKS_SCRIPT,
+    MemberStep,
+    run_member_steps,
+)
+from cloud_agent_host.network.chat_sandbox_network import (
     _GUEST_NETWORK_CHECK as _GUEST_NETWORK_CHECK,
     CHAT_BOOTSTRAP_NETWORK as CHAT_BOOTSTRAP_NETWORK,
     CHAT_NETWORK_BRIDGE_OPTION as CHAT_NETWORK_BRIDGE_OPTION,
@@ -106,16 +115,7 @@ from cloud_agent_host.chat_sandbox_network import (
     ChatSandboxNetwork,
     _GroupNetworkSnapshot,
 )
-from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
-from cloud_agent_host.exact_container import ExactContainer
-from cloud_agent_host.guest_root_exec import GuestRootExec
-from cloud_agent_host.member_setup.install_locks import install_lock
-from cloud_agent_host.member_setup.member_preparation import (
-    TOOL_HOOKS_SCRIPT,
-    MemberStep,
-    run_member_steps,
-)
-from cloud_agent_host.network_guard import GUARD_RECHECK_S
+from cloud_agent_host.network.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_EVENTS,
@@ -1138,7 +1138,7 @@ class ChatSandboxManager(GuestRootExec):
                     release_networks=not defer_network_release,
                 )
             except Exception as stop_exc:
-                from cloud_agent_host.guarded_workloads import exact_stop_unidentified
+                from cloud_agent_host.network.guarded_workloads import exact_stop_unidentified
 
                 exact_stop_unidentified(self, container_id)
                 logger.warning(

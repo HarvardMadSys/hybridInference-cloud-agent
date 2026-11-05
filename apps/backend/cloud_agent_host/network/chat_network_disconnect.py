@@ -9,7 +9,7 @@ from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
-    from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
+    from cloud_agent_host.network.chat_sandbox_network import ChatSandboxNetwork
 
 
 def disconnect_endpoint(

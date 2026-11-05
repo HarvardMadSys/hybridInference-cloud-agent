@@ -17,12 +17,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from cloud_agent_host.chat_network_disconnect import (
-    disconnect_endpoint,
-    forget_stopped_network,
-    stopped_network_record,
-)
-from cloud_agent_host.chat_network_ownership import owned_bridge_endpoints, require_service_peers
 from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_each
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_GENERATION_LABEL,
@@ -40,7 +34,16 @@ from cloud_agent_host.chat_sandbox_models import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
-from cloud_agent_host.network_guard import GUARD_RENEW_S
+from cloud_agent_host.network.chat_network_disconnect import (
+    disconnect_endpoint,
+    forget_stopped_network,
+    stopped_network_record,
+)
+from cloud_agent_host.network.chat_network_ownership import (
+    owned_bridge_endpoints,
+    require_service_peers,
+)
+from cloud_agent_host.network.network_guard import GUARD_RENEW_S
 from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 
 if TYPE_CHECKING:
@@ -49,7 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
     from cloud_agent_host.exact_container import ExactContainer
-    from cloud_agent_host.network_guard import HeldExceptions
+    from cloud_agent_host.network.network_guard import HeldExceptions
     from cloud_agent_host.sandbox import ContainerBackend
     from cloud_agent_shared.egress import SandboxNetwork
     from cloud_agent_shared.operation_profiling import StageObserver
@@ -817,7 +820,7 @@ class ChatSandboxNetwork:
     def renew_host_rules(self) -> None:
         """Renew the host-rule verification before it lapses, so a start need not.
 
-        The sweep calls this on an empty host (:mod:`cloud_agent_host.idle_host_rules`);
+        The sweep calls this on an empty host (:mod:`cloud_agent_host.network.idle_host_rules`);
         no network, no-op.
         """
         if self.backend.sandbox_network is not None:

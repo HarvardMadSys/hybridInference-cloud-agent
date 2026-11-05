@@ -29,7 +29,7 @@ from tests.unit.test_runner_host_service import (
 
 from cloud_agent_host import host_service, runner_stop, runtime_qualification, turn_child
 from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult
-from cloud_agent_host.network_guard import VERIFICATION_KEY
+from cloud_agent_host.network.network_guard import VERIFICATION_KEY
 from cloud_agent_shared.egress import network_from_env
 
 #: The network a turn's child is built with, in the default sandbox namespace.
@@ -237,7 +237,7 @@ def test_a_child_slow_to_start_checks_the_rules_itself_rather_than_decline(
     """
     from tests.unit.test_network_guard import FakeNft
 
-    from cloud_agent_host.network_guard import GUARD_RECHECK_S
+    from cloud_agent_host.network.network_guard import GUARD_RECHECK_S
     from cloud_agent_host.sandbox import ContainerBackend
 
     backend = ContainerBackend(image="sandbox", sandbox_network=_NETWORK)

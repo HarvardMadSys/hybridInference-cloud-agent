@@ -50,7 +50,7 @@ from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_NAME,
     INITIAL_ARCHIVE_MARKER_ROOT,
 )
-from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
+from cloud_agent_host.network.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,

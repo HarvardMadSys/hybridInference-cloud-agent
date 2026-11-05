@@ -49,7 +49,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
-from cloud_agent_host.network_guard import HostNetworkGuard
+from cloud_agent_host.network.network_guard import HostNetworkGuard
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
@@ -934,7 +934,7 @@ def test_cold_start_rechecks_host_rules_after_guest_proof(monkeypatch):
 
 def test_a_create_warms_the_helper_and_its_start_leaves_renewal_to_the_sweep(monkeypatch):
     """The start's read-back reads the kernel; renewing the verification is the sweep's."""
-    from cloud_agent_host.network_guard import GUARD_RECHECK_S, GUARD_RENEW_S
+    from cloud_agent_host.network.network_guard import GUARD_RECHECK_S, GUARD_RENEW_S
 
     manager, docker, guard = _world(monkeypatch)
     docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")

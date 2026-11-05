@@ -57,7 +57,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
 )
-from cloud_agent_host.network_guard import NetworkGuardError
+from cloud_agent_host.network.network_guard import NetworkGuardError
 from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 

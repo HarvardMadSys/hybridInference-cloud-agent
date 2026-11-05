@@ -10,7 +10,7 @@ own image, started in the host's network namespace under plain runc (a Kata VM
 would edit its own kernel, not the host's), with ``NET_ADMIN`` and no other
 capability, a read-only root and no-new-privileges, running ``nft``. The
 runner's host service and the sandbox manager each keep one such helper
-running while they use it (:mod:`cloud_agent_host.network_guard_helper`, where
+running while they use it (:mod:`cloud_agent_host.network.network_guard_helper`, where
 its threat analysis is written down) and start a disposable one for a step it
 cannot take; a turn's own process uses disposable helpers only. Neither
 keeps anything; the kernel holds the rules, so they outlive the process that
@@ -86,9 +86,9 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from cloud_agent_host import network_guard_helper
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.network_guard_helper import (
+from cloud_agent_host.network import network_guard_helper
+from cloud_agent_host.network.network_guard_helper import (
     HelperStuck,
     LongLivedHelper,
     Remove,
@@ -642,7 +642,7 @@ class HostNetworkGuard:
         """Start the long-lived helper ahead of a step an activation is about to take.
 
         For an activation, never the sweep: a host with nothing running keeps
-        no helper (:mod:`cloud_agent_host.idle_host_rules`). A create calls it
+        no helper (:mod:`cloud_agent_host.network.idle_host_rules`). A create calls it
         once its rules check stands (``ensure(warm=True)``). The start that
         follows gives a new or stopped group's fresh bridge its relay update
         after the bridge's Docker work, and that update otherwise waited for a
@@ -672,7 +672,7 @@ class HostNetworkGuard:
         """Stop the long-lived helper; every later step runs on a disposable one.
 
         Nothing has to call this: the helper also exits when this process
-        does, however it ends (:mod:`cloud_agent_host.network_guard_helper`).
+        does, however it ends (:mod:`cloud_agent_host.network.network_guard_helper`).
         """
         if self._long_lived is not None:
             self._long_lived.close()

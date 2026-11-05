@@ -30,7 +30,7 @@ from cloud_agent_host.chat_sandbox import (
     SandboxActionFacts,
 )
 from cloud_agent_host.group_lifecycle import Operation
-from cloud_agent_host.guarded_workloads import (
+from cloud_agent_host.network.guarded_workloads import (
     GuardedWorkload,
     exact_stop_unguarded,
     host_rule_failure,
@@ -39,7 +39,7 @@ from cloud_agent_host.guarded_workloads import (
     running_guarded_workloads,
     workloads_with_known,
 )
-from cloud_agent_host.idle_host_rules import IdleHostRules
+from cloud_agent_host.network.idle_host_rules import IdleHostRules
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,

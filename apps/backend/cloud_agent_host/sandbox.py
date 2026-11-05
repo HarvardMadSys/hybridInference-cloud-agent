@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Mapping
     from typing import IO
 
-    from cloud_agent_host.network_guard import HostNetworkGuard
+    from cloud_agent_host.network.network_guard import HostNetworkGuard
 
 logger = get_logger(__name__)
 
@@ -824,8 +824,8 @@ class ContainerBackend(SandboxBackend):
     def network_guard(self) -> HostNetworkGuard:
         """The one guard of this process, shared by every manager it builds."""
         if self._network_guard is None:
-            from cloud_agent_host import network_guard_helper
-            from cloud_agent_host.network_guard import HostNetworkGuard
+            from cloud_agent_host.network import network_guard_helper
+            from cloud_agent_host.network.network_guard import HostNetworkGuard
 
             self._network_guard = HostNetworkGuard(
                 self.require_sandbox_network(),
@@ -850,7 +850,7 @@ class ContainerBackend(SandboxBackend):
         would trust, because the child was slow to start, is not taken: the
         network check then installs and reads back the rules itself.
         """
-        from cloud_agent_host.network_guard import VERIFICATION_KEY
+        from cloud_agent_host.network.network_guard import VERIFICATION_KEY
 
         self._rules_handed_over = self.network_guard().adopt(payload.get(VERIFICATION_KEY))
 

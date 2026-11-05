@@ -24,7 +24,7 @@ from cloud_agent_host.chat_sandbox_models import (
     ChatSandboxInspection,
     ChatSandboxSpec,
 )
-from cloud_agent_host.idle_host_rules import running_deployment_container_ids
+from cloud_agent_host.network.idle_host_rules import running_deployment_container_ids
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:

@@ -26,7 +26,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.group_lifecycle import Operation
-from cloud_agent_host.guarded_workloads import (
+from cloud_agent_host.network.guarded_workloads import (
     sandbox_spec_from_inspection,
 )
 from cloud_agent_host.sandbox import SandboxError
