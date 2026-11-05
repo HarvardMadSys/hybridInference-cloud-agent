@@ -1,9 +1,10 @@
 """SQL for sandbox incidents that more than one module runs.
 
 The cursor's advance runs inside the attempt's own event transaction
-(``cloud_agent.storage._sql.event_batches``), when its ``started`` event is
-stored: from then on the attempt's prompt has been used, so what it told is
-told. It only moves forward.
+(``cloud_agent.storage._sql.event_batches``), when its ``turn_started`` event
+is stored: the runner writes that once the sandbox manager dispatched the
+prompt, so what the prompt told is told. The lease fence that event already
+passes fences the advance too, and it only moves forward.
 """
 
 from __future__ import annotations

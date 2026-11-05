@@ -436,6 +436,9 @@ def test_only_a_failure_nobody_asked_for_is_journalled(served):
     }
     crash = next(entry for entry in entries if entry["phase"] == "crashed")
     assert crash["exit_code"] == 3 and crash["kind"] == "mcp_server_failed"
+    # Each names the member it happened to by its credential's digest, as the
+    # admission held it then: the host never guesses from the slot.
+    assert {entry["member"] for entry in entries} == {hashlib.sha256(TOKEN.encode()).hexdigest()}
     assert [entry["seq"] for entry in entries] == list(range(1, len(entries) + 1))
     assert len({entry["journal"] for entry in entries}) == 1
     assert os.stat(served.runner_incidents(0)).st_mode & 0o777 == 0o640

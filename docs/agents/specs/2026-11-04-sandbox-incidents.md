@@ -1,6 +1,6 @@
 # Sandbox incidents: recorded, and told to the people and the agent who need them
 
-Status: implemented · 2026-11-05 (revised after review: member scope, background drain, per-thread cursor, immutable summaries, MCP stop reasons, host-first rollout; then to what was built)
+Status: implemented · 2026-11-05 (revised after review: member scope, background drain, per-thread cursor, immutable summaries, MCP stop reasons, host-first rollout; then to what was built; then after review of #1110: the cursor's start and advance, atomic notices, replay dedupe, attribution by credential)
 
 ## Summary
 
@@ -24,7 +24,7 @@ It adds no new service: no Prometheus, no Grafana, no log store. Those wait unti
 Every incident has a **scope**:
 
 - **sandbox:** it concerns everything in the container. The browser is one per sandbox, shared by the chat and its Forks.
-- **member:** it concerns one chat. MCP programs run per member slot, so one member's failed program must not be reported to another. A slot is reused after its member leaves, so the host resolves the slot to the member holding it when it *reads* the journal, at most a minute after the failure, and the incident carries that `thread_id`, never only the slot.
+- **member:** it concerns one chat. MCP programs run per member slot, so one member's failed program must not be reported to another. A slot is reused after its member leaves, so whose failure it was is fixed when it happens, not when the host reads the journal: the slot's runner journals the digest of the credential of the member it was serving (its admission's `token_sha256`), and the host, which admitted that credential, knows whose it is (`MemberCredentials`). The incident carries that `thread_id`. A failure whose credential the host never admitted, or forgot when it restarted, is nobody's and is not recorded.
 
 | Kind | Scope | Detected by | Told to the user | Told to the agent |
 | --- | --- | --- | --- | --- |
@@ -50,6 +50,8 @@ Incidents are **content-free**, like every other row in that table: no stderr, n
 - **The hourly cap.** A sandbox records at most 60 incident rows an hour, summaries included. Past that, the host only counts. At the end of that hour it sends one `incident.dropped` row with the total.
 
 Each row's id is deterministic: `<source>:<subject>:<seq or window start>[:repeated|:dropped]`. A row the host sends again (see the outbox, below) is therefore the same row, and the unique index turns the replay into a no-op.
+
+**A source event is counted once.** Docker replays its last events after a reconnect (`since`), and a journal line can be read twice. The host remembers the source ids it has counted (a bounded set, kept after the row is confirmed), so a replay is neither a new incident nor a repeat; only distinct events are counted into a window.
 
 ## How an incident travels
 
@@ -99,7 +101,7 @@ Neither side needs code kept for the other, so nothing is marked `COMPAT`.
 
 ## Telling the user
 
-For `out_of_memory`, `container_exited` and `mcp_server_failed`, the control plane appends a `lifecycle` event, `{phase: "sandbox_incident", incident, …}`, to the running turns the incident concerns, when it first stores the row. Each append is fenced by its attempt's live lease, as the runner's own are:
+For `out_of_memory`, `container_exited` and `mcp_server_failed`, the control plane appends a `lifecycle` event, `{phase: "sandbox_incident", incident, …}`, to the running turns the incident concerns, in the transaction that stores the row. A notice that cannot be written rolls the row back, so the beat is not confirmed and the retry stores and notifies afresh; a stored row was notified, so a replay notifies nobody twice. The rows go in first, then the running attempts are locked in id order. Each append is fenced by its attempt's live lease, as the runner's own are:
 
 - a sandbox-scoped incident goes to every turn running in that sandbox;
 - a member-scoped one goes only to that member's own turn, if it has one running.
@@ -131,11 +133,11 @@ Both are new producers in `claim_prompt` (`cloud_agent/prompt_injections.py`), r
 
 ### The cursor
 
-Which incidents a thread has been told is a **per-membership cursor**, not a time. A new column on `agent_thread_sandbox_memberships`, `incidents_told_through`, holds the highest `agent_sandbox_events.id` told to that thread.
+Which incidents a thread has been told is a **per-thread cursor**, not a time: `agent_thread_incident_cursors.told_through` holds the highest `agent_sandbox_events.id` told to that thread. The claim records what it would tell through against its attempt (`agent_attempt_incident_marks`).
 
 - **The claim** selects the sandbox's agent-relevant incidents with an id above the cursor: sandbox-scoped ones, and member-scoped ones carrying this thread's `thread_id`. It renders at most five, and records `through_id`, the highest id it selected, in the injection record. Selecting more than five still moves `through_id` past all of them, and the note says "and *n* more".
-- **The cursor advances** to `through_id` only when that attempt's `started` event is stored. The advance is fenced to that attempt and never moves the cursor backwards. A claim that is abandoned or retried before it starts advances nothing, so its retry tells the same incidents again.
-- **A new membership** starts at the sandbox's current highest id. A Fork joining a sandbox is not told its parent's past.
+- **The cursor advances** to `through_id` only when that attempt's `turn_started` event is stored. The runner writes it once the sandbox manager has dispatched the prompt; `started` comes earlier, at the container, before the workspace, uploads and runtime checks that can still fail. The advance rides that event's lease fence and never moves the cursor backwards. A claim whose prompt never went out advances nothing, so its retry tells the same incidents again.
+- **A cursor starts when its chat joins a sandbox**, by a trigger on the membership (at insert, and when it moves to another sandbox): at that sandbox's newest incident, or at zero when there is none. So a chat's first incident is told even when its first turn had none to tell, and a Fork joining a sandbox is not told its parent's past. A membership with no cursor (none should exist; the migration starts one for each) starts one explicitly at its first claim.
 
 Ids order insertion, not observation. That is exactly what makes a late incident safe: it gets a higher id than anything already told, so it is told at the next claim, whenever it was observed. The note sorts what it tells by observation time.
 
@@ -169,7 +171,7 @@ The sandbox trajectory already lists `agent_sandbox_events`. It gains a label an
   - both prompt producers and their conditions.
 - **Database:**
   - the migration, and the unique index that makes a replayed row a no-op;
-  - the cursor: it advances only on `started`, only forward, and only for its own attempt;
+  - the cursor: it starts when a chat joins, advances only on `turn_started`, only forward, and only for its own attempt;
   - a retried claim tells the same incidents again;
   - an incident recorded late is told at the next claim.
 - **Mixed versions:**

@@ -47,7 +47,7 @@ BROWSER_NOTE = (
 
 
 def _row(incident: SandboxIncident) -> dict[str, Any]:
-    """The event-table row of one reported incident: content-free details only."""
+    """The event-table row of one reported incident, with the notice it puts in turns."""
     details: dict[str, Any] = {
         "incident_id": incident.incident_id,
         "scope": incident.scope,
@@ -57,7 +57,11 @@ def _row(incident: SandboxIncident) -> dict[str, Any]:
     }
     if incident.thread_id is not None:
         details["thread_id"] = incident.thread_id
-    return {"event_type": f"incident.{incident.kind}", "details": details}
+    row: dict[str, Any] = {"event_type": f"incident.{incident.kind}", "details": details}
+    payload = _notice(row)
+    if payload is not None:
+        row["notice"] = {"payload": payload, "thread_id": incident.thread_id}
+    return row
 
 
 def _notice(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -79,32 +83,22 @@ async def record_heartbeat_incidents(
     """Store each reported group's incidents, and show new ones in the turns they broke.
 
     Whether every row was stored, which is what the answer confirms: a host
-    forgets its rows only on that confirmation, so a beat that stored some and
-    failed on others has all of them sent again, and the stored ones are
-    no-ops. It never raises into the heartbeat; diagnostics must never cost a
-    host its liveness.
+    forgets its rows only on that confirmation. A group's rows and their
+    notices commit together, so a group that failed is stored and notified
+    again whole by the retry, and one that committed is a no-op then. It never
+    raises into the heartbeat; diagnostics must never cost a host its liveness.
     """
     complete = True
     for group in retained:
         if not group.incidents:
             continue
         try:
-            stored = await store.record_sandbox_incidents(
+            await store.record_sandbox_incidents(
                 host=host,
                 sandbox_id=group.sandbox_id,
                 generation=group.generation,
                 incidents=[_row(incident) for incident in group.incidents],
             )
-            for row in stored:
-                notice = _notice(row)
-                if notice is None:
-                    continue
-                thread_id = row["details"].get("thread_id")
-                await store.notify_running_turns(
-                    sandbox_id=group.sandbox_id,
-                    thread_id=thread_id if isinstance(thread_id, str) else None,
-                    payload=notice,
-                )
         except Exception:
             complete = False
             logger.exception(
@@ -176,8 +170,9 @@ async def sandbox_notes(
 
     The browser note at a chat's first turn on a host whose image has the
     browser. The incidents the chat has not been told, at any turn: the mark
-    moves the chat's cursor only once this attempt's ``started`` event is
-    stored, so a claim that never starts tells them again.
+    moves the chat's cursor only once this attempt's ``turn_started`` event is
+    stored, which the runner writes once the prompt was dispatched, so a
+    claim whose prompt never went out tells them again.
     """
     thread_id = str(claim["thread_id"])
     attempt_id = int(claim["attempt_id"])

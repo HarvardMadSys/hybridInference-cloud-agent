@@ -49,8 +49,11 @@ async def append_attempt_events(
             await conn.execute(
                 "UPDATE agent_attempts SET terminal_ready = FALSE WHERE id = $1", attempt_id
             )
-        elif phase == "started":
-            # The prompt is in use: what it told of the sandbox's incidents is told.
+        elif phase == "turn_started":
+            # The runner writes this once the sandbox manager has dispatched the
+            # prompt, not at ``started`` (the container), before which the
+            # workspace, uploads and runtime may still fail: only now is what
+            # the prompt told of the sandbox's incidents told.
             await conn.execute(ADVANCE_INCIDENT_CURSOR_SQL, attempt_id)
         event_ids.append(
             await insert_event(

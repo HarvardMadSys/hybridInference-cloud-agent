@@ -3,6 +3,14 @@
 Incidents are ``incident.<kind>`` rows of ``agent_sandbox_events``, stored with
 ``source = 'host'``. The unique index on ``(sandbox_id, details->>'incident_id')``
 (migration ``0113_sandbox_incidents``) makes a row a host sends again a no-op.
+
+A row and the notices it puts in running turns commit together. A notice that
+cannot be written rolls its rows back, so the heartbeat is not confirmed and
+the host sends them again, and the retry stores and notifies them afresh; a
+row that committed was notified, so its replay notifies nobody twice. The
+transaction inserts its rows first and then locks the running attempts in id
+order: no runner append, which locks an attempt and writes job events, waits
+on anything this holds.
 """
 
 from __future__ import annotations
@@ -26,13 +34,13 @@ RETURNING id
 """
 
 _RUNNING_TURNS_SQL = """
-SELECT a.id AS attempt_id, a.lease_generation
+SELECT a.id AS attempt_id, a.lease_generation, m.thread_id
 FROM agent_thread_sandbox_memberships m
 JOIN agent_attempts a ON a.id = m.active_attempt_id
 WHERE m.sandbox_id = $1
-  AND ($2::text IS NULL OR m.thread_id = $2)
   AND a.status = 'running'
   AND a.lease_expires_at > clock_timestamp()
+ORDER BY a.id
 """
 
 _CURSOR_SQL = """
@@ -62,6 +70,13 @@ WHERE sandbox_id = $1 AND id > $2 AND id <= $3
   AND (details->>'scope' = 'sandbox' OR details->>'thread_id' = $5)
 """
 
+#: A chat whose cursor the membership trigger did not start starts here.
+_START_SQL = """
+INSERT INTO agent_thread_incident_cursors (thread_id, told_through)
+VALUES ($1, $2)
+ON CONFLICT (thread_id) DO NOTHING
+"""
+
 _MARK_SQL = """
 INSERT INTO agent_attempt_incident_marks (attempt_id, thread_id, through_id)
 VALUES ($1, $2, $3)
@@ -89,7 +104,14 @@ class PostgresSandboxIncidentRepository:
         generation: int,
         incidents: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Store a host's rows for a sandbox that host holds; the rows newly stored."""
+        """Store a host's rows for a sandbox it holds, with their notices; the rows newly stored.
+
+        Each row is ``{event_type, details, notice?}``. A ``notice`` is
+        ``{payload, thread_id}``: the ``lifecycle`` payload to append to the
+        running turns it concerns, every member's or only ``thread_id``'s. It
+        is appended only for a row stored now, in the same transaction, to
+        each turn whose lease is still live.
+        """
         if not incidents:
             return []
         stored: list[dict[str, Any]] = []
@@ -109,25 +131,10 @@ class PostgresSandboxIncidentRepository:
                 )
                 if event_id is not None:
                     stored.append({"id": int(event_id), **incident})
+            notices = [row["notice"] for row in stored if row.get("notice")]
+            if notices:
+                await _notify_running_turns(conn, sandbox_id, notices)
         return stored
-
-    async def notify_running_turns(
-        self, *, sandbox_id: str, thread_id: str | None, payload: Mapping[str, Any]
-    ) -> int:
-        """Append a ``lifecycle`` notice to the running turns it concerns; how many."""
-        async with self._pool.acquire() as conn:
-            turns = await conn.fetch(_RUNNING_TURNS_SQL, sandbox_id, thread_id)
-        notified = 0
-        for turn in turns:
-            async with self._pool.acquire() as conn, conn.transaction():
-                ids = await append_attempt_events(
-                    conn,
-                    attempt_id=int(turn["attempt_id"]),
-                    lease_generation=int(turn["lease_generation"]),
-                    events=(("lifecycle", dict(payload), None),),
-                )
-            notified += ids is not None
-        return notified
 
     async def untold_incidents(
         self, *, thread_id: str, kinds: Sequence[str], limit: int
@@ -135,11 +142,17 @@ class PostgresSandboxIncidentRepository:
         """The incidents ``thread_id`` has not been told, of ``kinds``."""
         async with self._pool.acquire() as conn:
             cursor = await conn.fetchrow(_CURSOR_SQL, thread_id)
-            if cursor is None or cursor["newest"] is None:
+            if cursor is None:
+                return None  # in no sandbox
+            if cursor["told_through"] is None:
+                # The membership's trigger starts every cursor; one it did not
+                # start begins after everything already recorded, explicitly,
+                # so the next incident is the first it is told.
+                await conn.execute(_START_SQL, thread_id, int(cursor["newest"] or 0))
+                return None
+            if cursor["newest"] is None:
                 return None
             newest = int(cursor["newest"])
-            if cursor["told_through"] is None:
-                return {"through_id": newest, "rows": [], "total": 0}
             told = int(cursor["told_through"])
             if told >= newest:
                 return {"through_id": told, "rows": [], "total": 0}
@@ -163,9 +176,29 @@ class PostgresSandboxIncidentRepository:
     async def mark_attempt_incidents(
         self, *, attempt_id: int, thread_id: str, through_id: int
     ) -> None:
-        """Record what an attempt's prompt told; its ``started`` event moves the cursor there."""
+        """Record what an attempt's prompt told; its ``turn_started`` moves the cursor there."""
         async with self._pool.acquire() as conn:
             await conn.execute(_MARK_SQL, attempt_id, thread_id, through_id)
+
+
+async def _notify_running_turns(
+    conn: Any, sandbox_id: str, notices: Sequence[Mapping[str, Any]]
+) -> None:
+    """Append each notice to the running turns it concerns, one locked append per turn."""
+    for turn in await conn.fetch(_RUNNING_TURNS_SQL, sandbox_id):
+        events = tuple(
+            ("lifecycle", dict(notice["payload"]), None)
+            for notice in notices
+            if notice.get("thread_id") in (None, turn["thread_id"])
+        )
+        if events:
+            # ``None``: the turn lost its lease meanwhile, and is not told.
+            await append_attempt_events(
+                conn,
+                attempt_id=int(turn["attempt_id"]),
+                lease_generation=int(turn["lease_generation"]),
+                events=events,
+            )
 
 
 __all__ = ["PostgresSandboxIncidentRepository"]

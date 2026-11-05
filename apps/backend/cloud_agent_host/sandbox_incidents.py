@@ -18,14 +18,21 @@ Three sources, one outbox (``docs/agents/specs/2026-11-04-sandbox-incidents.md``
 Each observation becomes a final row (``cloud_agent_shared.sandbox_incidents``):
 the first of a kind for a subject at once, repeats within the next minute as
 one ``.repeated`` row when the window closes, and rows past a sandbox's hourly
-cap as one ``dropped`` row. Nothing is counted by changing a sent row. The
-outbox holds a sandbox's rows until a heartbeat answer confirms them, so a
-failed beat sends them again and the control plane's unique index makes the
-replay a no-op. A restarted host loses what it had not sent.
+cap as one ``dropped`` row. Nothing is counted by changing a sent row. An
+observation is counted once, by the id of what it came from: Docker replays
+its last events after a reconnect, and a replay is neither a new incident nor
+a repeat. The outbox holds a sandbox's rows until a heartbeat answer confirms
+them, so a failed beat sends them again and the control plane's unique index
+makes the replay a no-op. A restarted host loses what it had not sent.
 
 A member-scoped row (an MCP program, which runs per slot) carries the
-``thread_id`` of the member holding that slot when the journal is read, at
-most a minute after the failure.
+``thread_id`` of the member it happened to. A slot is reused, so that is not
+read off the slot when the journal is read: the runner journals the digest of
+the credential of the member it served (its admission's ``token_sha256``), and
+the host knows whose credential that was from admitting it
+(:data:`MEMBER_CREDENTIALS`). A failure whose credential the host never
+admitted, or has forgotten since it restarted, is attributed to nobody and not
+recorded.
 """
 
 from __future__ import annotations
@@ -34,7 +41,7 @@ import contextlib
 import json
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -71,6 +78,11 @@ REARM_SHARE = 0.8
 #: A ``die`` within this long of Docker's ``kill`` for the same container was asked for.
 KILL_GRACE_S = 120.0
 MAX_TARGETS = 4096
+#: Source ids remembered so a replay is not counted again: far more than one
+#: replay window can bring back.
+MAX_SEEN = 8192
+#: Member credentials remembered for attribution: many residencies per slot.
+MAX_MEMBER_CREDENTIALS = 4096
 #: The resident states in which a member holds its slot.
 _HOLDS_SLOT = frozenset({"starting", "live", "restarting"})
 
@@ -137,6 +149,48 @@ class _Window:
     repeats: int = 0
 
 
+class MemberCredentials:
+    """Whose credential each admitted digest is, per sandbox; bounded. Thread-safe.
+
+    The host admits a member's MCP servers with that member's credential
+    (``cloud_agent_host.sandbox_mcp``), so it knows then, and only then, which
+    chat a digest belongs to and which slot it was admitted to. A digest is one
+    residency's: a member that comes back has a new one, so an old failure
+    keeps its old owner however its slot was reused.
+    """
+
+    def __init__(self, limit: int = MAX_MEMBER_CREDENTIALS) -> None:
+        """An empty registry holding at most ``limit`` digests."""
+        self._limit = limit
+        self._lock = threading.Lock()
+        self._members: OrderedDict[tuple[str, str], tuple[str, int]] = OrderedDict()
+
+    def admitted(self, sandbox_id: str, digest: str, *, thread_id: str, slot: int) -> None:
+        """Remember that ``digest`` is ``thread_id``'s, admitted to ``slot``."""
+        with self._lock:
+            self._members[(sandbox_id, digest)] = (thread_id, slot)
+            self._members.move_to_end((sandbox_id, digest))
+            while len(self._members) > self._limit:
+                self._members.popitem(last=False)
+
+    def thread(self, sandbox_id: str, digest: str) -> str | None:
+        """The chat whose credential ``digest`` is, in that sandbox; ``None`` if unknown."""
+        with self._lock:
+            found = self._members.get((sandbox_id, digest))
+        return None if found is None else found[0]
+
+    def slots(self, sandbox_id: str) -> set[int]:
+        """Every slot a member of the sandbox was admitted to: its journal may hold failures."""
+        with self._lock:
+            return {
+                slot for (sandbox, _), (_, slot) in self._members.items() if sandbox == sandbox_id
+            }
+
+
+#: The host's one registry: admissions and journal reads run in one process.
+MEMBER_CREDENTIALS = MemberCredentials()
+
+
 class IncidentOutbox:
     """Final rows per sandbox, from observations; held until confirmed. Thread-safe."""
 
@@ -144,6 +198,8 @@ class IncidentOutbox:
         """An empty outbox; ``clock`` is wall time, as rows carry it."""
         self._clock = clock
         self._lock = threading.Lock()
+        #: The observations already counted, by their source's id; bounded.
+        self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._rows: dict[str, deque[SandboxIncident]] = {}
         self._windows: dict[tuple[str, str, str, str], _Window] = {}
         #: Rows sent per (sandbox, hour), and rows dropped there.
@@ -167,6 +223,14 @@ class IncidentOutbox:
             return  # nobody to tell: the slot's member is gone
         key = (sandbox_id, kind, thread_id or "", subject)
         with self._lock:
+            # A replayed source event (Docker's ``since`` after a reconnect, a
+            # journal line read twice) is the same observation, counted once,
+            # even after its row was confirmed and forgotten.
+            if (sandbox_id, incident_id) in self._seen:
+                return
+            self._seen[(sandbox_id, incident_id)] = None
+            while len(self._seen) > MAX_SEEN:
+                self._seen.popitem(last=False)
             window = self._windows.get(key)
             if window is not None and observed_at - window.started < WINDOW_S:
                 window.repeats += 1
@@ -242,6 +306,8 @@ class IncidentOutbox:
                     del self._rows[sandbox_id]
             for key in [key for key in self._windows if key[0] not in sandbox_ids]:
                 del self._windows[key]
+            for seen in [seen for seen in self._seen if seen[0] not in sandbox_ids]:
+                del self._seen[seen]
 
     def _close_locked(self, sandbox_id: str, window: _Window) -> None:
         if not window.repeats:
@@ -293,10 +359,12 @@ class SandboxIncidents:
         clock: Callable[[], float] = time.time,
         client_factory: Callable[[], httpx.Client] | None = None,
         drain_interval_s: float = DRAIN_INTERVAL_S,
+        members: MemberCredentials = MEMBER_CREDENTIALS,
     ) -> None:
         """``read_journals(sandbox_id, request)`` runs :data:`DRAIN_SCRIPT` in that sandbox."""
         self.outbox = IncidentOutbox(clock=clock)
         self._read_journals = read_journals
+        self._members = members
         self._clock = clock
         self._client_factory = client_factory or (lambda: daemon_client(timeout_s=10.0))
         self._drain_interval_s = drain_interval_s
@@ -529,7 +597,10 @@ class SandboxIncidents:
             target = self._targets.get(sandbox_id)
             if target is None or not target.running:
                 return 0
-            paths = [BROWSER_JOURNAL, *(slot_journal(slot) for slot in sorted(target.slots))]
+            # Every slot a member was ever admitted to, not only the slots held
+            # now: a member that stopped may have left a failure behind.
+            slots = set(target.slots) | self._members.slots(sandbox_id)
+            paths = [BROWSER_JOURNAL, *(slot_journal(slot) for slot in sorted(slots))]
             cursors = {path: list(self._cursors.get((sandbox_id, path), ("", 0))) for path in paths}
         request = json.dumps({"journals": cursors, "budget": MAX_DRAIN_BYTES}).encode()
         raw = self._read_journals(sandbox_id, request)
@@ -576,17 +647,20 @@ class SandboxIncidents:
             return
         if kind != "mcp_server_failed" or path == BROWSER_JOURNAL:
             return
-        slot = _slot_of(path)
         alias = entry.get("alias")
         phase = entry.get("phase")
-        if slot is None or not isinstance(alias, str) or phase not in MCP_PHASES:
+        member = entry.get("member")
+        if _slot_of(path) is None or not isinstance(alias, str) or phase not in MCP_PHASES:
             return
+        # Whose failure it was is fixed by the credential the runner served
+        # then, never by who holds the slot now; an unknown one is nobody's.
+        thread_id = self._members.thread(target.sandbox_id, member) if member else None
         self.outbox.observe(
             target.sandbox_id,
             "mcp_server_failed",
             incident_id=incident_id,
             observed_at=observed_at,
-            thread_id=target.slots.get(slot),
+            thread_id=thread_id,
             subject=f"{alias[:40]}:{phase}",
             details={"alias": alias[:40], "phase": phase, "exit_code": exit_code, "signal": signal},
         )

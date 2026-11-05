@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class SandboxIncidentRepository(Protocol):
-    """Port: store incidents, notify running turns, and track what a chat was told."""
+    """Port: store incidents with their notices, and track what a chat was told."""
 
     async def record_sandbox_incidents(
         self,
@@ -28,19 +28,15 @@ class SandboxIncidentRepository(Protocol):
     ) -> list[dict[str, Any]]:
         """Store a host's rows for a sandbox that host holds; the rows newly stored.
 
-        Each row is ``{event_type, details}``. A row whose ``incident_id`` is
-        already stored is not stored again and is not returned. A sandbox the
-        host does not hold stores nothing.
-        """
-        ...
+        Each row is ``{event_type, details, notice?}``. A row whose
+        ``incident_id`` is already stored is not stored again and is not
+        returned. A sandbox the host does not hold stores nothing.
 
-    async def notify_running_turns(
-        self, *, sandbox_id: str, thread_id: str | None, payload: Mapping[str, Any]
-    ) -> int:
-        """Append a ``lifecycle`` notice to the running turns it concerns; how many.
-
-        Every member's running turn in the sandbox, or only ``thread_id``'s.
-        Each append is fenced by its attempt's live lease.
+        A ``notice`` (``{payload, thread_id}``) is a ``lifecycle`` payload for
+        the running turns the row concerns: every member's, or only
+        ``thread_id``'s. It is appended, lease-fenced, in the transaction that
+        stores the row, so either both happen or neither does, and a row
+        stored once is never notified twice.
         """
         ...
 
@@ -61,5 +57,5 @@ class SandboxIncidentRepository(Protocol):
     async def mark_attempt_incidents(
         self, *, attempt_id: int, thread_id: str, through_id: int
     ) -> None:
-        """Record what an attempt's prompt told; its ``started`` event moves the cursor there."""
+        """Record what an attempt's prompt told; its ``turn_started`` moves the cursor there."""
         ...

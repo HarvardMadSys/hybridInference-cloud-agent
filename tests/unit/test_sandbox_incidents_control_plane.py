@@ -49,7 +49,6 @@ class Store:
         self.fail = fail
         self.untold = untold
         self.recorded: list[dict] = []
-        self.notified: list[dict] = []
         self.marked: list[dict] = []
 
     async def record_sandbox_incidents(self, **kwargs: Any) -> list[dict[str, Any]]:
@@ -57,10 +56,6 @@ class Store:
             raise RuntimeError("database away")
         self.recorded.append(kwargs)
         return [{"id": n + 1, **row} for n, row in enumerate(kwargs["incidents"])]
-
-    async def notify_running_turns(self, **kwargs: Any) -> int:
-        self.notified.append(kwargs)
-        return 1
 
     async def untold_incidents(self, **kwargs: Any) -> dict | None:
         return self.untold
@@ -117,8 +112,12 @@ async def test_new_rows_that_broke_a_turn_are_shown_in_the_turns_they_concern() 
     details = recorded["incidents"][3]["details"]
     assert details["thread_id"] == "th-1" and details["incident_id"].startswith("id-")
     assert details["observed_at"].startswith("2027-")
-    # A repeat summary and a peak are not shown; a member's failure goes to that member.
-    assert [(note["thread_id"], note["payload"]) for note in store.notified] == [
+    # Each row carries its notice to the store, which writes both in one
+    # transaction. A repeat summary and a peak are not shown; a member's
+    # failure goes to that member.
+    notices = [row.get("notice") for row in recorded["incidents"]]
+    assert notices[1:3] == [None, None]
+    assert [(note["thread_id"], note["payload"]) for note in (notices[0], notices[3])] == [
         (None, {"phase": "sandbox_incident", "incident": "out_of_memory"}),
         (
             "th-1",

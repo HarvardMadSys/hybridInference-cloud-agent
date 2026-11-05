@@ -68,10 +68,6 @@ class AllCapabilities:
         """Legacy fixtures store no sandbox incident."""
         return []
 
-    async def notify_running_turns(self, **_kwargs: Any) -> int:
-        """Legacy fixtures have no running turn to tell of an incident."""
-        return 0
-
     async def untold_incidents(self, **_kwargs: Any) -> dict[str, Any] | None:
         """Legacy fixtures' sandboxes have no incident to tell."""
         return None

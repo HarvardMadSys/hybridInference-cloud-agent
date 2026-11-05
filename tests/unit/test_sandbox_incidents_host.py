@@ -26,8 +26,10 @@ from cloud_agent_host.sandbox_incidents import (
     BROWSER_JOURNAL,
     DRAIN_SCRIPT,
     HOURLY_CAP,
+    MAX_SEEN,
     OUTBOX_MAX,
     IncidentOutbox,
+    MemberCredentials,
     SandboxIncidents,
     slot_journal,
 )
@@ -118,8 +120,20 @@ def test_a_member_incident_with_no_member_is_not_recorded() -> None:
 # -- Docker events -----------------------------------------------------------------
 
 
-def _observer(read=lambda _sandbox, _request: None) -> SandboxIncidents:
-    incidents = SandboxIncidents(read_journals=read, clock=Clock())
+#: Members' credential digests, as the slot's admission names them.
+A, B, OLD, NEW = ("a" * 64, "b" * 64, "0" * 64, "1" * 64)
+
+
+def _members(*admitted: tuple[str, str, int]) -> MemberCredentials:
+    members = MemberCredentials()
+    for digest, thread_id, slot in admitted:
+        members.admitted("sb", digest, thread_id=thread_id, slot=slot)
+    return members
+
+
+def _observer(read=lambda _sandbox, _request: None, members=None) -> SandboxIncidents:
+    members = members or _members((A, "thread-a", 0), (B, "thread-b", 1))
+    incidents = SandboxIncidents(read_journals=read, clock=Clock(), members=members)
     incidents.sync(
         [{"sandbox_id": "sb", "container_id": CONTAINER, "running": True}],
         {"sb": {0: "thread-a", 1: "thread-b"}},
@@ -160,6 +174,107 @@ def test_another_containers_events_are_ignored() -> None:
     assert incidents.pending("sb") == []
 
 
+# -- replays are counted once ---------------------------------------------------------
+
+
+def test_a_replayed_docker_event_is_not_a_repeat() -> None:
+    """Review P2: Docker replays from ``since`` after a reconnect; one OOM, not two."""
+    incidents = _observer()
+    for _ in range(2):
+        incidents.handle_event(_event("oom", 100))
+    incidents.outbox._clock.now += 120  # the window closes
+    incidents.outbox.tick()
+    assert [row["kind"] for row in incidents.pending("sb")] == ["out_of_memory"]
+
+
+def test_a_replay_after_its_row_was_confirmed_is_still_the_same_observation() -> None:
+    incidents = _observer()
+    incidents.handle_event(_event("oom", 100))
+    [row] = incidents.pending("sb")
+    incidents.confirm({"sb": [row["incident_id"]]})
+    incidents.handle_event(_event("oom", 100))
+    incidents.outbox._clock.now += 3600
+    incidents.outbox.tick()
+    assert incidents.pending("sb") == []
+
+
+def test_two_different_events_in_a_window_are_one_row_and_a_repeat() -> None:
+    incidents = _observer()
+    incidents.handle_event(_event("oom", 100))
+    incidents.handle_event(_event("oom", 130))
+    incidents.handle_event(_event("oom", 130))  # that one's replay
+    incidents.outbox._clock.now += 3600
+    incidents.outbox.tick()
+    rows = incidents.pending("sb")
+    assert [(row["kind"], row["count"]) for row in rows] == [
+        ("out_of_memory", 1),
+        ("out_of_memory.repeated", 1),
+    ]
+
+
+def test_what_was_seen_is_bounded() -> None:
+    outbox = IncidentOutbox(clock=Clock())
+    for n in range(MAX_SEEN + 10):
+        outbox.observe("sb", "memory_high", incident_id=f"m-{n}", observed_at=1.0, subject=str(n))
+    assert len(outbox._seen) == MAX_SEEN
+    outbox.forget(set())
+    assert not outbox._seen
+
+
+# -- whose MCP failure it was ------------------------------------------------------------
+
+
+def _mcp(member: str, seq: int) -> str:
+    return _line("slot0", seq, "mcp_server_failed", member=member, alias="docs", phase="crashed")
+
+
+def test_a_failure_stays_with_its_member_after_the_slot_is_reused() -> None:
+    """Review P2: old-thread failed, new-thread took slot 0, and the drain blamed new-thread."""
+    members = _members((OLD, "old-thread", 0))
+    reply = {slot_journal(0): [_mcp(OLD, 1)]}
+    incidents = _observer(lambda *_: json.dumps(reply).encode(), members=members)
+    # old-thread leaves; new-thread takes the slot before the journal is read.
+    members.admitted("sb", NEW, thread_id="new-thread", slot=0)
+    incidents.sync(
+        [{"sandbox_id": "sb", "container_id": CONTAINER, "running": True}],
+        {"sb": {0: "new-thread"}},
+    )
+    incidents.drain("sb")
+    assert [row["thread_id"] for row in incidents.pending("sb")] == ["old-thread"]
+
+
+def test_a_stopped_members_journal_is_still_read_and_still_its_own() -> None:
+    members = _members((OLD, "old-thread", 3))
+    requests: list[dict] = []
+
+    def read(_sandbox: str, request: bytes) -> bytes:
+        requests.append(json.loads(request))
+        return json.dumps({slot_journal(3): [_mcp(OLD, 1)]}).encode()
+
+    incidents = _observer(read, members=members)
+    incidents.sync([{"sandbox_id": "sb", "container_id": CONTAINER, "running": True}], {"sb": {}})
+    incidents.drain("sb")
+    assert slot_journal(3) in requests[0]["journals"]  # no member holds slot 3 now
+    assert [row["thread_id"] for row in incidents.pending("sb")] == ["old-thread"]
+
+
+def test_failures_in_one_slot_go_to_whichever_member_each_was_served_to() -> None:
+    members = _members((OLD, "old-thread", 0), (NEW, "new-thread", 0))
+    reply = {slot_journal(0): [_mcp(OLD, 1), _mcp(NEW, 2)]}
+    incidents = _observer(lambda *_: json.dumps(reply).encode(), members=members)
+    incidents.drain("sb")
+    assert [row["thread_id"] for row in incidents.pending("sb")] == ["old-thread", "new-thread"]
+
+
+def test_the_member_registry_is_bounded_and_keeps_the_newest() -> None:
+    members = MemberCredentials(limit=2)
+    for n in range(3):
+        members.admitted("sb", str(n), thread_id=f"t{n}", slot=n)
+    assert members.thread("sb", "0") is None
+    assert (members.thread("sb", "2"), members.slots("sb")) == ("t2", {1, 2})
+    assert members.thread("other", "2") is None
+
+
 # -- peaks ---------------------------------------------------------------------------
 
 
@@ -192,12 +307,14 @@ def _line(journal: str, seq: int, kind: str, **fields) -> str:
     )
 
 
-def test_journals_are_read_from_their_cursor_and_mapped_to_the_slots_member() -> None:
+def test_journals_are_read_from_their_cursor_and_owned_by_the_member_served() -> None:
     requests: list[dict] = []
     replies = [
         {
             BROWSER_JOURNAL: [_line("j1", 1, "browser_crashed", exit_code=None, signal=11)],
-            slot_journal(1): [_line("k1", 1, "mcp_server_failed", alias="docs", phase="start")],
+            slot_journal(1): [
+                _line("k1", 1, "mcp_server_failed", member=B, alias="docs", phase="start")
+            ],
         },
         {BROWSER_JOURNAL: [_line("j1", 1, "browser_crashed"), _line("j1", 2, "browser_crashed")]},
     ]
@@ -225,7 +342,13 @@ def test_journals_are_read_from_their_cursor_and_mapped_to_the_slots_member() ->
 def test_an_unknown_or_malformed_journal_line_is_ignored() -> None:
     reply = {
         BROWSER_JOURNAL: ["not json", _line("j", 1, "something_else")],
-        slot_journal(0): [_line("k", 1, "mcp_server_failed", alias="docs", phase="install-ish")],
+        slot_journal(0): [
+            _line("k", 1, "mcp_server_failed", member=A, alias="docs", phase="install-ish"),
+            # A line without the member it happened to is nobody's.
+            _line("k", 2, "mcp_server_failed", alias="docs", phase="start"),
+            # Nor one whose credential this host never admitted, or forgot.
+            _line("k", 3, "mcp_server_failed", member="f" * 64, alias="docs", phase="start"),
+        ],
         "/etc/passwd": [_line("z", 1, "browser_crashed")],
     }
     incidents = _observer(lambda *_: json.dumps(reply).encode())
