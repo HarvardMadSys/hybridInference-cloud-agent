@@ -16,6 +16,7 @@ from uuid import UUID
 
 from pydantic import SecretStr
 
+from cloud_agent.application.compute_diagnostic_values import _safe_observed_at, _safe_uuid_fields
 from cloud_agent.application.compute_release import (
     EXPIRED_NOT_FOUND,
     NEVER_CREATED,
@@ -224,7 +225,7 @@ _SAFE_PROVIDER_REASONS = {
 }
 
 
-def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:  # noqa: PLR0912 complexity baseline, #771
+def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:
     """Validate provider diagnostic values as well as their field names."""
     details: dict[str, str | int | bool] = {}
     operation = source.get("provider_operation")
@@ -236,13 +237,7 @@ def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]
     reason = source.get("provider_reason_code")
     if isinstance(reason, str) and reason in _SAFE_PROVIDER_REASONS:
         details["provider_reason_code"] = reason
-    for key in ("provider_request_id", "external_id", "submission_request_id"):
-        value = source.get(key)
-        if isinstance(value, str):
-            try:
-                details[key] = str(UUID(value))
-            except ValueError:
-                continue
+    details.update(_safe_uuid_fields(source))
     status = source.get("submission_http_status")
     if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
         details["submission_http_status"] = status
@@ -257,15 +252,9 @@ def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]
         value = source.get(key)
         if isinstance(value, str) and _safe_diagnostic_label(value):
             details[key] = value
-    observed_at = source.get("provider_observed_at")
-    if isinstance(observed_at, str):
-        try:
-            parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-        except ValueError:
-            pass
-        else:
-            if parsed.tzinfo is not None:
-                details["provider_observed_at"] = observed_at[:64]
+    observed_at = _safe_observed_at(source.get("provider_observed_at"))
+    if observed_at is not None:
+        details["provider_observed_at"] = observed_at
     return details
 
 
