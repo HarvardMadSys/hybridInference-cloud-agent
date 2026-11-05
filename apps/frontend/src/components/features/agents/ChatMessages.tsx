@@ -118,15 +118,12 @@ function ToolIcon({ tool }: { tool: string }) {
 }
 
 // What a first run's milestones mean, said once: on the first turn of the
-// owner's first conversation, and never again. The rest need no gloss, and a
-// later turn's publishing updates the draft PR rather than opening one.
+// owner's first conversation, and never again. The rest need no gloss.
 const FIRST_RUN_CAPTIONS: Partial<Record<string, TranslationKey>> = {
   started: 'firstRun.started',
   workspace_preparing: 'firstRun.preparing',
   checked_out: 'firstRun.checkedOut',
   workspace_created: 'firstRun.workspaceCreated',
-  publishing: 'firstRun.publishing',
-  shared_snapshot_publishing: 'firstRun.publishing',
 };
 
 function LifecycleRow({

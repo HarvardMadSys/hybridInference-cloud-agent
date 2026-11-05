@@ -24,6 +24,7 @@ from cloud_agent.storage.repositories.conversation_queries import PostgresConver
 from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
 from cloud_agent.storage.repositories.file_activity import PostgresFileActivityQueries
+from cloud_agent.storage.repositories.github_relay import PostgresGitHubRelayRepository
 from cloud_agent.storage.repositories.goal_wakeups import PostgresGoalWakeupRepository
 from cloud_agent.storage.repositories.goals import PostgresGoalRepository
 from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
@@ -54,7 +55,6 @@ from cloud_agent.storage.repositories.sandbox import PostgresSandboxRepository
 from cloud_agent.storage.repositories.session_fork import PostgresSessionForkRepository
 from cloud_agent.storage.repositories.settings import PostgresSettingsRepository
 from cloud_agent.storage.repositories.skills import PostgresSkillRepository
-from cloud_agent.storage.repositories.snapshot import PostgresSnapshotRepository
 from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
 from cloud_agent.storage.repositories.ssh_servers import PostgresSshServerRepository
 from cloud_agent.storage.repositories.team_admin import PostgresTeamAdminQueries
@@ -77,6 +77,7 @@ __all__ = [
     "PostgresCredentialQueries",
     "PostgresExecutionQueries",
     "PostgresFileActivityQueries",
+    "PostgresGitHubRelayRepository",
     "PostgresGoalRepository",
     "PostgresGoalWakeupRepository",
     "PostgresHostCapacityRepository",
@@ -98,7 +99,6 @@ __all__ = [
     "PostgresSessionForkRepository",
     "PostgresSettingsRepository",
     "PostgresSkillRepository",
-    "PostgresSnapshotRepository",
     "PostgresSourceControlRepository",
     "PostgresSshServerRepository",
     "PostgresTeamAdminQueries",

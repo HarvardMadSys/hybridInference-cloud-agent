@@ -41,9 +41,15 @@ from cloud_agent_host.drivers import (
     TurnResult,
     get_driver,
 )
+from cloud_agent_host.github_relay_env import github_relay_env
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
 from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
+from cloud_agent_host.platform_instructions import (
+    claude_attribution,
+    platform_instructions,
+    with_platform_instructions,
+)
 from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
@@ -51,7 +57,10 @@ from cloud_agent_host.sandbox_browser import ensure_browser_service
 from cloud_agent_host.sandbox_mcp import admit_sandbox_mcp
 from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
-from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
+from cloud_agent_shared.shared_protocol import (
+    is_residency_github_credential,
+    is_residency_mcp_credential,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -188,10 +197,17 @@ class ResidentLaunch:
     slot_id: int = 0
     residency_generation: int = 0
     plugins: tuple[dict[str, str], ...] = ()
-    # Short-lived, single-repository, contents/PR write GitHub App token. Kept in
-    # this member's environment, never in shared workspace or image config.
-    github_token: str | None = field(default=None, repr=False)
+    # The residency's GitHub relay placeholder (``agh.``), which only the
+    # GitHub relay accepts. Kept in this member's environment, never in shared
+    # workspace or image config. Like ``mcp_credential`` it names the
+    # residency, so a probe carries none and borrows a live process's.
+    github_credential: str = field(default="", repr=False)
     github_repo: str = ""
+    # The owner as commit author, and the co-author line for the agent. Fixed
+    # per residency, like the credential they arrive with.
+    git_author_name: str = ""
+    git_author_email: str = ""
+    git_coauthor: str = ""
     environment: BoundEnvironment | None = field(default=None, repr=False)
     # The owner model connection the member runs on: its exact Base URL,
     # protocol, and ``<connection>@<revision>``. ``credential`` is that
@@ -383,6 +399,18 @@ class ResidentTransport(Generic[_RuntimeT_co]):
                 )
             )
         )
+        # A probe names no credential or identity: those arrive with the
+        # residency, and a live process keeps its own.
+        same_github = (
+            held.github_credential == launch.github_credential
+            and (held.git_author_name, held.git_author_email, held.git_coauthor)
+            == (launch.git_author_name, launch.git_author_email, launch.git_coauthor)
+        ) or (
+            not launch.github_credential
+            and (
+                not held.github_credential or is_residency_github_credential(held.github_credential)
+            )
+        )
         checks = (
             ("thread_id", held.thread_id == launch.thread_id),
             ("runtime_id", held.runtime_id == launch.runtime_id),
@@ -399,7 +427,7 @@ class ResidentTransport(Generic[_RuntimeT_co]):
             ),
             ("inference_local_token", held.inference_local_token == launch.inference_local_token),
             ("mcp", same_mcp),
-            ("github_token", held.github_token == launch.github_token),
+            ("github", same_github),
             ("github_repo", held.github_repo == launch.github_repo),
             ("environment", held.environment == launch.environment),
             ("slot_id", held.slot_id == launch.slot_id),
@@ -874,29 +902,12 @@ class ResidentTransportFactory:
             }
         )
         base_env.update(compat_token_env(launch.inference_local_token))
-        # Only the claim's repository-scoped token may authenticate gh. Do not
-        # fall back to a credential inherited from a custom host backend.
+        # Only the residency's GitHub relay placeholder may authenticate gh and
+        # git. Do not fall back to a credential inherited from a custom host
+        # backend.
         base_env.pop("GH_TOKEN", None)
         base_env.pop("GITHUB_TOKEN", None)
-        if launch.github_token:
-            base_env.update(
-                {
-                    "GH_TOKEN": launch.github_token,
-                    "GH_HOST": "github.com",
-                    "GH_PROMPT_DISABLED": "1",
-                    "GIT_TERMINAL_PROMPT": "0",
-                    # Reset inherited helpers before selecting gh. These
-                    # invocation-only settings never write credentials or
-                    # helper configuration into the shared .git directory.
-                    "GIT_CONFIG_COUNT": "3",
-                    "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
-                    "GIT_CONFIG_VALUE_1": "",
-                    "GIT_CONFIG_KEY_2": "credential.https://github.com.helper",
-                    "GIT_CONFIG_VALUE_2": "!gh auth git-credential",
-                }
-            )
-            if launch.github_repo:
-                base_env["GH_REPO"] = launch.github_repo
+        base_env.update(github_relay_env(launch))
         if launch.runtime_version:
             base_env["PATH"] = (
                 f"{runtime_bin_dir(runtime_id, launch.runtime_version)}:{base_env['PATH']}"
@@ -926,6 +937,7 @@ class ResidentTransportFactory:
             )
         activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
         base_env, inference_script = self._member_env(launch)
+        instructions = platform_instructions(launch)
 
         reaped = False
 
@@ -958,6 +970,7 @@ class ResidentTransportFactory:
                 self._prepare_runtime_helpers(spec, launch)
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
+            argv, env = with_platform_instructions(runtime_id, argv, env, instructions)
             return self._manager.spawn(
                 spec,
                 argv,
@@ -994,8 +1007,13 @@ class ResidentTransportFactory:
             state_dir=CHAT_STATE_DIR,
             session_state_dir=state_dir or CHAT_STATE_DIR,
             activation_dir=activation_dir,
+            # Claude's own commit attribution names the platform's co-author.
             install_tool_hooks=lambda update: self._manager.install_tool_hooks(
-                spec, update, slot_id=launch.slot_id, thread_id=launch.thread_id, batch=preparation
+                spec,
+                {**update, **claude_attribution(launch)},
+                slot_id=launch.slot_id,
+                thread_id=launch.thread_id,
+                batch=preparation,
             ),
             claude_config_dir=(
                 claude_member_config_dir(launch.slot_id, launch.thread_id)

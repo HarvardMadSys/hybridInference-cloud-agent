@@ -35,8 +35,7 @@
         "src/app/(agents)/admin/database/DatabaseExplorer.tsx",
         "src/app/(agents)/admin/usage/page.tsx",
         "src/app/(agents)/layout.tsx",
-        "src/components/features/agents/ArchiveProjectSection.tsx",
-        "src/components/features/agents/job-detail/RunOutcome.tsx"
+        "src/components/features/agents/ArchiveProjectSection.tsx"
       ],
       "rules": {
         "complexity": ["error", 16]
@@ -127,6 +126,7 @@
       "files": [
         "src/app/(agents)/admin/users/teams/\\[teamId\\]/page.tsx",
         "src/components/features/agents/conversationTurnNavigation.ts",
+        "src/components/features/agents/job-detail/JobTranscript.tsx",
         "src/components/features/agents/mcp/McpApprovalsProvider.tsx",
         "src/components/features/settings/ProfileSettings.tsx"
       ],
@@ -140,7 +140,6 @@
         "src/app/(agents)/admin/runs/\\[jobId\\]/page.tsx",
         "src/app/(agents)/admin/settings/AgentVersions.tsx",
         "src/components/features/agents/PendingMessageQueue.tsx",
-        "src/components/features/agents/job-detail/JobTranscript.tsx",
         "src/lib/api/client.ts"
       ],
       "rules": {
@@ -354,7 +353,7 @@
     {
       "files": ["src/components/features/agents/JobDetail.tsx"],
       "rules": {
-        "complexity": ["error", 96]
+        "complexity": ["error", 83]
       }
     },
     {
@@ -446,7 +445,7 @@
         "max-lines": [
           "error",
           {
-            "max": 932
+            "max": 881
           }
         ]
       }

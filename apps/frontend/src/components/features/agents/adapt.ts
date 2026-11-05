@@ -1452,8 +1452,8 @@ function adaptJob(
     repo: projectKey(job.repo),
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),
-    // Every turn in a conversation publishes to the same branch/PR. A
-    // temporary workspace publishes nothing, so it has no branch at all.
+    // The conversation workspace's local branch, shared by every turn. A
+    // temporary workspace has no repository, so it has no branch at all.
     branch:
       job.output_branch ??
       (job.repo === null ? '' : `agent/${job.thread_id ?? options.thread?.thread_id ?? job.id}`),
@@ -1479,12 +1479,7 @@ function adaptJob(
     ...(job.workspace_shared ? { workspaceShared: true } : {}),
     ...(job.native_state ? { nativeState: job.native_state } : {}),
     ...(job.native_fork_available ? { nativeForkAvailable: true } : {}),
-    ...(job.workspace_publication_state
-      ? { workspacePublicationState: job.workspace_publication_state }
-      : {}),
-    ...(job.workspace_publication_unchanged ? { workspacePublicationUnchanged: true } : {}),
     ...(job.workspace_pr_url ? { workspacePrUrl: job.workspace_pr_url } : {}),
-    ...(job.workspace_unpublished_changes ? { workspaceUnpublishedChanges: true } : {}),
     ...(typeof job.workspace_epoch === 'number' ? { workspaceEpoch: job.workspace_epoch } : {}),
     ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
     ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),

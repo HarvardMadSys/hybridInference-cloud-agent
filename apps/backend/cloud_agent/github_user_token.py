@@ -2,7 +2,7 @@
 
 Which repositories a user may work on is asked of GitHub *as that user* (see
 :mod:`cloud_agent.entitlement`), so every entitlement check needs a token that
-still works — including the ones the publisher and the goal controller make
+still works — including the ones the GitHub relay and the goal controller make
 hours after the user last looked at the page.
 
 An App that expires user tokens hands out eight-hour access tokens and

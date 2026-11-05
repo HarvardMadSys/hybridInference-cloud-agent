@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import copy
 import json
 from contextlib import asynccontextmanager
@@ -20,14 +18,6 @@ from cloud_agent_shared.environment import (
     environment_payload,
     uses_inference_names,
 )
-from cloud_agent_shared.git.base_bundle_stream import (
-    BASE_BUNDLE_CONTENT_TYPE,
-    BASE_BUNDLE_STREAM_CAPABILITY,
-    BASE_BUNDLE_STREAM_CHUNK_BYTES,
-    LEGACY_BASE_BUNDLE_CONTENT_TYPE,
-    MAX_BASE_BUNDLE_METADATA_BYTES,
-    encode_base_bundle_metadata,
-)
 from cloud_agent_shared.operation_profiling import (
     MAX_CONTEXT_CHARS,
     PROFILING_CONTEXT_HEADER,
@@ -40,7 +30,6 @@ from cloud_agent_shared.storable_text import storable_json
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
     from contextlib import AbstractAsyncContextManager
-    from typing import BinaryIO
 
 
 SHARED_SESSION_FORK_TIMEOUT_S = 180.0
@@ -48,7 +37,7 @@ SHARED_SESSION_FORK_TIMEOUT_S = 180.0
 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
 
 #: The most this process buffers from one sandbox manager reply that carries workspace
-#: content: a file or listing, Git inspection or a shared snapshot. The sandbox
+#: content: a file or listing, or Git inspection. The sandbox
 #: manager's own bounds, which a misbehaving host does not have to keep, stop
 #: those at 2 MiB of Git output plus 2 MiB of stderr, a 512 KiB preview or 5,000
 #: directory entries. JSON escapes a control byte as
@@ -59,55 +48,7 @@ MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 #: cut from protocol records of at most 8 MiB.
 MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
 #: The route suffixes whose replies are workspace content.
-_CONTENT_ROUTES = frozenset({"files", "git", "snapshot"})
-_LEGACY_BASE_BUNDLE_SUFFIX = b'"}'
-
-
-def _rewind_and_size(bundle: BinaryIO) -> int:
-    """Rewind a seekable bundle and return its exact byte length."""
-    bundle.seek(0, 2)
-    size = bundle.tell()
-    bundle.seek(0)
-    return size
-
-
-async def _base_bundle_body(prefix: bytes, bundle: BinaryIO) -> AsyncIterator[bytes]:
-    """Yield one framed request while keeping the source reusable on failure."""
-    bundle.seek(0)
-    try:
-        yield prefix
-        while chunk := await asyncio.to_thread(bundle.read, BASE_BUNDLE_STREAM_CHUNK_BYTES):
-            yield chunk
-    finally:
-        bundle.seek(0)
-
-
-def _legacy_base_bundle_prefix(metadata: Mapping[str, Any]) -> bytes:
-    """Encode the bounded prefix emitted by the previous JSON transport."""
-    encoded = json.dumps(metadata, ensure_ascii=True, separators=(",", ":")).encode("ascii")
-    if not encoded or len(encoded) > MAX_BASE_BUNDLE_METADATA_BYTES:
-        raise ValueError("base bundle metadata exceeds the transport limit")
-    separator = b"" if encoded == b"{}" else b","
-    return encoded[:-1] + separator + b'"bundle_b64":"'
-
-
-async def _legacy_base_bundle_body(prefix: bytes, bundle: BinaryIO) -> AsyncIterator[bytes]:
-    """Stream valid legacy JSON without materializing its base64 value."""
-    carry = b""
-    bundle.seek(0)
-    try:
-        yield prefix
-        while chunk := await asyncio.to_thread(bundle.read, BASE_BUNDLE_STREAM_CHUNK_BYTES):
-            payload = carry + chunk
-            complete = len(payload) - (len(payload) % 3)
-            if complete:
-                yield base64.b64encode(payload[:complete])
-            carry = payload[complete:]
-        if carry:
-            yield base64.b64encode(carry)
-        yield _LEGACY_BASE_BUNDLE_SUFFIX
-    finally:
-        bundle.seek(0)
+_CONTENT_ROUTES = frozenset({"files", "git"})
 
 
 async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
@@ -964,71 +905,6 @@ class SandboxManagerClient:
                 if source_launch.get("plugins") or target_launch.get("plugins")
                 else SHARED_SESSION_FORK_TIMEOUT_S
             ),
-        )
-
-    async def capture_shared_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Ask the owning host for one bounded, generation-fenced Git diff."""
-        payload = {
-            **identity_from_row(snapshot, members=snapshot["members"]),
-            "snapshot_id": snapshot["snapshot_id"],
-            "workspace_epoch": snapshot["workspace_epoch"],
-            "base_sha": snapshot["base_sha"],
-            **({"environment": snapshot["environment"]} if snapshot.get("environment") else {}),
-            **(
-                {"known_secrets": snapshot["known_secrets"]}
-                if snapshot.get("known_secrets")
-                else {}
-            ),
-        }
-        if snapshot.get("environment"):
-            await self.require_environment_capability(snapshot["environment"])
-        return await self._shared_sandbox_request(
-            "POST",
-            str(snapshot["origin_thread_id"]),
-            "snapshot",
-            json=payload,
-            timeout=120,
-        )
-
-    async def import_shared_base(
-        self,
-        snapshot: dict[str, Any],
-        *,
-        commit_sha: str,
-        bundle: BinaryIO,
-    ) -> dict[str, Any]:
-        """Stream trusted commit objects in the authenticated host's wire format."""
-        metadata = {
-            **identity_from_row(snapshot, members=snapshot["members"]),
-            "snapshot_id": snapshot["snapshot_id"],
-            "commit_sha": commit_sha,
-        }
-        size = _rewind_and_size(bundle)
-        if size <= 0:
-            raise ValueError("base bundle must be non-empty")
-        capabilities = await self._sandbox_manager_capabilities()
-        if BASE_BUNDLE_STREAM_CAPABILITY in capabilities:
-            prefix = encode_base_bundle_metadata(metadata)
-            content = _base_bundle_body(prefix, bundle)
-            content_type = BASE_BUNDLE_CONTENT_TYPE
-            content_length = len(prefix) + size
-        else:
-            # One rolling-upgrade window: old hosts accept only JSON, but the
-            # new control plane still emits its base64 value incrementally.
-            prefix = _legacy_base_bundle_prefix(metadata)
-            content = _legacy_base_bundle_body(prefix, bundle)
-            content_type = LEGACY_BASE_BUNDLE_CONTENT_TYPE
-            content_length = len(prefix) + 4 * ((size + 2) // 3) + len(_LEGACY_BASE_BUNDLE_SUFFIX)
-        return await self._shared_sandbox_request(
-            "POST",
-            str(snapshot["origin_thread_id"]),
-            "import-base",
-            content=content,
-            headers={
-                "Content-Type": content_type,
-                "Content-Length": str(content_length),
-            },
-            timeout=360,
         )
 
 

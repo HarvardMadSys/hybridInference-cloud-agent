@@ -18,7 +18,7 @@
     },
     {
       "files": ["src/components/features/agents/JobDetail.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 6438 }] }
+      "rules": { "max-lines": ["error", { "max": 6056 }] }
     },
     {
       "files": ["src/components/features/agents/TaskComposer.test.tsx"],
@@ -38,7 +38,7 @@
     },
     {
       "files": ["src/components/features/agents/adapt.test.ts"],
-      "rules": { "max-lines": ["error", { "max": 1880 }] }
+      "rules": { "max-lines": ["error", { "max": 1868 }] }
     },
     {
       "files": ["src/components/features/agents/ChatMessages.test.tsx"],
@@ -46,7 +46,7 @@
     },
     {
       "files": ["src/components/features/agents/useAgentJob.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1593 }] }
+      "rules": { "max-lines": ["error", { "max": 1577 }] }
     },
     {
       "files": ["src/app/(agents)/admin/measurements/page.test.tsx"],
@@ -70,7 +70,7 @@
     },
     {
       "files": ["src/lib/api/__tests__/agents.test.ts"],
-      "rules": { "max-lines": ["error", { "max": 1230 }] }
+      "rules": { "max-lines": ["error", { "max": 1218 }] }
     }
   ]
 }

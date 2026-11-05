@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 22:23-0400\n"
+"POT-Creation-Date: 2026-11-04 08:10-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -25,7 +25,9 @@ msgid ""
 "path from account sign-up to a real pull request. The check covers a "
 "Cloud Agent control plane, one runner host, a model provider the tester "
 "holds a key for, and a disposable GitHub repository."
-msgstr "这份手册用在一套可以随时丢弃的 staging 部署上，验证从账号注册一直到生成真实 pull request 的完整链路。涉及的范围是：一个 Cloud Agent 控制平面、一台 runner 主机、一个测试人员持有密钥的模型服务商，以及一个可以随时丢弃的 GitHub 仓库。"
+msgstr ""
+"这份手册用在一套可以随时丢弃的 staging 部署上，验证从账号注册一直到生成真实 pull request 的完整链路。涉及的范围是：一个 "
+"Cloud Agent 控制平面、一台 runner 主机、一个测试人员持有密钥的模型服务商，以及一个可以随时丢弃的 GitHub 仓库。"
 
 #: ../developer/smoke.md:8
 msgid ""
@@ -40,9 +42,12 @@ msgid ""
 "The local smoke creates the first administrator with the setup code the "
 "control plane logs, signs in with the account session, reads "
 "administration, and checks that nothing runs before the owner connects a "
-"model. It does not test live provider behavior or GitHub publication; "
+"model. It does not test live provider behavior or GitHub pull requests; "
 "this staging runbook checks those boundaries separately."
-msgstr "本地 smoke 用控制平面日志中的设置代码创建首个管理员，用账号会话登录，读取管理信息，并检查所有者连接模型之前什么都不会运行。真实服务商的行为和 GitHub 发布它测不到，这两处边界由这份 staging 手册单独检查。"
+msgstr ""
+"本地 smoke "
+"用控制平面日志中的设置代码创建首个管理员，用账号会话登录，读取管理信息，并检查所有者连接模型之前什么都不会运行。真实服务商的行为和 GitHub "
+"pull request 它测不到，这两处边界由这份 staging 手册单独检查。"
 
 #: ../developer/smoke.md:22
 msgid ""
@@ -50,7 +55,9 @@ msgid ""
 "a [dated record](../agents/reviews/2026-08-04-staging-smoke-runs.md). "
 "They used the retired Gateway sign-in and do not show that any current "
 "deployment passes."
-msgstr "这份清单在 2026-08 仓库拆分期间跑过的几次结果，保存为一份[带日期的记录](../agents/reviews/2026-08-04-staging-smoke-runs.md)。它们使用的是已退役的 Gateway 登录，并不能说明现在的任何一套部署能通过检查。"
+msgstr ""
+"这份清单在 2026-08 仓库拆分期间跑过的几次结果，保存为一份[带日期的记录](../agents/reviews/2026-08-04"
+"-staging-smoke-runs.md)。它们使用的是已退役的 Gateway 登录，并不能说明现在的任何一套部署能通过检查。"
 
 #: ../developer/smoke.md:26
 msgid "What a passing run proves"
@@ -60,18 +67,24 @@ msgstr "跑通一次能证明什么"
 msgid ""
 "A completed, passing run proves account sign-up and verification, "
 "waiting-list approval, administration, a verified model connection, "
-"enrollment, sandbox execution on the owner's connection, and GitHub "
-"publication for the recorded revision and environment. A successful job "
-"alone does not prove publication: the owner asks for it, and the "
-"publisher then processes an immutable workspace snapshot asynchronously."
-msgstr "完整跑通一次，能证明在所记录的版本和环境下，这些环节都是通的：账号注册和验证、等候名单审批、管理功能、经过验证的模型连接、主机注册、在所有者连接上的沙箱执行，以及 GitHub 发布。光是任务成功，并不能证明发布没问题：发布要由所有者主动发起，之后发布器再异步处理一份不可变的工作区快照。"
+"enrollment, sandbox execution on the owner's connection, and a pull "
+"request the agent opened as the owner, for the recorded revision and "
+"environment. A successful job alone does not prove the pull request: the "
+"agent pushes and opens one through the GitHub relay only when the owner "
+"asks."
+msgstr ""
+"完整跑通一次，能证明在所记录的版本和环境下，这些环节都是通的：账号注册和验证、等候名单审批、管理功能、经过验证的模型连接、主机注册、在所有者连接上的沙箱执行，以及"
+" agent 以所有者身份开的 pull request。光是任务成功，并不能证明 pull request 没问题：只有所有者要求时，agent"
+" 才会经 GitHub 中继推送并开 pull request。"
 
 #: ../developer/smoke.md:35
 msgid ""
 "The run does not cover concurrency, host loss, or every isolation "
 "boundary. Use [deployment reliability](deployment-reliability.md) and "
 "[native context recall](context-recall.md) for those separate checks."
-msgstr "这次运行不涵盖并发、主机丢失，也没有覆盖每一道隔离边界。这些要分别按[部署可靠性](deployment-reliability.md)和[原生会话的上下文记忆](context-recall.md)去检查。"
+msgstr ""
+"这次运行不涵盖并发、主机丢失，也没有覆盖每一道隔离边界。这些要分别按[部署可靠性](deployment-"
+"reliability.md)和[原生会话的上下文记忆](context-recall.md)去检查。"
 
 #: ../developer/smoke.md:39
 msgid "0. Before you start"
@@ -99,7 +112,10 @@ msgid ""
 "cloud_agent.identity_namespace --check` against it first; it     must "
 "report an empty database and change nothing     ([cutover](upgrade-"
 "notes.md#independent-accounts-cutover))."
-msgstr "从一个新的空 Agent 数据库开始。先针对它运行 `python -m cloud_agent.identity_namespace --check`；它必须报告这是空数据库，并且不做任何改动（[切换说明](upgrade-notes.md#independent-accounts-cutover)）。"
+msgstr ""
+"从一个新的空 Agent 数据库开始。先针对它运行 `python -m cloud_agent.identity_namespace "
+"--check`；它必须报告这是空数据库，并且不做任何改动（[切换说明](upgrade-notes.md#independent-"
+"accounts-cutover)）。"
 
 #: ../developer/smoke.md:50
 msgid ""
@@ -110,28 +126,32 @@ msgstr "准备一个部署可以用来给你控制的测试地址发信的邮件
 
 #: ../developer/smoke.md:53
 msgid ""
-"Choose a disposable GitHub repository and configure write/PR permission"
-"     through the deployment's supported GitHub App or publishing "
-"credential.     Record its base branch. Do not use a repository others "
-"depend on."
+"Choose a disposable GitHub repository with the deployment's GitHub App"
+"     installed on it, that the test account's connected GitHub account "
+"may     push to, and configure the GitHub relay. Record its base branch. "
+"Do not     use a repository others depend on."
 msgstr ""
-"选一个可以随时丢弃的 GitHub 仓库，通过部署支持的 GitHub App 或发布凭据，给它配置写入和创建 PR 的权限。记下它的 base "
-"分支。不要用别人在用的仓库。"
+"选一个可以随时丢弃的 GitHub 仓库：仓库上装了部署的 GitHub App，测试账号连接的 GitHub 账号能推送到它；再配置好 "
+"GitHub 中继。记下它的 base 分支。不要用别人在用的仓库。"
 
-#: ../developer/smoke.md:57
+#: ../developer/smoke.md:58
 msgid "1. Configure"
 msgstr "1\\. 配置"
 
-#: ../developer/smoke.md:59
+#: ../developer/smoke.md:60
 msgid ""
 "Use separate, private environment files for the control plane and host. "
 "Start from [`control-plane/.env.example`](../../deploy/control-"
 "plane/.env.example) and "
 "[`host/.env.example`](../../deploy/host/.env.example); "
 "[ENVIRONMENT.md](../../ENVIRONMENT.md) is the reference."
-msgstr "控制平面和主机各用一份独立的私有环境文件。分别从 [`control-plane/.env.example`](../../deploy/control-plane/.env.example) 和 [`host/.env.example`](../../deploy/host/.env.example) 改起，参考资料是 [ENVIRONMENT.md](../../ENVIRONMENT.md)。"
+msgstr ""
+"控制平面和主机各用一份独立的私有环境文件。分别从 [`control-plane/.env.example`](../../deploy"
+"/control-plane/.env.example) 和 "
+"[`host/.env.example`](../../deploy/host/.env.example) 改起，参考资料是 "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md)。"
 
-#: ../developer/smoke.md:64
+#: ../developer/smoke.md:65
 msgid ""
 "Leave the control plane's keys empty. On a new deployment root with the "
 "bundled database, the first `deploy.sh` run generates the database "
@@ -143,25 +163,32 @@ msgid ""
 "settings remain decryptable. None of these keys is shared with any other "
 "service."
 msgstr ""
-"控制平面的密钥都留空。在一个新的部署根目录上使用自带数据库时，第一次运行 `deploy.sh` 会把数据库密码和 DSN、`AGENT_LOCAL_SESSION_SECRET` 和 `AGENT_SETTINGS_ENCRYPTION_KEY` 生成到它的 `.env` 里，控制平面则把主机签名密钥和凭据加密密钥生成到自己的设置里（见[全新安装](operations.md#admin-settings)）。这个 `.env` 不要放进版本控制，也不要再改动，这样已保存的连接和设置才能一直解密。这些密钥都不与其他任何服务共用。"
+"控制平面的密钥都留空。在一个新的部署根目录上使用自带数据库时，第一次运行 `deploy.sh` 会把数据库密码和 "
+"DSN、`AGENT_LOCAL_SESSION_SECRET` 和 `AGENT_SETTINGS_ENCRYPTION_KEY` 生成到它的 "
+"`.env` 里，控制平面则把主机签名密钥和凭据加密密钥生成到自己的设置里（见[全新安装](operations.md#admin-"
+"settings)）。这个 `.env` 不要放进版本控制，也不要再改动，这样已保存的连接和设置才能一直解密。这些密钥都不与其他任何服务共用。"
 
-#: ../developer/smoke.md:73
+#: ../developer/smoke.md:74
 msgid ""
 "Set `AGENT_WEB_BASE_URL` and `AGENT_PUBLIC_API_URL`; the app is served at"
 "     the root of its hostname with the API at `/api`. Set no `GATEWAY_*`,"
 " `IDENTITY_*` or `AGENT_AUTH_MODE`:     the control plane and `deploy.sh`"
 " refuse them."
 msgstr ""
-"设置 `AGENT_WEB_BASE_URL` 和 `AGENT_PUBLIC_API_URL`；应用挂在主机名的根路径下，API 在 `/api`。不要设置任何 `GATEWAY_*`、`IDENTITY_*` 或 `AGENT_AUTH_MODE`：控制平面和 `deploy.sh` 会拒绝它们。"
+"设置 `AGENT_WEB_BASE_URL` 和 `AGENT_PUBLIC_API_URL`；应用挂在主机名的根路径下，API 在 "
+"`/api`。不要设置任何 `GATEWAY_*`、`IDENTITY_*` 或 `AGENT_AUTH_MODE`：控制平面和 "
+"`deploy.sh` 会拒绝它们。"
 
-#: ../developer/smoke.md:79
+#: ../developer/smoke.md:77
 msgid ""
 "Set explicit Compose project names, sandbox image, enrolled host name,"
 "     sandbox manager credential/reverse route, both tunnel destinations "
 "and keys,     and the host's non-overlapping egress pool/resolver."
-msgstr "明确设置：Compose 项目名、沙箱镜像、要注册的主机名、sandbox manager 凭据和反向路由、两条隧道各自的目标地址和密钥，以及主机上互不重叠的出口地址池和 DNS 解析器。"
+msgstr ""
+"明确设置：Compose 项目名、沙箱镜像、要注册的主机名、sandbox manager "
+"凭据和反向路由、两条隧道各自的目标地址和密钥，以及主机上互不重叠的出口地址池和 DNS 解析器。"
 
-#: ../developer/smoke.md:82
+#: ../developer/smoke.md:80
 msgid ""
 "Render configuration privately using the active environment file. Export"
 "     `AGENT_DEPLOYMENT_SHA` for direct control-plane Compose commands; "
@@ -171,11 +198,11 @@ msgstr ""
 "用当前生效的环境文件，在私密的地方渲染出最终配置。如果直接对控制平面执行 Compose 命令，要导出 "
 "`AGENT_DEPLOYMENT_SHA`；部署脚本会自己设置它。渲染出来的配置里有 secret，不要贴进验收日志。"
 
-#: ../developer/smoke.md:87
+#: ../developer/smoke.md:85
 msgid "2. Start the control plane"
 msgstr "2\\. 启动控制平面"
 
-#: ../developer/smoke.md:89
+#: ../developer/smoke.md:87
 msgid ""
 "Use the deployment process in [deployment reliability](deployment-"
 "reliability.md). For a cold source deployment, its `prepare` and "
@@ -183,42 +210,47 @@ msgid ""
 "identity namespace read-only, migrate, and bootstrap the API and MCP "
 "listener needed for host readiness. Complete activation after the host "
 "publishes readiness in section 4."
-msgstr "按[部署可靠性](deployment-reliability.md)里的部署流程操作。如果是从零开始的源码部署，它的 `prepare` 和 `prepare-database` 两个阶段会构建镜像、启动 Postgres、以只读方式检查身份命名空间、执行迁移，再启动主机就绪检查要用到的 API 和 MCP 监听器。等主机在第 4 节报告就绪之后，再完成激活。"
+msgstr ""
+"按[部署可靠性](deployment-reliability.md)里的部署流程操作。如果是从零开始的源码部署，它的 `prepare` 和 "
+"`prepare-database` 两个阶段会构建镜像、启动 Postgres、以只读方式检查身份命名空间、执行迁移，再启动主机就绪检查要用到的"
+" API 和 MCP 监听器。等主机在第 4 节报告就绪之后，再完成激活。"
 
-#: ../developer/smoke.md:95
+#: ../developer/smoke.md:93
 msgid ""
 "Migrations exit successfully at the checkout's current head. The API does"
 "     not create missing tables at startup."
 msgstr "迁移在本地仓库当前的 head 上成功退出。API 启动时不会自动创建缺失的表。"
 
-#: ../developer/smoke.md:97
+#: ../developer/smoke.md:95
 msgid "Main API `/healthz` responds on port 8000 by default."
 msgstr "主 API 的 `/healthz` 能响应，默认端口 8000。"
 
-#: ../developer/smoke.md:98
+#: ../developer/smoke.md:96
 msgid ""
 "MCP-only `/healthz` responds on port 8001 by default; its tunnel targets"
 "     that listener."
 msgstr "MCP 专用监听器的 `/healthz` 能响应，默认端口 8001；MCP 隧道指向的就是这个监听器。"
 
-#: ../developer/smoke.md:100
+#: ../developer/smoke.md:98
 msgid ""
 "The control-plane log has `agent_local_setup_pending` with a one-time"
 "     setup code. Do not paste the code into the run log."
 msgstr "控制平面日志中有带一次性设置代码的 `agent_local_setup_pending`。不要把这个代码贴进运行记录。"
 
-#: ../developer/smoke.md:103
+#: ../developer/smoke.md:101
 msgid "3. Accounts — setup, sign-up, approval"
 msgstr "3\\. 账号：设置、注册、审批"
 
-#: ../developer/smoke.md:105
+#: ../developer/smoke.md:103
 msgid ""
 "Open `/setup/administrator`, exchange the setup code for the first     "
 "administrator and sign in. Setup is closed afterwards: a second attempt"
 "     answers 409 `setup_complete`."
-msgstr "打开 `/setup/administrator`，用设置代码兑换首个管理员并登录。之后设置即关闭：再试一次会得到 409 `setup_complete`。"
+msgstr ""
+"打开 `/setup/administrator`，用设置代码兑换首个管理员并登录。之后设置即关闭：再试一次会得到 409 "
+"`setup_complete`。"
 
-#: ../developer/smoke.md:108
+#: ../developer/smoke.md:106
 #, python-brace-format
 msgid ""
 "`GET /v1/session/me` returns the administrator's `id` and     "
@@ -226,25 +258,28 @@ msgid ""
 "     `auth_mode`. The session cookie is `__Host-"
 "cloud_agent_local_session`.     Avoid recording cookies or token bodies "
 "in the run log."
-msgstr "`GET /v1/session/me` 返回管理员的 `id`，以及带 `agent.admin` 的 `agent_access: {allowed, permissions}`；没有 `auth_mode`。会话 cookie 是 `__Host-cloud_agent_local_session`。不要在运行记录里记下 cookie 或令牌内容。"
+msgstr ""
+"`GET /v1/session/me` 返回管理员的 `id`，以及带 `agent.admin` 的 `agent_access: "
+"{allowed, permissions}`；没有 `auth_mode`。会话 cookie 是 `__Host-"
+"cloud_agent_local_session`。不要在运行记录里记下 cookie 或令牌内容。"
 
-#: ../developer/smoke.md:112
+#: ../developer/smoke.md:110
 msgid ""
 "In a second browser, sign up a test account, follow the verification     "
 "link, and apply. It sees the waiting list and cannot create a task."
 msgstr "在另一个浏览器中注册一个测试账号，点击验证链接并提交申请。它看到等候名单，不能创建任务。"
 
-#: ../developer/smoke.md:114
+#: ../developer/smoke.md:112
 msgid ""
 "As the administrator, approve the application under **Admin →     "
 "Accounts**. The test account now holds `agent.use`."
 msgstr "以管理员身份在 **管理 → 账号** 下批准该申请。测试账号现在拥有 `agent.use`。"
 
-#: ../developer/smoke.md:117
+#: ../developer/smoke.md:115
 msgid "4. Enrol the host"
 msgstr "4\\. 注册主机"
 
-#: ../developer/smoke.md:119
+#: ../developer/smoke.md:117
 msgid ""
 "Issue `POST /admin/agent/runner-hosts/enroll-token` with the chosen "
 "`host`     name using infrastructure admin access. The response reveals a"
@@ -254,118 +289,129 @@ msgstr ""
 "用基础设施管理员权限，带上选好的 `host` 名，调用 `POST /admin/agent/runner-hosts/enroll-"
 "token`。响应里会给出一个只能用一次的注册令牌，把它放进主机的私有配置。"
 
-#: ../developer/smoke.md:122
+#: ../developer/smoke.md:120
 msgid ""
 "Deploy the host through `deploy/host/deploy.sh` for the same target "
 "release.     The host process prepares/attests the sandbox image, starts "
 "tunnels and     sandbox manager, probes the MCP relay and publishes the "
 "completed-generation     marker. Directly starting runner Compose "
 "containers does not complete this gate."
-msgstr "用 `deploy/host/deploy.sh` 把主机部署到同一个目标版本。主机进程会准备并证明沙箱镜像、启动隧道和 sandbox manager、探测 MCP 中继，最后写入“本代已完成”的标记。直接启动 runner 的 Compose 容器，过不了这一关。"
+msgstr ""
+"用 `deploy/host/deploy.sh` 把主机部署到同一个目标版本。主机进程会准备并证明沙箱镜像、启动隧道和 sandbox "
+"manager、探测 MCP 中继，最后写入“本代已完成”的标记。直接启动 runner 的 Compose 容器，过不了这一关。"
 
-#: ../developer/smoke.md:126
+#: ../developer/smoke.md:124
 msgid ""
 "`GET /admin/agent/runner-hosts` shows a fresh online heartbeat, expected"
 "     deployment capability and reachable sandbox manager URL. Check the "
 "reverse     sandbox manager route from the control plane."
-msgstr "`GET /admin/agent/runner-hosts` 显示：刚收到的在线心跳、预期的部署能力，以及可以访问的 sandbox manager URL。再从控制平面检查一下反向 sandbox manager 路由。"
+msgstr ""
+"`GET /admin/agent/runner-hosts` 显示：刚收到的在线心跳、预期的部署能力，以及可以访问的 sandbox "
+"manager URL。再从控制平面检查一下反向 sandbox manager 路由。"
 
-#: ../developer/smoke.md:129
+#: ../developer/smoke.md:127
 msgid ""
 "Complete control-plane activation and confirm its readiness check "
 "succeeds     for the intended host/API SHA."
 msgstr "完成控制平面的激活，确认它的就绪检查对预期的主机和 API SHA 通过。"
 
-#: ../developer/smoke.md:132
+#: ../developer/smoke.md:130
 msgid "5. One job, all the way"
 msgstr "5\\. 跑通一个完整的任务"
 
-#: ../developer/smoke.md:134
+#: ../developer/smoke.md:132
 msgid ""
 "As the test account, add a model connection under **My settings → Model"
 "     connections** with the provider's Base URL, the tester's key and a "
 "model     id, and choose **Verify and save**. A failed check saves "
 "nothing."
-msgstr "以测试账号身份，在 **我的设置 → 模型连接** 下用服务商的 Base URL、测试人员的密钥和一个模型 ID 添加模型连接，然后选择 **验证并保存**。检查失败时不保存任何内容。"
+msgstr ""
+"以测试账号身份，在 **我的设置 → 模型连接** 下用服务商的 Base URL、测试人员的密钥和一个模型 ID 添加模型连接，然后选择 "
+"**验证并保存**。检查失败时不保存任何内容。"
 
-#: ../developer/smoke.md:137
+#: ../developer/smoke.md:135
 msgid "Connect/authorize the scratch repository under **Integrations**."
 msgstr "在 **Integrations** 里连接并授权这个临时仓库。"
 
-#: ../developer/smoke.md:138
+#: ../developer/smoke.md:136
 msgid ""
 "Create a task on its intended base branch with a small verifiable change,"
 "     such as adding a `CONTRIBUTING.md` containing a specified sentence."
 msgstr "在预定的 base 分支上创建一个任务，改动要小、容易验证，比如新建一个 `CONTRIBUTING.md`，里面写一句指定的话。"
 
-#: ../developer/smoke.md:140
+#: ../developer/smoke.md:138
 msgid ""
 "Observe `queued` then a host claim. Record job/attempt/host identifiers."
 "     The turn names its model and connection; no reasoning-effort control"
 " is     offered for it."
 msgstr "观察到 `queued`，然后是主机认领。记下任务、attempt 和主机的标识符。这一轮注明了其模型和连接；不提供推理强度控件。"
 
-#: ../developer/smoke.md:143
+#: ../developer/smoke.md:141
 msgid ""
 "Confirm events stream to the browser and at least one model/tool call"
 "     succeeds, and that the run's usage footer shows reported tokens and "
 "says     the provider bills it."
 msgstr "确认事件能实时推送到浏览器，至少有一次模型或工具调用成功，并且运行的用量页脚显示上报的 token 数并注明由服务商计费。"
 
-#: ../developer/smoke.md:146
+#: ../developer/smoke.md:144
 msgid ""
-"Confirm the turn succeeds with the expected file change. Nothing is     "
-"published until you ask: choose **Create PR** in the conversation, wait"
-"     for the publication to finish, and open the real **draft pull "
-"request**.     Check target branch, author and diff; record its URL. "
-"Execution success     alone is insufficient."
+"Confirm the turn succeeds with the expected file change. Then ask the"
+"     agent in the conversation to open a pull request, and open the real"
+"     **draft pull request** it links. Check that you are the author of "
+"the     pull request and its commits, the target branch and the diff; "
+"record its     URL. Execution success alone is insufficient."
 msgstr ""
-"确认这一轮成功了，文件改动符合预期。你不发起，就什么都不会发布：在对话里点 **Create PR**，等发布完成，再打开那个真实的 "
-"**draft pull request**。检查目标分支、作者和 diff，记下它的 URL。光是执行成功是不够的。"
+"确认这一轮成功了，文件改动符合预期。然后在对话里让 agent 开一个 pull request，打开它给出链接的那个真实的 **draft "
+"pull request**。检查 pull request 和其中 commit 的作者都是你，再检查目标分支和 diff，记下它的 "
+"URL。光是执行成功是不够的。"
 
-#: ../developer/smoke.md:151
+#: ../developer/smoke.md:149
 msgid "List files and open a terminal on the retained workspace through the app."
 msgstr "在应用里列出保留工作区的文件，并打开一个终端。"
 
-#: ../developer/smoke.md:153
+#: ../developer/smoke.md:151
 msgid "6. The parts that only fail later"
 msgstr "6\\. 那些过一阵才会出问题的地方"
 
-#: ../developer/smoke.md:155
+#: ../developer/smoke.md:153
 msgid ""
 "Run failure injection only in the disposable staging deployment and "
 "restore its original settings after each case."
 msgstr "故障注入只能在可以随时丢弃的 staging 部署上做，每做完一项，都要把设置改回原样。"
 
-#: ../developer/smoke.md:158
+#: ../developer/smoke.md:156
 msgid ""
 "**Cancellation:** cancel a separate running turn. Verify worker     "
 "acknowledgment and terminal cancellation."
 msgstr "**取消**：取消另一轮正在运行的任务。确认 worker 已确认取消，且任务以取消的终态结束。"
 
-#: ../developer/smoke.md:160
+#: ../developer/smoke.md:158
 msgid ""
 "**Revocation:** as the administrator, withdraw the test account's access"
 "     while a turn runs. Its work stops, its streams end within 15 "
 "minutes, and     a new task is refused; restoring access does not restart"
 " the old turn."
-msgstr "**撤销**：在一轮任务运行时，以管理员身份撤销测试账号的访问权限。它的工作会停止，数据流在 15 分钟内结束，新任务会被拒绝；恢复访问权限不会重新启动旧的那一轮。"
+msgstr ""
+"**撤销**：在一轮任务运行时，以管理员身份撤销测试账号的访问权限。它的工作会停止，数据流在 15 "
+"分钟内结束，新任务会被拒绝；恢复访问权限不会重新启动旧的那一轮。"
 
-#: ../developer/smoke.md:163
+#: ../developer/smoke.md:161
 msgid ""
 "**Fail closed:** stop the database briefly, then attempt fresh sign-in "
 "and     a protected owner request. Neither may gain access; `/me` shows a"
 "     temporary failure without exposing protected content. Restore it and"
 "     verify recovery."
-msgstr "**出错时一律拒绝**：短暂停掉数据库，然后尝试全新登录，并发起一个受保护的所有者请求。两者都不能获得访问权；`/me` 显示暂时性失败，且不露出受保护的内容。恢复数据库后，确认一切恢复正常。"
+msgstr ""
+"**出错时一律拒绝**：短暂停掉数据库，然后尝试全新登录，并发起一个受保护的所有者请求。两者都不能获得访问权；`/me` "
+"显示暂时性失败，且不露出受保护的内容。恢复数据库后，确认一切恢复正常。"
 
-#: ../developer/smoke.md:167
+#: ../developer/smoke.md:165
 msgid ""
 "**Control-plane loss:** stop the disposable API while a task runs. After"
 "     restoring it, verify lease/reaper handling."
 msgstr "**控制平面中断**：在任务运行时，停掉这套可丢弃部署的 API。恢复之后，检查租约和 reaper 的处理是否正确。"
 
-#: ../developer/smoke.md:169
+#: ../developer/smoke.md:167
 msgid ""
 "Check live follow-up and same-container idle restore separately using"
 "     [context recall](context-recall.md#verification-before-"
@@ -374,11 +420,11 @@ msgstr ""
 "按[上下文记忆](context-recall.md#verification-before-"
 "accepting-a-deployment)里的方法，分别检查运行中发送后续消息，以及同一个容器在空闲后的恢复。"
 
-#: ../developer/smoke.md:172
+#: ../developer/smoke.md:170
 msgid "7. Tear down"
 msgstr "7\\. 收尾清理"
 
-#: ../developer/smoke.md:174
+#: ../developer/smoke.md:172
 msgid ""
 "Stop the disposable stacks using their recorded project names. Keep data"
 "     until acceptance evidence has been captured. Volume deletion is "
@@ -386,24 +432,24 @@ msgid ""
 "intentionally disposable."
 msgstr "用记下的项目名，停掉这些可丢弃的环境。验收证据收集完之前，数据先留着。删除卷是不可恢复的；只有数据库确实可以丢弃的环境，才用 `down -v`。"
 
-#: ../developer/smoke.md:177
+#: ../developer/smoke.md:175
 msgid ""
 "Delete scratch branches/repository and the test account's model     "
 "connection, and revoke the test provider key and repository credentials"
 "     when the deployment is retired."
 msgstr "部署退役时，删掉临时分支或临时仓库以及测试账号的模型连接，并撤销测试用的服务商密钥和仓库凭据。"
 
-#: ../developer/smoke.md:180
+#: ../developer/smoke.md:178
 msgid ""
 "Restore any failure-injection settings on staging and record the result"
 "     as described under [Log](#log)."
 msgstr "把 staging 上所有故障注入的设置都改回去，并按[记录](#log)一节的要求记下结果。"
 
-#: ../developer/smoke.md:183
+#: ../developer/smoke.md:181
 msgid "Log"
 msgstr "记录"
 
-#: ../developer/smoke.md:185
+#: ../developer/smoke.md:183
 msgid ""
 "Record results while running: the date and time (UTC), result and notes "
 "for each numbered section, plus the source SHA, environment, host, job "
@@ -412,3 +458,4 @@ msgid ""
 msgstr ""
 "边跑边记：每个编号小节的日期和时间（UTC）、结果和备注，以及源 SHA、环境、主机、任务和 PR "
 "的标识。这份记录和部署自己的验收证据放在一起保存。"
+

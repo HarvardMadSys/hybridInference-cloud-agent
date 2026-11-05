@@ -1,10 +1,8 @@
 """One recovery pass of the reaper failing does not skip the others.
 
-The attempt reaper, the stalled-capture reaper, the stalled-publish reaper and
-the stalled-Fork reaper recover different things. They shared one ``try``, so a
-pass that failed every time -- a capture the database refused did, for every
-workspace in the deployment -- also stopped stalled publishes and Forks from
-ever being recovered.
+The attempt reaper and the stalled-Fork reaper recover different things. They
+once shared one ``try``, so a pass that failed every time also stopped stalled
+Forks from ever being recovered.
 """
 
 from __future__ import annotations
@@ -27,10 +25,6 @@ async def test_each_stalled_work_reaper_runs_when_the_ones_before_it_fail() -> N
     """Every reaper is asked once per pass, whichever of the others raised."""
     inner = SimpleNamespace(
         reap_expired=AsyncMock(side_effect=RuntimeError("attempt pass failed")),
-        reap_stalled_sandbox_snapshot_captures=AsyncMock(
-            side_effect=RuntimeError("capture pass failed")
-        ),
-        reap_stalled_snapshot_publishes=AsyncMock(side_effect=RuntimeError("publish pass failed")),
         reap_stalled_session_forks=AsyncMock(return_value=[]),
     )
     task = asyncio.create_task(reap_expired_attempts(OneFake(inner), interval_seconds=0.001))
@@ -44,8 +38,6 @@ async def test_each_stalled_work_reaper_runs_when_the_ones_before_it_fail() -> N
             await task
 
     assert inner.reap_expired.await_count
-    assert inner.reap_stalled_sandbox_snapshot_captures.await_count
-    assert inner.reap_stalled_snapshot_publishes.await_count
 
 
 async def test_stalled_environment_maintenance_does_not_delay_attempt_reaping() -> None:
@@ -60,8 +52,6 @@ async def test_stalled_environment_maintenance_does_not_delay_attempt_reaping() 
         environments=SimpleNamespace(maintain_environments=stalled_maintenance),
         environment_snapshots=SimpleNamespace(maintain=AsyncMock(return_value=None)),
         reap_expired=AsyncMock(return_value=[]),
-        reap_stalled_sandbox_snapshot_captures=AsyncMock(return_value=[]),
-        reap_stalled_snapshot_publishes=AsyncMock(return_value=[]),
         reap_stalled_session_forks=AsyncMock(return_value=[]),
     )
     store = OneFake(inner)

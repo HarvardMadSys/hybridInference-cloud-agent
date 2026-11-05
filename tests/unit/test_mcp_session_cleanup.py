@@ -395,7 +395,7 @@ async def test_relay_lifespan_runs_maintenance_and_releases_upstream_sessions(mo
     async with lifespan(app, background=False):
         await asyncio.wait_for(started.wait(), timeout=0.5)
         assert app.state.reaper_task is None
-        assert app.state.publish_task is None
+        assert app.state.sandbox_deletion_task is None
         assert not current.transport.closed
     assert app.state.mcp_maintenance_task.cancelled()
     assert current.transport.closed

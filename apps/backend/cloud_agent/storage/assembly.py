@@ -37,6 +37,7 @@ from cloud_agent.storage.repositories import (
     PostgresCredentialQueries,
     PostgresExecutionQueries,
     PostgresFileActivityQueries,
+    PostgresGitHubRelayRepository,
     PostgresGoalRepository,
     PostgresGoalWakeupRepository,
     PostgresHostCapacityRepository,
@@ -58,7 +59,6 @@ from cloud_agent.storage.repositories import (
     PostgresSessionForkRepository,
     PostgresSettingsRepository,
     PostgresSkillRepository,
-    PostgresSnapshotRepository,
     PostgresSourceControlRepository,
     PostgresSshServerRepository,
     PostgresTeamAdminQueries,
@@ -89,6 +89,7 @@ if TYPE_CHECKING:
         CredentialQueries,
         ExecutionQueries,
         FileActivityQueries,
+        GitHubRelayRepository,
         GoalRepository,
         GoalWakeupRepository,
         HostCapacityRepository,
@@ -110,7 +111,6 @@ if TYPE_CHECKING:
         SessionForkRepository,
         SettingsRepository,
         SkillRepository,
-        SnapshotRepository,
         SourceControlRepository,
         SshServerRepository,
         TeamAdminQueries,
@@ -151,6 +151,7 @@ class Storage:
         self.credential_queries: CredentialQueries = PostgresCredentialQueries(pool)
         self.execution_queries: ExecutionQueries = PostgresExecutionQueries(pool)
         self.file_activity_queries: FileActivityQueries = PostgresFileActivityQueries(pool)
+        self.github_relay: GitHubRelayRepository = PostgresGitHubRelayRepository(pool)
         self.goals: GoalRepository = PostgresGoalRepository(pool)
         self.goal_wakeups: GoalWakeupRepository = PostgresGoalWakeupRepository(pool)
         self.host_capacity: HostCapacityRepository = PostgresHostCapacityRepository(pool)
@@ -176,7 +177,6 @@ class Storage:
         self.settings: SettingsRepository = PostgresSettingsRepository(pool)
         self.skills: SkillRepository = PostgresSkillRepository(pool)
         self.attachments: AttachmentRepository = PostgresAttachmentRepository(pool)
-        self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
         self.ssh_servers: SshServerRepository = PostgresSshServerRepository(pool)
         self.model_connections: ModelConnectionRepository = PostgresModelConnectionRepository(pool)

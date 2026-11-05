@@ -47,6 +47,7 @@ def _store(*, establish: Any, connection_id: str | None = CONNECTION_ID) -> Simp
         ),
         attempt_commands=SimpleNamespace(transition=AsyncMock(return_value=True)),
         sandbox=SimpleNamespace(record_shared_thread_residency=AsyncMock(return_value=True)),
+        source_control=SimpleNamespace(get_github_account=AsyncMock(return_value=None)),
     )
 
 

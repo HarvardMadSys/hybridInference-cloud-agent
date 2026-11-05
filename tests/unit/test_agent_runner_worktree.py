@@ -106,7 +106,7 @@ def remote(tmp_path: Path) -> tuple[str, str, str, str]:
     return f"file://{tmp_path / 'remotes'}", "owner/name", first, head
 
 
-def test_initial_chat_checkout_is_populated_and_has_no_push_remote(tmp_path: Path, remote):
+def test_initial_chat_checkout_records_origin_without_a_credential(tmp_path: Path, remote):
     base, repo, _first, head = remote
     workdir = tmp_path / "job"
     workdir.mkdir()
@@ -115,7 +115,9 @@ def test_initial_chat_checkout_is_populated_and_has_no_push_remote(tmp_path: Pat
 
     assert resolved == head
     assert (workdir / "hello.py").read_text() == "def hello():\n    return 1\n"
-    assert _git("remote", cwd=workdir).strip() == ""
+    # origin is the plain URL: what a push buys is the GitHub relay's to decide.
+    assert _git("remote", cwd=workdir).strip() == "origin"
+    assert _git("remote", "get-url", "origin", cwd=workdir).strip() == f"{base}/{repo}.git"
 
 
 def test_a_pinned_commit_is_the_one_streamed_into_the_container(tmp_path: Path, remote):

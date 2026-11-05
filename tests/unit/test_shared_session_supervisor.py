@@ -1717,7 +1717,7 @@ def _in_thread(call):
     return thread, outcome
 
 
-@pytest.mark.parametrize("call", ["status", "acquire", "snapshot", "initial_archive"])
+@pytest.mark.parametrize("call", ["status", "acquire", "initial_archive"])
 def test_a_member_inspection_does_not_block_another_groups_status(monkeypatch, call):
     """Docker inspect runs outside the supervisor-wide lock.
 
@@ -1745,8 +1745,6 @@ def test_a_member_inspection_does_not_block_another_groups_status(monkeypatch, c
     def blocked():
         if call == "status":
             return supervisor.status("athr_source")
-        if call == "snapshot":
-            return supervisor.capture_snapshot("athr_source", capture=lambda _backend: {})
         if call == "initial_archive":
             assert lease is not None
             return supervisor.capture_initial_archive(
@@ -1881,8 +1879,7 @@ def test_a_retiring_cli_that_fails_to_close_still_settles_its_member():
     assert replayed == settled
 
 
-@pytest.mark.parametrize("call", ["snapshot", "initial_archive"])
-def test_a_capture_that_finds_its_container_missing_lifts_its_barrier(call):
+def test_a_capture_that_finds_its_container_missing_lifts_its_barrier():
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
     lease = supervisor.acquire(
@@ -1893,18 +1890,11 @@ def test_a_capture_that_finds_its_container_missing_lifts_its_barrier(call):
         has_settled_context=False,
         manifest=_members(),
     )
-    if call == "snapshot":
-        supervisor.abandon("athr_source", lease.token, lost=False)
     group = supervisor._members["athr_source"]
     del manager.items[_spec().container_name]
 
     with pytest.raises(RetainedChatLost, match="missing"):
-        if call == "snapshot":
-            supervisor.capture_snapshot("athr_source", capture=lambda _backend: {})
-        else:
-            supervisor.capture_initial_archive(
-                "athr_source", lease.token, capture=lambda *_args: {}
-            )
+        supervisor.capture_initial_archive("athr_source", lease.token, capture=lambda *_args: {})
 
     assert group.snapshotting is False
     assert manager.events == []
@@ -2523,7 +2513,7 @@ def test_a_token_still_closes_after_a_manifest_drops_its_opener(kind):
     A later Fork reclaims the deleted chat's resident slot, so every manifest
     from then on omits the chat, and the host drops the member while its
     token is still open. Closing the token must still release the group;
-    otherwise it never goes idle and every publication snapshot is refused.
+    otherwise it never goes idle and its container is never stopped.
     """
     now = [1000.0]
     manager = _Manager()
@@ -2551,9 +2541,6 @@ def test_a_token_still_closes_after_a_manifest_drops_its_opener(kind):
     assert descriptor.idle_deadline_monotonic == 1060.0
     with pytest.raises(SandboxError, match="no shared sandbox membership"):
         close()
-    assert supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""}) == {
-        "patch": ""
-    }
     now[0] += 60
     assert [stopped.running for stopped in supervisor.sweep()] == [False]
     assert manager.items[_spec().container_name].running is False
@@ -3520,26 +3507,6 @@ def test_http_member_lock_cleanup_runs_as_the_source_slot_owner(runtime_id: str)
     assert kwargs["user_gid"] == 10001
 
 
-def test_snapshot_is_a_short_group_barrier_and_always_thaws_writers():
-    manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(manager)
-    supervisor.register_manifest(_spec(), _members())
-
-    def capture(_backend):
-        manager.events.append("capture")
-        with pytest.raises(SessionBusy, match="snapshot"):
-            supervisor.operation_opened("athr_peer")
-        return {"patch": "diff --git a/a b/a\n"}
-
-    result = supervisor.capture_snapshot("athr_source", capture=capture)
-
-    assert result == {"patch": "diff --git a/a b/a\n"}
-    assert manager.events[0] == ("freeze", (0, 1))
-    assert manager.events[1] == "capture"
-    assert manager.events[2][0] == "thaw"
-    assert supervisor.status("athr_source").snapshotting is False
-
-
 def _waits_without_sleeping(monkeypatch, supervisor) -> list[float]:
     """Advance the clock by each wait instead of sleeping; answer the waits made."""
     now = [1000.0]
@@ -3736,60 +3703,6 @@ def test_the_initial_archive_waits_for_open_terminals_behind_its_barrier(monkeyp
 
     assert waits == [0.5] * 4
     assert group.snapshotting is False
-
-
-def test_snapshot_refuses_active_mutations_instead_of_serializing_normal_work():
-    manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(manager)
-    supervisor.register_manifest(_spec(), _members())
-    token, _ = supervisor.operation_opened("athr_peer")
-
-    with pytest.raises(SessionBusy, match="active mutations"):
-        supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""})
-
-    supervisor.operation_closed("athr_peer", token)
-    assert supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""}) == {
-        "patch": ""
-    }
-
-
-def test_snapshot_starts_the_exact_idle_stopped_container_and_rearms_idle():
-    manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30)
-    supervisor.register_manifest(_spec(), _members())
-    before = manager.stop(_spec())
-
-    result = supervisor.capture_snapshot(
-        "athr_source",
-        capture=lambda _backend: {"patch": "diff --git a/a b/a\n"},
-    )
-
-    after = supervisor.status("athr_source")
-    assert result == {"patch": "diff --git a/a b/a\n"}
-    assert after.container_id == before.container_id
-    assert after.running is True
-    assert after.snapshotting is False
-    assert after.idle_deadline_monotonic is not None
-    assert manager.events[0] == ("freeze", (0, 1))
-    assert manager.events[-1][0] == "thaw"
-
-
-def test_snapshot_start_failure_releases_the_admission_barrier():
-    class StartFailureManager(_Manager):
-        def start(self, spec, **_kwargs):
-            raise SandboxError("docker start failed")
-
-    manager = StartFailureManager()
-    supervisor = SharedChatSessionSupervisor(manager)
-    supervisor.register_manifest(_spec(), _members())
-    manager.stop(_spec())
-
-    with pytest.raises(SandboxError, match="docker start failed"):
-        supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""})
-
-    status = supervisor.status("athr_source")
-    assert status.running is False
-    assert status.snapshotting is False
 
 
 @pytest.mark.parametrize("reserved_child", [False, True])
@@ -4508,16 +4421,6 @@ def test_flush_failure_blocks_mutations_even_when_docker_stop_raises() -> None:
         supervisor.operation_opened("athr_source")
     with pytest.raises(SessionBusy, match="native flush failure"):
         supervisor.terminal_opened("athr_source")
-    captured = False
-
-    def capture(_backend):
-        nonlocal captured
-        captured = True
-        return {"patch": ""}
-
-    with pytest.raises(SessionBusy, match="native flush failure"):
-        supervisor.capture_snapshot("athr_source", capture=capture)
-    assert captured is False
 
     # Once Docker stop works, the recorded skip lets the stop finish.
     manager.stop = original_stop  # type: ignore[method-assign]
@@ -5135,7 +5038,7 @@ def test_archive_start_fence_runs_only_for_a_stopped_to_running_transition() -> 
     controller.close()
 
 
-def test_failed_start_marker_completion_is_retried_in_place_before_snapshot() -> None:
+def test_failed_start_marker_completion_is_retried_in_place_before_workspace_work() -> None:
     manager = _Manager()
     completions = 0
     preparations = 0
@@ -5183,17 +5086,10 @@ def test_failed_start_marker_completion_is_retried_in_place_before_snapshot() ->
     assert lease.token
     supervisor.abandon("athr_source", lease.token, lost=False)
 
-    captured = False
+    # A workspace request after it finds the completion done, and redoes nothing.
+    token, _descriptor = supervisor.operation_opened("athr_source")
+    supervisor.operation_closed("athr_source", token)
 
-    def capture(_backend):
-        nonlocal captured
-        captured = True
-        return {"patch": ""}
-
-    snapshot = supervisor.capture_snapshot("athr_source", capture=capture)
-
-    assert snapshot == {"patch": ""}
-    assert captured is True
     assert preparations == 1
     assert completions == 2
     assert manager.stop_count == 1

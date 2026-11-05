@@ -36,13 +36,11 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "goal_wakeup_maintenance_task",
     "goal_scheduling_maintenance_task",
     "pending_message_maintenance_task",
-    "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
     "capacity_task",
     "agent_memory_task",
     "queue_monitor_task",
-    "publish_task",
     "profiling_policy_task",
     "compute_resource_task",
     "account_access_task",
@@ -68,7 +66,6 @@ _BEFORE_SOURCE = _BEFORE_SETTINGS_TASK | frozenset(
 
 _QUIET_ENV = (
     *RETIRED_GATEWAY_VARIABLES,
-    "AGENT_GITHUB_TOKEN",
     "AGENT_GITHUB_APP_ID",
     "AGENT_GITHUB_APP_PRIVATE_KEY",
     "AGENT_GITHUB_APP_PRIVATE_KEY_PATH",
@@ -132,8 +129,6 @@ _STAGES = [
         ("goal_wakeup_maintenance", True, False),
         ("goal_scheduling_maintenance", True, False),
         ("pending_message_maintenance", True, False),
-        ("background_wake", True, False),
-        ("snapshots", True, False),
         ("sandbox_deletions", True, False),
         ("capacity", True, False),
         ("agent_memory", True, False),
@@ -145,7 +140,6 @@ _STAGES = [
         ("work_signal", True, False),
         ("job_event_signal", True, False),
         ("owner_change_signal", True, False),
-        ("publisher", True, False),
     ),
     *_only(False, ("mcp_decision_signal", True, False)),
 ]
@@ -357,7 +351,6 @@ def _prepare(
             "cloud_agent.bootstrap.lifespan.run_pending_message_maintenance",
             "pending_message_maintenance_task",
         ),
-        ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", "snapshot_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", "sandbox_deletion_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_move_out", "sandbox_move_out_task"),
         ("cloud_agent.bootstrap.lifespan.maintain_agent_memories", "agent_memory_task"),
@@ -369,7 +362,6 @@ def _prepare(
         ("cloud_agent.workers.account_broadcasts.run_account_broadcasts", "account_broadcast_task"),
         ("cloud_agent.capacity_history.prune_host_capacity_history", "capacity_task"),
         ("cloud_agent.operational_health.monitor_queue", "queue_monitor_task"),
-        ("cloud_agent.publish_worker.publish_loop", "publish_task"),
         ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
         monkeypatch.setattr(target, _idle(events, label))
@@ -440,8 +432,6 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
             "cloud_agent.bootstrap.lifespan.run_pending_message_maintenance",
             _boom(stage),
         ),
-        "background_wake": ("cloud_agent.bootstrap.lifespan.BackgroundWake", _boom(stage)),
-        "snapshots": ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", _boom(stage)),
         "sandbox_deletions": (
             "cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions",
             _boom(stage),
@@ -469,7 +459,6 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "job_event_signal": ("cloud_agent.bootstrap.lifespan.JobEventSignal", _boom(stage)),
         "owner_change_signal": ("cloud_agent.bootstrap.lifespan.OwnerChangeSignal", _boom(stage)),
         "listen": ("cloud_agent.bootstrap.lifespan.listen", _boom(stage)),
-        "publisher": ("cloud_agent.publish_worker.publish_loop", _boom(stage)),
         "mcp_maintenance": ("cloud_agent.mcp.runtime.maintain_host_sessions", _boom(stage)),
         "mcp_decision_signal": ("cloud_agent.bootstrap.lifespan.McpDecisionSignal", _boom(stage)),
         "measurement_writer": ("cloud_agent.measurement_writer.MeasurementWriter", _boom(stage)),
@@ -852,10 +841,10 @@ async def test_primary_error_survives_owner_cancellation_during_cleanup() -> Non
 @pytest.mark.parametrize(
     ("background", "attribute", "target"),
     [
-        (True, "publish_task", "cloud_agent.publish_worker.publish_loop"),
+        (True, "reaper_task", "cloud_agent.bootstrap.lifespan.reap_expired_attempts"),
         (False, "mcp_maintenance_task", "cloud_agent.mcp.runtime.maintain_host_sessions"),
     ],
-    ids=["publisher", "mcp-maintenance"],
+    ids=["reaper", "mcp-maintenance"],
 )
 async def test_a_background_task_that_dies_is_reported_when_it_dies(
     monkeypatch: pytest.MonkeyPatch,
@@ -867,7 +856,7 @@ async def test_a_background_task_that_dies_is_reported_when_it_dies(
     """A loop that stops with an error says so then, not first at shutdown.
 
     Until shutdown re-raises it, nothing else would: the process goes on
-    serving with no publisher, or no reaper, and nothing in its log says why.
+    serving with no reaper, or no session maintenance, and nothing in its log says why.
     """
     caplog.set_level("INFO", logger="cloud_agent.app")
     prepared = _prepare(monkeypatch)

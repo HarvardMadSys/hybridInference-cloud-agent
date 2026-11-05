@@ -61,9 +61,9 @@ MODEL_CONNECTION_KEY_DOMAIN = b"hybridinference/model-connection-key/v1"
 #: sandbox group. A ciphertext of one domain cannot be decrypted as the
 #: other's, and nothing that starts a process reads the scan copies at all.
 MODEL_CONNECTION_SCAN_DOMAIN = b"hybridinference/model-connection-scan-key/v1"
-#: How many key revisions one group's trusted snapshot or publication is
-#: scanned for. A group handed more refuses to be scanned rather than
-#: scanning for some: see :class:`ScanMaterialOverflow`.
+#: How many key revisions one group's content is scanned for. A group handed
+#: more refuses to be scanned rather than scanning for some: see
+#: :class:`ScanMaterialOverflow`.
 MAX_SCAN_KEYS = 200
 #: What a translated member's loopback token is a MAC of, under the
 #: connection cipher's own platform-held MAC key, ahead of the member's
@@ -96,53 +96,6 @@ def model_connection_scan_cipher(secret: str | None = None) -> CredentialCipher:
         secret if secret is not None else setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or ""
     )
     return CredentialCipher(material, domain=MODEL_CONNECTION_SCAN_DOMAIN)
-
-
-async def known_connection_secrets(
-    connections: ModelConnectionRepository, *, sandbox_id: str
-) -> dict[str, str]:
-    """The key revisions this sandbox group was handed, for its trusted snapshot or publication.
-
-    Only this group's: each was bound to one of its members before that
-    member's CLI received it, whichever member, so a same-owner Fork's keys
-    are here too, and a key the owner holds but never used in this group is
-    never read, decrypted or sent to its host. Rotated and deleted
-    connections' keys stay: a workspace file can hold a key long after it
-    stopped being used. Read from the scan-only copies, never the execution
-    keys. A copy that cannot be decrypted raises ``CredentialCipherError``,
-    and more revisions than a scan covers raise ``ScanMaterialOverflow``: a
-    scan that skipped a key would pass content it exists to stop.
-    """
-    ciphertexts = await connections.scan_key_ciphertexts(
-        sandbox_id=sandbox_id, limit=MAX_SCAN_KEYS + 1
-    )
-    if len(ciphertexts) > MAX_SCAN_KEYS:
-        raise ScanMaterialOverflow(
-            f"this workspace ran on more than {MAX_SCAN_KEYS} model connection keys; "
-            "its snapshots cannot be checked for all of them"
-        )
-    if not ciphertexts:
-        return {}
-    cipher = model_connection_scan_cipher()
-    return {
-        f"model-connection-key-{index}": cipher.decrypt(ciphertext)
-        for index, ciphertext in enumerate(ciphertexts)
-    }
-
-
-async def trusted_scan_secrets(
-    connections: ModelConnectionRepository, environment: Any, *, sandbox_id: str | None
-) -> dict[str, str]:
-    """What a group's trusted publication refuses: its environment's Secrets and its keys.
-
-    Connection keys are attributed to a sandbox group when its member is
-    bound, so a publication with no group was never handed one; every
-    snapshot publication names its group.
-    """
-    values: dict[str, str] = dict(environment.secrets()) if environment is not None else {}
-    if sandbox_id:
-        values.update(await known_connection_secrets(connections, sandbox_id=sandbox_id))
-    return values
 
 
 def model_connections_enabled() -> bool:
@@ -510,7 +463,6 @@ __all__ = [
     "connection_access",
     "connection_residency_credential",
     "invalidate_connection",
-    "known_connection_secrets",
     "model_connection_cipher",
     "model_connection_scan_cipher",
     "model_connections_enabled",
@@ -518,6 +470,5 @@ __all__ = [
     "residency_credential",
     "resolve_turn_connection",
     "translator_token",
-    "trusted_scan_secrets",
     "unusable_error",
 ]

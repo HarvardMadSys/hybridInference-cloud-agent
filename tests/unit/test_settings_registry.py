@@ -50,19 +50,19 @@ class Repository:
 
 
 async def test_environment_is_imported_once_and_saved_reset_ignores_later_env(monkeypatch):
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "release")
+    monkeypatch.setenv("AGENT_GITHUB_API", "https://release.example")
     repository = Repository()
     await settings.initialize_settings(repository)
-    assert settings.text_setting("publish_base_branch") == "release"
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "changed-env")
+    assert settings.text_setting("github_api_url") == "https://release.example"
+    monkeypatch.setenv("AGENT_GITHUB_API", "https://changed-env.example")
     await settings.initialize_settings(repository)
     assert repository.seeds == 1
-    assert settings.setting_env("AGENT_PUBLISH_BASE_BRANCH") == "release"
-    repository.values.update(settings.encode_changes({"publish_base_branch": None}))
+    assert settings.setting_env("AGENT_GITHUB_API") == "https://release.example"
+    repository.values.update(settings.encode_changes({"github_api_url": None}))
     settings.apply_settings(2, repository.values)
-    assert settings.setting_env("AGENT_PUBLISH_BASE_BRANCH") == "dev"
-    assert settings.settings_environment()["AGENT_PUBLISH_BASE_BRANCH"] == "dev"
-    assert __import__("os").environ["AGENT_PUBLISH_BASE_BRANCH"] == "changed-env"
+    assert settings.setting_env("AGENT_GITHUB_API") == "https://api.github.com"
+    assert settings.settings_environment()["AGENT_GITHUB_API"] == "https://api.github.com"
+    assert __import__("os").environ["AGENT_GITHUB_API"] == "https://changed-env.example"
 
 
 def test_secrets_are_encrypted_imported_write_only_and_bound_to_their_key(monkeypatch):
@@ -76,7 +76,7 @@ def test_secrets_are_encrypted_imported_write_only_and_bound_to_their_key(monkey
     assert view["values"]["mcp_github_client_secret"] is None
     assert view["secret_configured"]["mcp_github_client_secret"] is True
     assert secret not in json.dumps(view)
-    moved = {**encoded, "github_publish_token": encoded["mcp_github_client_secret"]}
+    moved = {**encoded, "serper_api_key": encoded["mcp_github_client_secret"]}
     with pytest.raises(SettingsEncryptionError):
         settings.validate_stored_settings(moved)
 
@@ -85,7 +85,7 @@ def test_secret_configuration_requires_a_stable_key(monkeypatch):
     monkeypatch.delenv("AGENT_SESSION_SECRET", raising=False)
     with pytest.raises(SettingsEncryptionError):
         settings.encode_changes({"sandbox_manager_token": "secret-that-must-never-be-persisted"})
-    assert settings.encode_changes({"github_publish_token": None}) == {"github_publish_token": ""}
+    assert settings.encode_changes({"serper_api_key": None}) == {"serper_api_key": ""}
 
 
 def test_stale_snapshots_do_not_revert_current_values():
@@ -101,8 +101,8 @@ def test_unchanged_and_stale_snapshots_do_not_decode_secrets(monkeypatch):
         pytest.fail("an already adopted revision must not be decoded again")
 
     monkeypatch.setattr(settings, "_decode", unexpected_decode)
-    settings.apply_settings(3, {"github_publish_token": "invalid"})
-    settings.apply_settings(2, {"github_publish_token": "invalid"})
+    settings.apply_settings(3, {"serper_api_key": "invalid"})
+    settings.apply_settings(2, {"serper_api_key": "invalid"})
     assert settings.text_setting("site.app_name") == "Current"
 
 
@@ -110,7 +110,7 @@ async def test_synchronization_polls_from_last_successfully_adopted_revision(mon
     repository = Repository()
     requested = []
     snapshots = [
-        (2, {"github_publish_token": "plaintext"}),
+        (2, {"serper_api_key": "plaintext"}),
         (2, {"site.app_name": "Next"}),
         (-1, {}),
     ]
@@ -206,7 +206,7 @@ def test_one_key_at_a_time_repairs_every_stored_value_this_release_refuses():
         update = {**stored, **settings.encode_changes({key: None})}
         settings.validate_settings_update(stored, update)
         stored = update
-    unrelated = {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+    unrelated = {**stored, **settings.encode_changes({"github_api_url": "https://main.example"})}
     settings.validate_settings_update(stored, unrelated)
 
 
@@ -221,7 +221,7 @@ def test_a_stored_pair_out_of_order_falls_back_to_both_defaults():
     assert settings.number_setting("goals.wakeup_backoff_max_seconds") == 300.0
     # A pair the update does not touch does not block it either.
     settings.validate_settings_update(
-        stored, {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+        stored, {**stored, **settings.encode_changes({"github_api_url": "https://main.example"})}
     )
 
 
@@ -242,7 +242,7 @@ def test_a_stored_key_shorter_than_its_minimum_is_kept_and_reported(caplog):
     assert "compute_encryption_key" in logged[0]
     assert "a-short-saved-key" not in logged[0]
     settings.validate_settings_update(
-        stored, {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+        stored, {**stored, **settings.encode_changes({"github_api_url": "https://main.example"})}
     )
     with pytest.raises(ValueError, match="at least 32 bytes"):
         settings.encode_changes({"compute_encryption_key": "another-short-key"})
@@ -302,18 +302,18 @@ def test_an_update_still_cannot_save_an_ordering_it_breaks():
 def test_an_undecryptable_stored_secret_still_fails_closed(monkeypatch):
     monkeypatch.setenv("AGENT_MCP_GITHUB_CLIENT_SECRET", "test-dispatch-secret-unique-value")
     encoded = settings.initial_settings()
-    moved = {**encoded, "github_publish_token": encoded["mcp_github_client_secret"]}
+    moved = {**encoded, "serper_api_key": encoded["mcp_github_client_secret"]}
     with pytest.raises(SettingsEncryptionError):
         settings.apply_settings(1, moved)
     with pytest.raises(ValueError, match="Unencrypted stored secret"):
-        settings.apply_settings(1, {**encoded, "github_publish_token": "plaintext"})
+        settings.apply_settings(1, {**encoded, "serper_api_key": "plaintext"})
 
 
 async def test_a_failed_synchronization_names_the_setting_in_its_log(monkeypatch, caplog):
     """The message names a setting and never its value, so it is safe to log."""
     repository = Repository()
     repository.revision = 2
-    repository.values = {**settings.initial_settings(), "github_publish_token": "plaintext"}
+    repository.values = {**settings.initial_settings(), "serper_api_key": "plaintext"}
     ticks = 0
 
     async def tick(_delay):
@@ -327,8 +327,7 @@ async def test_a_failed_synchronization_names_the_setting_in_its_log(monkeypatch
     with pytest.raises(asyncio.CancelledError):
         await settings.synchronize_settings(repository)
     assert _warnings(caplog) == [
-        "settings synchronization failed "
-        "(ValueError: Unencrypted stored secret for GitHub publication token)"
+        "settings synchronization failed (ValueError: Unencrypted stored secret for Serper API key)"
     ]
 
 
@@ -338,7 +337,7 @@ async def test_a_secret_that_cannot_be_decrypted_is_named_in_the_log(monkeypatch
     encoded = settings.initial_settings()
     repository = Repository()
     repository.revision = 2
-    repository.values = {**encoded, "github_publish_token": encoded["mcp_github_client_secret"]}
+    repository.values = {**encoded, "serper_api_key": encoded["mcp_github_client_secret"]}
     ticks = 0
 
     async def tick(_delay):
@@ -353,7 +352,7 @@ async def test_a_secret_that_cannot_be_decrypted_is_named_in_the_log(monkeypatch
         await settings.synchronize_settings(repository)
     assert _warnings(caplog) == [
         "settings synchronization failed "
-        "(SettingsEncryptionError: Stored secret for GitHub publication token could not be decrypted)"
+        "(SettingsEncryptionError: Stored secret for Serper API key could not be decrypted)"
     ]
 
 
@@ -476,26 +475,26 @@ async def test_relay_never_seeds_a_partial_environment(monkeypatch):
         reads += 1
         repository.revision, repository.values = (
             1,
-            {**settings.initial_settings(), "publish_base_branch": "main-import"},
+            {**settings.initial_settings(), "github_api_url": "https://main-import.example"},
         )
 
     monkeypatch.setattr(settings.asyncio, "sleep", main_initializes)
     await settings.initialize_settings(repository, seed=False)
     assert repository.seeds == 0
     assert reads == 1
-    assert settings.text_setting("publish_base_branch") == "main-import"
+    assert settings.text_setting("github_api_url") == "https://main-import.example"
 
 
 async def test_upgrade_imports_new_fields_once_without_reimporting_old_settings(monkeypatch):
     repository = Repository()
     repository.revision = 4
-    repository.values = {"publish_base_branch": "saved-branch", "max_attempts": 3}
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-env-branch")
+    repository.values = {"github_api_url": "https://saved.example", "max_attempts": 3}
+    monkeypatch.setenv("AGENT_GITHUB_API", "https://stale-env.example")
     monkeypatch.setenv("AGENT_PUBLIC_API_URL", "https://original.example")
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "private-host-signing-key-of-32-bytes")
     await settings.initialize_settings(repository)
     assert repository.revision == 5
-    assert settings.text_setting("publish_base_branch") == "saved-branch"
+    assert settings.text_setting("github_api_url") == "https://saved.example"
     assert settings.text_setting("public_api_url") == "https://original.example"
     assert (
         settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "private-host-signing-key-of-32-bytes"

@@ -98,7 +98,6 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "terminal_resume_pending": row["terminal_resume_pending"],
         "current_attempt_id": row["current_attempt_id"],
         "published_pr_url": row["published_pr_url"],
-        "published_commit_sha": row["published_commit_sha"],
         "detail": row["detail"],
         # Every change raises them (migration 0031); a read that does not
         # select them reports the counter at its start.

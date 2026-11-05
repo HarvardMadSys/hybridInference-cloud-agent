@@ -1,4 +1,4 @@
-"""GitHub App credentials for the publisher (issue #1041).
+"""GitHub App credentials for checkout, entitlement and the GitHub relay (issue #1041).
 
 The design calls for a GitHub App rather than a personal access token, and the
 difference is not bureaucratic. A PAT is a long-lived, account-wide credential
@@ -14,7 +14,7 @@ repositories a user deliberately installed on, and nobody has to mint or rotate
 a credential by hand. Revocation is uninstalling the App.
 
 Tokens are cached until shortly before they expire, because the exchange is a
-network round trip and the publisher runs per job.
+network round trip and every turn's claim asks for a clone token.
 """
 
 from __future__ import annotations
@@ -258,7 +258,7 @@ class AppConfig:
         """Build from environment, or None when the App is not configured.
 
         Returning None rather than raising is deliberate: a deployment without
-        the App should simply not publish, not fail to boot.
+        the App should simply go without GitHub, not fail to boot.
         """
         app_id = (env.get("AGENT_GITHUB_APP_ID") or "").strip()
         key = env.get("AGENT_GITHUB_APP_PRIVATE_KEY") or ""
@@ -315,7 +315,7 @@ class _CachedToken:
 
 
 class GitHubAppCredentials:
-    """Mints and caches installation tokens for the publisher."""
+    """Mints and caches installation tokens, and speaks for the App to GitHub."""
 
     def __init__(
         self,
@@ -372,7 +372,7 @@ class GitHubAppCredentials:
         occasional. Repository entitlement asks GitHub on workspace file reads
         and terminal opens (through :meth:`writable_repositories_for_user`,
         whenever its minute-long answer has lapsed), so a per-call handshake
-        was on the interactive path, not just the publisher's.
+        was on the interactive path, not just the background loops'.
 
         One client for this object's lifetime instead. It is created on first
         use rather than in ``__init__`` because a client binds to the running
@@ -484,7 +484,7 @@ class GitHubAppCredentials:
         """The key users' GitHub tokens are stored under — GitLab's, domain and all.
 
         Built on first use, because a deployment that never lets users connect
-        publishes with the private key alone and needs no encryption key.
+        works with the private key alone and needs no encryption key.
         """
         if self._cipher is None:
             self._cipher = SourceControlCipher()
@@ -537,7 +537,7 @@ class GitHubAppCredentials:
         """Return the installation covering ``owner/name``.
 
         A repository with no installation is not an error to retry — it means
-        the user has not installed the App there, and the publisher must say so
+        the user has not installed the App there, and the caller must say so
         rather than appear to be broken. ``fresh`` bypasses the short token-mint
         cache when the id is serving as an authorization fence; the answer still
         refreshes that cache for subsequent minting.
@@ -582,13 +582,13 @@ class GitHubAppCredentials:
         installation token inherits *every* App permission unless it asks for
         less, so a consumer that only needs to read must say so. Combined with
         ``repository_scoped``, which limits the token to this repository alone,
-        that is how one App serves checkout (read), sandbox branch/PR writes,
-        and the trusted publisher without sharing broader installation scope.
+        that is how one App serves checkout and repository reads without
+        sharing broader installation scope.
 
         ``holder`` names who outside this process the token is for, such as one
         conversation's sandbox, which then gets a token of its own. Whoever
         holds an installation token can revoke it, with no permission at all,
-        and a token shared with the publisher or another conversation would be
+        and a token shared with another holder or conversation would be
         refused for all of them while this cache went on serving it.
 
         An installation that refuses to mint is looked up afresh once: the App
@@ -656,9 +656,9 @@ class GitHubAppCredentials:
         caller lands in the cache rather than only the ones that remembered to.
 
         Narrowed tokens must not share a cache slot with full ones, in either
-        direction: serving a read-only token to the publisher would break every
-        push, and serving a full one to the runner would silently undo the
-        narrowing that parameter exists for. The scope key is what keeps them
+        direction: serving a read-only token to a caller that asked for more
+        would break its writes, and serving a full one to the runner would
+        silently undo the narrowing that parameter exists for. The scope key is what keeps them
         apart, and it is derived from the same two values that shape the
         request — so a slot cannot describe a scope the token does not have.
         It also names the token's holder, if it has one, which keeps that
@@ -1172,7 +1172,7 @@ class GitHubAppCredentials:
 
         The job stores the *sha*, never the branch name. A branch moves; a job
         that recorded "dev" would silently mean a different tree by the time it
-        ran, and the publisher applies its patch onto a pinned commit.
+        ran, and every turn of the conversation starts from one pinned commit.
 
         ``ref`` is the requester's text: only a name git accepts is sent, and
         encoded, so it can never select another endpoint or add a query.
@@ -1202,10 +1202,10 @@ class GitHubAppCredentials:
     ) -> str:
         """Confirm ``sha`` is in the history of a branch of ``repo``; return that branch.
 
-        A job's base commit is fetched by hash and the publisher pushes a
-        branch built on it, so a hash alone would let a submission start from
-        any object GitHub serves for the repository, such as a fork's pull
-        request head, and have the platform push it under its own name.
+        A job's base commit is fetched by hash and the agent's branch is built
+        on it, so a hash alone would let a submission start from any object
+        GitHub serves for the repository, such as a fork's pull request head,
+        as if it were the repository's own history.
 
         ``branch`` is the one the job names. When it is not a branch of this
         repository (a tag, a commit, ``refs/pull/...``) or none is named, the
@@ -1335,16 +1335,6 @@ class GitHubAppCredentials:
         if installation_id is not None:
             for key in [k for k in self._tokens if k[0] == installation_id]:
                 self._discard_token(key)
-
-    def forget_token(self, token: str) -> None:
-        """Stop serving a token GitHub refused before it expired.
-
-        Whoever holds an installation token can revoke it, and the cache would
-        otherwise serve it until it neared expiry. Matched by value, so a
-        replacement another caller has already minted stays.
-        """
-        for key in [key for key, cached in self._tokens.items() if cached.token == token]:
-            self._discard_token(key)
 
 
 def _parse_expiry(raw: str, *, default: float) -> float:

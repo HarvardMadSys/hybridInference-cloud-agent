@@ -4615,7 +4615,7 @@
                 "type": "null"
               }
             ],
-            "description": "Branch to work from. Resolved to a commit at creation and stored as base_sha — a branch moves, and the publisher applies onto a pinned commit. The draft PR targets this branch; jobs that name none target the deployment default.",
+            "description": "Branch to work from. Resolved to a commit at creation and stored as base_sha, because a branch moves and the conversation works from one commit. Jobs that name none start from the repository's default branch.",
             "title": "Base Ref"
           },
           "base_sha": {
@@ -4766,7 +4766,7 @@
                 "type": "null"
               }
             ],
-            "description": "Target repository, e.g. 'owner/name'. An explicit null starts a temporary workspace: the sandbox starts empty, and nothing it does is published.",
+            "description": "Target repository, e.g. 'owner/name'. An explicit null starts a temporary workspace: the sandbox starts empty and has no repository to push to.",
             "title": "Repo"
           },
           "runtime": {
@@ -5323,17 +5323,6 @@
             "title": "Plugins",
             "type": "array"
           },
-          "published_commit_sha": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Published Commit Sha"
-          },
           "published_pr_url": {
             "anyOf": [
               {
@@ -5343,6 +5332,7 @@
                 "type": "null"
               }
             ],
+            "description": "The pull request this turn's agent opened, if it opened one.",
             "title": "Published Pr Url"
           },
           "reasoning_effort": {
@@ -5540,43 +5530,12 @@
                 "type": "null"
               }
             ],
-            "description": "The pull request the workspace was last published to. Present once the owner has published; POST /threads/{thread_id}/publish updates it.",
+            "description": "The newest pull request this conversation's agent opened through the GitHub relay.",
             "title": "Workspace Pr Url"
-          },
-          "workspace_publication_state": {
-            "anyOf": [
-              {
-                "enum": [
-                  "pending",
-                  "capturing",
-                  "captured",
-                  "publishing",
-                  "published",
-                  "failed"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Workspace Publication State"
-          },
-          "workspace_publication_unchanged": {
-            "default": false,
-            "description": "Whether the workspace's newest publication found nothing to publish, so it opened no pull request.",
-            "title": "Workspace Publication Unchanged",
-            "type": "boolean"
           },
           "workspace_shared": {
             "default": false,
             "title": "Workspace Shared",
-            "type": "boolean"
-          },
-          "workspace_unpublished_changes": {
-            "default": false,
-            "description": "Whether the workspace holds turns its owner has not published, or its last publication failed. The platform publishes only on POST /threads/{thread_id}/publish.",
-            "title": "Workspace Unpublished Changes",
             "type": "boolean"
           }
         },
@@ -7296,10 +7255,7 @@
           "delete_block_reason": {
             "anyOf": [
               {
-                "enum": [
-                  "fork_in_progress",
-                  "publication_pending"
-                ],
+                "const": "fork_in_progress",
                 "type": "string"
               },
               {
@@ -7705,7 +7661,7 @@
           },
           "require_idle": {
             "default": false,
-            "description": "Accept only when every chat sharing the published workspace is idle with an empty queue.",
+            "description": "Accept only when every chat sharing the workspace is idle with an empty queue.",
             "title": "Require Idle",
             "type": "boolean"
           },
@@ -7899,42 +7855,6 @@
           "pinned"
         ],
         "title": "AgentThreadPinResponse",
-        "type": "object"
-      },
-      "AgentThreadPublicationResponse": {
-        "description": "The workspace snapshot an owner's publication request opened or found.",
-        "properties": {
-          "requested": {
-            "description": "True when this request opened the snapshot; false when a publication of the workspace was already on its way and is returned instead.",
-            "title": "Requested",
-            "type": "boolean"
-          },
-          "snapshot_id": {
-            "title": "Snapshot Id",
-            "type": "integer"
-          },
-          "state": {
-            "enum": [
-              "pending",
-              "capturing",
-              "captured",
-              "publishing"
-            ],
-            "title": "State",
-            "type": "string"
-          },
-          "thread_id": {
-            "title": "Thread Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "thread_id",
-          "snapshot_id",
-          "state",
-          "requested"
-        ],
-        "title": "AgentThreadPublicationResponse",
         "type": "object"
       },
       "AgentThreadQuestionsResponse": {
@@ -15681,6 +15601,30 @@
           "generation": {
             "title": "Generation",
             "type": "integer"
+          },
+          "git_author_email": {
+            "default": "",
+            "description": "The owner's GitHub noreply address, so GitHub attributes the commits to them.",
+            "title": "Git Author Email",
+            "type": "string"
+          },
+          "git_author_name": {
+            "default": "",
+            "description": "The owner's GitHub login, as commit author and committer. Empty when the owner has not connected GitHub.",
+            "title": "Git Author Name",
+            "type": "string"
+          },
+          "git_coauthor": {
+            "default": "",
+            "description": "`Name <email>` the agent names as its commits' co-author, or empty.",
+            "title": "Git Coauthor",
+            "type": "string"
+          },
+          "github_credential": {
+            "default": "",
+            "description": "The GitHub relay placeholder for this residency's process: what git and gh present to GitHub, which only the GitHub relay accepts and exchanges for the owner's own GitHub token. Like `mcp_credential` it names the residency, so the process keeps it across turns.",
+            "title": "Github Credential",
+            "type": "string"
           },
           "mcp_credential": {
             "default": "",
@@ -25257,18 +25201,6 @@
             "$ref": "#/components/schemas/ExecutionProfile",
             "default": "trusted-v1"
           },
-          "github_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Short-lived GitHub App token scoped to this repository with contents and pull_requests write permissions. Injected as GH_TOKEN in the owning sandbox member for pushing branches and creating pull requests. Null when no GitHub App installation covers the repository.",
-            "title": "Github Token"
-          },
           "job_id": {
             "title": "Job Id",
             "type": "string"
@@ -25642,7 +25574,7 @@
                 "type": "null"
               }
             ],
-            "description": "Branch to work from. Resolved to a commit at creation and stored as base_sha — a branch moves, and the publisher applies onto a pinned commit. The draft PR targets this branch; jobs that name none target the deployment default.",
+            "description": "Branch to work from. Resolved to a commit at creation and stored as base_sha, because a branch moves and the conversation works from one commit. Jobs that name none start from the repository's default branch.",
             "title": "Base Ref"
           },
           "base_sha": {
@@ -25655,7 +25587,7 @@
                 "type": "null"
               }
             ],
-            "description": "The commit the agent actually worked from. Recorded only when the job did not already carry one — the publisher cannot apply a patch without knowing its base, and a job may be submitted without naming a commit.",
+            "description": "The commit the agent actually worked from. Recorded only when the job did not already carry one: a job may be submitted without naming a commit, and its follow-ups start from this one.",
             "title": "Base Sha"
           },
           "detail": {
@@ -34291,7 +34223,7 @@
     },
     "/v1/agent/changes": {
       "get": {
-        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\nThe stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab\nreconnects, is admitted again, and its ``hello`` has it read its lists.\n429 when the account already holds as many streams as this process allows\none account (:mod:`cloud_agent.api._stream_slots`).",
+        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue`` (a conversation) carry only\n``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\nThe stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab\nreconnects, is admitted again, and its ``hello`` has it read its lists.\n429 when the account already holds as many streams as this process allows\none account (:mod:`cloud_agent.api._stream_slots`).",
         "operationId": "stream_owner_changes_v1_agent_changes_get",
         "parameters": [
           {
@@ -45190,7 +45122,7 @@
         "summary": "Get Thread Queue"
       },
       "post": {
-        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or a publication is\nunfinished at the locked write, and with ``unpublished_changes`` if a turn\nsettled since the workspace was last published. An accepted idle-only\naction creates its turn in that same transaction without entering the\npending queue.",
+        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message or a Fork is active at the locked write.\nAn accepted idle-only\naction creates its turn in that same transaction without entering the\npending queue.",
         "operationId": "submit_thread_message_v1_agent_threads__thread_id__messages_post",
         "parameters": [
           {
@@ -45492,62 +45424,6 @@
           }
         },
         "summary": "Send Pending Message Now"
-      }
-    },
-    "/v1/agent/threads/{thread_id}/publish": {
-      "post": {
-        "description": "Push the conversation's workspace to its branch and open or update its draft PR.\n\nThe platform never publishes on its own: a finished turn stays in the\nworkspace until its owner asks. This opens the workspace's next snapshot\nand returns at once; capture, the secret scan, the push and the draft PR\nfollow as the job's ``workspace_publication_state``. Every conversation\nsharing the workspace is published together, to its origin's branch. A\npublication already on its way is returned instead of a second one.",
-        "operationId": "publish_agent_thread_v1_agent_threads__thread_id__publish_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "thread_id",
-            "required": true,
-            "schema": {
-              "title": "Thread Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentThreadPublicationResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Publish Agent Thread"
       }
     },
     "/v1/agent/threads/{thread_id}/questions": {

@@ -112,7 +112,7 @@ class EnvironmentBindingRepository(Protocol):
         ...
 
     async def get_job_environment(self, job_id: str) -> BoundEnvironment | None:
-        """Resolve immutable owned configuration for trusted publication paths."""
+        """Resolve a turn's immutable owned configuration, for masking."""
         ...
 
     async def workspace_environment_view(self, user_id: str, thread_id: str) -> dict[str, Any]:

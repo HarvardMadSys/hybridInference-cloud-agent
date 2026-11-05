@@ -25,7 +25,6 @@ from fastapi import HTTPException
 from cloud_agent.application import job_admission, session_fork
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.workers.attempts import reap_expired_attempts
-from cloud_agent.workers.snapshots import _capture_due_shared_snapshot
 
 
 class _RecordingConnection:
@@ -83,18 +82,6 @@ class _RecordingPool:
 
 def _assembled(pool: _RecordingPool) -> Storage:
     return Storage(cast("Any", pool))
-
-
-async def test_the_snapshot_pass_claims_through_the_assembled_repository() -> None:
-    """The loop asks `store.snapshot`, and the statement is the real claim."""
-    pool = _RecordingPool()
-
-    await _capture_due_shared_snapshot(_assembled(pool))
-
-    assert len(pool.queries) == 1, "the pass reached no statement at all"
-    assert "agent_sandbox_snapshots" in pool.queries[0], (
-        "the snapshot pass did not go through the assembled snapshot repository"
-    )
 
 
 async def test_the_reaper_pass_asks_the_assembled_sandbox_repository() -> None:

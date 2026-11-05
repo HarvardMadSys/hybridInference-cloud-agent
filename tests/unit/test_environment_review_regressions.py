@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import functools
 import json
-import os
-import subprocess
-import sys
 import threading
 from types import SimpleNamespace
 
@@ -24,14 +21,12 @@ from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxMana
 from cloud_agent_host import environment_tests
 from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.environment_snapshot import check_snapshot_secrets
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_manager import _TerminalManager
 from cloud_agent_shared.environment import (
     BoundEnvironment,
     EnvironmentAction,
     EnvironmentInputError,
-    EnvironmentVariable,
     VariableEdit,
     merge_variables,
     parse_env,
@@ -74,138 +69,6 @@ def test_multiline_secret_does_not_turn_short_lines_or_pem_headers_into_global_p
             stream.feed(value[:index]) + stream.feed(value[index:]) + stream.flush()
             == "[secret:KEY]"
         )
-
-
-@pytest.fixture
-def git_workspace(tmp_path):
-    def git(*args):
-        return subprocess.check_output(["git", *args], cwd=tmp_path, stderr=subprocess.STDOUT)
-
-    git("init", "-q")
-    (tmp_path / "tracked").write_text("baseline\n")
-    (tmp_path / ".gitignore").write_text("ignored\n")
-    git("add", ".")
-    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
-    base = git("rev-parse", "HEAD").decode().strip()
-
-    def capture(_spec, argv, *, env, workdir, timeout_s):
-        return subprocess.run(
-            [sys.executable, *argv[1:]],
-            cwd=workdir,
-            env={**os.environ, **env},
-            capture_output=True,
-            timeout=timeout_s,
-        )
-
-    backend = SimpleNamespace(spec=object(), manager=SimpleNamespace(exec_capture=capture))
-    return tmp_path, git, base, backend
-
-
-@pytest.mark.parametrize("kind", ["untracked", "binary", "staged", "tracked", "symlink"])
-def test_snapshot_scans_every_new_secret_blob_without_changing_the_user_index(git_workspace, kind):
-    root, git, base, backend = git_workspace
-    secret = "example-private-credential"
-    path = root / ("tracked" if kind == "tracked" else ".env.local")
-    if kind == "symlink":
-        path.symlink_to(secret)
-    else:
-        path.write_bytes((b"\0\xff" if kind == "binary" else b"TOKEN=") + secret.encode())
-    if kind == "staged":
-        git("add", ".env.local")
-    index = (root / ".git/index").read_bytes()
-    bound = BoundEnvironment(
-        binding_id="b", variables=[EnvironmentVariable(name="TOKEN", value=secret)]
-    )
-    with pytest.raises(SandboxError, match="Secret value"):
-        check_snapshot_secrets(backend, base, bound, workdir=str(root))
-    assert (root / ".git/index").read_bytes() == index
-
-
-def test_snapshot_allows_ordinary_flags_ignored_files_and_secret_removal(git_workspace):
-    root, git, base, backend = git_workspace
-    value = "example-private-credential"
-    (root / "tracked").write_text(value)
-    git("add", ".")
-    git(
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "commit",
-        "-qm",
-        "baseline secret",
-    )
-    base = git("rev-parse", "HEAD").decode().strip()
-    (root / "tracked").write_text("1 test passed")
-    (root / "ignored").write_text(value)
-    bound = BoundEnvironment(
-        binding_id="b",
-        variables=[
-            EnvironmentVariable(name="TOKEN", value=value),
-            EnvironmentVariable(name="DEBUG", value="1", secret=False),
-        ],
-    )
-    check_snapshot_secrets(backend, base, bound, workdir=str(root))
-
-
-def test_snapshot_scan_never_imports_from_the_workspace(git_workspace):
-    root, _, base, _ = git_workspace
-    # The change adds the project's own module, named like the standard library's.
-    (root / "types.py").write_text("UserId = int\n")
-
-    def capture(_spec, argv, *, env, workdir, timeout_s):
-        # The scan exactly as the sandbox runs it, with the system interpreter.
-        return subprocess.run(
-            argv,
-            cwd=workdir,
-            env={"PATH": "/usr/bin:/bin", **env},
-            capture_output=True,
-            timeout=timeout_s,
-        )
-
-    backend = SimpleNamespace(spec=object(), manager=SimpleNamespace(exec_capture=capture))
-    bound = BoundEnvironment(
-        binding_id="b",
-        variables=[EnvironmentVariable(name="TOKEN", value="example-private-credential")],
-    )
-    check_snapshot_secrets(backend, base, bound, workdir=str(root))
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
-@pytest.mark.parametrize("holds_secret", [False, True])
-def test_snapshot_scans_a_file_whose_name_is_not_utf8(git_workspace, holds_secret):
-    root, _, base, backend = git_workspace
-    value = "example-private-credential"
-    # Git keeps a name as the bytes it was written with, here Latin-1.
-    with open(os.path.join(os.fsencode(root), b"r\xe9sum\xe9.txt"), "wb") as handle:
-        handle.write(b"TOKEN=" + value.encode() if holds_secret else b"cv\n")
-    bound = BoundEnvironment(
-        binding_id="b", variables=[EnvironmentVariable(name="TOKEN", value=value)]
-    )
-    if holds_secret:
-        with pytest.raises(SandboxError, match="Secret value"):
-            check_snapshot_secrets(backend, base, bound, workdir=str(root))
-    else:
-        check_snapshot_secrets(backend, base, bound, workdir=str(root))
-
-
-def test_snapshot_scan_passes_a_repository_cloned_into_the_workspace(git_workspace):
-    root, _, base, backend = git_workspace
-    nested = root / "dependency"
-    nested.mkdir()
-    (nested / "README").write_text("another project\n")
-    for args in (
-        ["init", "-q"],
-        ["add", "README"],
-        ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "x"],
-    ):
-        subprocess.check_output(["git", *args], cwd=nested, stderr=subprocess.STDOUT)
-    bound = BoundEnvironment(
-        binding_id="b",
-        variables=[EnvironmentVariable(name="TOKEN", value="example-private-credential")],
-    )
-    # Its entry is a commit id, which carries no file content into the patch.
-    check_snapshot_secrets(backend, base, bound, workdir=str(root))
 
 
 def test_completed_action_is_not_reexecuted_after_reaping_or_broker_restart(tmp_path):
@@ -844,43 +707,6 @@ async def test_old_broker_receives_no_secret_bearing_payload():
 
 
 @pytest.mark.asyncio
-async def test_empty_binding_snapshot_uses_the_existing_broker_protocol(monkeypatch):
-    from unittest.mock import AsyncMock
-
-    from cloud_agent import sandbox_manager_routing
-    from cloud_agent.workers.snapshots import _capture_due_shared_snapshot
-
-    snapshot = {
-        "snapshot_id": 1,
-        "sandbox_id": "sandbox",
-        "generation": 1,
-        "container_id": "container",
-        "workspace_epoch": 2,
-        "base_sha": "a" * 40,
-        "anchor_job_id": "job",
-    }
-    receipt = {**snapshot, "sandbox_generation": 1, "patch": "", "content_sha256": "digest"}
-    broker = SimpleNamespace(capture_shared_snapshot=AsyncMock(return_value=receipt))
-    monkeypatch.setattr(
-        sandbox_manager_routing, "sandbox_manager_for_job", AsyncMock(return_value=broker)
-    )
-    store = SimpleNamespace(
-        host_pool=object(),
-        snapshot=SimpleNamespace(
-            claim_due_sandbox_snapshot=AsyncMock(return_value=snapshot),
-            record_sandbox_snapshot_capture=AsyncMock(return_value={"id": 1}),
-        ),
-        environments=SimpleNamespace(
-            get_job_environment=AsyncMock(return_value=BoundEnvironment(binding_id="empty"))
-        ),
-        # A group that never ran on a model connection: no keys to scan for.
-        model_connections=SimpleNamespace(scan_key_ciphertexts=AsyncMock(return_value=[])),
-    )
-    assert await _capture_due_shared_snapshot(store)
-    assert "environment" not in broker.capture_shared_snapshot.call_args.args[0]
-
-
-@pytest.mark.asyncio
 async def test_empty_binding_fork_reaches_coordination_without_environment_preparation(monkeypatch):
     from unittest.mock import AsyncMock
 
@@ -924,19 +750,3 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
     assert failure.value.detail["error"]["type"] == "fork_in_progress"
     broker.prepare_environment.assert_not_awaited()
     store.session_fork.claim_session_fork_materialization.assert_awaited_once()
-
-
-def test_snapshot_refuses_a_model_connection_key_with_no_environment_at_all(git_workspace):
-    """A provider key need not look like one; the group's known keys are scanned by value."""
-    root, _git, base, backend = git_workspace
-    key = "Zq7-provider-key-without-any-prefix"
-    (root / "notes.txt").write_text(f"export PROVIDER={key}\n")
-    with pytest.raises(SandboxError, match="Secret value"):
-        check_snapshot_secrets(
-            backend, base, None, workdir=str(root), known_secrets={"model-connection-key-0": key}
-        )
-    # And it is not a pattern match: other text passes.
-    (root / "notes.txt").write_text("export PROVIDER=someone-elses-value\n")
-    check_snapshot_secrets(
-        backend, base, None, workdir=str(root), known_secrets={"model-connection-key-0": key}
-    )
