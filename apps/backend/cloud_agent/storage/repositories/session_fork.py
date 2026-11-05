@@ -45,6 +45,80 @@ if TYPE_CHECKING:
     import asyncpg
 
 
+def _anchor_refusal(source: Any) -> str | None:
+    """Why a source turn cannot anchor a fork, or None."""
+    # A failed/cancelled platform job is not proof of a completed native
+    # exchange. Historical rewind is anchored only on successful turns;
+    # their ordinal is resolved against the provider transcript later.
+    if source["state"] != SUCCEEDED:
+        return "anchor_not_settled"
+    if not source["native_turn_no"]:
+        return "native_context_unavailable"
+    return None
+
+
+def _group_refusal(row: Any) -> str | None:
+    """Why the source's sandbox group cannot be forked from, or None."""
+    if row is None:
+        return "not_shared_live"
+    if row["deletion_state"] in DELETED_GROUP_STATES:
+        return "sandbox_not_ready"
+    return None
+
+
+def _revocation_error(refused: str) -> str:
+    """The fork error for a start the host revocation check refused."""
+    if refused == "host_revoked":
+        return "host_removed"
+    # A late checkpoint handed the group on; its next turn restores it.
+    return "sandbox_not_ready"
+
+
+def _member_refusal(row: Any) -> str | None:
+    """Why the source member cannot serve a native fork, or None."""
+    if not row["native_fork_capable"]:
+        # Existing retained v1 containers remain valid for follow-up
+        # turns.  Their bundled helpers do not understand historical
+        # anchors, however, so never degrade an at-anchor fork into a
+        # latest-session fork during a rolling upgrade.
+        return "native_fork_unavailable"
+    if row["active_attempt_id"] is not None:
+        return "source_busy"
+    if row["native_state"] != "ready" or not str(row["native_session_id"] or "").strip():
+        return "native_context_unavailable"
+    return None
+
+
+def _settled_group_refusal(row: Any, source: Any, latest_settled: Any) -> str | None:
+    """Why the settled native context or its group cannot take a child, or None."""
+    if (
+        latest_settled is None
+        or latest_settled["native_turn_no"] is None
+        or int(latest_settled["turn_no"]) < int(source["turn_no"])
+        or int(latest_settled["native_turn_no"]) < int(source["native_turn_no"])
+    ):
+        return "native_context_unavailable"
+    if row["resident_slot_id"] is None:
+        return "sandbox_not_ready"
+    if row["fork_operation_id"] is not None:
+        return "fork_in_progress"
+    if row["sandbox_state"] in {
+        "lost",
+        "stopped_dirty",
+        "provisioning",
+        "stopping",
+        # Only a checkpoint holds the group; the next turn restores it.
+        "cold",
+        "restoring",
+    }:
+        return "sandbox_not_ready"
+    if not row["container_id"]:
+        return "sandbox_not_ready"
+    if row["runtime_id"] != source["runtime"]:
+        return "runtime_mismatch"
+    return None
+
+
 class PostgresSessionForkRepository:
     """Forking a retained chat: prepare, materialize, finalize, reap."""
 
@@ -52,7 +126,22 @@ class PostgresSessionForkRepository:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
-    async def prepare_session_fork(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    async def _replayed_fork(
+        self, conn: asyncpg.Connection, existing: Any, *, source_job_id: str
+    ) -> dict[str, Any] | None:
+        """Answer an idempotent retry with the Fork its key already made."""
+        result = await self._session_fork_details(conn, str(existing["id"]))
+        if result is not None:
+            # Only the request that created the Fork knows the fence
+            # it took. The current one may belong to a start still in
+            # flight, so a replay names none: its run's checkpoint
+            # then never covers the group, which only costs a move.
+            result["start_seq"] = None
+        if result is not None and existing["source_job_id"] != source_job_id:
+            result["error"] = "idempotency_conflict"
+        return result
+
+    async def prepare_session_fork(
         self,
         *,
         source_job_id: str,
@@ -98,16 +187,7 @@ class PostgresSessionForkRepository:
             if owned_thread is None:
                 return None
             if existing is not None:
-                result = await self._session_fork_details(conn, str(existing["id"]))
-                if result is not None:
-                    # Only the request that created the Fork knows the fence
-                    # it took. The current one may belong to a start still in
-                    # flight, so a replay names none: its run's checkpoint
-                    # then never covers the group, which only costs a move.
-                    result["start_seq"] = None
-                if result is not None and existing["source_job_id"] != source_job_id:
-                    result["error"] = "idempotency_conflict"
-                return result
+                return await self._replayed_fork(conn, existing, source_job_id=source_job_id)
 
             # Replay above may recover a committed child after archival. Only
             # new operations are refused, under the source thread lock.
@@ -126,13 +206,9 @@ class PostgresSessionForkRepository:
             )
             if source is None:
                 return None
-            # A failed/cancelled platform job is not proof of a completed native
-            # exchange. Historical rewind is anchored only on successful turns;
-            # their ordinal is resolved against the provider transcript later.
-            if source["state"] != SUCCEEDED:
-                return {"error": "anchor_not_settled"}
-            if not source["native_turn_no"]:
-                return {"error": "native_context_unavailable"}
+            anchor_error = _anchor_refusal(source)
+            if anchor_error is not None:
+                return {"error": anchor_error}
             await conn.fetchval(
                 """
                 SELECT thread_id
@@ -158,34 +234,23 @@ class PostgresSessionForkRepository:
                 """,
                 source["thread_id"],
             )
-            if row is None:
-                return {"error": "not_shared_live"}
-            if row["deletion_state"] in DELETED_GROUP_STATES:
-                return {"error": "sandbox_not_ready"}
+            group_error = _group_refusal(row)
+            if group_error is not None:
+                return {"error": group_error}
             # ``native_fork_capable`` read the host before the group's lock was
             # this fork's, and a revocation may have held that lock. Read again
             # under it: a fork must not start a revoked host's group.
             refused = await refuse_start_on_revoked_host(
                 conn, {"id": row["sandbox_id"], "state": row["sandbox_state"], "host": row["host"]}
             )
-            if refused == "host_revoked":
-                return {"error": "host_removed"}
             if refused is not None:
-                # A late checkpoint handed the group on; its next turn restores it.
-                return {"error": "sandbox_not_ready"}
+                return {"error": _revocation_error(refused)}
             resource_new, _ = await host_compute_admission(conn, str(row["host"]))
             if not resource_new:
                 return {"error": "resource_admission_blocked"}
-            if not row["native_fork_capable"]:
-                # Existing retained v1 containers remain valid for follow-up
-                # turns.  Their bundled helpers do not understand historical
-                # anchors, however, so never degrade an at-anchor fork into a
-                # latest-session fork during a rolling upgrade.
-                return {"error": "native_fork_unavailable"}
-            if row["active_attempt_id"] is not None:
-                return {"error": "source_busy"}
-            if row["native_state"] != "ready" or not str(row["native_session_id"] or "").strip():
-                return {"error": "native_context_unavailable"}
+            member_error = _member_refusal(row)
+            if member_error is not None:
+                return {"error": member_error}
             latest_settled = await conn.fetchrow(
                 """
                 SELECT turn_no, native_turn_no FROM agent_jobs
@@ -194,31 +259,9 @@ class PostgresSessionForkRepository:
                 row["last_settled_job_id"],
                 source["thread_id"],
             )
-            if (
-                latest_settled is None
-                or latest_settled["native_turn_no"] is None
-                or int(latest_settled["turn_no"]) < int(source["turn_no"])
-                or int(latest_settled["native_turn_no"]) < int(source["native_turn_no"])
-            ):
-                return {"error": "native_context_unavailable"}
-            if row["resident_slot_id"] is None:
-                return {"error": "sandbox_not_ready"}
-            if row["fork_operation_id"] is not None:
-                return {"error": "fork_in_progress"}
-            if row["sandbox_state"] in {
-                "lost",
-                "stopped_dirty",
-                "provisioning",
-                "stopping",
-                # Only a checkpoint holds the group; the next turn restores it.
-                "cold",
-                "restoring",
-            }:
-                return {"error": "sandbox_not_ready"}
-            if not row["container_id"]:
-                return {"error": "sandbox_not_ready"}
-            if row["runtime_id"] != source["runtime"]:
-                return {"error": "runtime_mismatch"}
+            slot_error = _settled_group_refusal(row, source, latest_settled)
+            if slot_error is not None:
+                return {"error": slot_error}
 
             # A deleted chat keeps its membership as an audit row, so without
             # this its slot stays occupied forever. The slot is a fixed member
