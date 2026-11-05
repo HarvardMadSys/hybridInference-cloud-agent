@@ -16,12 +16,9 @@ from tests.support.owners import connection_access, residency_connection
 from cloud_agent_host import (
     control_plane_client,
     github_relay_env,
-    group_reservation,
     host_capabilities,
     host_service,
     local_settings,
-    shared_live_attempt,
-    turn_child,
     turn_launch,
 )
 from cloud_agent_host.claimed_job import ClaimedJob
@@ -30,6 +27,7 @@ from cloud_agent_host.container.chat_sandbox import CHAT_UPLOADS_DIR, ChatSandbo
 from cloud_agent_host.container.sandbox import ContainerBackend, ProcessBackend
 from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, encode_turn
 from cloud_agent_host.runtimes import get_runtime
+from cloud_agent_host.turn import group_reservation, shared_live_attempt, turn_child
 from cloud_agent_shared import shared_protocol
 
 _JOB = ClaimedJob(

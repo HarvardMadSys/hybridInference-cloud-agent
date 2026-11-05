@@ -73,7 +73,8 @@ def test_sigterm_during_preflight_does_not_kill_the_turn_child() -> None:
         """
         import io, os, signal, sys, time
         sys.path.insert(0, os.environ["HOST_PKG"])
-        from cloud_agent_host import runner_stop, turn_child
+        from cloud_agent_host import runner_stop
+        from cloud_agent_host.turn import turn_child
 
         class Backend:
             def preflight(self):

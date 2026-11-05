@@ -25,8 +25,8 @@ ends the run instead of being retried.
 
 This module is the command line. Without ``--turn`` it runs the host service
 (:mod:`cloud_agent_host.host_service`); with it, one turn's child process
-(:mod:`cloud_agent_host.turn_child`). The trusted Git work on a chat's source
-is :mod:`cloud_agent_host.source_preparation`.
+(:mod:`cloud_agent_host.turn.turn_child`). The trusted Git work on a chat's source
+is :mod:`cloud_agent_host.turn.source_preparation`.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from cloud_agent_host.local_settings import (
 )
 from cloud_agent_host.logging_utils import configure_process_logging
 from cloud_agent_host.retired_configuration import refuse_retired_host_configuration
-from cloud_agent_host.turn_child import _serve_turn
+from cloud_agent_host.turn.turn_child import _serve_turn
 
 
 def _lease_ttl_arg(raw: str) -> float:

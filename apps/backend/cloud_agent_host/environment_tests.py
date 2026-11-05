@@ -245,7 +245,7 @@ def execute_test(
 ) -> None:
     """Prepare exact source, install/start/verify, then remove the ephemeral group."""
     from cloud_agent_host.claimed_job import ClaimedJob
-    from cloud_agent_host.source_preparation import GitSourcePrefetch
+    from cloud_agent_host.turn.source_preparation import GitSourcePrefetch
 
     bound = BoundEnvironment.model_validate(run["environment"])
     prebuild = run.get("purpose") == "prebuild"
@@ -390,7 +390,7 @@ def _save_snapshot(
     the bucket's credentials.
     """
     from cloud_agent_host.sandbox_manager_client import sandbox_manager_from_env
-    from cloud_agent_host.source_preparation import SAFE_DIRECTORY_ENV
+    from cloud_agent_host.turn.source_preparation import SAFE_DIRECTORY_ENV
 
     if lockfiles is None:
         raise RuntimeError("the checkout's dependency manifests are unknown")

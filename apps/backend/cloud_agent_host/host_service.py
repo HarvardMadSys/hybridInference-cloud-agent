@@ -2,7 +2,7 @@
 
 One process per machine, started as ``python -m cloud_agent_host.runner``. It
 claims a turn only while it is under its limit and hands each claimed turn to
-a child process of its own (:mod:`cloud_agent_host.turn_child`); it never runs
+a child process of its own (:mod:`cloud_agent_host.turn.turn_child`); it never runs
 a turn itself. On SIGTERM it stops claiming and waits for its children.
 """
 

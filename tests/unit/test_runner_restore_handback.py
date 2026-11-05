@@ -10,15 +10,11 @@ import pytest
 from tests.unit.test_runner_host_settings import _JOB, _stamp
 from tests.unit.test_runner_source_prefetch import Source
 
-from cloud_agent_host import (
-    control_plane_client,
-    group_reservation,
-    shared_live_attempt,
-    source_preparation,
-)
+from cloud_agent_host import control_plane_client
 from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox_manager_client import SandboxManagerError
+from cloud_agent_host.turn import group_reservation, shared_live_attempt, source_preparation
 
 _RESTORE = {
     "checkpoint_id": "c" * 32,

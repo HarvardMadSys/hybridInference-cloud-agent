@@ -30,11 +30,12 @@ from tests.unit.test_shared_session_supervisor import (
     _TransportFactory,
 )
 
-from cloud_agent_host import resident_probe, shared_live_attempt
+from cloud_agent_host import resident_probe
 from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransport
 from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.turn import shared_live_attempt
 from cloud_agent_shared import operation_profiling
 
 

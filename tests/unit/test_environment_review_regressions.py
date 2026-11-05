@@ -439,7 +439,7 @@ def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=N
     monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: retained)
     monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
     monkeypatch.setattr(environment_tests, "claim_and_execute", claim_and_execute)
-    monkeypatch.setattr("cloud_agent_host.source_preparation.GitSourcePrefetch", _Source)
+    monkeypatch.setattr("cloud_agent_host.turn.source_preparation.GitSourcePrefetch", _Source)
     return environment_tests.EnvironmentTestWorker("http://control", backend), claims, reports
 
 

@@ -19,7 +19,7 @@ What is measured
 
 One *simulated* startup attempt, shaped after the claim in ``run_forever`` and
 ``_run_shared_live_attempt`` in ``apps/backend/cloud_agent_host/host_service.py`` and
-``apps/backend/cloud_agent_host/shared_live_attempt.py``:
+``apps/backend/cloud_agent_host/turn/shared_live_attempt.py``:
 
 * one ``start_operation(operation="attempt.startup", host=..., worker_id=...)``,
 * one ``span`` around a stand-in for the attestation and claim call,

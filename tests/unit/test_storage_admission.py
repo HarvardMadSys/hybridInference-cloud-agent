@@ -12,11 +12,12 @@ import pytest
 from tests.support.owners import connection_access
 
 from cloud_agent.schemas import WorkerReleaseRequest
-from cloud_agent_host import local_settings, storage_admission, turn_child
+from cloud_agent_host import local_settings, storage_admission
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.host_capacity import StorageMissing, StorageSample
 from cloud_agent_host.host_runtime import HANDOVER_DECLINED, encode_turn
+from cloud_agent_host.turn import turn_child
 
 
 @pytest.mark.parametrize("available_mib,declined", [(1023, True), (1024, False), (2048, False)])

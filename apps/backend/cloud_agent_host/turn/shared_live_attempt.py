@@ -1,7 +1,7 @@
 """One attempt of a turn in its shared-live sandbox group.
 
 The group is first checked and reserved with the control plane
-(:mod:`cloud_agent_host.group_reservation`). The attempt then runs as a fixed
+(:mod:`cloud_agent_host.turn.group_reservation`). The attempt then runs as a fixed
 sequence of stages: it acquires the group from the sandbox manager, prepares
 the workspace, starts or reuses the member's resident Agent CLI, admits and
 streams the prompt, and settles both sides.
@@ -36,13 +36,6 @@ from cloud_agent_host.container.sandbox import SandboxBackend, SandboxError
 from cloud_agent_host.control_plane_client import ControlPlane, _log_control_failure
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.github_relay_env import residency_github_launch
-from cloud_agent_host.group_reservation import (
-    GroupPlan,
-    GroupRefused,
-    owner_visible_error,
-    plan_group,
-    reserve_group,
-)
 from cloud_agent_host.local_settings import _chat_idle_timeout_s
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
@@ -57,7 +50,14 @@ from cloud_agent_host.sandbox_manager_client import (
     sandbox_manager_from_env,
 )
 from cloud_agent_host.setup import run_setup
-from cloud_agent_host.source_preparation import (
+from cloud_agent_host.turn.group_reservation import (
+    GroupPlan,
+    GroupRefused,
+    owner_visible_error,
+    plan_group,
+    reserve_group,
+)
+from cloud_agent_host.turn.source_preparation import (
     GitSourcePrefetch,
     WorktreeError,
     _choose_environment_snapshot,
@@ -66,7 +66,7 @@ from cloud_agent_host.source_preparation import (
     _resident_base_ready,
     _retained_head,
 )
-from cloud_agent_host.turn_stream import _reportable_turn_resources, _stream_shared_agent_turn
+from cloud_agent_host.turn.turn_stream import _reportable_turn_resources, _stream_shared_agent_turn
 from cloud_agent_host.upload_import import import_uploads as _import_uploads
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
