@@ -719,7 +719,7 @@ REAP_STALLED_SESSION_FORKS_MEMBERS_3_SQL = """
                     """
 
 
-# -- repositories/attempt_commands.py -----------------------------------------
+# -- repositories/attempt_commands/ -------------------------------------------
 
 #: Executed by ``claim_job``.
 CLAIM_COLD_GROUP_FOR_RESTORE_SQL = f"""
