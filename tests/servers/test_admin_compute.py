@@ -28,11 +28,8 @@ from cloud_agent.ports.external.compute_provider import (
     ProviderCapabilities,
 )
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
+from cloud_agent.providers.compute import compute_registry
 from cloud_agent.providers.compute.compute_config import ComputeConfiguration
-from cloud_agent.providers.compute.compute_registry import (
-    ComputeProviderRegistration,
-    ComputeProviderRegistry,
-)
 from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 from cloud_agent.schemas.compute import AutomaticDeploymentSetup, RenewalPolicy
 from cloud_agent_shared.egress import network_from_env
@@ -310,9 +307,9 @@ class NoProviderCalls:
 async def compute_api(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "test-compute-admin")
     repo = MemoryResources()
-    registry = ComputeProviderRegistry(
+    registry = compute_registry.ComputeProviderRegistry(
         [
-            ComputeProviderRegistration(
+            compute_registry.ComputeProviderRegistration(
                 id="cloudlab",
                 label="CloudLab",
                 provider=NoProviderCalls(),
@@ -459,7 +456,7 @@ async def test_missing_runtime_is_unavailable_after_authentication(compute_api):
 async def test_remove_is_available_when_provider_is_unconfigured(compute_api):
     client, _, app = compute_api
     _, operation = await allocation(client)
-    app.state.compute_commands.registry = ComputeProviderRegistry([])
+    app.state.compute_commands.registry = compute_registry.ComputeProviderRegistry([])
     app.state.compute_commands.queries.registry = app.state.compute_commands.registry
 
     response = await client.get("/admin/agent/servers", headers=ADMIN)
@@ -648,9 +645,9 @@ async def test_cloudlab_autoscaling_put_is_canonical_revisioned_audited_and_paus
     client, repo, app = compute_api
     commands = app.state.compute_commands
     cloudlab = commands.registry.get("cloudlab")
-    commands.registry = ComputeProviderRegistry(
+    commands.registry = compute_registry.ComputeProviderRegistry(
         [
-            ComputeProviderRegistration(
+            compute_registry.ComputeProviderRegistration(
                 id=cloudlab.id,
                 label=cloudlab.label,
                 provider=cloudlab.provider,

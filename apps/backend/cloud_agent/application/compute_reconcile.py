@@ -30,10 +30,7 @@ from cloud_agent.application.compute_rotation import (
     host_release_blocks_rotation,
     load_host_release_for_allocations,
 )
-from cloud_agent.application.compute_setup import (
-    HostRelease,
-    load_control_plane_host_release,
-)
+from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.application.release_inventory import quiesce_and_scan
 from cloud_agent.application.superseded_removal import superseded_refusal
@@ -64,10 +61,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
     DeploymentProfile,
 )
-from cloud_agent.providers.compute.compute_config import (
-    current_observation_seconds,
-    current_registration_url,
-)
+from cloud_agent.providers.compute import compute_config
 from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
@@ -418,7 +412,9 @@ class ComputeReconciler:
         A released resource not yet seen gone is still read, and only read.
         """
         now = _now()
-        observation_seconds = current_observation_seconds(self.commands.configuration)
+        observation_seconds = compute_config.current_observation_seconds(
+            self.commands.configuration
+        )
         snapshot = await self.repository.scheduling_inventory()
         release = await load_host_release_for_allocations(
             snapshot.allocations, load_control_plane_host_release
@@ -1415,7 +1411,7 @@ class ComputeReconciler:
         Each submission gets a fresh token; only the newest one of an
         allocation can register, and only its hash is stored.
         """
-        url = current_registration_url(self.commands.configuration)
+        url = compute_config.current_registration_url(self.commands.configuration)
         if not url:
             raise ProviderError(
                 "registration_unavailable",

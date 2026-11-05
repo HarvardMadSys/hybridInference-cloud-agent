@@ -58,12 +58,7 @@ from cloud_agent.domain.agent_memory import MemoryTask
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol, sandbox_tools
 from cloud_agent.mcp.authorization import decide, visible_capabilities
-from cloud_agent.mcp.host import (
-    HostError,
-    SessionKey,
-    arguments_digest,
-    encode_arguments,
-)
+from cloud_agent.mcp.host import HostError, SessionKey, arguments_digest, encode_arguments
 from cloud_agent.mcp.invocations import MAX_HELD_ARGUMENTS_BYTES, deadline_for
 from cloud_agent.mcp.jsonrpc import (
     INTERNAL_ERROR,
