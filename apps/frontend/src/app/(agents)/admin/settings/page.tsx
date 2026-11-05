@@ -288,6 +288,7 @@ function SettingsView() {
       ]),
     ],
     archiveAvailable: archiveSettings !== null,
+    isSettingVisible: applicationSettings.isSettingVisible,
   });
 
   const selectSearchResult = (item: SettingsSearchItem) => {

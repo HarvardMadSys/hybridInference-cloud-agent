@@ -330,7 +330,8 @@ export function ApplicationSettingGroup({
   fields: AdminSettingDefinition[];
   settings: ApplicationSettingsState;
 }) {
-  const { snapshot, saved, busy, save } = settings;
+  const { snapshot, saved, busy, save, isSettingVisible, setGoverningDraft, clearGoverningDrafts } =
+    settings;
   const [editing, setEditing] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [replacing, setReplacing] = useState<Record<string, boolean>>({});
@@ -344,7 +345,10 @@ export function ApplicationSettingGroup({
   const groupId = useId();
   const incoming = (field: AdminSettingDefinition) =>
     field.secret ? '' : String(snapshot?.values[field.key] ?? field.default);
-  const changed = fields.filter(
+  // Fields of an unselected provider or a disabled feature are not shown. Their
+  // drafts are kept for switching back, but never counted or submitted.
+  const shown = fields.filter((field) => isSettingVisible(field.key));
+  const changed = shown.filter(
     (field) =>
       !field.read_only && drafts[field.key] !== undefined && drafts[field.key] !== incoming(field),
   );
@@ -380,6 +384,7 @@ export function ApplicationSettingGroup({
     setReplacing({});
     setMultiline({});
     setErrors({});
+    clearGoverningDrafts(fields.map((field) => field.key));
     setEditing(false);
     requestAnimationFrame(() => editButton.current?.focus());
   };
@@ -422,6 +427,7 @@ export function ApplicationSettingGroup({
 
   return (
     <div
+      hidden={!shown.length}
       className={`mt-4 rounded-xl border bg-surface first:mt-0 ${editing ? 'border-accent/30 shadow-[0_0_0_3px_rgb(var(--ui-accent)/0.04)]' : 'border-border'}`}
     >
       <div className="flex min-h-14 items-center justify-between gap-4 rounded-t-xl border-b border-border/70 bg-surface-muted/45 px-4 py-2 sm:px-5">
@@ -450,7 +456,7 @@ export function ApplicationSettingGroup({
           ref={editButton}
           type="button"
           aria-label={`Edit ${title} settings`}
-          disabled={busy || editing || fields.every((field) => field.read_only)}
+          disabled={busy || editing || shown.every((field) => field.read_only)}
           hidden={editing}
           className={`ui-button ui-button-ghost min-h-9 shrink-0 gap-1.5 px-2.5 text-xs hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${editing ? 'hidden' : ''}`}
           onClick={() => {
@@ -486,7 +492,7 @@ export function ApplicationSettingGroup({
           prepare();
         }}
       >
-        {fields.map((field) => {
+        {shown.map((field) => {
           const key = field.key;
           const id = `application-setting-${key}`;
           const configured = snapshot?.secret_configured[key] ?? false;
@@ -502,6 +508,7 @@ export function ApplicationSettingGroup({
               return updated;
             });
             setErrors((previous) => ({ ...previous, [key]: '' }));
+            setGoverningDraft(key, next === incoming(field) ? undefined : next);
           };
           const fieldProps = {
             id,
