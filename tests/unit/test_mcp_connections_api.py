@@ -1904,7 +1904,7 @@ class TestImport:
                                 "wiki": {
                                     "command": "npx",
                                     "args": ["-y", "@scope/wiki@1.0.0"],
-                                    "env": {"API_KEY": "literal"},
+                                    "env": {"API_KEY": "literal-key"},
                                 }
                             }
                         }
@@ -1916,7 +1916,7 @@ class TestImport:
         assert store.created == []
         draft = response.json()["drafts"][0]
         assert draft["argv"][0] == "npx"
-        assert draft["secrets"][0]["value"] != "literal"
+        assert draft["secrets"][0]["value"] != "literal-key"
 
     def test_saving_imports_the_command_and_keeps_the_secret_out_of_the_spec(self) -> None:
         """The launch spec carries a reference; the value is encrypted."""
@@ -1931,7 +1931,7 @@ class TestImport:
                                 "wiki": {
                                     "command": "npx",
                                     "args": ["-y", "@scope/wiki@1.0.0"],
-                                    "env": {"API_KEY": "literal"},
+                                    "env": {"API_KEY": "literal-key"},
                                 }
                             }
                         }
@@ -1944,7 +1944,7 @@ class TestImport:
         assert len(store.created) == 1
         stored = store.connections[1]
         assert stored["launch_spec"]["env"]["API_KEY"] == "secret://API_KEY"
-        assert "literal" not in json.dumps(stored["launch_spec"])
+        assert "literal-key" not in json.dumps(stored["launch_spec"])
 
     def test_later_credential_rejection_rolls_back_the_whole_import(self) -> None:
         """An import reports no success while an earlier draft remains committed."""
