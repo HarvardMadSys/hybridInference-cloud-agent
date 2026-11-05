@@ -45,6 +45,7 @@ async def http(pool, monkeypatch):
 
     app = create_app()
     storage = Storage(pool)
+    _stretch_windows(monkeypatch, storage)
     app.state.storage = storage
     app.state.owners = LocalOwnerDirectory(storage.local_accounts)
     await make_account(storage, _EMAIL)
@@ -52,6 +53,31 @@ async def http(pool, monkeypatch):
         transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
     ) as client:
         yield client
+
+
+#: How much longer than configured each counting window is made here.
+_WINDOW_STRETCH = 10_000
+
+
+def _stretch_windows(monkeypatch, storage: Storage) -> None:
+    """Make every sign-in window last months, so no test straddles one's edge.
+
+    A window starts on a multiple of its length in wall time (every quarter
+    hour, every hour), and a test that signs in dozens of times on a slow
+    machine can cross one: its earlier attempts then count in the window that
+    closed, and a 429 the test expects never comes. These tests are about
+    which counter fills and when, not how long a window is, so each window is
+    stretched by :data:`_WINDOW_STRETCH`.
+    """
+    accounts = storage.local_accounts
+    count = accounts.hit_rate_limit
+
+    async def stretched(*, bucket: str, key_hash: bytes, window_s: int, limit: int) -> float:
+        return await count(
+            bucket=bucket, key_hash=key_hash, window_s=window_s * _WINDOW_STRETCH, limit=limit
+        )
+
+    monkeypatch.setattr(accounts, "hit_rate_limit", stretched)
 
 
 async def _login(http, address: str, password: str = PASSWORD, email: str = _EMAIL) -> int:

@@ -148,6 +148,9 @@ class AdminSandbox(BaseModel):
     idle_deadline: datetime | None = None
     updated_at: datetime
     host_last_heartbeat_at: datetime | None = None
+    #: The kind of this sandbox's newest incident within 24 hours, listed only.
+    last_incident: str | None = Field(None, max_length=64)
+    last_incident_at: datetime | None = None
 
 
 class AdminSandboxList(BaseModel):
