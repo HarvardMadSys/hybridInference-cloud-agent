@@ -30,6 +30,8 @@ from cloud_agent_shared.environment import (
     environment_payload,
     uses_inference_names,
 )
+from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.sandbox_manager_compat import manager_env
 
 if TYPE_CHECKING:
     import builtins
@@ -706,4 +708,21 @@ class SessionSupervisorClient:
         )
 
 
-__all__ = ["SessionSupervisorClient", "SessionSupervisorError", "SharedTurnStream"]
+def session_supervisor_from_env(*, timeout: float = 180) -> SessionSupervisorClient:
+    """A client for this host's sandbox manager, at the address and token it was started with."""
+    url = (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip()
+    token = (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip()
+    if not url or not token:
+        raise SandboxError(
+            "restartable chat execution needs AGENT_SANDBOX_MANAGER_URL and "
+            "AGENT_SANDBOX_MANAGER_TOKEN"
+        )
+    return SessionSupervisorClient(url, token, timeout=timeout)
+
+
+__all__ = [
+    "SessionSupervisorClient",
+    "SessionSupervisorError",
+    "SharedTurnStream",
+    "session_supervisor_from_env",
+]

@@ -13,12 +13,23 @@ from unittest.mock import Mock
 import pytest
 from tests.support.owners import connection_access, residency_connection
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import (
+    chat_sandbox,
+    control_plane_client,
+    github_relay_env,
+    host_capabilities,
+    host_service,
+    local_settings,
+    shared_live_attempt,
+    turn_child,
+    turn_launch,
+)
 from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, ChatSandboxManager
+from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, encode_turn
-from cloud_agent_host.runner import ClaimedJob
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend
+from cloud_agent_shared import shared_protocol
 
 _JOB = ClaimedJob(
     model_connection=connection_access("claude-code"),
@@ -32,7 +43,7 @@ _JOB = ClaimedJob(
     model="model",
     worker_token="ajt.a.b",
     thread_id="athr_1",
-    runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+    runtime_version=shared_protocol.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
 
 _PAYLOAD = {
@@ -56,7 +67,7 @@ _PAYLOAD = {
 
 
 def test_the_spawn_payload_keeps_the_settings_the_turn_runs_with():
-    handed = runner_mod._child_turn_payload(
+    handed = turn_launch.child_turn_payload(
         {
             "job_id": "ajob_1",
             "_worker_id": "parent-only",
@@ -75,14 +86,14 @@ def test_a_turn_is_handed_the_settings_as_of_its_handover():
             seen.append(handed)
             return LaunchResult(LAUNCH_STARTED, None)
 
-    runner_mod._hand_over_turn(
+    host_service._hand_over_turn(
         dict(_PAYLOAD),
         turns=_Turns(),
         base_url="http://control",
         worker_id="runner-a-1",
         host_settings={"agent_timeout_s": 900.0},
     )
-    runner_mod._hand_over_turn(
+    host_service._hand_over_turn(
         dict(_PAYLOAD), turns=_Turns(), base_url="http://control", worker_id="runner-a-2"
     )
 
@@ -95,12 +106,12 @@ def _serve(monkeypatch, payload: dict[str, Any]) -> dict[str, Any]:
     read_fd, write_fd = os.pipe()
     monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
     backend = ProcessBackend(acknowledged_unsafe=True)
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    monkeypatch.setattr(turn_child, "build_backend_from_env", lambda: backend)
     ran: list[dict[str, Any]] = []
-    monkeypatch.setattr(runner_mod, "run_turn", lambda *_a, **kwargs: ran.append(kwargs) or 0)
+    monkeypatch.setattr(turn_child, "run_turn", lambda *_a, **kwargs: ran.append(kwargs) or 0)
     try:
         assert (
-            runner_mod._serve_turn(
+            turn_child._serve_turn(
                 handover_fd=write_fd,
                 base_url="http://control",
                 worker_id="runner-a",
@@ -155,11 +166,11 @@ def test_a_turn_handed_no_settings_runs_with_the_hosts_own(monkeypatch):
 def _stamp(**_: object) -> dict[str, Any]:
     return {
         "sandbox_image_digest": "sha256:shared-image",
-        "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+        "runtime_versions": dict(shared_protocol.SHARED_SANDBOX_RUNTIME_PINS),
         "runtime_versions_available": {
-            key: [value] for key, value in runner_mod.SHARED_SANDBOX_RUNTIME_PINS.items()
+            key: [value] for key, value in shared_protocol.SHARED_SANDBOX_RUNTIME_PINS.items()
         },
-        "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+        "helper_versions": dict(shared_protocol.SHARED_SANDBOX_HELPER_PINS),
     }
 
 
@@ -192,10 +203,10 @@ def test_github_reaches_the_resident_launch_from_its_residency_not_its_claim(mon
         "git_author_email": "7+octo@users.noreply.github.com",
         "git_coauthor": "FreeInference <9+freeinference[bot]@users.noreply.github.com>",
     }
-    assert runner_mod.residency_github_launch(claim.repo, residency) == residency
+    assert github_relay_env.residency_github_launch(claim.repo, residency) == residency
     # Without a repository there is nothing for the relay to act on, but the
     # owner still authors the commits.
-    assert runner_mod.residency_github_launch(None, residency) == {
+    assert github_relay_env.residency_github_launch(None, residency) == {
         **residency,
         "github_credential": "",
     }
@@ -220,18 +231,20 @@ def _run_new_chat(
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
     manager = Mock()
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
-    monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
-    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
+    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(
+        shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
+    )
+    monkeypatch.setattr(shared_live_attempt, "_resident_base_ready", lambda *_args: True)
+    monkeypatch.setattr(shared_live_attempt, "runtime_version_unavailable", lambda *_args: None)
     checkouts: list[dict[str, Any]] = []
     prepared = SimpleNamespace(import_into=lambda *_args, **_kwargs: "b" * 40, discard=lambda: None)
     monkeypatch.setattr(
-        runner_mod,
+        shared_live_attempt,
         "_prefetch_retained_source",
         lambda **kwargs: checkouts.append(kwargs) or prepared,
     )
-    control = Mock(spec=runner_mod.ControlPlane)
+    control = Mock(spec=control_plane_client.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
     control.establish_shared_residency.return_value = {
         "credential": _JOB.model_connection.api_key,
@@ -290,15 +303,15 @@ def _run_new_chat(
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-new"}
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
+        shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "1800")
 
     finish = Mock()
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=replace(job),
         control=control,
@@ -508,7 +521,7 @@ def test_a_new_untrusted_sandbox_without_a_disk_quota_starts_with_a_warning(
     assert run.result == 0
     assert run.reserved["disk_limit_mib"] == 0
     (warning,) = _quota_warnings(caplog)
-    assert warning.getMessage() == runner_mod.UNTRUSTED_DISK_QUOTA_RECOMMENDED
+    assert warning.getMessage() == shared_live_attempt.UNTRUSTED_DISK_QUOTA_RECOMMENDED
     assert warning.job_id == _JOB.job_id  # type: ignore[attr-defined]
 
 
@@ -543,7 +556,7 @@ def test_an_existing_untrusted_sandbox_without_a_quota_is_not_warned_about(monke
         "cpu_limit": "3.5",
     }
     job = replace(_JOB, execution_profile="untrusted-kata-v1", thread_sandbox=existing)
-    existing["container_name"] = runner_mod.ChatSandboxSpec(
+    existing["container_name"] = chat_sandbox.ChatSandboxSpec(
         thread_id=job.thread_id,
         sandbox_id="asbx_existing",
         generation=1,
@@ -560,7 +573,7 @@ def test_an_existing_untrusted_sandbox_without_a_quota_is_not_warned_about(monke
     finish = Mock()
 
     with caplog.at_level(logging.WARNING):
-        runner_mod._run_shared_live_attempt(
+        shared_live_attempt._run_shared_live_attempt(
             runtime=get_runtime("claude-code"),
             job=job,
             control=control,
@@ -594,7 +607,7 @@ def test_a_claim_attests_the_disk_quota_a_new_group_would_get(
     else:
         monkeypatch.setenv("AGENT_SANDBOX_DISK_MIB", environment)
 
-    stamp = runner_mod._claim_attestation(
+    stamp = host_capabilities.claim_attestation(
         ProcessBackend(acknowledged_unsafe=True), host_settings=settings
     )
 
@@ -639,7 +652,7 @@ def test_container_resources_bootstrap_from_the_hosts_environment(monkeypatch):
     monkeypatch.setenv("AGENT_SANDBOX_MEMORY_MIB", "12288")
     monkeypatch.setenv("AGENT_SANDBOX_DISK_MIB", "40960")
 
-    local = runner_mod._runner_local_settings(3600)
+    local = local_settings._runner_local_settings(3600)
     run = _run_new_chat(monkeypatch, None)
 
     assert local["sandbox_cpu_millicores"] == 3500
@@ -703,7 +716,7 @@ def test_an_existing_sandbox_keeps_the_capacity_and_resources_it_was_created_wit
     control.reserve_chat_sandbox.side_effect = RuntimeError("stop after the reservation request")
     finish = Mock()
     job = replace(_JOB, thread_sandbox=existing)
-    existing["container_name"] = runner_mod.ChatSandboxSpec(
+    existing["container_name"] = chat_sandbox.ChatSandboxSpec(
         thread_id=job.thread_id,
         sandbox_id="asbx_existing",
         generation=1,
@@ -714,7 +727,7 @@ def test_an_existing_sandbox_keeps_the_capacity_and_resources_it_was_created_wit
         resident_slot_capacity=4,
     ).container_name
 
-    runner_mod._run_shared_live_attempt(
+    shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=job,
         control=control,
@@ -805,11 +818,11 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
     stamp = Mock(side_effect=_stamp)
     monkeypatch.setattr(backend, "version_stamp", stamp)
     supervisors = Mock()
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", supervisors)
-    control = Mock(spec=runner_mod.ControlPlane)
+    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", supervisors)
+    control = Mock(spec=control_plane_client.ControlPlane)
     finish = Mock()
 
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=replace(_JOB, mcp_bindings=["deepwiki", ":platform:memory"]),
         control=control,
@@ -821,8 +834,8 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
     )
 
     assert result == 2
-    finish.assert_called_once_with("failed", runner_mod.SITE_MISCONFIGURED_MCP)
-    assert runner_mod.SITE_MISCONFIGURED_MCP.startswith("Site misconfigured:")
+    finish.assert_called_once_with("failed", shared_live_attempt.SITE_MISCONFIGURED_MCP)
+    assert shared_live_attempt.SITE_MISCONFIGURED_MCP.startswith("Site misconfigured:")
     assert not stamp.called
     assert not control.reserve_chat_sandbox.called
     assert not supervisors.called

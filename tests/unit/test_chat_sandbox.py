@@ -3095,7 +3095,7 @@ class TestSandboxActionFacts:
         that, because it supplies the spelling the classifier wants, so this one
         drives the real ``create`` and hands the result to the real classifier.
         """
-        from cloud_agent_host.runner import _classify_startup_path
+        from cloud_agent_host.shared_live_attempt import _classify_startup_path
 
         spec = _spec()
         manager = ChatSandboxManager(ContainerBackend(image="img"))

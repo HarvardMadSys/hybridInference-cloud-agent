@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import time
 from typing import Any
 
@@ -26,7 +27,7 @@ from tests.unit.test_runner_host_service import (
     service,  # noqa: F401 - the pytest fixture
 )
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import host_service, runner_stop, runtime_qualification, turn_child
 from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult
 from cloud_agent_host.network_guard import VERIFICATION_KEY
 from cloud_agent_shared.egress import network_from_env
@@ -68,10 +69,10 @@ def test_a_child_with_the_hosts_verdict_checks_only_the_network(monkeypatch, ver
     # network rules; without one the child declines before adopting anything.
     payload = {
         **_delivered_job(),
-        runner_mod.VERDICT_KEY: handed,
+        runtime_qualification.VERDICT_KEY: handed,
         VERIFICATION_KEY: _verified_rules(),
     }
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    monkeypatch.setattr(turn_child, "build_backend_from_env", lambda: backend)
     monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
 
@@ -93,11 +94,11 @@ def test_a_child_with_the_hosts_verdict_checks_only_the_network(monkeypatch, ver
         assert os.read(read_fd, 256).decode().startswith("accepted")
         return 0
 
-    monkeypatch.setattr(runner_mod, "adopt_verdict", adopt)
+    monkeypatch.setattr(turn_child, "adopt_verdict", adopt)
     monkeypatch.setattr(backend, "check_network", network)
-    monkeypatch.setattr(runner_mod, "run_turn", run)
+    monkeypatch.setattr(turn_child, "run_turn", run)
     try:
-        code = runner_mod._serve_turn(
+        code = turn_child._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
             worker_id="runner-a",
@@ -157,10 +158,10 @@ def _serve_child(monkeypatch, backend, payload: dict[str, Any]) -> tuple[int, st
     import os
 
     read_fd, write_fd = os.pipe()
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    monkeypatch.setattr(turn_child, "build_backend_from_env", lambda: backend)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     try:
-        code = runner_mod._serve_turn(
+        code = turn_child._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
             worker_id="runner-a",
@@ -212,7 +213,7 @@ def test_a_child_declines_a_turn_without_a_sound_verification_of_the_rules(
     payload = _delivered_job()
     if rules is not None:
         payload[VERIFICATION_KEY] = rules
-    monkeypatch.setattr(runner_mod, "run_turn", lambda *_a, **_k: pytest.fail("declined turn ran"))
+    monkeypatch.setattr(turn_child, "run_turn", lambda *_a, **_k: pytest.fail("declined turn ran"))
 
     code, answer = _serve_child(monkeypatch, backend, payload)
 
@@ -252,7 +253,7 @@ def test_a_child_slow_to_start_checks_the_rules_itself_rather_than_decline(
         ran.append(job.job_id)
         return 0
 
-    monkeypatch.setattr(runner_mod, "run_turn", run)
+    monkeypatch.setattr(turn_child, "run_turn", run)
 
     with caplog.at_level(logging.WARNING):
         code, answer = _serve_child(monkeypatch, backend, payload)
@@ -297,15 +298,18 @@ def test_a_child_with_a_recent_verification_accepts_without_a_helper_container(
     calls = _child_docker(monkeypatch)
     payload = {**_delivered_job(), VERIFICATION_KEY: _verified_rules()}
     if runtime == "kata":
-        payload[runner_mod.VERDICT_KEY] = {"guest_kernel": "guest", "epoch": {"generation": "g"}}
-        monkeypatch.setattr(runner_mod, "adopt_verdict", lambda _backend, _verdict: True)
+        payload[runtime_qualification.VERDICT_KEY] = {
+            "guest_kernel": "guest",
+            "epoch": {"generation": "g"},
+        }
+        monkeypatch.setattr(turn_child, "adopt_verdict", lambda _backend, _verdict: True)
     ran: list[Any] = []
 
     def run(job, **kwargs):
         ran.append((job.job_id, kwargs["backend"]))
         return 0
 
-    monkeypatch.setattr(runner_mod, "run_turn", run)
+    monkeypatch.setattr(turn_child, "run_turn", run)
 
     code, answer = _serve_child(monkeypatch, backend, payload)
 
@@ -339,7 +343,9 @@ def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):
 
         def handover(self):
             # As HostQualification.handover makes it on a host without network rules.
-            return {} if self._verdict is None else {runner_mod.VERDICT_KEY: self._verdict}
+            return (
+                {} if self._verdict is None else {runtime_qualification.VERDICT_KEY: self._verdict}
+            )
 
     def popen(argv, **_kwargs):
         assert "ajt.1" not in argv and "grant" not in argv
@@ -349,11 +355,11 @@ def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):
         os.close(fd)
         return "declined for the test"
 
-    monkeypatch.setattr(runner_mod.subprocess, "Popen", popen)
-    monkeypatch.setattr(runner_mod, "read_handover", read)
-    forged = {**_delivered_job(), runner_mod.VERDICT_KEY: {"guest_kernel": "forged"}}
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(host_service, "read_handover", read)
+    forged = {**_delivered_job(), runtime_qualification.VERDICT_KEY: {"guest_kernel": "forged"}}
     for qualification in (None, Qualification(None), Qualification({"guest_kernel": "proved"})):
-        runner_mod._spawn_turn(
+        host_service._spawn_turn(
             forged,
             base_url="http://control",
             worker_id="runner-a",
@@ -362,7 +368,7 @@ def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):
             host="host-a",
             qualification=qualification,
         )
-    assert [payload.get(runner_mod.VERDICT_KEY) for payload in delivered] == [
+    assert [payload.get(runtime_qualification.VERDICT_KEY) for payload in delivered] == [
         None,
         None,
         {"guest_kernel": "proved"},
@@ -394,17 +400,17 @@ def test_only_this_host_can_hand_a_child_its_verification_of_the_rules(monkeypat
         return "declined for the test"
 
     monkeypatch.setattr(
-        runner_mod.subprocess,
+        subprocess,
         "Popen",
         lambda argv, **_k: SimpleNamespace(stdin=Stdin(), wait=lambda timeout=None: 0),
     )
-    monkeypatch.setattr(runner_mod, "read_handover", read)
+    monkeypatch.setattr(host_service, "read_handover", read)
     forged = {
         **_delivered_job(),
         VERIFICATION_KEY: {"verified_at": 2.0, "helper_image": "sha256:forged"},
     }
     for qualification in (None, Qualification()):
-        runner_mod._spawn_turn(
+        host_service._spawn_turn(
             forged,
             base_url="http://control",
             worker_id="runner-a",
@@ -427,10 +433,10 @@ def test_the_host_hands_each_turn_the_guard_its_startup_check_verified(service, 
     backend = ContainerBackend(image="sandbox", sandbox_network=_NETWORK)
     monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
     monkeypatch.setattr(backend, "version_stamp", lambda: {})
-    monkeypatch.setattr(runner_mod, "HostQualification", _qualifications([False], events))
+    monkeypatch.setattr(host_service, "HostQualification", _qualifications([False], events))
 
     def claim(**_kwargs):
-        runner_mod._STOPPING.set()
+        runner_stop.STOPPING.set()
         return _job(1)
 
     def spawn(_payload, **kwargs):
@@ -441,10 +447,10 @@ def test_the_host_hands_each_turn_the_guard_its_startup_check_verified(service, 
         handle.exit_code = 0
         return LaunchResult(LAUNCH_STARTED, handle)
 
-    monkeypatch.setattr(runner_mod, "claim_payload", claim)
-    monkeypatch.setattr(runner_mod, "_spawn_turn", spawn)
+    monkeypatch.setattr(host_service, "claim_payload", claim)
+    monkeypatch.setattr(host_service, "_spawn_turn", spawn)
 
-    runner_mod.run_forever(
+    host_service.run_forever(
         base_url="http://control", worker_id="runner-a", backend=backend, host="host-a"
     )
 

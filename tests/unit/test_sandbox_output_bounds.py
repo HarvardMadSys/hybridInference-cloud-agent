@@ -16,7 +16,7 @@ import tracemalloc
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod, runner as runner_mod
+from cloud_agent_host import chat_sandbox as chat_sandbox_mod, source_preparation
 from cloud_agent_host.bounded_output import OUTPUT_CHUNK_BYTES, STDERR_TAIL_BYTES
 from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
@@ -97,8 +97,8 @@ def test_the_patch_reader_cap_holds_before_anything_is_buffered(tmp_path):
     )
 
     def read():
-        with pytest.raises(runner_mod.WorktreeError, match="exceeded 65536 bytes"):
-            runner_mod._read_bounded(process, deadline_s=60, max_bytes=65536)
+        with pytest.raises(source_preparation.WorktreeError, match="exceeded 65536 bytes"):
+            source_preparation._read_bounded(process, deadline_s=60, max_bytes=65536)
 
     _result, peak = _peak_while(read)
     process.wait()

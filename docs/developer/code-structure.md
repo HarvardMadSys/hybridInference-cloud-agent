@@ -122,11 +122,16 @@ wire changes require the contract update described in the developer guide.
 
 ## Follow a host execution
 
-`runner.py` owns claims, attempt leases, turn execution, heartbeats, and draining.
-`claimed_job.py` defines claim payloads and lease errors;
-`control_plane_client.py` owns attempt-scoped worker HTTP calls, request
-deadlines, and event replay. The runner explicitly re-exports their existing
-public names and keeps client construction at its orchestration boundary. The
+`runner.py` is the command line. The host service in `host_service.py` enrolls
+the host, heartbeats, claims turns up to its limit, and drains on SIGTERM;
+`host_capabilities.py` holds what it advertises and the proof each claim
+carries. Each claimed turn runs in a child process (`turn_child.py`) that
+preflights, answers the handover, and then runs the attempt in
+`shared_live_attempt.py` under the lease `attempt_lease.py` renews;
+`turn_stream.py` relays the admitted turn. `source_preparation.py` is the
+trusted Git work on a chat's source outside the sandbox. `claimed_job.py`
+defines claim payloads and lease errors; `control_plane_client.py` owns
+attempt-scoped worker HTTP calls, request deadlines, and event replay. The
 client queues a turn's events on the ordered sender in `event_sender.py`, which
 uploads them in batches.
 

@@ -23,11 +23,11 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     claude_member_config_dir,
 )
+from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.plugins import install_claude_plugins, run_plugin_command
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.runner import ClaimedJob
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
 

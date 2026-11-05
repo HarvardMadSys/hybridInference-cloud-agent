@@ -12,8 +12,8 @@ import pytest
 from tests.unit.test_live_sessions import _LiveProcess, _protocol_context, _turn_lines
 from tests.unit.test_runner_host_settings import _PAYLOAD
 
+from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.drivers import TurnInput
-from cloud_agent_host.runner import ClaimedJob
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, KiloRuntime, OpencodeRuntime, PiRuntime
 from cloud_agent_host.runtimes.live import driver_for
 

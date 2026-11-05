@@ -183,10 +183,10 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
 
     from cloud_agent.measurement import operation_measurement
     from cloud_agent.sandbox_manager import sandbox_manager_routing
-    from cloud_agent_host import runner as runner_mod
+    from cloud_agent_host import measurement_sender
 
     operation_measurement.reset()
-    runner_mod.reset_delivery_state()
+    measurement_sender.reset_delivery_state()
 
     sandbox_manager = _SandboxManager()
     monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)

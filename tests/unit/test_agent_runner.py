@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import socket
-import threading
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -19,13 +17,24 @@ from pydantic import ValidationError
 from tests.support.owners import connection_access, residency_connection
 
 from cloud_agent.schemas import WorkerSandboxAbandonRequest
-from cloud_agent_host import control_plane_client, runner as runner_mod
+from cloud_agent_host import (
+    attempt_lease,
+    control_plane_client,
+    host_capabilities,
+    host_service,
+    local_settings,
+    session_lifecycle,
+    session_supervisor_client,
+    shared_live_attempt,
+    turn_child,
+    turn_stream,
+)
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.runner import ClaimedJob, LeaseLost
+from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
 from cloud_agent_host.session_supervisor_client import SessionSupervisorError
-from cloud_agent_shared import operation_profiling
+from cloud_agent_shared import operation_profiling, shared_protocol
 from cloud_agent_shared.environment import BoundEnvironment
 
 
@@ -48,7 +57,7 @@ _JOB = ClaimedJob(
     model="model",
     worker_token="ajt.a.b",
     thread_id="athr_1",
-    runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+    runtime_version=shared_protocol.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
     model_connection=connection_access("claude-code"),
 )
 
@@ -56,11 +65,11 @@ _JOB = ClaimedJob(
 def _stamp(**_: object) -> dict:
     return {
         "sandbox_image_digest": "sha256:shared-image",
-        "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+        "runtime_versions": dict(shared_protocol.SHARED_SANDBOX_RUNTIME_PINS),
         "runtime_versions_available": {
-            key: [value] for key, value in runner_mod.SHARED_SANDBOX_RUNTIME_PINS.items()
+            key: [value] for key, value in shared_protocol.SHARED_SANDBOX_RUNTIME_PINS.items()
         },
-        "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+        "helper_versions": dict(shared_protocol.SHARED_SANDBOX_HELPER_PINS),
     }
 
 
@@ -79,13 +88,14 @@ def test_pending_deployment_heartbeats_but_does_not_poll(monkeypatch, tmp_path):
     backend = ContainerBackend(image="img")
 
     ready_file.write_text("pending:target-sha\n")
-    assert runner_mod.SHARED_SANDBOX_CAPABILITY in runner_mod._shared_live_host_capabilities(
-        backend, _stamp()
+    assert (
+        shared_protocol.SHARED_SANDBOX_CAPABILITY
+        in host_capabilities._shared_live_host_capabilities(backend, _stamp())
     )
-    assert runner_mod._shared_live_deployment_ready(backend, _stamp()) is False
+    assert host_capabilities._shared_live_deployment_ready(backend, _stamp()) is False
 
     ready_file.write_text("target-sha\n")
-    assert runner_mod._shared_live_deployment_ready(backend, _stamp()) is True
+    assert host_capabilities._shared_live_deployment_ready(backend, _stamp()) is True
 
 
 @pytest.mark.parametrize(
@@ -102,21 +112,30 @@ def test_shared_live_attestation_rejects_an_incomplete_host(monkeypatch, name, v
     _configure_host(monkeypatch)
     monkeypatch.setenv(name, value)
 
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == []
+    assert (
+        host_capabilities._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp())
+        == []
+    )
 
 
-@pytest.mark.parametrize("helper_id", runner_mod.SHARED_SANDBOX_HELPER_PINS)
+@pytest.mark.parametrize("helper_id", shared_protocol.SHARED_SANDBOX_HELPER_PINS)
 def test_shared_live_attestation_requires_every_pinned_runtime_and_helper(monkeypatch, helper_id):
     _configure_host(monkeypatch)
     stamp = _stamp()
     stamp["runtime_versions"]["codex"] = "wrong"
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
+    assert (
+        host_capabilities._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
+    )
 
     stamp = _stamp()
     stamp["helper_versions"][helper_id] = "wrong"
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
+    assert (
+        host_capabilities._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
+    )
     del stamp["helper_versions"][helper_id]
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
+    assert (
+        host_capabilities._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
+    )
 
 
 def test_a_claim_without_the_fork_helper_attests_no_shared_capability(monkeypatch):
@@ -124,7 +143,7 @@ def test_a_claim_without_the_fork_helper_attests_no_shared_capability(monkeypatc
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
-    assert runner_mod._claim_attestation(backend)["runner_capabilities"]
+    assert host_capabilities.claim_attestation(backend)["runner_capabilities"]
 
     def without_fork_helper(**_: object) -> dict:
         stamp = _stamp()
@@ -132,13 +151,13 @@ def test_a_claim_without_the_fork_helper_attests_no_shared_capability(monkeypatc
         return stamp
 
     monkeypatch.setattr(backend, "version_stamp", without_fork_helper)
-    assert runner_mod._claim_attestation(backend)["runner_capabilities"] == []
+    assert host_capabilities.claim_attestation(backend)["runner_capabilities"] == []
 
 
 def test_shared_live_attestation_refuses_a_non_container_backend(monkeypatch):
     _configure_host(monkeypatch)
     assert (
-        runner_mod._shared_live_host_capabilities(
+        host_capabilities._shared_live_host_capabilities(
             ProcessBackend(acknowledged_unsafe=True), _stamp()
         )
         == []
@@ -148,225 +167,15 @@ def test_shared_live_attestation_refuses_a_non_container_backend(monkeypatch):
 def test_chat_idle_timeout_has_one_canonical_setting(monkeypatch):
     monkeypatch.setenv("AGENT_SESSION_IDLE_TIMEOUT_S", "12")
     monkeypatch.delenv("AGENT_CHAT_IDLE_TIMEOUT_S", raising=False)
-    assert runner_mod._chat_idle_timeout_s() == runner_mod.DEFAULT_CHAT_IDLE_TIMEOUT_S
+    assert local_settings._chat_idle_timeout_s() == session_lifecycle.DEFAULT_CHAT_IDLE_TIMEOUT_S
 
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "34")
-    assert runner_mod._chat_idle_timeout_s() == 34
-
-
-def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
-    """A sandbox manager restart must not renew a full idle window on every beat."""
-
-    class Supervisor:
-        def list(self):
-            return [
-                {
-                    "thread_id": "athr_reconstructed",
-                    "sandbox_id": "asbx_reconstructed",
-                    "container_id": "container-reconstructed",
-                    "generation": 1,
-                    "activation_generation": 0,
-                    "running": True,
-                    "shared_live": True,
-                    "group_busy": False,
-                    "terminal_count": 0,
-                    "operation_count": 0,
-                    "workspace_suspended": False,
-                    "idle_deadline_monotonic": None,
-                    "members": [],
-                }
-            ]
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: Supervisor())
-
-    rows = runner_mod._retained_sandbox_heartbeat_rows()
-
-    assert rows is not None
-    assert rows[0]["activity_active"] is None
-    assert rows[0]["idle_remaining_seconds"] is None
-
-
-@pytest.mark.parametrize("invalid_usage", [False, True])
-@pytest.mark.parametrize("terminal_count", [2, 4096, 4097])
-def test_retained_heartbeat_passes_group_resources_and_terminal_count(
-    monkeypatch, invalid_usage, terminal_count
-):
-    sample = {
-        "sample_id": "resource-sample",
-        "sample_age_ms": 4000,
-        "memory_bytes": "invalid" if invalid_usage else 1024,
-        "cpu_cores": 1.5,
-    }
-    supervisor = SimpleNamespace(
-        list=lambda: [
-            {
-                "thread_id": "athr_source",
-                "sandbox_id": "asbx_source",
-                "container_id": "container-source",
-                "generation": 1,
-                "activation_generation": 1,
-                "running": True,
-                "shared_live": True,
-                "terminal_count": terminal_count,
-                "members": [],
-                "resource_usage": sample,
-            }
-        ],
-        close=Mock(),
-    )
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: supervisor)
-    rows = runner_mod._retained_sandbox_heartbeat_rows()
-    assert rows is not None
-    assert rows[0]["container_id"] == "container-source"
-    assert rows[0]["activity_active"] is True
-    assert rows[0]["terminal_count"] == (terminal_count if terminal_count <= 4096 else None)
-    if invalid_usage:
-        assert rows[0]["resource_usage"] is None
-    else:
-        assert rows[0]["resource_usage"]["sample_id"] == "resource-sample"
-        assert rows[0]["resource_usage"]["sample_age_ms"] == 4000
-        assert rows[0]["resource_usage"]["memory_bytes"] == 1024
-        assert rows[0]["resource_usage"]["scope"] == "container"
-    supervisor.close.assert_called_once()
-
-
-def test_a_sandbox_manager_that_never_answers_costs_the_host_beat_only_its_observation(
-    monkeypatch,
-):
-    """The observation runs on the host-heartbeat thread, ahead of the beat itself.
-
-    It used the sandbox manager client's 180-second ceiling, so a sandbox
-    manager that accepted the request and never answered held the beat for
-    three minutes -- twice the silence after which the control plane counts
-    the host offline and refuses its claims.
-    """
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    # Connections complete in the backlog and are never read or answered.
-    listener.listen(8)
-    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}")
-    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "sandbox-manager-token")
-    monkeypatch.setattr(runner_mod, "_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S", 0.2)
-    observed: list[Any] = []
-    beat = threading.Thread(
-        target=lambda: observed.append(runner_mod._retained_sandbox_heartbeat_rows()),
-        daemon=True,
-    )
-    try:
-        beat.start()
-        beat.join(timeout=10)
-        assert not beat.is_alive(), "the host beat waited on the sandbox manager"
-        # "Not observed this beat", never an authoritative empty list.
-        assert observed == [None]
-    finally:
-        listener.close()
-
-
-def test_residency_cleanup_waits_on_a_silent_sandbox_manager_no_longer_than_the_beat(
-    monkeypatch,
-):
-    """The cleanup a beat's answer asks for runs on the same heartbeat thread.
-
-    It still used the 180-second sandbox manager client, so a sandbox manager
-    that never answered held the next beat for three minutes and the host went
-    offline.
-    """
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(8)
-    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}")
-    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "sandbox-manager-token")
-    monkeypatch.setattr(runner_mod, "_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S", 0.2)
-    beat = threading.Thread(
-        target=runner_mod._handle_host_residencies_lost,
-        args=([{"thread_id": "athr_1", "generation": 3}],),
-        daemon=True,
-    )
-    try:
-        beat.start()
-        beat.join(timeout=10)
-        assert not beat.is_alive(), "the host beat waited on the sandbox manager"
-    finally:
-        listener.close()
-
-
-def test_residency_cleanup_leaves_the_rest_to_a_later_beat_once_its_time_is_spent(
-    monkeypatch,
-):
-    """A slow sandbox manager gets one call per beat, not one ceiling per lost member.
-
-    Each verdict is named again by every beat while the sandbox manager still
-    reports the member live, so nothing is lost by stopping; waiting out one
-    ceiling per member would hold the next beat past the host's offline
-    threshold.
-    """
-    clock = SimpleNamespace(now=0.0)
-    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: clock.now)
-    members = [{"thread_id": f"athr_{index}"} for index in range(3)]
-    fenced: list[tuple[str, int]] = []
-
-    class SandboxManager:
-        def list(self):
-            return [{"members": members}]
-
-        def shared_residency_lost(self, thread_id, *, generation):
-            fenced.append((thread_id, generation))
-            # A call that used the whole ceiling before it was answered.
-            clock.now += runner_mod._HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S
-            raise SessionSupervisorError(503, "shared Session Supervisor is unavailable")
-
-        def close(self):
-            pass
-
-    timeouts: list[float | None] = []
-
-    def sandbox_manager(*, timeout=None):
-        timeouts.append(timeout)
-        return SandboxManager()
-
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", sandbox_manager)
-
-    runner_mod._handle_host_residencies_lost(
-        [{"thread_id": f"athr_{index}", "generation": index + 1} for index in range(3)]
-    )
-
-    assert timeouts == [runner_mod._HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S]
-    assert fenced == [("athr_0", 1)]
-
-
-def test_residency_cleanup_fences_every_named_member_a_prompt_sandbox_manager_holds(
-    monkeypatch,
-):
-    fenced: list[tuple[str, int]] = []
-    sandbox_manager = SimpleNamespace(
-        list=lambda: [{"members": [{"thread_id": "athr_1"}, {"thread_id": "athr_2"}]}],
-        shared_residency_lost=lambda thread_id, *, generation: fenced.append(
-            (thread_id, generation)
-        ),
-        close=Mock(),
-    )
-    monkeypatch.setattr(
-        runner_mod, "_session_supervisor_from_env", lambda **_kwargs: sandbox_manager
-    )
-
-    runner_mod._handle_host_residencies_lost(
-        [
-            {"thread_id": "athr_1", "generation": 4},
-            {"thread_id": "athr_gone", "generation": 1},
-            {"thread_id": "athr_2", "generation": 7},
-        ]
-    )
-
-    assert fenced == [("athr_1", 4), ("athr_2", 7)]
-    sandbox_manager.close.assert_called_once()
+    assert local_settings._chat_idle_timeout_s() == 34
 
 
 def test_resume_requires_the_exact_native_session():
     assert (
-        runner_mod._verified_native_session_id(
+        shared_live_attempt._verified_native_session_id(
             previous_session_id="native-one",
             observed_session_id="native-one",
             has_context=True,
@@ -374,7 +183,7 @@ def test_resume_requires_the_exact_native_session():
         == "native-one"
     )
     with pytest.raises(SandboxError, match="resumed a different native session"):
-        runner_mod._verified_native_session_id(
+        shared_live_attempt._verified_native_session_id(
             previous_session_id="native-one",
             observed_session_id="native-two",
             has_context=True,
@@ -383,7 +192,7 @@ def test_resume_requires_the_exact_native_session():
 
 def test_first_turn_requires_a_native_session_locator():
     with pytest.raises(SandboxError, match="without a native session locator"):
-        runner_mod._verified_native_session_id(
+        shared_live_attempt._verified_native_session_id(
             previous_session_id=None,
             observed_session_id=None,
             has_context=False,
@@ -415,16 +224,16 @@ def test_a_claimed_turn_dispatches_only_to_shared_live(monkeypatch):
         def stop(self):
             pass
 
-    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
-    monkeypatch.setattr(runner_mod, "Heartbeater", Heart)
+    monkeypatch.setattr(turn_child, "ControlPlane", lambda *_args, **_kwargs: Control())
+    monkeypatch.setattr(turn_child, "Heartbeater", Heart)
     monkeypatch.setattr(
-        runner_mod,
+        turn_child,
         "_run_shared_live_attempt",
         lambda **kwargs: dispatched.append(kwargs) or 0,
     )
 
     assert (
-        runner_mod.run_turn(
+        turn_child.run_turn(
             _JOB,
             base_url="http://control",
             worker_id="runner-1",
@@ -458,10 +267,10 @@ def test_preparation_error_outside_shared_handler_finishes_before_stopping_heart
 
     control.finish.side_effect = finish
     heart.stop.side_effect = lambda: order.append("stop")
-    monkeypatch.setattr(runner_mod, "ControlPlane", Mock(return_value=control))
-    monkeypatch.setattr(runner_mod, "Heartbeater", Mock(return_value=heart))
+    monkeypatch.setattr(turn_child, "ControlPlane", Mock(return_value=control))
+    monkeypatch.setattr(turn_child, "Heartbeater", Mock(return_value=heart))
 
-    code = runner_mod.run_turn(
+    code = turn_child.run_turn(
         _JOB,
         base_url="http://control",
         worker_id="runner-1",
@@ -488,11 +297,11 @@ def test_preparation_lease_rejection_does_not_attempt_terminal_write(monkeypatch
     monkeypatch.setattr(backend, "version_stamp", Mock(side_effect=LeaseLost("expired")))
     control = Mock()
     heart = Mock()
-    monkeypatch.setattr(runner_mod, "ControlPlane", Mock(return_value=control))
-    monkeypatch.setattr(runner_mod, "Heartbeater", Mock(return_value=heart))
+    monkeypatch.setattr(turn_child, "ControlPlane", Mock(return_value=control))
+    monkeypatch.setattr(turn_child, "Heartbeater", Mock(return_value=heart))
 
     assert (
-        runner_mod.run_turn(
+        turn_child.run_turn(
             _JOB,
             base_url="http://control",
             worker_id="runner-1",
@@ -523,7 +332,7 @@ def test_historical_one_to_one_sandbox_fails_closed():
         }
     )
 
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=ClaudeCodeRuntime(),
         job=job,
         control=SimpleNamespace(),
@@ -562,10 +371,12 @@ def _run_shared_boundary_case(
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
-    monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
-    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
+    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(
+        shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
+    )
+    monkeypatch.setattr(shared_live_attempt, "_resident_base_ready", lambda *_args: True)
+    monkeypatch.setattr(shared_live_attempt, "runtime_version_unavailable", lambda *_args: None)
     control = Mock()
     control.reserve_chat_sandbox.side_effect = lambda seed: {
         **seed,
@@ -612,9 +423,9 @@ def _run_shared_boundary_case(
     supervisor.acquire_shared.side_effect = acquire_shared
     supervisor.ensure_shared_resident.side_effect = ensure_shared_resident
     supervisor.settle_shared.return_value = {"native_session_id": observed_session_id}
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod,
+        shared_live_attempt,
         "_stream_shared_agent_turn",
         lambda **_kwargs: (code, "API error", [], frame, None),
     )
@@ -622,19 +433,19 @@ def _run_shared_boundary_case(
     if configure is not None:
         configure(control, supervisor, finish)
 
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime(runtime_id),
         job=replace(
             _JOB,
             runtime=runtime_id,
-            runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS[runtime_id],
+            runtime_version=shared_protocol.SHARED_SANDBOX_RUNTIME_PINS[runtime_id],
             thread_sandbox=thread_sandbox,
             **(job_changes or {}),
         ),
         control=control,
         heart=heart
         or SimpleNamespace(
-            cancel_requested=False, lease_lost=False, ttl=runner_mod.DEFAULT_LEASE_TTL_S
+            cancel_requested=False, lease_lost=False, ttl=local_settings.DEFAULT_LEASE_TTL_S
         ),
         backend=backend,
         host="host-a",
@@ -665,7 +476,7 @@ def test_only_the_runner_creating_a_group_reports_its_fork_helper_version(monkey
             "host": "host-a",
             "container_name": spec.container_name,
             "runtime_id": spec.runtime_id,
-            "runtime_version": runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+            "runtime_version": shared_protocol.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
             "sandbox_image_digest": "sha256:the-image-it-was-created-from",
             "execution_profile": "trusted-v1",
         }
@@ -676,7 +487,9 @@ def test_only_the_runner_creating_a_group_reports_its_fork_helper_version(monkey
 
     reservation = control.reserve_chat_sandbox.call_args.args[0]
     assert reservation["fork_helper_version"] == (
-        None if follow_up else runner_mod.SHARED_SANDBOX_HELPER_PINS[runner_mod.FORK_HELPER]
+        None
+        if follow_up
+        else shared_protocol.SHARED_SANDBOX_HELPER_PINS[shared_protocol.FORK_HELPER]
     )
 
 
@@ -700,14 +513,14 @@ def test_a_turn_relies_on_the_bridge_proof_its_sandbox_manager_states(monkeypatc
             return lease
 
         supervisor.acquire_shared.side_effect = acquire_shared
-        stub = runner_mod.RetainedChatBackend
+        stub = shared_live_attempt.RetainedChatBackend
 
         def backend(*args, **kwargs):
             retained = stub(*args, **kwargs)
             built.append((kwargs, retained))
             return retained
 
-        monkeypatch.setattr(runner_mod, "RetainedChatBackend", backend)
+        monkeypatch.setattr(shared_live_attempt, "RetainedChatBackend", backend)
 
     _run_shared_boundary_case(monkeypatch, 0, None, "claude-code", configure=configure)
 
@@ -757,7 +570,7 @@ def test_a_stop_before_admission_spends_no_prompt_and_keeps_the_context(monkeypa
     stream = Mock()
 
     def configure(_control, _supervisor, _finish):
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, control, supervisor, finish = _run_shared_boundary_case(
         monkeypatch,
@@ -782,7 +595,7 @@ def test_a_lease_lost_before_admission_admits_nothing(monkeypatch):
     stream = Mock()
 
     def configure(_control, _supervisor, _finish):
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, control, _supervisor, finish = _run_shared_boundary_case(
         monkeypatch,
@@ -1054,7 +867,7 @@ def test_a_settled_turn_is_never_reported_failed_because_its_finish_was(
     generic handler, which reported the settled, successful turn as failed --
     with the control plane's URL in the owner's detail.
     """
-    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
     pending = list(failures)
 
     def configure(_control, _supervisor, finish):
@@ -1091,7 +904,7 @@ def test_a_settled_turn_is_never_reported_failed_because_its_finish_was(
 
 def test_a_settled_turn_whose_finish_is_fenced_on_retry_reports_nothing_more(monkeypatch):
     """A retry refused by the fence is usually the first try having landed."""
-    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     def configure(_control, _supervisor, finish):
         finish.side_effect = [httpx.ReadTimeout("answer lost"), LeaseLost("finished")]
@@ -1134,7 +947,7 @@ def test_a_stopped_turn_is_never_reported_failed_because_its_finish_was(
     generic handler, which reported the cancelled turn as a failure -- with the
     control plane's URL in the owner's detail.
     """
-    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
     pending = list(failures)
 
     def configure(_control, _supervisor, finish):
@@ -1215,18 +1028,20 @@ def test_a_refused_reservation_reaches_the_owner_without_the_address(monkeypatch
 
 @pytest.mark.parametrize("stage", ["admission", "supervisor_settle", "control_settle"])
 def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatch, stage):
-    from cloud_agent_host import runner as runner_mod
+    from cloud_agent_host import (
+        shared_live_attempt,
+    )
 
-    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
     stream = Mock(return_value=(0, "", [], {"kind": "result", "status": "completed"}, None))
 
     def configure(control, supervisor, finish):
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
         if stage == "admission":
             control.admit_chat_turn.side_effect = [httpx.ReadTimeout("ack lost"), None]
         elif stage == "supervisor_settle":
             supervisor.settle_shared.side_effect = [
-                runner_mod.SessionSupervisorError(503, "ack lost"),
+                session_supervisor_client.SessionSupervisorError(503, "ack lost"),
                 {"native_session_id": "native-existing"},
             ]
         else:
@@ -1248,24 +1063,22 @@ def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatc
 
 @pytest.mark.parametrize("status", [409, 410, 422, 503])
 def test_receipt_retry_is_bounded_and_does_not_retry_rejected_fences(monkeypatch, status):
-    from cloud_agent_host import runner as runner_mod
 
     sleep = Mock()
-    monkeypatch.setattr(runner_mod.time, "sleep", sleep)
-    error = runner_mod.SessionSupervisorError(status, "rejected")
+    monkeypatch.setattr(time, "sleep", sleep)
+    error = session_supervisor_client.SessionSupervisorError(status, "rejected")
     request = Mock(side_effect=error)
-    with pytest.raises(runner_mod.SessionSupervisorError):
-        runner_mod._retry_lifecycle_receipt("settle", "ajob_test", request)
+    with pytest.raises(session_supervisor_client.SessionSupervisorError):
+        attempt_lease._retry_lifecycle_receipt("settle", "ajob_test", request)
     assert request.call_count == (3 if status == 503 else 1)
     assert sleep.call_count == (2 if status == 503 else 0)
 
 
 def test_control_lease_rejection_never_retries_settlement(monkeypatch):
-    from cloud_agent_host import runner as runner_mod
 
     request = Mock(side_effect=LeaseLost("superseded"))
     with pytest.raises(LeaseLost):
-        runner_mod._retry_lifecycle_receipt("settle", "ajob_test", request)
+        attempt_lease._retry_lifecycle_receipt("settle", "ajob_test", request)
     request.assert_called_once()
 
 
@@ -1320,7 +1133,7 @@ def test_a_settlement_the_control_plane_never_records_keeps_the_sandboxs_session
     """
     clock = _virtual_clock(monkeypatch)
     tries: list[float] = []
-    ttl = runner_mod.DEFAULT_LEASE_TTL_S
+    ttl = local_settings.DEFAULT_LEASE_TTL_S
 
     class Heart:
         cancel_requested = False
@@ -1405,7 +1218,7 @@ def test_a_failed_turn_is_explained_by_what_it_reported(monkeypatch, settled, ru
 
     def configure(_control, _supervisor, _finish):
         monkeypatch.setattr(
-            runner_mod,
+            shared_live_attempt,
             "_stream_shared_agent_turn",
             lambda **_kwargs: (1, '"uuid":"tail-of-a-json-result"}\n', [], frame, reported),
         )
@@ -1522,7 +1335,7 @@ def test_shared_interrupt_drains_the_sandbox_managers_terminal_resource_frame(
     )
     control = _Control()
 
-    code, _tail, _errors, result, _reported = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, result, _reported = turn_stream._stream_shared_agent_turn(
         supervisor=supervisor,
         job=_JOB,
         control=control,
@@ -1542,7 +1355,7 @@ def test_shared_interrupt_drains_the_sandbox_managers_terminal_resource_frame(
 def test_shared_turn_lease_loss_interrupts_and_fences():
     supervisor = _Supervisor()
     with pytest.raises(LeaseLost):
-        runner_mod._stream_shared_agent_turn(
+        turn_stream._stream_shared_agent_turn(
             supervisor=supervisor,
             job=_JOB,
             control=_Control(),
@@ -1555,7 +1368,7 @@ def test_shared_turn_lease_loss_interrupts_and_fences():
 
 
 def _run_frames(frames):
-    return runner_mod._stream_shared_agent_turn(
+    return turn_stream._stream_shared_agent_turn(
         supervisor=_Supervisor(frames),
         job=_JOB,
         control=_Control(),
@@ -1573,7 +1386,7 @@ def test_tool_output_cut_inside_a_surrogate_pair_does_not_end_the_turn():
     """
     control = _Control()
 
-    code, *_ = runner_mod._stream_shared_agent_turn(
+    code, *_ = turn_stream._stream_shared_agent_turn(
         supervisor=_Supervisor(
             [
                 {
@@ -1669,7 +1482,7 @@ def test_shared_turn_streams_events_and_requires_a_result(runtime_id):
     )
     control = _Control()
 
-    code, tail, errors, result, _reported = runner_mod._stream_shared_agent_turn(
+    code, tail, errors, result, _reported = turn_stream._stream_shared_agent_turn(
         supervisor=supervisor,
         job=replace(_JOB, runtime=runtime_id),
         control=control,
@@ -1696,7 +1509,7 @@ def test_shared_turn_reports_dispatch_before_waiting_for_runtime_output():
     supervisor = _Supervisor()
     supervisor.stream.frames = frames
 
-    code, _tail, _errors, _result, _reported = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, _result, _reported = turn_stream._stream_shared_agent_turn(
         supervisor=supervisor,
         job=_JOB,
         control=control,
@@ -1716,7 +1529,7 @@ def test_shared_turn_does_not_report_dispatch_when_prompt_handoff_is_rejected():
     control = _Control()
 
     with pytest.raises(SessionSupervisorError, match="turn rejected"):
-        runner_mod._stream_shared_agent_turn(
+        turn_stream._stream_shared_agent_turn(
             supervisor=supervisor,
             job=_JOB,
             control=control,
@@ -1740,14 +1553,14 @@ def _virtual_clock(monkeypatch) -> SimpleNamespace:
         clock.sleeps.append(seconds)
         clock.now += seconds
 
-    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: clock.now)
-    monkeypatch.setattr(runner_mod.time, "sleep", sleep)
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(time, "sleep", sleep)
     return clock
 
 
-def _event_control(endpoint) -> runner_mod.ControlPlane:
+def _event_control(endpoint) -> control_plane_client.ControlPlane:
     """A real worker client whose only wire is ``endpoint``."""
-    control = runner_mod.ControlPlane("https://control.test", "test-token")
+    control = control_plane_client.ControlPlane("https://control.test", "test-token")
     control.close()
     control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
     control.job_id = _JOB.job_id
@@ -1820,7 +1633,7 @@ def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
     monkeypatch.setattr(backend, "preflight", lambda **_kwargs: None)
 
     with pytest.raises(RuntimeError, match="cannot attest shared-sandbox-v1"):
-        runner_mod.run_forever(
+        host_service.run_forever(
             base_url="http://control",
             worker_id="runner",
             backend=backend,
@@ -1832,7 +1645,7 @@ def _enable_profiling(monkeypatch, **overrides):
     """Turn startup profiling on with a run that selects only this operation."""
     run = {
         "run_id": "runner-stages-1",
-        "operations": [runner_mod.STARTUP_OPERATION],
+        "operations": [host_service.STARTUP_OPERATION],
         "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
         "max_operations": 5,
     }
@@ -1845,7 +1658,7 @@ def _enable_profiling(monkeypatch, **overrides):
 def _profiled_measurement():
     """Return a live measurement wired to the runner's startup operation."""
     return operation_profiling.start_operation(
-        operation=runner_mod.STARTUP_OPERATION, host="host-a", worker_id="runner-1"
+        operation=host_service.STARTUP_OPERATION, host="host-a", worker_id="runner-1"
     )
 
 
@@ -1866,7 +1679,7 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, _control, _supervisor, _finish = _run_shared_boundary_case(
         monkeypatch,
@@ -1948,7 +1761,7 @@ def test_startup_path_comes_from_the_actions_the_supervisor_reported(
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, _control, _supervisor, _finish = _run_shared_boundary_case(
         monkeypatch,
@@ -1987,7 +1800,7 @@ def test_sandbox_manager_sub_stages_hang_off_the_stage_they_happened_in(monkeypa
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, *_ = _run_shared_boundary_case(
         monkeypatch,
@@ -2057,7 +1870,7 @@ def test_a_sandbox_manager_that_is_not_profiling_leaves_the_record_partial(monke
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     _run_shared_boundary_case(
         monkeypatch,
@@ -2148,7 +1961,7 @@ def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch,
         started.append(kwargs)
         return _Stream()
 
-    code, _tail, _errors, _frame, _reported = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, _frame, _reported = turn_stream._stream_shared_agent_turn(
         supervisor=SimpleNamespace(start_shared_turn=start_shared_turn),
         job=_JOB,
         control=SimpleNamespace(
@@ -2181,7 +1994,7 @@ def test_a_failed_prompt_handoff_is_a_failure_stage_with_a_duration(monkeypatch,
         def stream(**_kwargs):
             raise SandboxError("the supervisor refused the prompt")
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, _control, _supervisor, _finish = _run_shared_boundary_case(
         monkeypatch,
@@ -2217,7 +2030,7 @@ def test_the_runner_hands_its_selection_to_the_sandbox_manager(monkeypatch, tmp_
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     _result, _control, supervisor, _finish = _run_shared_boundary_case(
         monkeypatch,
@@ -2233,7 +2046,7 @@ def test_the_runner_hands_its_selection_to_the_sandbox_manager(monkeypatch, tmp_
     acquire_context = supervisor.acquire_shared.call_args.kwargs["profiling"]
     resident_context = supervisor.ensure_shared_resident.call_args.kwargs["profiling"]
     assert acquire_context["run_id"] == "runner-stages-1"
-    assert acquire_context["operation"] == runner_mod.STARTUP_OPERATION
+    assert acquire_context["operation"] == host_service.STARTUP_OPERATION
     assert acquire_context["expires_at"] > time.time()
     assert resident_context["run_id"] == "runner-stages-1"
 
@@ -2247,7 +2060,7 @@ def test_the_runner_offers_the_sandbox_manager_nothing_when_it_is_not_profiling(
         def stream(**_kwargs):
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     _result, _control, supervisor, _finish = _run_shared_boundary_case(
         monkeypatch,
@@ -2279,7 +2092,7 @@ def test_an_acquire_fragment_does_not_cover_a_missing_resident_fragment(monkeypa
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, *_ = _run_shared_boundary_case(
         monkeypatch,
@@ -2319,7 +2132,7 @@ def test_a_truncated_sandbox_manager_fragment_makes_the_record_partial(monkeypat
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, *_ = _run_shared_boundary_case(
         monkeypatch,
@@ -2361,7 +2174,7 @@ def test_a_reuse_that_does_no_timed_work_is_a_complete_fragment(monkeypatch, tmp
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, *_ = _run_shared_boundary_case(
         monkeypatch,
@@ -2405,7 +2218,7 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
         # The retry rotates the residency grant before reopening the process.
         control.establish_shared_residency.return_value = {
             "credential": "provider-key-2",
@@ -2477,7 +2290,7 @@ def test_a_sandbox_manager_cut_short_by_its_own_deadline_keeps_the_record_incomp
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, *_ = _run_shared_boundary_case(
         monkeypatch,
@@ -2510,33 +2323,7 @@ def test_a_sandbox_manager_cut_short_by_its_own_deadline_keeps_the_record_incomp
 def test_environment_capability_disappears_when_broker_or_container_support_is_lost(monkeypatch):
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
-    assert "environment-v1" in runner_mod._environment_host_capabilities(backend, _stamp())
+    assert "environment-v1" in host_capabilities._environment_host_capabilities(backend, _stamp())
     monkeypatch.delenv("AGENT_SANDBOX_MANAGER_TOKEN")
-    assert runner_mod._environment_host_capabilities(backend, _stamp()) == []
-    assert runner_mod._environment_host_capabilities(SimpleNamespace(), _stamp()) == []
-
-
-@pytest.mark.parametrize("checkpoint", [{"checkpoint_id": "c" * 32}, "not-a-receipt", None])
-def test_retained_heartbeat_forwards_the_latest_checkpoint_receipt(monkeypatch, checkpoint):
-    supervisor = SimpleNamespace(
-        list=lambda: [
-            {
-                "thread_id": "athr_source",
-                "sandbox_id": "asbx_source",
-                "container_id": "container-source",
-                "generation": 1,
-                "activation_generation": 1,
-                "running": False,
-                "shared_live": True,
-                "members": [],
-                "checkpoint": checkpoint,
-            }
-        ],
-        close=Mock(),
-    )
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: supervisor)
-
-    rows = runner_mod._retained_sandbox_heartbeat_rows()
-
-    assert rows is not None
-    assert rows[0]["checkpoint"] == (checkpoint if isinstance(checkpoint, dict) else None)
+    assert host_capabilities._environment_host_capabilities(backend, _stamp()) == []
+    assert host_capabilities._environment_host_capabilities(SimpleNamespace(), _stamp()) == []

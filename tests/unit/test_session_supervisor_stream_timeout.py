@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from cloud_agent_host import runner
-from cloud_agent_host.runner import LeaseLost
+from cloud_agent_host import turn_stream
+from cloud_agent_host.claimed_job import LeaseLost
 from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorClient,
     SessionSupervisorError,
@@ -92,7 +92,7 @@ def _control(append_event):
 
 
 def _run_turn(client, *, heart=None, control=None, timeout_s=5):
-    return runner._stream_shared_agent_turn(
+    return turn_stream._stream_shared_agent_turn(
         supervisor=client,
         job=SimpleNamespace(
             thread_id="athr_quiet",
@@ -145,7 +145,7 @@ def test_quiet_turn_outlives_lifecycle_timeout(quiet_sandbox_manager):
 @pytest.mark.parametrize("reason", ["deadline", "cancel", "lease_lost"])
 def test_quiet_turn_remains_interruptible(quiet_sandbox_manager, monkeypatch, reason):
     """Waiting for a quiet model must preserve the runner's active controls."""
-    monkeypatch.setattr(runner, "_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(turn_stream, "_POLL_INTERVAL_S", 0.01)
     heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
 
     def on_event(event):

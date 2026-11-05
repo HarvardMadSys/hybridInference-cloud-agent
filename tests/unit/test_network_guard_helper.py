@@ -40,7 +40,7 @@ from tests.unit.test_network_guard import (
     _update,
 )
 
-from cloud_agent_host import network_guard, network_guard_helper
+from cloud_agent_host import host_service, network_guard, network_guard_helper
 from cloud_agent_host.network_guard import (
     _NFT_BATCH,
     _NFT_SERVE,
@@ -1710,14 +1710,14 @@ def _builder(calls: list[dict[str, Any]]) -> Callable[..., Any]:
 
 def test_the_runners_host_service_and_the_sandbox_manager_keep_one(monkeypatch) -> None:
     """They outlive their steps; a turn's child, which the host service starts, does not."""
-    from cloud_agent_host import runner as runner_mod, sandbox_manager
+    from cloud_agent_host import sandbox_manager
 
     calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", _builder(calls))
+    monkeypatch.setattr(host_service, "build_backend_from_env", _builder(calls))
     monkeypatch.setattr(sandbox_manager, "build_backend_from_env", _builder(calls))
 
     with pytest.raises(_Built):
-        runner_mod.run_forever(base_url="http://control", worker_id="worker-1")
+        host_service.run_forever(base_url="http://control", worker_id="worker-1")
     with pytest.raises(_Built):
         sandbox_manager.create_app(token="token")
 

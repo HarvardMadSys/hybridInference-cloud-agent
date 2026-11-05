@@ -20,7 +20,12 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
 
 from cloud_agent import runtime_upgrades, settings
 from cloud_agent.schemas.hosts import HostHeartbeatRequest
-from cloud_agent_host import local_settings, runner as runner_mod
+from cloud_agent_host import (
+    attempt_lease,
+    host_capabilities,
+    local_settings,
+    turn_child,
+)
 from cloud_agent_host.runtime_downloads import RuntimeDownloads
 from cloud_agent_host.runtime_settings import RuntimeSettings
 from cloud_agent_host.sandbox import ContainerBackend
@@ -46,7 +51,7 @@ def test_the_lease_is_a_bounded_runner_setting_imported_late() -> None:
     assert "lease_ttl_s" in RUNNER_SETTING_KEYS
     assert "lease_ttl_s" in LATE_IMPORT_KEYS
     # Above one heartbeat interval plus one request timeout, at most the cap.
-    assert lease.minimum > runner_mod._UNRENEWABLE_LEASE_S
+    assert lease.minimum > attempt_lease._UNRENEWABLE_LEASE_S
     assert lease.maximum == 900
     with pytest.raises(ValueError, match="Turn lease"):
         validate_admin_change({"lease_ttl_s": 40})
@@ -54,7 +59,7 @@ def test_the_lease_is_a_bounded_runner_setting_imported_late() -> None:
 
 
 def test_the_local_lease_is_reported_and_an_admin_value_replaces_it(monkeypatch) -> None:
-    local = runner_mod._runner_local_settings(3600, 300.0)
+    local = local_settings._runner_local_settings(3600, 300.0)
     assert local["lease_ttl_s"] == 300.0
     runtime = RuntimeSettings(local)
     assert runtime.turn_settings()["lease_ttl_s"] == 300.0
@@ -67,7 +72,7 @@ def test_the_local_lease_is_reported_and_an_admin_value_replaces_it(monkeypatch)
 
 def test_a_handed_over_turn_keeps_the_lease_it_was_claimed_with() -> None:
     """The child renews with the lease the parent's claim asked for."""
-    settings_seen = runner_mod._turn_host_settings({"lease_ttl_s": 480, "agent_timeout_s": 900})
+    settings_seen = turn_child._turn_host_settings({"lease_ttl_s": 480, "agent_timeout_s": 900})
     assert settings_seen["lease_ttl_s"] == 480.0
 
 
@@ -86,7 +91,7 @@ def test_an_out_of_range_local_capacity_no_longer_withholds_shared_live(monkeypa
     """The P1 debt: a bad bootstrap value hid the host from shared-live placement."""
     _configure_host(monkeypatch)
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "500")
-    capabilities = runner_mod._shared_live_host_capabilities(
+    capabilities = host_capabilities._shared_live_host_capabilities(
         ContainerBackend(image="img"), _stamp()
     )
     assert "shared-sandbox-v1" in capabilities

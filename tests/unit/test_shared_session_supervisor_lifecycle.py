@@ -52,7 +52,7 @@ def test_http_observations_and_runner_heartbeats_do_not_wait_for_final_archive(m
     from anyio.from_thread import start_blocking_portal
     from fastapi.testclient import TestClient
 
-    from cloud_agent_host import runner
+    from cloud_agent_host import host_service
     from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
 
     manager = _Manager()
@@ -87,18 +87,18 @@ def test_http_observations_and_runner_heartbeats_do_not_wait_for_final_archive(m
         client._client.portal = portal
         return client
 
-    monkeypatch.setattr(runner, "_session_supervisor_from_env", client_from_env)
+    monkeypatch.setattr(host_service, "session_supervisor_from_env", client_from_env)
     calls = ThreadPoolExecutor(max_workers=8)
     http = TestClient(app, headers={"X-Agent-Workspace-Token": "test-secret"})
     http.portal = portal
     try:
         # This first observation must discover AND enqueue the orphan without
         # making the HTTP request own the archive upload's lifetime.
-        rows = calls.submit(runner._retained_sandbox_heartbeat_rows).result(timeout=2)
+        rows = calls.submit(host_service._retained_sandbox_heartbeat_rows).result(timeout=2)
         assert rows is not None
         assert {row["sandbox_id"] for row in rows} == {"asbx_shared", "asbx_orphan"}
         assert entered.wait(timeout=2)
-        beats = [calls.submit(runner._retained_sandbox_heartbeat_rows) for _ in range(16)]
+        beats = [calls.submit(host_service._retained_sandbox_heartbeat_rows) for _ in range(16)]
         for beat in beats:
             rows = beat.result(timeout=2)
             assert rows is not None

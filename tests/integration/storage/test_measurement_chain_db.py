@@ -39,7 +39,9 @@ from cloud_agent.measurement.measurement_persistence import (
 from cloud_agent.measurement.measurement_writer import MeasurementWriter
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
-from cloud_agent_host.runner import ClaimedJob, ControlPlane, deliver_measurements
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.control_plane_client import ControlPlane
+from cloud_agent_host.measurement_sender import deliver_measurements
 from cloud_agent_shared import operation_profiling
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -177,12 +179,12 @@ async def chain(monkeypatch, tmp_path, expires_at):
         ),
     )
     operation_profiling.reset_cache()
-    from cloud_agent_host import runner as runner_mod
+    from cloud_agent_host import measurement_sender
 
     # This process remembers which measurements it has delivered, so a test
     # inherits the previous one's decisions unless it clears them -- and a
     # record the earlier test sent would look like a retry here.
-    runner_mod.reset_delivery_state()
+    measurement_sender.reset_delivery_state()
 
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: _ChainStorage(Storage(pool))
@@ -411,7 +413,7 @@ async def test_delivering_the_same_record_twice_stores_one(chain, expires_at):
 async def test_live_delivery_reaches_postgres_without_a_jsonl_sink(chain, monkeypatch):
     """The optional baseline file is not a prerequisite for Admin storage."""
     pool, base_url, _sink = chain
-    from cloud_agent_host import runner as runner_mod
+    from cloud_agent_host import measurement_sender
 
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
     measurement = operation_profiling.start_operation(
@@ -434,7 +436,7 @@ async def test_live_delivery_reaches_postgres_without_a_jsonl_sink(chain, monkey
         worker_token=_token(),
     )
 
-    runner_mod._enqueue_delivery(measurement, job=job, base_url=base_url, drain_s=0)
+    measurement_sender._enqueue_delivery(measurement, job=job, base_url=base_url, drain_s=0)
     for _ in range(200):
         async with pool.acquire() as conn:
             stored = await conn.fetchval(

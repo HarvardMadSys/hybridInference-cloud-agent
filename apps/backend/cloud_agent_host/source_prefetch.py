@@ -12,13 +12,14 @@ import threading
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from cloud_agent_host.chat_sandbox import CHAT_WORKDIR
-from cloud_agent_host.source_preparation import SOURCE_PREFETCH_JOIN_TIMEOUT_S
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.git.source_cancellation import check_source_stop
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+
+SOURCE_PREFETCH_JOIN_TIMEOUT_S = 2.0
 
 
 def _spool() -> BinaryIO:

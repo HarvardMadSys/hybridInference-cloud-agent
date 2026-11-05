@@ -10,7 +10,11 @@ import pytest
 from tests.unit.test_runner_host_settings import _JOB, _stamp
 from tests.unit.test_runner_source_prefetch import Source
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import (
+    control_plane_client,
+    shared_live_attempt,
+    source_preparation,
+)
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_host.session_supervisor_client import SessionSupervisorError
@@ -30,14 +34,14 @@ def _restoring_turn(
     monkeypatch, *, acquire_error: Exception, group_after_abandon: dict[str, Any]
 ) -> SimpleNamespace:
     source = Source()
-    monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
-    monkeypatch.setattr(runner_mod, "build_source_archive", source.build_source_archive)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", source.prepare_worktree)
+    monkeypatch.setattr(source_preparation, "build_source_archive", source.build_source_archive)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
     manager = Mock()
     manager.backend = backend
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    control = Mock(spec=runner_mod.ControlPlane)
+    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: manager)
+    control = Mock(spec=control_plane_client.ControlPlane)
     control.reserve_chat_sandbox.side_effect = lambda seed: {
         **seed,
         "thread_id": _JOB.thread_id,
@@ -54,11 +58,11 @@ def _restoring_turn(
     control.release_turn.return_value = True
     supervisor = Mock()
     supervisor.acquire_shared.side_effect = acquire_error
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "1800")
     finish = Mock()
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=_JOB,
         control=control,

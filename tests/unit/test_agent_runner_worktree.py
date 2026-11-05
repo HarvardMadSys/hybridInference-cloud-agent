@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.runner import (
+from cloud_agent_host import source_preparation
+from cloud_agent_host.local_settings import source_import_max_bytes
+from cloud_agent_host.source_preparation import (
     WorktreeError,
     _assert_no_credential_on_disk,
     _auth_env,
@@ -22,7 +23,6 @@ from cloud_agent_host.runner import (
     checkout_output_branch,
     prepare_worktree,
     repo_clone_base_url,
-    source_import_max_bytes,
 )
 from cloud_agent_shared.git.source_archive import DEFAULT_MAX_SOURCE_ARCHIVE_BYTES
 
@@ -332,14 +332,14 @@ def test_a_clone_over_the_limit_is_stopped_with_everything_it_started(tmp_path: 
     child_pid = _slow_git(tmp_path, monkeypatch)
     # Over the limit as soon as the child that writes exists.
     monkeypatch.setattr(
-        runner_mod,
+        source_preparation,
         "_checkout_bytes",
         lambda _workdir: 1 << 40 if _child_started(child_pid) else 0,
     )
     started = time.monotonic()
 
     with pytest.raises(WorktreeError, match="retained import size limit"):
-        runner_mod._run_git_within(["fetch"], cwd=str(tmp_path), max_bytes=1 << 20)
+        source_preparation._run_git_within(["fetch"], cwd=str(tmp_path), max_bytes=1 << 20)
 
     assert time.monotonic() - started < 20, "git's own child kept the clone running"
     _assert_ended(child_pid)
@@ -365,7 +365,9 @@ def test_a_clone_nobody_will_use_is_stopped_when_asked(tmp_path: Path, monkeypat
     started = time.monotonic()
 
     with pytest.raises(WorktreeError, match="abandoned"):
-        runner_mod._run_git_within(["fetch"], cwd=str(tmp_path), max_bytes=1 << 20, stop=stop)
+        source_preparation._run_git_within(
+            ["fetch"], cwd=str(tmp_path), max_bytes=1 << 20, stop=stop
+        )
 
     assert time.monotonic() - started < 20, "the clone ran on after it was abandoned"
     _assert_ended(child_pid)
@@ -394,8 +396,8 @@ def test_a_missing_follow_up_base_ships_only_what_it_adds_to_a_held_parent(
             bundle.seek(0)
             imported.update(bundle=payload, commit=commit)
 
-    monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_: base)
-    monkeypatch.setattr(runner_mod, "_sandbox_has_commit", has_commit)
+    monkeypatch.setattr(source_preparation, "repo_clone_base_url", lambda **_: base)
+    monkeypatch.setattr(source_preparation, "_sandbox_has_commit", has_commit)
     job = SimpleNamespace(repo=repo, base_sha=head, clone_token=None)
 
     resolved = _import_retained_base(job=job, manager=Manager(), spec=None, backend=None)

@@ -28,8 +28,8 @@ from tests.unit.test_runner_host_settings import _JOB, _run_new_chat
 from cloud_agent.agent_memory import claim_agent_memories as _claim_agent_memories
 from cloud_agent.api.environments import RuntimeRefreshInput, refresh_runtime_environment
 from cloud_agent.goals.controller import _check_access
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.runner import prepare_temporary_worktree
+from cloud_agent_host import source_preparation
+from cloud_agent_host.source_preparation import prepare_temporary_worktree
 from cloud_agent_shared.git.temporary_workspace import (
     EMPTY_TREE_SHA,
     TEMPORARY_WORKSPACE_BASE_SHA,
@@ -92,9 +92,9 @@ def test_the_host_starts_main_on_the_fixed_commit_every_time(tmp_path) -> None:
 
 def test_the_runner_builds_a_temporary_workspace_instead_of_cloning(monkeypatch) -> None:
     """No clone and no output branch: the import carries the empty repository on main."""
-    monkeypatch.setattr(runner_mod, "prepare_worktree", _refuse_clone)
-    monkeypatch.setattr(runner_mod, "checkout_output_branch", _refuse_clone)
-    prefetch = runner_mod._prefetch_retained_source(job=_TEMPORARY_JOB, uid=1000, gid=1000)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", _refuse_clone)
+    monkeypatch.setattr(source_preparation, "checkout_output_branch", _refuse_clone)
+    prefetch = source_preparation._prefetch_retained_source(job=_TEMPORARY_JOB, uid=1000, gid=1000)
     imported: list[bytes] = []
     manager = Mock()
     manager.import_archive.side_effect = lambda _spec, _path, archive: imported.append(
@@ -117,7 +117,7 @@ def test_the_runner_builds_a_temporary_workspace_instead_of_cloning(monkeypatch)
 
 def test_a_missing_temporary_base_is_rebuilt_not_cloned(monkeypatch) -> None:
     """A workspace that lost its base gets the same empty commit back, as a bundle."""
-    monkeypatch.setattr(runner_mod, "prepare_worktree", _refuse_clone)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", _refuse_clone)
     bundles: list[dict[str, Any]] = []
     manager = Mock()
 
@@ -127,7 +127,7 @@ def test_a_missing_temporary_base_is_rebuilt_not_cloned(monkeypatch) -> None:
 
     manager.import_base_bundle.side_effect = capture_bundle
 
-    imported = runner_mod._import_retained_base(
+    imported = source_preparation._import_retained_base(
         job=_TEMPORARY_JOB, manager=manager, spec=Mock(), backend=Mock()
     )
 

@@ -63,7 +63,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/source_control/` (`github_relay_policy.py`, `source_control.py`), `api/github_relay.py` | The GitHub relay and its policy, and the GitHub/GitLab credentials behind them |
 | `apps/backend/cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
 | `apps/backend/cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
-| `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
+| `apps/backend/cloud_agent_host/host_service.py`, `turn_child.py` | The host service that claims, heartbeats and drains on SIGTERM, and the child process that executes one turn (`runner.py` is their command line) |
 | `apps/backend/cloud_agent_host/claimed_job.py`, `control_plane_client.py` | Claim payloads, lease errors, and attempt-scoped worker HTTP calls |
 | `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
 | `apps/backend/cloud_agent_host/chat_sandbox_network.py` | Per-group bridge and relay lifecycle, guest network proof, and exact network release |

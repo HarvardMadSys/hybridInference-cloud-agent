@@ -11,9 +11,10 @@ import http.server
 import threading
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
 
-from cloud_agent_host import host_control
+from cloud_agent_host import claimed_job, host_control
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -105,3 +106,47 @@ def test_the_host_lets_an_idle_connection_go_before_the_control_plane_does() -> 
     keepalive = host_control._CONTROL_PLANE_LIMITS.keepalive_expiry
     assert keepalive is not None
     assert keepalive < server_idle_s
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "outcome"),
+    [
+        (200, {"token": "abc:3"}, "abc:3"),
+        (404, {"detail": "Not Found"}, claimed_job.WorkWaitUnsupported),
+        (401, {"detail": "unauthorized"}, httpx.HTTPStatusError),
+    ],
+)
+def test_the_wait_request_and_how_its_answers_are_read(monkeypatch, status, body, outcome):
+    sent: dict[str, Any] = {}
+
+    def post(url: str, **kwargs: Any) -> httpx.Response:
+        sent.update(url=url, **kwargs)
+        return httpx.Response(status, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", post)
+
+    def call() -> str:
+        return host_control.wait_for_work(
+            base_url="http://control/", host_credential="aht.cred", since="abc:2", timeout_s=5.0
+        )
+
+    if isinstance(outcome, str):
+        assert call() == outcome
+    else:
+        with pytest.raises(outcome):
+            call()
+    assert sent["url"] == "http://control/v1/agent/worker/wait"
+    assert sent["json"] == {"since": "abc:2", "timeout_seconds": 5.0}
+    assert sent["headers"] == {"Authorization": "Bearer aht.cred"}
+    assert sent["timeout"] > 5.0, "the control plane answers before the client gives up"
+
+
+def test_an_unreachable_control_plane_is_reported_as_one(monkeypatch):
+    def post(url: str, **_kwargs: Any) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", post)
+    with pytest.raises(claimed_job.ClaimUnreachable):
+        host_control.wait_for_work(
+            base_url="http://control", host_credential="aht.cred", since=None, timeout_s=5.0
+        )

@@ -75,7 +75,7 @@ relative to `apps/backend/`.
 | Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager/sandbox_manager_client.py`; host handling is in `cloud_agent_host/manager_api/workspaces.py` and `terminals.py`, which `sandbox_manager.py` assembles into the app. |
 | A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `apps/backend/migrations/versions/` for schema changes. |
 | Compute-resource lifecycle | `cloud_agent/application/compute_resources.py`, `compute_reconcile.py`, `workers/compute_resources.py`, and `providers/compute/`. |
-| Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `runner.py`. |
+| Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `host_service.py` and `turn_child.py`. |
 | Retained-container values or lifecycle | `cloud_agent_host/chat_sandbox_models.py` for value types; `chat_sandbox.py` for Docker lifecycle. |
 | CLI behavior or version compatibility | `cloud_agent_host/runtimes/` and `drivers.py`; discovery facts are in `cloud_agent_shared/runtime_catalog.py`, shared pins in `shared_protocol.py`, image pins in `deploy/sandbox/Dockerfile.agent-sandbox`. |
 | Browser UI or a BFF route | `apps/frontend/src/`; browser API clients are in `src/lib/api/agents/`, job-page components and hooks in `components/features/agents/job-detail/`. |

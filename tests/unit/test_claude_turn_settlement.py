@@ -27,7 +27,7 @@ import pytest
 from tests.unit.test_agent_runner import _run_shared_boundary_case
 from tests.unit.test_agent_sandbox_manager import _app, _SharedSupervisor
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import shared_live_attempt, turn_stream
 from cloud_agent_host.drivers import (
     TURN_COMPLETED,
     USER_MESSAGE_EVENT,
@@ -56,7 +56,7 @@ _STILL_WAITING_S = 0.3
 
 #: Captured before any test replaces it, so the end-to-end case can put the
 #: real relay back under the runner harness that stubs it.
-_REAL_STREAM_SHARED_TURN = runner_mod._stream_shared_agent_turn
+_REAL_STREAM_SHARED_TURN = turn_stream._stream_shared_agent_turn
 
 
 class _ResidentProcess:
@@ -714,7 +714,7 @@ def test_a_completed_resident_turn_finishes_the_platform_attempt(resident, monke
             relayed.append(outcome)
             return outcome
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", relay)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", relay)
         supervisor.start_shared_turn.side_effect = client.start_shared_turn
         supervisor.interrupt_shared.side_effect = client.interrupt_shared
         control.lease_lost = False

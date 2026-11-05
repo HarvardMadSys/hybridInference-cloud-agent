@@ -825,17 +825,24 @@ RAW_SETTING_READS: dict[tuple[str, str, str], str] = {
         "the saved value here would let the setting authorize itself"
     ),
     **{
-        ("apps/backend/cloud_agent_host/runner.py", function, "AGENT_SANDBOX_MANAGER_TOKEN"): (
+        (f"apps/backend/cloud_agent_host/{module}.py", function, "AGENT_SANDBOX_MANAGER_TOKEN"): (
             "the host's own copy of the credential it presents to its sandbox manager"
         )
-        for function in ("_shared_live_host_capabilities", "_session_supervisor_from_env")
+        for module, function in (
+            ("host_capabilities", "_shared_live_host_capabilities"),
+            ("session_supervisor_client", "session_supervisor_from_env"),
+        )
     },
     (
         "apps/backend/cloud_agent_host/sandbox_manager.py",
         "create_app",
         "AGENT_SANDBOX_MANAGER_TOKEN",
     ): "the credential the sandbox manager checks callers against",
-    ("apps/backend/cloud_agent_host/runner.py", "run_forever", "AGENT_RUNTIME_REGISTRY_URL"): (
+    (
+        "apps/backend/cloud_agent_host/host_service.py",
+        "run_forever",
+        "AGENT_RUNTIME_REGISTRY_URL",
+    ): (
         "the host's registry until the first heartbeat answer names the saved one; the "
         "host image has no settings registry"
     ),
@@ -844,24 +851,24 @@ RAW_SETTING_READS: dict[tuple[str, str, str], str] = {
 #: Where a host process reads a HOST_SETTINGS variable from its own
 #: environment, by (module, function), and why that is its bootstrap value.
 HOST_BOOTSTRAP_READS: dict[tuple[str, str], str] = {
-    ("apps/backend/cloud_agent_host/runner.py", "build_parser"): (
+    ("apps/backend/cloud_agent_host/local_settings.py", "_local_agent_timeout_s"): (
         "AGENT_TIMEOUT_S as the --agent-timeout default, the turn limit until a settings "
         "answer replaces it"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "_chat_idle_timeout_s"): (
+    ("apps/backend/cloud_agent_host/local_settings.py", "_chat_idle_timeout_s"): (
         "the idle clock's bootstrap value"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "_runner_local_settings"): (
+    ("apps/backend/cloud_agent_host/local_settings.py", "_runner_local_settings"): (
         "the runner's local values, reported as settings_local and used only before the "
         "first settings heartbeat"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "source_import_max_bytes"): (
+    ("apps/backend/cloud_agent_host/local_settings.py", "source_import_max_bytes"): (
         "the import limit's local value, feeding _runner_local_settings"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "_new_sandbox_storage_error"): (
+    ("apps/backend/cloud_agent_host/local_settings.py", "_new_sandbox_storage_error"): (
         "the storage reserve when the turn carries no settings"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "_sandbox_resource_setting"): (
+    ("apps/backend/cloud_agent_host/local_settings.py", "_sandbox_resource_setting"): (
         "a sandbox resource limit when the turn carries no settings"
     ),
     ("apps/backend/cloud_agent_host/local_settings.py", "local_shared_resident_capacity"): (
@@ -884,8 +891,14 @@ HOST_BOOTSTRAP_READS: dict[tuple[str, str], str] = {
 #: Reads whose variable is a registry entry's ``.env`` (a loop over the
 #: registry), by (module, function), naming the registry.
 REGISTRY_READS: dict[tuple[str, str], Literal["HOST_SETTINGS"]] = {
-    ("apps/backend/cloud_agent_host/runner.py", "_new_sandbox_storage_error"): "HOST_SETTINGS",
-    ("apps/backend/cloud_agent_host/runner.py", "_sandbox_resource_setting"): "HOST_SETTINGS",
+    (
+        "apps/backend/cloud_agent_host/local_settings.py",
+        "_new_sandbox_storage_error",
+    ): "HOST_SETTINGS",
+    (
+        "apps/backend/cloud_agent_host/local_settings.py",
+        "_sandbox_resource_setting",
+    ): "HOST_SETTINGS",
     ("apps/backend/cloud_agent_host/sandbox_manager.py", "create_app"): "HOST_SETTINGS",
 }
 

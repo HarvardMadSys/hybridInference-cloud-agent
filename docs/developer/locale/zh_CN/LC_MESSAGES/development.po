@@ -238,10 +238,10 @@ msgstr "主机认领任务，或 worker 的 HTTP 调用"
 #: ../developer/development.md
 msgid ""
 "`cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the "
-"orchestration in `runner.py`."
+"orchestration in `host_service.py` and `turn_child.py`."
 msgstr ""
 "`cloud_agent_host/claimed_job.py`、`control_plane_client.py`，以及 "
-"`runner.py` 里的编排逻辑。"
+"`host_service.py` 和 `turn_child.py` 里的编排逻辑。"
 
 #: ../developer/development.md
 msgid "Retained-container values or lifecycle"

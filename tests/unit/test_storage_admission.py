@@ -7,14 +7,15 @@ import os
 from dataclasses import replace
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from tests.support.owners import connection_access
 
 from cloud_agent.schemas import WorkerReleaseRequest
-from cloud_agent_host import runner, storage_admission
+from cloud_agent_host import local_settings, storage_admission, turn_child
+from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.host_capacity import StorageMissing, StorageSample
 from cloud_agent_host.host_runtime import HANDOVER_DECLINED, encode_turn
-from cloud_agent_host.runner import ClaimedJob
 from cloud_agent_host.sandbox import ProcessBackend
 
 
@@ -62,12 +63,14 @@ def test_existing_sandbox_resume_does_not_depend_on_available_disk_space(monkeyp
     )
     called = []
     monkeypatch.setattr(
-        runner, "new_sandbox_storage_error", lambda **kw: called.append(kw) or "disk full"
+        local_settings, "new_sandbox_storage_error", lambda **kw: called.append(kw) or "disk full"
     )
-    assert runner._new_sandbox_storage_error(job, {"storage_min_available_mib": 2048}) is None
+    assert (
+        local_settings._new_sandbox_storage_error(job, {"storage_min_available_mib": 2048}) is None
+    )
     assert called == []
     assert (
-        runner._new_sandbox_storage_error(
+        local_settings._new_sandbox_storage_error(
             replace(job, thread_sandbox=None), {"storage_min_available_mib": 2048}
         )
         == "disk full"
@@ -90,17 +93,17 @@ def test_low_storage_declines_handover_before_the_turn_starts(monkeypatch):
     }
     monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
     monkeypatch.setattr(
-        runner, "build_backend_from_env", lambda: ProcessBackend(acknowledged_unsafe=True)
+        turn_child, "build_backend_from_env", lambda: ProcessBackend(acknowledged_unsafe=True)
     )
     monkeypatch.setattr(
-        runner, "new_sandbox_storage_error", lambda **_kw: "storage reserve reached"
+        local_settings, "new_sandbox_storage_error", lambda **_kw: "storage reserve reached"
     )
     started = []
-    monkeypatch.setattr(runner, "run_turn", lambda *_a, **_kw: started.append(True))
+    monkeypatch.setattr(turn_child, "run_turn", lambda *_a, **_kw: started.append(True))
     read_fd, write_fd = os.pipe()
     try:
         assert (
-            runner._serve_turn(
+            turn_child._serve_turn(
                 handover_fd=write_fd,
                 base_url="http://control",
                 worker_id="runner",
@@ -135,7 +138,7 @@ def test_direct_runner_storage_release_posts_a_valid_audit_reason(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        runner,
+        turn_child,
         "_new_sandbox_storage_error",
         lambda *_args: "new sandbox allocation declined: verified Docker storage is below reserve",
     )
@@ -145,9 +148,9 @@ def test_direct_runner_storage_release_posts_a_valid_audit_reason(monkeypatch):
         posted.append(WorkerReleaseRequest.model_validate(kwargs["json"]))
         return SimpleNamespace(status_code=200)
 
-    monkeypatch.setattr(runner.httpx, "post", post)
+    monkeypatch.setattr(httpx, "post", post)
     assert (
-        runner._run_turn(
+        turn_child._run_turn(
             job,
             base_url="http://control",
             worker_id="runner",

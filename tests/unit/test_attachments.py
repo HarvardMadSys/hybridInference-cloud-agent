@@ -436,7 +436,7 @@ def test_uploads_land_outside_the_worktree_so_they_cannot_reach_a_pull_request()
 
 
 def _job(**overrides: Any) -> Any:
-    from cloud_agent_host.runner import ClaimedJob
+    from cloud_agent_host.claimed_job import ClaimedJob
 
     return ClaimedJob.from_response(
         {
@@ -522,7 +522,7 @@ def test_uploads_are_fetched_only_when_the_container_needs_them(
     fresh: bool, thread: int, turn: int, expected: bool
 ) -> None:
     """Re-fetching every turn would move the conversation's bytes for nothing."""
-    from cloud_agent_host.runner import _import_uploads
+    from cloud_agent_host.upload_import import import_uploads as _import_uploads
 
     control = _Control([("a.txt", b"x"), ("b.txt", b"y")])
     manager = _Manager()
@@ -557,7 +557,7 @@ def test_the_imported_archive_is_written_outside_the_worktree() -> None:
     """The one invariant that keeps an upload out of the user's own diff."""
     from types import SimpleNamespace
 
-    from cloud_agent_host.runner import _import_uploads
+    from cloud_agent_host.upload_import import import_uploads as _import_uploads
 
     manager = _Manager()
     _import_uploads(
