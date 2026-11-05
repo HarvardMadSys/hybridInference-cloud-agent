@@ -431,6 +431,42 @@ def _read_exceptions(tables: list[list[Any]]) -> HeldExceptions | None:
         return None
 
 
+def _verify_family_chains(
+    family: str,
+    table: str,
+    listing: list[Any],
+    *,
+    expected_rules: dict[tuple[str, str], int],
+    expected_hooks: dict[tuple[str, str], str],
+) -> None:
+    """Refuse one family's table unless each rendered chain has its rule count and hook."""
+    chains = {
+        item["chain"]["name"]: item["chain"]
+        for item in listing
+        if isinstance(item, dict) and "chain" in item
+    }
+    rules: dict[str, int] = {}
+    for item in listing:
+        if isinstance(item, dict) and "rule" in item:
+            rules[item["rule"]["chain"]] = rules.get(item["rule"]["chain"], 0) + 1
+    for (rule_family, chain), count in expected_rules.items():
+        if rule_family != family:
+            continue
+        if chain not in chains:
+            raise NetworkGuardError(f"{family} {table} is missing chain {chain!r}")
+        if rules.get(chain, 0) != count:
+            raise NetworkGuardError(
+                f"{family} {table} chain {chain!r} holds {rules.get(chain, 0)} rules, "
+                f"expected {count}"
+            )
+    for (hook_family, chain), hook in expected_hooks.items():
+        if hook_family != family:
+            continue
+        observed = chains.get(chain) or {}
+        if observed.get("hook") != hook or observed.get("policy") != "accept":
+            raise NetworkGuardError(f"{family} {table} chain {chain!r} is not hooked on {hook!r}")
+
+
 class HostNetworkGuard:
     """This deployment's rules on this host, through the trusted helper."""
 
@@ -916,7 +952,7 @@ class HostNetworkGuard:
             ["list", "set", "inet", table, "pool4"],
         ]
 
-    def _verify(self, rendered: str, *, listings: list[list[Any]] | None = None) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
+    def _verify(self, rendered: str, *, listings: list[list[Any]] | None = None) -> None:
         table = self.network.table
         if listings is None:
             listings = self._list_many(self._verification_reads())
@@ -931,33 +967,9 @@ class HostNetworkGuard:
                 expected_hooks[(family, chain)] = hook
 
         for family, listing in zip(RELAY_FAMILIES, listings[:-2], strict=True):
-            chains = {
-                item["chain"]["name"]: item["chain"]
-                for item in listing
-                if isinstance(item, dict) and "chain" in item
-            }
-            rules: dict[str, int] = {}
-            for item in listing:
-                if isinstance(item, dict) and "rule" in item:
-                    rules[item["rule"]["chain"]] = rules.get(item["rule"]["chain"], 0) + 1
-            for (rule_family, chain), count in expected_rules.items():
-                if rule_family != family:
-                    continue
-                if chain not in chains:
-                    raise NetworkGuardError(f"{family} {table} is missing chain {chain!r}")
-                if rules.get(chain, 0) != count:
-                    raise NetworkGuardError(
-                        f"{family} {table} chain {chain!r} holds {rules.get(chain, 0)} rules, "
-                        f"expected {count}"
-                    )
-            for (hook_family, chain), hook in expected_hooks.items():
-                if hook_family != family:
-                    continue
-                observed = chains.get(chain) or {}
-                if observed.get("hook") != hook or observed.get("policy") != "accept":
-                    raise NetworkGuardError(
-                        f"{family} {table} chain {chain!r} is not hooked on {hook!r}"
-                    )
+            _verify_family_chains(
+                family, table, listing, expected_rules=expected_rules, expected_hooks=expected_hooks
+            )
 
         protected = _networks(self._set_elements(listings[-2], "inet", table, "protected4"))
         if protected != list(ipaddress.collapse_addresses(self.network.protected)):
