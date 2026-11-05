@@ -33,7 +33,7 @@ from tests.unit.test_shared_session_supervisor import (
 from cloud_agent_host import resident_probe, shared_live_attempt
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransport
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared import operation_profiling
 
@@ -128,7 +128,7 @@ def test_a_refused_probe_records_why_the_live_process_was_not_reused(
 
         def refuse_first(*args, **kwargs):
             if supervisor.ensure_shared_resident.call_count == 1:
-                raise SessionSupervisorError(503, message)
+                raise SandboxManagerError(503, message)
             return answer(*args, **kwargs)
 
         supervisor.ensure_shared_resident.side_effect = refuse_first

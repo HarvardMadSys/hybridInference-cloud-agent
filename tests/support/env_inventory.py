@@ -830,7 +830,7 @@ RAW_SETTING_READS: dict[tuple[str, str, str], str] = {
         )
         for module, function in (
             ("host_capabilities", "_shared_live_host_capabilities"),
-            ("session_supervisor_client", "session_supervisor_from_env"),
+            ("sandbox_manager_client", "sandbox_manager_from_env"),
         )
     },
     (

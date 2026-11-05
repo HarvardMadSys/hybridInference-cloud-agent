@@ -13,9 +13,9 @@ import pytest
 
 from cloud_agent_host import turn_stream
 from cloud_agent_host.claimed_job import LeaseLost
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
 )
 
 
@@ -71,7 +71,7 @@ def quiet_sandbox_manager():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    client = SessionSupervisorClient(
+    client = SandboxManagerClient(
         f"http://127.0.0.1:{server.server_port}", "sandbox-manager-token", timeout=0.1
     )
     try:
@@ -137,7 +137,7 @@ def test_quiet_turn_outlives_lifecycle_timeout(quiet_sandbox_manager):
 
     # A stream-specific allowance must not leak to ordinary control requests.
     quiet_sandbox_manager.release.clear()
-    with pytest.raises(SessionSupervisorError) as caught:
+    with pytest.raises(SandboxManagerError) as caught:
         quiet_sandbox_manager.client.list()
     assert isinstance(caught.value.__cause__, httpx.ReadTimeout)
 

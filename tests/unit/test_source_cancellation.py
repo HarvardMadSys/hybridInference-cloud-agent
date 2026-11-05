@@ -212,7 +212,7 @@ def test_post_fetch_git_cancellation_kills_descendants(tmp_path, monkeypatch, st
 
 def _archive_failure_child():
     """Real turn cleanup + archive copying, with slow local I/O and a failed broker."""
-    from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+    from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 
     monkeypatch = pytest.MonkeyPatch()
     copying = threading.Event()
@@ -241,7 +241,7 @@ def _archive_failure_child():
 
     def refuse_broker():
         assert copying.wait(5)
-        raise SessionSupervisorError(503, "broker unavailable")
+        raise SandboxManagerError(503, "broker unavailable")
 
     monkeypatch.setattr(source_archive.tarfile, "copyfileobj", slow_copy)
     source = RealArchiveSource()

@@ -35,7 +35,7 @@ from cloud_agent_host import (
 from cloud_agent_host.chat_sandbox import CHAT_WORKDIR
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 from cloud_agent_host.setup import SetupResult
 from cloud_agent_host.source_preparation import WorktreeError
 
@@ -156,7 +156,7 @@ def _run_turn(
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-1"}
-    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
         shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
@@ -226,7 +226,7 @@ def test_a_turn_that_stops_before_its_checkout_leaves_nothing_behind(
         if clone_finished_first:
             for thread in _prefetch_threads():
                 thread.join(5)
-        raise SessionSupervisorError(503, "shared Session Supervisor is unavailable")
+        raise SandboxManagerError(503, "shared Session Supervisor is unavailable")
 
     turn = _run_turn(monkeypatch, source, before_acquire=stop)
     source.release.set()

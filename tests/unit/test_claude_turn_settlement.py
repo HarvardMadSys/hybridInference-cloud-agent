@@ -44,7 +44,7 @@ from cloud_agent_host.runtimes.claude import background as claude_background
 from cloud_agent_host.runtimes.claude.background import notified_tasks
 from cloud_agent_host.runtimes.claude.session import ClaudeCodeLiveSession
 from cloud_agent_host.runtimes.live import driver_for
-from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -699,7 +699,7 @@ def test_a_completed_resident_turn_finishes_the_platform_attempt(resident, monke
         _RESULT,
     )
     owner = _ResidentSupervisor(resident.session)
-    client = SessionSupervisorClient("http://sandbox-manager", "sandbox-manager-secret")
+    client = SandboxManagerClient("http://sandbox-manager", "sandbox-manager-secret")
     client._client.close()
     client._client = TestClient(
         _app(owner),

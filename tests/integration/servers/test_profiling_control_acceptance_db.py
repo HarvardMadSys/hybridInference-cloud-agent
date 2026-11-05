@@ -394,10 +394,10 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         # exchange, then the sandbox manager's own policy route. This is the wiring that
         # a sync built without a sandbox manager client silently skipped.
         from cloud_agent_host.profiling_policy import ProfilingPolicySync
+        from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
         from cloud_agent_host.sandbox_manager_profiling_policy import applied_state
-        from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
 
-        sandbox_manager_client = SessionSupervisorClient(
+        sandbox_manager_client = SandboxManagerClient(
             chain.sandbox_manager_base_url, "acceptance-sandbox-manager-token", timeout=10
         )
         sync = ProfilingPolicySync(

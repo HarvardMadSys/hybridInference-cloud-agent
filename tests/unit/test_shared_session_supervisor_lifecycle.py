@@ -53,7 +53,7 @@ def test_http_observations_and_runner_heartbeats_do_not_wait_for_final_archive(m
     from fastapi.testclient import TestClient
 
     from cloud_agent_host import host_service
-    from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+    from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
 
     manager = _Manager()
     entered, release = threading.Event(), threading.Event()
@@ -81,13 +81,13 @@ def test_http_observations_and_runner_heartbeats_do_not_wait_for_final_archive(m
     portal = portal_context.__enter__()
 
     def client_from_env(**kwargs):
-        client = SessionSupervisorClient("http://testserver", "test-secret", **kwargs)
+        client = SandboxManagerClient("http://testserver", "test-secret", **kwargs)
         client._client.close()
         client._client = TestClient(app, headers=client._headers)
         client._client.portal = portal
         return client
 
-    monkeypatch.setattr(host_service, "session_supervisor_from_env", client_from_env)
+    monkeypatch.setattr(host_service, "sandbox_manager_from_env", client_from_env)
     calls = ThreadPoolExecutor(max_workers=8)
     http = TestClient(app, headers={"X-Agent-Workspace-Token": "test-secret"})
     http.portal = portal

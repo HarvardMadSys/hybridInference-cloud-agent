@@ -245,7 +245,7 @@ def _run_turn(monkeypatch, *, resident_state: str, has_binary: bool) -> tuple[Mo
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-1"}
-    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
         shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )

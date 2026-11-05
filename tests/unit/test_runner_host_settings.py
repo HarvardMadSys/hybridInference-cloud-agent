@@ -304,7 +304,7 @@ def _run_new_chat(
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-new"}
-    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
         shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
@@ -819,7 +819,7 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
     stamp = Mock(side_effect=_stamp)
     monkeypatch.setattr(backend, "version_stamp", stamp)
     supervisors = Mock()
-    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", supervisors)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", supervisors)
     control = Mock(spec=control_plane_client.ControlPlane)
     finish = Mock()
 

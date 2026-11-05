@@ -117,7 +117,7 @@ def _run(monkeypatch, job: ClaimedJob) -> Mock:
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-new"}
     supervisor.sync_ssh_access.return_value = {"newest": True, "revision": 5}
-    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
         shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
@@ -164,7 +164,7 @@ def test_the_runner_tells_the_sandbox_manager_its_turn_is_starting() -> None:
 
     import httpx
 
-    from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+    from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
 
     sent: list[dict[str, Any]] = []
 
@@ -172,7 +172,7 @@ def test_the_runner_tells_the_sandbox_manager_its_turn_is_starting() -> None:
         sent.append(json.loads(request.content))
         return httpx.Response(200, json={"newest": True, "revision": 5, "running": True})
 
-    client = SessionSupervisorClient("http://sandbox_manager", "secret")
+    client = SandboxManagerClient("http://sandbox_manager", "secret")
     client._client.close()
     client._client = httpx.Client(transport=httpx.MockTransport(answer))
 

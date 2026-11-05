@@ -300,7 +300,7 @@ def test_a_new_group_offered_a_snapshot_starts_while_its_archive_is_built(monkey
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-1"}
-    monkeypatch.setattr(shared_live_attempt, "session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
         shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )

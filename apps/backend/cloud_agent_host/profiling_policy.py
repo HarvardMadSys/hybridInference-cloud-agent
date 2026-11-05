@@ -135,7 +135,7 @@ class ProfilingPolicySync:
     ) -> None:
         """Bind the sync to one host's credential and one sandbox manager client.
 
-        ``sandbox_manager`` is the host's authenticated supervisor client, or ``None``
+        ``sandbox_manager`` is the host's authenticated Sandbox Manager client, or ``None``
         when this host has none configured. A host without a sandbox manager still syncs
         its own configuration; it just cannot hand it on.
         """

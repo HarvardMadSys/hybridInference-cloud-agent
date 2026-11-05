@@ -1,4 +1,4 @@
-"""Synchronous runner client for the host's private Session Supervisor."""
+"""Synchronous runner client for the host's private Sandbox Manager."""
 
 from __future__ import annotations
 
@@ -62,9 +62,9 @@ class SharedTurnStream:
             try:
                 value = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise SessionSupervisorError(502, "shared turn returned invalid JSON") from exc
+                raise SandboxManagerError(502, "shared turn returned invalid JSON") from exc
             if not isinstance(value, dict):
-                raise SessionSupervisorError(502, "shared turn returned an invalid frame")
+                raise SandboxManagerError(502, "shared turn returned an invalid frame")
             yield value
 
     def close(self) -> None:
@@ -73,7 +73,7 @@ class SharedTurnStream:
 
 
 @dataclass
-class SessionSupervisorError(RuntimeError):
+class SandboxManagerError(RuntimeError):
     """Bounded failure returned by the private host lifecycle service."""
 
     status_code: int
@@ -170,7 +170,7 @@ def _group_identity(
     }
 
 
-class SessionSupervisorClient:
+class SandboxManagerClient:
     """Use the sandbox manager credential without ever exposing it to a chat container."""
 
     def __init__(self, base_url: str, token: str, *, timeout: float = 60) -> None:
@@ -194,7 +194,7 @@ class SessionSupervisorClient:
         if uses_inference_names(environment):
             required.add(ENVIRONMENT_INFERENCE_CAPABILITY)
         if not required <= set(capabilities):
-            raise SessionSupervisorError(
+            raise SandboxManagerError(
                 503, "Sandbox manager does not support environment configuration"
             )
         stop = threading.Event()
@@ -226,7 +226,7 @@ class SessionSupervisorClient:
             stop.set()
             watcher.join(timeout=11)
         if response.is_error:
-            raise SessionSupervisorError(
+            raise SandboxManagerError(
                 response.status_code, _error_detail(response, "Environment preparation failed")
             )
         return response.json()
@@ -280,17 +280,17 @@ class SessionSupervisorClient:
                     method, f"{self._base_url}{path}", json=payload, timeout=timeout
                 )
         except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, unavailable) from exc
+            raise SandboxManagerError(503, unavailable) from exc
         if response.is_error:
-            raise SessionSupervisorError(response.status_code, _error_detail(response, refused))
+            raise SandboxManagerError(response.status_code, _error_detail(response, refused))
         try:
             body = response.json()
         except ValueError as exc:
             # This intentionally normalizes what used to escape as a raw
             # JSONDecodeError/ValueError on successful malformed responses.
-            raise SessionSupervisorError(502, invalid) from exc
+            raise SandboxManagerError(502, invalid) from exc
         if not isinstance(body, dict):
-            raise SessionSupervisorError(502, invalid)
+            raise SandboxManagerError(502, invalid)
         return body
 
     def _shared_request(
@@ -393,7 +393,7 @@ class SessionSupervisorClient:
         )
         rows = body.get("sandboxes")
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-            raise SessionSupervisorError(502, "chat Session Supervisor returned invalid data")
+            raise SandboxManagerError(502, "chat Session Supervisor returned invalid data")
         return [dict(row) for row in rows]
 
     def confirm_incidents(self, confirmed: dict[str, builtins.list[str]]) -> None:
@@ -501,7 +501,7 @@ class SessionSupervisorClient:
         body = self._manager_post("/environment-snapshots/images", {}, timeout=150)
         found = body.get("snapshot_ids")
         if not isinstance(found, list):
-            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
+            raise SandboxManagerError(502, "sandbox manager returned invalid data")
         return [str(item) for item in found]
 
     def ensure_shared_resident(
@@ -628,13 +628,13 @@ class SessionSupervisorClient:
             )
             response = self._client.send(request, stream=True)
         except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "shared Session Supervisor is unavailable") from exc
+            raise SandboxManagerError(503, "shared Session Supervisor is unavailable") from exc
         if response.is_error:
             response.read()
             detail = _error_detail(response, "shared Session Supervisor rejected the turn")
             status_code = response.status_code
             response.close()
-            raise SessionSupervisorError(status_code, detail)
+            raise SandboxManagerError(status_code, detail)
         return SharedTurnStream(response)
 
     def interrupt_shared(self, thread_id: str, *, token: str) -> None:
@@ -720,7 +720,7 @@ class SessionSupervisorClient:
         )
 
 
-def session_supervisor_from_env(*, timeout: float = 180) -> SessionSupervisorClient:
+def sandbox_manager_from_env(*, timeout: float = 180) -> SandboxManagerClient:
     """A client for this host's sandbox manager, at the address and token it was started with."""
     url = (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip()
     token = (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip()
@@ -729,12 +729,12 @@ def session_supervisor_from_env(*, timeout: float = 180) -> SessionSupervisorCli
             "restartable chat execution needs AGENT_SANDBOX_MANAGER_URL and "
             "AGENT_SANDBOX_MANAGER_TOKEN"
         )
-    return SessionSupervisorClient(url, token, timeout=timeout)
+    return SandboxManagerClient(url, token, timeout=timeout)
 
 
 __all__ = [
-    "SessionSupervisorClient",
-    "SessionSupervisorError",
+    "SandboxManagerClient",
+    "SandboxManagerError",
     "SharedTurnStream",
-    "session_supervisor_from_env",
+    "sandbox_manager_from_env",
 ]

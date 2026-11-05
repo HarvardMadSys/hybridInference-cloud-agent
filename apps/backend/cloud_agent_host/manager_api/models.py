@@ -1,7 +1,7 @@
 """Request bodies the Sandbox Manager validates, shared with the runner's client.
 
 Each model is the one shape a route accepts. Where the runner's
-``SessionSupervisorClient`` sends exactly that shape, it builds the body from
+``SandboxManagerClient`` sends exactly that shape, it builds the body from
 the same model, so the two sides cannot drift apart field by field.
 """
 

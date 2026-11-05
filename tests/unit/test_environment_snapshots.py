@@ -385,7 +385,7 @@ def test_a_snapshot_is_marked_emptied_of_the_repository_stopped_then_uploaded(mo
             return {"snapshot_id": SNAPSHOT, "object_key": "key", "base_image": IMAGE}
 
     monkeypatch.setattr(
-        "cloud_agent_host.session_supervisor_client.session_supervisor_from_env",
+        "cloud_agent_host.sandbox_manager_client.sandbox_manager_from_env",
         lambda **_: _Supervisor(),
     )
     receipt = environment_tests._save_snapshot(
@@ -548,10 +548,10 @@ class _RetiringSupervisor:
         return [item["snapshot_id"] for item in items if item["object_key"]]
 
     def environment_snapshot_images(self):
-        from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+        from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 
         if self.held is None:
-            raise SessionSupervisorError(404, "sandbox manager refused")
+            raise SandboxManagerError(404, "sandbox manager refused")
         return self.held
 
 
@@ -559,7 +559,7 @@ def _retire(monkeypatch, supervisor, *, retired_status: int = 200) -> list[list[
     from cloud_agent_host import environment_tests
 
     monkeypatch.setattr(
-        "cloud_agent_host.session_supervisor_client.session_supervisor_from_env",
+        "cloud_agent_host.sandbox_manager_client.sandbox_manager_from_env",
         lambda **_: supervisor,
     )
     asked: list[list[str]] = []
@@ -610,9 +610,7 @@ def test_a_host_without_a_sandbox_manager_has_no_snapshots_to_drop(monkeypatch):
     def missing(**_):
         raise SandboxError("restartable chat execution needs AGENT_SANDBOX_MANAGER_URL")
 
-    monkeypatch.setattr(
-        "cloud_agent_host.session_supervisor_client.session_supervisor_from_env", missing
-    )
+    monkeypatch.setattr("cloud_agent_host.sandbox_manager_client.sandbox_manager_from_env", missing)
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

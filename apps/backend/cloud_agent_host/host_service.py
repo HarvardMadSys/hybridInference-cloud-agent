@@ -72,10 +72,10 @@ from cloud_agent_host.sandbox import (
     SandboxError,
     build_backend_from_env,
 )
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
-    session_supervisor_from_env,
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+    sandbox_manager_from_env,
 )
 from cloud_agent_host.turn_launch import TurnSpare, spawn_turn
 from cloud_agent_shared import operation_profiling
@@ -172,9 +172,9 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
     sandbox manager is restarting. Returning ``None`` means "not observed this beat";
     it must never be confused with an authoritative empty list or deletion.
     """
-    client: SessionSupervisorClient | None = None
+    client: SandboxManagerClient | None = None
     try:
-        client = session_supervisor_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
+        client = sandbox_manager_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
         incident_relay.confirm(client)
         rows = client.list()
         observations: list[dict[str, Any]] = []
@@ -233,7 +233,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                 }
             )
         return observations
-    except (KeyError, TypeError, ValueError, SandboxError, SessionSupervisorError) as exc:
+    except (KeyError, TypeError, ValueError, SandboxError, SandboxManagerError) as exc:
         print(
             f"agent runner: retained sandbox observation unavailable: {exc}",
             file=sys.stderr,
@@ -376,9 +376,9 @@ class _RetainedSandboxStopWorker:
 
 def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
     """Apply one worker batch of durable settled-idle stop commands."""
-    client: SessionSupervisorClient | None = None
+    client: SandboxManagerClient | None = None
     try:
-        client = session_supervisor_from_env()
+        client = sandbox_manager_from_env()
         for command in commands:
             try:
                 client.stop_shared_idle(
@@ -388,7 +388,7 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
                     reason=str(command.get("reason") or "idle"),
                     member_activation_generations=command.get("member_activation_generations"),
                 )
-            except (KeyError, TypeError, ValueError, SessionSupervisorError) as exc:
+            except (KeyError, TypeError, ValueError, SandboxManagerError) as exc:
                 # A stale command is expected during a racing acquire. The
                 # next heartbeat reports fresh Docker state and the durable
                 # predicate decides again; never fail host liveness for it.
@@ -397,7 +397,7 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
                     file=sys.stderr,
                     flush=True,
                 )
-    except (SandboxError, SessionSupervisorError) as exc:
+    except (SandboxError, SandboxManagerError) as exc:
         print(
             f"agent runner: retained idle stop unavailable: {exc}",
             file=sys.stderr,
@@ -417,10 +417,10 @@ def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
     for now is named again by a later beat, for as long as the sandbox manager
     still reports it live under the generation the control plane refused.
     """
-    client: SessionSupervisorClient | None = None
+    client: SandboxManagerClient | None = None
     deadline = time.monotonic() + _HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S
     try:
-        client = session_supervisor_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
+        client = sandbox_manager_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
         shared_members = {
             str(member.get("thread_id"))
             for row in client.list()
@@ -434,9 +434,9 @@ def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
                 continue
             if time.monotonic() >= deadline:
                 break
-            with contextlib.suppress(SessionSupervisorError):
+            with contextlib.suppress(SandboxManagerError):
                 client.shared_residency_lost(thread_id, generation=generation)
-    except (SandboxError, SessionSupervisorError) as exc:
+    except (SandboxError, SandboxManagerError) as exc:
         print(
             f"agent runner: shared residency cleanup unavailable: {exc}",
             file=sys.stderr,
@@ -680,7 +680,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     # Until the first answer, every setting is this host's own, which is also
     # what an unreachable control plane leaves in place.
     try:
-        settings_sandbox_manager: SessionSupervisorClient | None = session_supervisor_from_env()
+        settings_sandbox_manager: SandboxManagerClient | None = sandbox_manager_from_env()
     except Exception:
         settings_sandbox_manager = None
     runtime_settings = RuntimeSettings(
@@ -709,7 +709,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         # container sub-stages missing. A host that has no sandbox manager configured
         # passes ``None`` and still syncs its own configuration.
         try:
-            sandbox_manager_client: SessionSupervisorClient | None = session_supervisor_from_env()
+            sandbox_manager_client: SandboxManagerClient | None = sandbox_manager_from_env()
         except Exception:
             sandbox_manager_client = None
             logger.info(

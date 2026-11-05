@@ -51,10 +51,10 @@ from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.runtimes import AgentRuntime, NormalizedEvent
 from cloud_agent_host.sandbox import SandboxBackend, SandboxError
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
-    session_supervisor_from_env,
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+    sandbox_manager_from_env,
 )
 from cloud_agent_host.setup import run_setup
 from cloud_agent_host.source_preparation import (
@@ -358,7 +358,7 @@ class _SharedLiveAttempt:
         self.has_context = bool(reservation.get("last_settled_job_id"))
         self.native_session_id = str(reservation.get("native_session_id") or "").strip() or None
         self.manifest = _shared_group_manifest(reservation, thread_id=job.thread_id)
-        self.supervisor: SessionSupervisorClient | None = None
+        self.supervisor: SandboxManagerClient | None = None
         self.source: GitSourcePrefetch | None = None
         self.lease_token: str | None = None
         self.snapshot: EnvironmentSnapshotRef | None = None
@@ -392,7 +392,7 @@ class _SharedLiveAttempt:
             return 3
         except _HandBack as exc:
             return self._hand_back(exc)
-        except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
+        except (DriverError, SandboxError, SandboxManagerError, WorktreeError) as exc:
             self.failure_detail = str(exc)
             _log_control_failure(self.stage, self.job.job_id, exc)
             self._abandon_before_finish(
@@ -433,7 +433,7 @@ class _SharedLiveAttempt:
             return exit_code
         return self._settle(outcome)
 
-    def _acquired(self) -> tuple[SessionSupervisorClient, str]:
+    def _acquired(self) -> tuple[SandboxManagerClient, str]:
         """The sandbox manager's client and this activation's lease, once acquired."""
         assert self.supervisor is not None and self.lease_token is not None
         return self.supervisor, self.lease_token
@@ -464,7 +464,7 @@ class _SharedLiveAttempt:
             and self.restore is None
             and not self.reservation.get("container_id"),
         )
-        self.supervisor = supervisor = session_supervisor_from_env()
+        self.supervisor = supervisor = sandbox_manager_from_env()
         try:
             acquire_call = operation_profiling.expect_fragment(
                 self.measurement, SANDBOX_MANAGER_PRODUCER, "supervisor_acquire"
@@ -487,7 +487,7 @@ class _SharedLiveAttempt:
                     self.snapshot.model_dump(mode="json") if self.snapshot is not None else None
                 ),
             )
-        except SessionSupervisorError as exc:
+        except SandboxManagerError as exc:
             if self.restore is not None and exc.status_code == 424:
                 raise _HandBack(
                     RESTORE_FAILED_RELEASE_REASON, f"sandbox restore failed: {exc}"
@@ -871,7 +871,7 @@ class _SharedLiveAttempt:
                 activation_owner=token,
                 cancelled=lambda: self.heart.cancel_requested or self.heart.lease_lost,
             )
-        except SessionSupervisorError:
+        except SandboxManagerError:
             # A Stop kills the running script, and the preparation then
             # fails. Nothing has reached the CLI yet, so it is no failure.
             if self._stopped_before_admission(self.base_sha):
