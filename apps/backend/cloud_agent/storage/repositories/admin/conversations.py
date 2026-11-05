@@ -5,7 +5,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from cloud_agent.admin_conversations import (
+from cloud_agent.domain.cursors import cursor_scope, encode_cursor
+from cloud_agent.schemas.admin_conversations import (
     AdminConversation,
     AdminConversationDetail,
     AdminConversationList,
@@ -15,7 +16,6 @@ from cloud_agent.admin_conversations import (
     ConversationTurnsCursor,
     turns_scope,
 )
-from cloud_agent.admin_observability import RunFilters, cursor_scope, encode_cursor
 from cloud_agent.storage._sql.jobs import CONVERSATION_STATE_SQL
 from cloud_agent.storage.repositories.admin.runs import _RUN_COLUMNS, _fold_run_resource_summary
 
@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     import asyncpg
+
+    from cloud_agent.schemas.admin_observability import RunFilters
 
 
 # Match the same turn cohort as Usage; the window is NOT thread creation time.

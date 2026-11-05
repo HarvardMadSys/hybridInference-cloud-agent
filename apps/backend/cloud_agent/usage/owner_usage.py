@@ -24,7 +24,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.admin_observability import cursor_scope
+from cloud_agent.domain.cursors import cursor_scope
 
 # Pydantic resolves these annotations when it builds the token usage view.
 from cloud_agent.usage.admin_usage import (  # noqa: TC001

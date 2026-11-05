@@ -13,7 +13,7 @@ from uuid import UUID
 
 import asyncpg
 
-from cloud_agent.admin_database import (
+from cloud_agent.schemas.admin_database import (
     INTEGER_TYPES,
     MAX_RESULT_BYTES,
     MAX_TEXT_CHARACTERS,

@@ -90,11 +90,6 @@ PORT_IMPORT_EXCEPTIONS = {
     # live in the same module; moving the one a port names would split the
     # tree. The code-structure plan moves these modules' models to schemas/
     # whole, one pull request per module.
-    ("ports/admin_queries.py", "cloud_agent.admin_conversations"),
-    ("ports/admin_queries.py", "cloud_agent.admin_database"),
-    ("ports/admin_queries.py", "cloud_agent.admin_observability"),
-    ("ports/admin_queries.py", "cloud_agent.admin_sandbox_inventory"),
-    ("ports/admin_queries.py", "cloud_agent.admin_sandboxes"),
     ("ports/context_queries.py", "cloud_agent.context.context_dna"),
     ("ports/context_queries.py", "cloud_agent.context.context_insights"),
     ("ports/context_queries.py", "cloud_agent.context.context_request"),

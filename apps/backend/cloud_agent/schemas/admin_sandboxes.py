@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.admin_observability import cursor_scope
+from cloud_agent.domain.cursors import cursor_scope
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 SANDBOX_CURSOR_SCOPE = cursor_scope(["sandboxes", "running"])

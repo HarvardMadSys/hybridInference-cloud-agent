@@ -12,7 +12,7 @@ from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
 from tests.unit.test_sandbox_resource_protocol import sample
 
-from cloud_agent.admin_observability import decode_cursor
+from cloud_agent.domain.cursors import decode_cursor
 from cloud_agent.usage.owner_usage import CONTAINER_CURSOR_SCOPE, OwnerContainerCursor
 from cloud_agent.usage.usage_range import buckets
 

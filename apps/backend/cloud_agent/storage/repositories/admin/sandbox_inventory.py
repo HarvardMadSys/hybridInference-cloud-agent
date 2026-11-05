@@ -12,14 +12,14 @@ import json
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from cloud_agent.admin_observability import encode_cursor
-from cloud_agent.admin_sandbox_inventory import (
+from cloud_agent.domain.cursors import encode_cursor
+from cloud_agent.schemas.admin_sandbox_inventory import (
     AdminSandboxHostObservation,
     AdminSandboxInventoryPage,
     SandboxInventoryCursor,
     inventory_scope,
 )
-from cloud_agent.admin_sandboxes import AdminSandbox
+from cloud_agent.schemas.admin_sandboxes import AdminSandbox
 from cloud_agent.storage._sql.admin_sandbox_inventory import inventory_rows, inventory_view
 from cloud_agent.storage._sql.rows import load_json
 

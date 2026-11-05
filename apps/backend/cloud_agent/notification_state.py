@@ -9,7 +9,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from cloud_agent.admin_observability import cursor_scope, encode_cursor
+from cloud_agent.domain.cursors import cursor_scope, encode_cursor
 
 
 def notification_scope(user_id: str, limit: int) -> str:

@@ -17,19 +17,23 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from datetime import datetime
 
-    from cloud_agent.admin_conversations import (
+    from cloud_agent.schemas.admin_conversations import (
         AdminConversationDetail,
         AdminConversationList,
         ConversationCursor,
         ConversationTurnsCursor,
     )
-    from cloud_agent.admin_database import DatabaseQuery, DatabaseQueryResult, DatabaseTables
-    from cloud_agent.admin_observability import AdminRunList, RunCursor, RunFilters
-    from cloud_agent.admin_sandbox_inventory import (
+    from cloud_agent.schemas.admin_database import (
+        DatabaseQuery,
+        DatabaseQueryResult,
+        DatabaseTables,
+    )
+    from cloud_agent.schemas.admin_observability import AdminRunList, RunCursor, RunFilters
+    from cloud_agent.schemas.admin_sandbox_inventory import (
         AdminSandboxInventoryPage,
         SandboxInventoryCursor,
     )
-    from cloud_agent.admin_sandboxes import (
+    from cloud_agent.schemas.admin_sandboxes import (
         AdminSandboxDetail,
         AdminSandboxList,
         AdminSandboxTrajectoryPage,

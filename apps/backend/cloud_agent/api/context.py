@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.admin_observability import decode_cursor, encode_cursor
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
 from cloud_agent.api.errors import typed_error
@@ -53,6 +52,7 @@ from cloud_agent.domain.command_executions import (  # noqa: TC001 — FastAPI r
     CommandFilter,
     CommandSort,
 )
+from cloud_agent.domain.cursors import decode_cursor, encode_cursor
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.admin_queries import UsageQueryTooLarge, UsageQueryUnavailable
 from cloud_agent.usage.usage_batches import owner_usage

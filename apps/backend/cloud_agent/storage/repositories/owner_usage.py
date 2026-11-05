@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.admin_observability import encode_cursor
+from cloud_agent.domain.cursors import encode_cursor
 from cloud_agent.domain.sandbox_group import DeletionState, GroupState, sql_list
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.usage.owner_usage import (

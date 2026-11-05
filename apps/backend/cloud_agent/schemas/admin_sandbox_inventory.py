@@ -7,8 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from cloud_agent.admin_observability import cursor_scope
-from cloud_agent.admin_sandboxes import AdminSandbox
+from cloud_agent.domain.cursors import cursor_scope
+from cloud_agent.schemas.admin_sandboxes import AdminSandbox
 
 
 def inventory_scope(state: str, include_archived: bool, limit: int) -> str:
