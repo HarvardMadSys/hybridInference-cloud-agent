@@ -33,7 +33,7 @@ from cloud_agent.application.compute_resources import ComputeCommands
 from cloud_agent.compute_config import ComputeConfiguration
 from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
 from cloud_agent.compute_secrets import ComputeSecretStore
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import (
     NodeObservation,

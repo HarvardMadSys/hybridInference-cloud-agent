@@ -14,6 +14,7 @@ from cloud_agent.api.deps import (
     verify_admin_access,
 )
 from cloud_agent.domain.cursors import cursor_scope, decode_cursor
+from cloud_agent.domain.thread_stats import summarize_session_statistics
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry, AttemptResources, TurnResourceSummary
 from cloud_agent.schemas.admin_observability import (
@@ -25,7 +26,6 @@ from cloud_agent.schemas.admin_observability import (
     RunFilters,
     resolve_run_window,
 )
-from cloud_agent.thread_stats import summarize_session_statistics
 from cloud_agent.usage.turn_report import summarize_job_usage
 from cloud_agent_shared.turn_resources import summarize_turn_resources
 

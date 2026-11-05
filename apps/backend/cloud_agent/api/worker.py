@@ -49,9 +49,9 @@ from cloud_agent.application.turn_claim import ClaimRefusal, ClaimStorage, hand_
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.domain.execution import QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.domain.goals import GoalReportEnvelope
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.goals.controller import continue_after_finish
 from cloud_agent.goals.report import parse_goal_report, source_digest, unavailable
-from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.measurement.measurement_ingest import Owner
 from cloud_agent.measurement.measurement_persistence import persist_measurement

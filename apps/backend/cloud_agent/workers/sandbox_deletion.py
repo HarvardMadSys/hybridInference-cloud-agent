@@ -12,7 +12,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.compute import RECLAIMED_QUIET_SECONDS
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive import (
@@ -29,6 +28,7 @@ from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     sandbox_manager_configuration_error,
     sandbox_manager_for_host,
 )
+from cloud_agent.schemas.capacity_protocol import FRESH_AFTER_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -13,9 +13,9 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.compute import fingerprint
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
+from cloud_agent.schemas.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.schemas.compute import CloudLabDefaults
 
 if TYPE_CHECKING:

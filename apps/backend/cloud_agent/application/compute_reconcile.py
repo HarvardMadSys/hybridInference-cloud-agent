@@ -47,7 +47,7 @@ from cloud_agent.domain.compute import (
     move_out_window_seconds,
     provider_resource_absent,
 )
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import (

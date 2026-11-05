@@ -63,7 +63,7 @@ from cloud_agent.accounts.config import ENV_LOCAL_SESSION_SECRET
 from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.app import create_app
 from cloud_agent.application.profiling_control import ProfilingControlService
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.profiling_control_config import profiling_control_deployment
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import mint_host_token

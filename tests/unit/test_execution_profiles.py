@@ -2,7 +2,7 @@
 
 import pytest
 
-from cloud_agent.execution_profiles import (
+from cloud_agent.domain.execution_profiles import (
     compatible_shared_sandbox_followup_attested,
     shared_sandbox_claim_attested,
 )

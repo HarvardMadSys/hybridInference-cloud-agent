@@ -11,10 +11,10 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.cursors import cursor_scope, encode_cursor
+from cloud_agent.domain.thread_stats import TOKEN_KEY_GROUPS
 from cloud_agent.schemas import AttemptResources, ProcessObservation, ToolCallResources
 from cloud_agent.schemas.admin_observability import AdminRun, AdminRunList, RunCursor, RunFilters
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.thread_stats import TOKEN_KEY_GROUPS
 from cloud_agent_shared.turn_resources import summarize_run_resources
 
 if TYPE_CHECKING:

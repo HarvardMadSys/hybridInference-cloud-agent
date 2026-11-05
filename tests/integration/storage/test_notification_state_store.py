@@ -14,7 +14,7 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401 - pyt
     store,
 )
 
-from cloud_agent.notification_state import (
+from cloud_agent.schemas.notification_state import (
     NotificationStateCursor,
     decode_notification_cursor,
     encode_cursor,

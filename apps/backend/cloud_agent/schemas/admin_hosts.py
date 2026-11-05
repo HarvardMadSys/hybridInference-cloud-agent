@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, StrictInt, field_validator
 
-from cloud_agent.capacity_protocol import (
+from cloud_agent.schemas.capacity_protocol import (
     AgentHostCapacity,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent_shared.host_settings import (

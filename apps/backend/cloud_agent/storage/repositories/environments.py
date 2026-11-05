@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from cloud_agent.domain.execution_profiles import default_execution_profile
 from cloud_agent.environments import (
     EnvironmentAccessRevoked,
     EnvironmentBusy,
@@ -20,7 +21,6 @@ from cloud_agent.environments import (
     EnvironmentForbidden,
     EnvironmentNotFound,
 )
-from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.storage._sql import environment_catalogue, environment_runs
 from cloud_agent.storage._sql.environment_claims import (
     claim_environment_run as claim_queued_run,

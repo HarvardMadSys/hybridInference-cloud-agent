@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from cloud_agent.thread_stats import normalized_runtime_input_tokens, reported_token_totals
+from cloud_agent.domain.thread_stats import normalized_runtime_input_tokens, reported_token_totals
 
 
 class RuntimeUsage(BaseModel):

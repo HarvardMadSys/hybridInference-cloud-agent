@@ -31,7 +31,7 @@ from cloud_agent.domain.compute import (
     public_connection,
     public_operation,
 )
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.schemas.compute import CloudLabAutoscalingPolicy, CloudLabDefaults, RenewalPolicy

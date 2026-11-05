@@ -6,10 +6,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent.domain.source_control import REPO_PATTERN
 from cloud_agent.schemas.mcp import (
     McpIntegrationResponse,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.source_control.entitlement import REPO_PATTERN
 from cloud_agent.source_control.source_control_runtime import (
     LoadStatus,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )

@@ -38,8 +38,8 @@ from cloud_agent.application.ssh_servers import build_ssh_access, servers_for_th
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.execution import FAILED, RUNNING
+from cloud_agent.domain.execution_profiles import ExecutionProfile
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
-from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_for_thread
 from cloud_agent.mcp.sandbox_servers import split_bindings

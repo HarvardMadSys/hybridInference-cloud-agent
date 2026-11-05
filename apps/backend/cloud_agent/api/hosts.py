@@ -28,7 +28,7 @@ from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_storage
 from cloud_agent.api.errors import typed_error
 from cloud_agent.application.sandbox_incidents import record_heartbeat_incidents
-from cloud_agent.host_pool import (
+from cloud_agent.domain.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
 )

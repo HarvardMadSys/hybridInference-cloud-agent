@@ -9,7 +9,7 @@ import pytest
 from tests.integration.storage.test_schema_upgrade import _db_config, store as store
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent_host.runtime_settings import RuntimeSettings
 from cloud_agent_shared.host_settings import RUNNER_SETTING_KEYS, default_values, merge_admin_values
 

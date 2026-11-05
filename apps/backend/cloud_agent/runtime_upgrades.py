@@ -28,8 +28,8 @@ from urllib.parse import quote
 
 import httpx
 
+from cloud_agent.domain.host_pool import HOST_ONLINE
 from cloud_agent.domain.runtimes import KIND_SELECTION, KIND_UPDATE
-from cloud_agent.host_pool import HOST_ONLINE
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import (
     DEFAULT_REGISTRY_URL,

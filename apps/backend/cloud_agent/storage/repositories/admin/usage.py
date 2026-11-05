@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     import asyncpg
 
-    from cloud_agent.thread_stats import AttemptStatsRollup
+    from cloud_agent.domain.thread_stats import AttemptStatsRollup
 
 logger = get_logger(__name__)
 

@@ -20,12 +20,12 @@ const HOSTS = '/admin/agent/runner-hosts';
 const RUNTIME_VERSIONS = '/admin/agent/runtime-versions';
 const HOST_SETTINGS = '/admin/agent/host-settings';
 
-/** Status values the control plane stores; see `cloud_agent/host_pool.py`. */
+/** Status values the control plane stores; see `cloud_agent/domain/host_pool.py`. */
 export type AgentHostStatus = 'enrolling' | 'online' | 'draining' | 'disabled' | 'offline';
 
 /**
  * Why a CPU figure is absent. The vocabulary is fixed by the control plane
- * (`cloud_agent/capacity_protocol.py`) and every member means something
+ * (`cloud_agent/schemas/capacity_protocol.py`) and every member means something
  * different to the operator, so the page maps each one to its own label rather
  * than collapsing them into a single "unknown".
  */

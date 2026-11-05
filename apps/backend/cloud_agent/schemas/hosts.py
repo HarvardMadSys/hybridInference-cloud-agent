@@ -7,8 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, StrictInt, ValidationError, model_validator
 
-from cloud_agent.capacity_protocol import HostCapacityReport, parse_capacity_block
-from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
+from cloud_agent.domain.host_pool import ENROLL_TOKEN_TTL_S
 from cloud_agent.schemas._host_reports import (
     HOST_LABELS_MAX_ITEMS,
     _HostCapability,
@@ -20,6 +19,7 @@ from cloud_agent.schemas._host_reports import (
 from cloud_agent.schemas.archive_settings import (
     HostSandboxArchiveSettings,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent.schemas.capacity_protocol import HostCapacityReport, parse_capacity_block
 from cloud_agent.schemas.workers import (
     WorkerSandboxMember,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )

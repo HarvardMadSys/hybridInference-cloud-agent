@@ -18,7 +18,7 @@ import jsonschema
 import pytest
 from tests.unit.test_live_sessions import _LiveProcess, _protocol_context, _turn_lines
 
-from cloud_agent.thread_stats import (
+from cloud_agent.domain.thread_stats import (
     AttemptStatsAccumulator,
     attempt_rollup_from_payload,
     attempt_rollup_payload,

@@ -854,7 +854,7 @@ async def test_a_ref_to_resolve_can_only_ever_name_a_ref(config):
     ],
 )
 def test_ref_names_follow_git_s_own_rules(ref, accepted):
-    from cloud_agent.source_control.github_app import is_ref_name
+    from cloud_agent.domain.source_control import is_ref_name
 
     assert is_ref_name(ref) is accepted
 

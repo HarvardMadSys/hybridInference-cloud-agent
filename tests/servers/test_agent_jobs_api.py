@@ -55,13 +55,13 @@ from cloud_agent.api.errors import install_domain_errors
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
+from cloud_agent.domain.thread_stats import summarize_thread
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.sandbox_manager import sandbox_manager_routing
 from cloud_agent.schemas.model_preferences import ModelPreferenceView
 from cloud_agent.storage.repositories.conversation_commands import _goal_round_metadata
 from cloud_agent.storage.repositories.goals import _pause_detail
-from cloud_agent.thread_stats import summarize_thread
 from cloud_agent.tokens import mint_worker_token, parse_residency_mcp_token
 
 pytestmark = pytest.mark.asyncio

@@ -13,12 +13,13 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from cloud_agent.domain.user_text import user_sentences
+
 # Pydantic resolves this annotation when it constructs the public view schema.
 from cloud_agent.user_avatar import (
     UserAvatar,
     generate_user_avatar,
 )
-from cloud_agent.user_text import user_sentences
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

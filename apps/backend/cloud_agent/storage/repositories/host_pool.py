@@ -13,15 +13,8 @@ from collections import deque
 from datetime import UTC
 from typing import TYPE_CHECKING
 
-from cloud_agent.capacity_protocol import (
-    CAPACITY_HISTORY_MAX_AGE_S,
-    FRESH_AFTER_SECONDS,
-    history_point_write_from_block,
-)
-from cloud_agent.domain.runtimes import KIND_SELECTION, KIND_UPDATE
-from cloud_agent.domain.sandbox_group import DeletionState, GroupState
-from cloud_agent.execution_profiles import KATA_RUNTIME
-from cloud_agent.host_pool import (
+from cloud_agent.domain.execution_profiles import KATA_RUNTIME
+from cloud_agent.domain.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
     HOST_ENROLLING,
@@ -30,6 +23,8 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
+from cloud_agent.domain.runtimes import KIND_SELECTION, KIND_UPDATE
+from cloud_agent.domain.sandbox_group import DeletionState, GroupState
 from cloud_agent.host_settings_import import plan_settings_import
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
@@ -37,6 +32,11 @@ from cloud_agent.sandbox_archive_credentials import (
     archive_settings_payload,
     seal_archive_storage,
     stored_archive_policy,
+)
+from cloud_agent.schemas.capacity_protocol import (
+    CAPACITY_HISTORY_MAX_AGE_S,
+    FRESH_AFTER_SECONDS,
+    history_point_write_from_block,
 )
 from cloud_agent.storage._sql.compute_admission import (
     host_compute_admission,

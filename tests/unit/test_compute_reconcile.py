@@ -21,7 +21,7 @@ from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_setup import HostRelease
 from cloud_agent.domain.compute import autoscaling_acquire_can_cancel, fingerprint, public_operation
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,

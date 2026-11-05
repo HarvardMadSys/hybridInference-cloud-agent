@@ -7,11 +7,11 @@ from typing import Literal, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from cloud_agent.domain.thread_stats import (
+    SessionStatistics,  # noqa: TC001 — Pydantic resolves this at runtime.
+)
 from cloud_agent.schemas.resources import (
     RunResourceSummary,  # noqa: TC001 — Pydantic resolves this at runtime.
-)
-from cloud_agent.thread_stats import (
-    SessionStatistics,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
 from cloud_agent.usage.turn_report import (
     JobUsageResponse,  # noqa: TC001 — Pydantic resolves this at runtime.

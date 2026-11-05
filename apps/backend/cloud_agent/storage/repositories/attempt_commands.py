@@ -23,16 +23,16 @@ from cloud_agent.domain.execution import (
     RUNNING,
     TERMINAL_STATES,
 )
-from cloud_agent.domain.pending_messages import QUEUE_PAUSED_STOPPED
-from cloud_agent.domain.runtimes import resolve_runtime_version
-from cloud_agent.domain.sandbox_group import GroupState
-from cloud_agent.execution_profiles import (
+from cloud_agent.domain.execution_profiles import (
     KATA_RUNTIME,
     ExecutionProfile,
     compatible_shared_sandbox_followup_attested,
     shared_sandbox_claim_attested,
 )
-from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
+from cloud_agent.domain.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
+from cloud_agent.domain.pending_messages import QUEUE_PAUSED_STOPPED
+from cloud_agent.domain.runtimes import resolve_runtime_version
+from cloud_agent.domain.sandbox_group import GroupState
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
