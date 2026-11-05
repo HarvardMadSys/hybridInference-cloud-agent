@@ -44,7 +44,7 @@ from cloud_agent_host.runtimes import (
     RuntimeConnectionUnsupportedError,
     connection_base_url,
 )
-from cloud_agent_host.runtimes.codex import NATIVE_LAUNCHER
+from cloud_agent_host.runtimes.codex.adapter import NATIVE_LAUNCHER
 from cloud_agent_shared.model_connections import ModelConnectionAccess
 from cloud_agent_shared.protocol_compat import ORIGIN_PLACEHOLDER, TOKEN_PLACEHOLDER
 from cloud_agent_shared.secret_redaction import SecretRedactor

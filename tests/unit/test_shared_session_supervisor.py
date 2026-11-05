@@ -39,10 +39,14 @@ from cloud_agent_host.chat_sandbox_markers import (
 from cloud_agent_host.drivers import DriverError, InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
 from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest
+from cloud_agent_host.member_homes import legacy_member_state_dir, member_state_dir
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransportFactory,
 )
+from cloud_agent_host.runtimes.claude import member as claude_member
+from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.http_bridge import member as http_member
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_manager import create_app
@@ -2608,8 +2612,8 @@ def test_claude_member_launch_shares_only_native_projects(monkeypatch, tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     source = _launch("athr_source", native_session_id="native-source", slot=0)
     child = _launch("athr_child", native_session_id="native-child", slot=1)
-    factory._prepare_claude_member_state(_spec(), source)
-    factory._prepare_claude_member_state(_spec(), child)
+    claude_member.prepare_member_state(manager, _spec(), source)
+    claude_member.prepare_member_state(manager, _spec(), child)
 
     assert [call[0][-2] for call in calls] == [
         claude_member_config_dir(0, source.thread_id),
@@ -2654,12 +2658,11 @@ def test_claude_reassigned_slot_gets_fresh_member_settings(monkeypatch, tmp_path
         return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     old = _launch("athr_old", native_session_id="old", slot=1)
     new = _launch("athr_new", native_session_id="new", slot=1)
     assert claude_member_config_dir(1, old.thread_id) != claude_member_config_dir(1, new.thread_id)
-    factory._prepare_claude_member_state(_spec(), old)
-    factory._prepare_claude_member_state(_spec(), new)
+    claude_member.prepare_member_state(manager, _spec(), old)
+    claude_member.prepare_member_state(manager, _spec(), new)
     home = tmp_path / "member-home"
     home.mkdir()
     shared = tmp_path / "agent-state" / "claude"
@@ -2684,9 +2687,8 @@ def test_claude_member_preparation_rejects_symlinked_state(monkeypatch, tmp_path
         return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
-    factory._prepare_claude_member_state(
-        _spec(), _launch("athr_source", native_session_id="native-source", slot=0)
+    claude_member.prepare_member_state(
+        manager, _spec(), _launch("athr_source", native_session_id="native-source", slot=0)
     )
     home = tmp_path / "member"
     home.mkdir()
@@ -2718,10 +2720,9 @@ def test_claude_native_fork_uses_the_source_private_config(monkeypatch):
         )
 
     monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
 
     source_launch = _launch("athr_source", native_session_id="source", slot=1)
-    assert factory._fork_claude(_spec(), "source", source_launch, 2) == "child"
+    assert claude_member.fork_session(manager, _spec(), "source", source_launch, 2) == "child"
     assert calls[0][0] == ["claude-session-fork", "source", "2"]
     assert calls[0][1]["env"]["CLAUDE_CONFIG_DIR"] == claude_member_config_dir(1, "athr_source")
     assert calls[0][1]["user_uid"] == MEMBER_UID_BASE + 1
@@ -2741,8 +2742,8 @@ def test_private_provider_members_get_deterministic_distinct_homes(
     source = _launch("athr_source", native_session_id="native-source", slot=0)
     child = replace(source, thread_id="athr_child", native_session_id="native-child", slot_id=1)
 
-    source_home = ResidentTransportFactory._member_state_dir(replace(source, runtime_id=runtime_id))
-    child_home = ResidentTransportFactory._member_state_dir(replace(child, runtime_id=runtime_id))
+    source_home = member_state_dir(replace(source, runtime_id=runtime_id))
+    child_home = member_state_dir(replace(child, runtime_id=runtime_id))
 
     assert source_home.startswith(f"/agent-state/{collection}/")
     assert child_home.startswith(f"/agent-state/{collection}/")
@@ -2848,7 +2849,7 @@ def test_a_member_provider_home_is_private_to_its_member(tmp_path: Path, runtime
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id=runtime_id)
-    home = factory._member_state_dir(launch)
+    home = member_state_dir(launch)
 
     factory._prepare_member_state(_spec(), launch, home)
     factory._prepare_member_state(_spec(), launch, home)
@@ -2871,7 +2872,7 @@ def test_an_earlier_releases_home_moves_into_the_trusted_collection(tmp_path: Pa
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id="opencode")
-    legacy = manager.local(factory._legacy_member_state_dir(launch))
+    legacy = manager.local(legacy_member_state_dir(launch))
     (legacy / "opencode/data").mkdir(parents=True)
     (legacy / "opencode/data/opencode.db").write_text("native session")
     (legacy / "opencode/data/opencode.db").chmod(0o660)
@@ -2879,9 +2880,9 @@ def test_an_earlier_releases_home_moves_into_the_trusted_collection(tmp_path: Pa
         directory.chmod(0o2770)
     (legacy / ".freeinference-member-state-v1").write_text("")
 
-    factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
+    factory._prepare_member_state(_spec(), launch, member_state_dir(launch))
 
-    home = manager.local(factory._member_state_dir(launch))
+    home = manager.local(member_state_dir(launch))
     assert not legacy.exists()
     assert (home / "opencode/data/opencode.db").read_text() == "native session"
     _assert_private(home)
@@ -2893,14 +2894,14 @@ def test_a_symlink_at_a_members_home_is_refused_not_adopted(tmp_path: Path):
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id="codex")
     manager.ensure_private_member_collections(_spec())
-    home = manager.local(factory._member_state_dir(launch))
+    home = manager.local(member_state_dir(launch))
     planted = tmp_path / "sibling-owned"
     planted.mkdir()
     planted.chmod(0o777)
     home.symlink_to(planted, target_is_directory=True)
 
     with pytest.raises(DriverError, match="not owned by this member"):
-        factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
+        factory._prepare_member_state(_spec(), launch, member_state_dir(launch))
 
     assert list(planted.iterdir()) == []
 
@@ -2931,7 +2932,7 @@ def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path,
     target_launch = replace(
         _launch("athr_child", native_session_id=None, slot=2), runtime_id=runtime_id
     )
-    source_home = factory._member_state_dir(source_launch)
+    source_home = member_state_dir(source_launch)
     factory._prepare_member_state(_spec(), source_launch, source_home)
     source = manager.local(source_home)
     (source / "sessions").mkdir()
@@ -2945,7 +2946,7 @@ def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path,
 
     factory._clone_private_member_state(_spec(), source_launch, target_launch)
 
-    child = manager.local(factory._member_state_dir(target_launch))
+    child = manager.local(member_state_dir(target_launch))
     _assert_private(child)
     # The CLI's own files keep its umask; the closed home is what protects them.
     assert stat.S_IMODE(source.stat().st_mode) == 0o700
@@ -2996,8 +2997,8 @@ def test_a_sibling_cannot_swap_a_members_home_before_its_cli_starts(_multi_uid_s
     manager = _LocalMemberShell(base, as_uids=True)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
-    factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
-    home = manager.local(factory._member_state_dir(victim))
+    factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     collection = home.parent
     _assert_trusted(state, collection, _SANDBOX_UID)
     assert home.stat().st_uid == MEMBER_UID_BASE + 1
@@ -3015,8 +3016,8 @@ def test_a_sibling_cannot_swap_a_members_home_before_its_cli_starts(_multi_uid_s
     _assert_trusted(state, collection, _SANDBOX_UID)
     # The sibling can still make its own home, and the victim restarts cleanly.
     own = replace(_launch("athr_sibling", native_session_id=None, slot=0), runtime_id="codex")
-    factory._prepare_member_state(_spec(), own, factory._member_state_dir(own))
-    factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+    factory._prepare_member_state(_spec(), own, member_state_dir(own))
+    factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
 
 
 @pytest.mark.parametrize("planted", ["sibling_directory", "sibling_file_inside"])
@@ -3026,7 +3027,7 @@ def test_a_legacy_home_a_sibling_replaced_is_refused_after_the_move(_multi_uid_s
     manager = _LocalMemberShell(base, as_uids=True)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
-    legacy = manager.local(factory._legacy_member_state_dir(victim))
+    legacy = manager.local(legacy_member_state_dir(victim))
     sibling = MEMBER_UID_BASE
     # An earlier release's member-created, group-writable collection.
     made = _as_member(manager, sibling, 'umask 0007; mkdir -p -- "$1"', str(legacy.parent))
@@ -3042,13 +3043,13 @@ def test_a_legacy_home_a_sibling_replaced_is_refused_after_the_move(_multi_uid_s
     assert result.returncode == 0, result.stderr
 
     with pytest.raises(DriverError, match=r"not owned by this member|another UID"):
-        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
 
     # Codex review P1 on #568: the next start must not find the refused tree at
     # the home's path, take it for an already migrated home, and adopt it.
-    home = manager.local(factory._member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     try:
-        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
     except DriverError:
         pass  # Still refused is safe; adopting the planted tree is not.
     else:
@@ -3058,7 +3059,7 @@ def test_a_legacy_home_a_sibling_replaced_is_refused_after_the_move(_multi_uid_s
 
 def _poison_legacy_home(manager: _LocalMemberShell, factory, victim) -> None:
     """An earlier release's group-writable home a sibling put its config into."""
-    legacy = manager.local(factory._legacy_member_state_dir(victim))
+    legacy = manager.local(legacy_member_state_dir(victim))
     sibling = MEMBER_UID_BASE
     made = _as_member(manager, sibling, 'umask 0007; mkdir -p -- "$1"', str(legacy.parent))
     assert made.returncode == 0, made.stderr
@@ -3074,9 +3075,9 @@ def victim_uid(launch) -> int:
 
 def _never_adopted(manager: _LocalMemberShell, factory, victim) -> None:
     """Start again: refused is safe; a home with a sibling's file in it is not."""
-    home = manager.local(factory._member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     try:
-        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
     except DriverError as exc:
         assert "another UID" in str(exc) or "not owned by this member" in str(exc)
         return
@@ -3103,7 +3104,7 @@ def test_a_sibling_holding_every_guessable_quarantine_name_gets_nothing_adopted(
     victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
     manager.ensure_private_member_collections(_spec())
     _poison_legacy_home(manager, factory, victim)
-    home = manager.local(factory._member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     squat = (
         'for name in "$@"; do mkdir -- "$name"; : > "$name/keep"; done; '
         'i=1; while [ "$i" -le 2048 ]; do mkdir -- "$0.refused-$i"; i=$((i + 1)); done'
@@ -3120,7 +3121,7 @@ def test_a_sibling_holding_every_guessable_quarantine_name_gets_nothing_adopted(
     assert squatted.returncode == 0, squatted.stderr
 
     with pytest.raises(DriverError, match="another UID"):
-        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
 
     _never_adopted(manager, factory, victim)
     _never_adopted(manager, factory, victim)
@@ -3136,7 +3137,7 @@ def test_a_poisoned_home_is_refused_on_every_start_when_it_cannot_be_set_aside(
     victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
     manager.ensure_private_member_collections(_spec())
     _poison_legacy_home(manager, factory, victim)
-    home = manager.local(factory._member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     # Every name mktemp offers is one the sibling already holds.
     stubs = base / "stubs"
     stubs.mkdir()
@@ -3151,7 +3152,7 @@ def test_a_poisoned_home_is_refused_on_every_start_when_it_cannot_be_set_aside(
 
     for _start in range(3):
         with pytest.raises(DriverError, match="another UID"):
-            factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+            factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
         # The poisoned tree is still at the home's path, and still refused.
         assert (home / "config.toml").read_text() == "evil"
 
@@ -3165,8 +3166,8 @@ def test_a_clean_home_and_a_fork_copy_pass_the_every_start_check(_multi_uid_stat
         _launch("athr_source", native_session_id="native-source", slot=0), runtime_id="opencode"
     )
     child = replace(_launch("athr_child", native_session_id=None, slot=2), runtime_id="opencode")
-    factory._prepare_member_state(_spec(), source, factory._member_state_dir(source))
-    source_home = manager.local(factory._member_state_dir(source))
+    factory._prepare_member_state(_spec(), source, member_state_dir(source))
+    source_home = manager.local(member_state_dir(source))
     written = _as_member(
         manager,
         victim_uid(source),
@@ -3174,12 +3175,12 @@ def test_a_clean_home_and_a_fork_copy_pass_the_every_start_check(_multi_uid_stat
         str(source_home),
     )
     assert written.returncode == 0, written.stderr
-    factory._prepare_member_state(_spec(), source, factory._member_state_dir(source))
+    factory._prepare_member_state(_spec(), source, member_state_dir(source))
 
     factory._clone_private_member_state(_spec(), source, child)
-    factory._prepare_member_state(_spec(), child, factory._member_state_dir(child))
+    factory._prepare_member_state(_spec(), child, member_state_dir(child))
 
-    child_home = manager.local(factory._member_state_dir(child))
+    child_home = manager.local(member_state_dir(child))
     assert {path.lstat().st_uid for path in [child_home, *child_home.rglob("*")]} == {
         victim_uid(child)
     }
@@ -3232,8 +3233,8 @@ def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(mon
         },
     )
     monkeypatch.setattr(
-        factory,
-        "_codex_fork_children",
+        codex_member,
+        "fork_children",
         lambda *_args, **_kwargs: {"native-old-child", "native-recovered-child"},
     )
     monkeypatch.setattr(
@@ -3295,8 +3296,8 @@ def test_codex_lost_fork_response_recovers_from_the_rollout_inventory(monkeypatc
     writes: list[dict[str, object]] = []
     monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
     monkeypatch.setattr(
-        factory,
-        "_codex_fork_children",
+        codex_member,
+        "fork_children",
         lambda *_args, **_kwargs: next(inventories),
     )
     monkeypatch.setattr(factory, "_clone_private_member_state", lambda *_args: None)
@@ -3349,9 +3350,9 @@ def test_http_native_fork_flushes_and_clones_private_provider_state(monkeypatch,
     writes: list[dict[str, object]] = []
     monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
     monkeypatch.setattr(
-        factory,
-        "_clear_http_member_locks",
-        lambda _spec, launch: lifecycle.append(f"clear:{launch.thread_id}"),
+        http_member,
+        "clear_member_locks",
+        lambda _manager, _spec, launch: lifecycle.append(f"clear:{launch.thread_id}"),
     )
     monkeypatch.setattr(
         factory,
@@ -3400,14 +3401,14 @@ def test_claude_fork_flushes_the_source_before_reading_its_historical_boundary(m
     monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
     monkeypatch.setattr(factory, "_write_fork_journal", lambda *_args: None)
 
-    def fork_claude(spec, source_id, launch, source_native_turn_no):
+    def fork_claude(_manager, spec, source_id, launch, source_native_turn_no):
         assert lifecycle == ["flush"]
         assert spec == _spec()
         assert launch == source_launch
         lifecycle.append((source_id, launch, source_native_turn_no))
         return "native-child"
 
-    monkeypatch.setattr(factory, "_fork_claude", fork_claude)
+    monkeypatch.setattr(claude_member, "fork_session", fork_claude)
 
     child_id = factory.fork_native(
         _spec(),
@@ -3476,19 +3477,18 @@ def test_http_member_lock_cleanup_runs_as_the_source_slot_owner(runtime_id: str)
             return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
 
     manager = LockManager()
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(
         _launch("athr_source", native_session_id="native-source", slot=3),
         runtime_id=runtime_id,
         runtime_version="test-version",
     )
 
-    factory._clear_http_member_locks(_spec(), launch)
+    http_member.clear_member_locks(manager, _spec(), launch)
 
     assert len(manager.calls) == 1
     argv, kwargs = manager.calls[0]
     assert argv[-1] == runtime_id
-    assert argv[-2] == factory._member_state_dir(launch)
+    assert argv[-2] == member_state_dir(launch)
     assert "locks" in argv[2]
     assert kwargs["user_uid"] == 11004
     assert kwargs["user_gid"] == 10001

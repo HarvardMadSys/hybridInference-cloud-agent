@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from cloud_agent_shared.runtime_catalog import OPENCODE
 
-from .http_bridge import HttpBridgeRuntime
+from .adapter import HttpBridgeRuntime
 
 
 class OpencodeRuntime(HttpBridgeRuntime):

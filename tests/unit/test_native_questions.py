@@ -12,11 +12,9 @@ from pathlib import Path
 import pytest
 from tests.unit.test_live_sessions import _live, _LiveProcess, _turn_lines
 
-from cloud_agent_host.drivers import (
-    TurnInput,
-    driver_for,
-)
+from cloud_agent_host.drivers import TurnInput
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, CodexRuntime, KiloRuntime, OpencodeRuntime
+from cloud_agent_host.runtimes.live import driver_for
 from cloud_agent_shared.shared_protocol import INPUT_REFUSED, INPUT_TURN_ENDED
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/agent_runtime_streams"

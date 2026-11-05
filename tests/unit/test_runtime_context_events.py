@@ -12,9 +12,10 @@ import pytest
 from tests.unit.test_live_sessions import _LiveProcess, _protocol_context, _turn_lines
 from tests.unit.test_runner_host_settings import _PAYLOAD
 
-from cloud_agent_host.drivers import TurnInput, driver_for
+from cloud_agent_host.drivers import TurnInput
 from cloud_agent_host.runner import ClaimedJob
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, KiloRuntime, OpencodeRuntime, PiRuntime
+from cloud_agent_host.runtimes.live import driver_for
 
 
 def _claude_user(content, **extra):
@@ -182,7 +183,7 @@ def test_a_claim_carries_bounded_injection_records_and_drops_the_rest():
 
 
 def test_claude_blocks_carry_how_long_they_streamed_and_subagents_do_not(monkeypatch):
-    from cloud_agent_host.runtimes import claude as claude_module
+    from cloud_agent_host.runtimes.claude import adapter as claude_module
 
     clock = iter([100.0, 102.5, 200.0])
     monkeypatch.setattr(claude_module.time, "monotonic", lambda: next(clock))

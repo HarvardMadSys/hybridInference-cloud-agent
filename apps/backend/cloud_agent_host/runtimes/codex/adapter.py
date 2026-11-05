@@ -9,7 +9,7 @@ from cloud_agent_host.sandbox import RUNTIME_BIN_ROOT
 from cloud_agent_shared.runtime_catalog import CODEX
 from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_SERVER_NAME
 
-from .base import (
+from ..base import (
     COMPAT_ORIGIN,
     EMPTY_RUNTIME_MCP_CONFIG,
     MCP_TOKEN_ENV,
@@ -155,7 +155,7 @@ class CodexRuntime(AgentRuntime):
 
     Speaks the OpenAI surface, configured through command-line provider flags
     so nothing writes to or depends on the operator's own Codex config. Its
-    events are read by ``drivers.CodexAppServerSession``, not here.
+    events are read by ``session.CodexAppServerSession``, not here.
     """
 
     name = CODEX.name

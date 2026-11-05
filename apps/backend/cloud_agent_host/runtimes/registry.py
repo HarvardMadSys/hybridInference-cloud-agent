@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from .base import AgentRuntime  # noqa: TC001 — Public factory annotation introspection.
-from .claude import ClaudeCodeRuntime
-from .codex import CodexRuntime
-from .kilo import KiloRuntime
-from .opencode import OpencodeRuntime
-from .pi import PiRuntime
+from .claude.adapter import ClaudeCodeRuntime
+from .codex.adapter import CodexRuntime
+from .http_bridge.kilo import KiloRuntime
+from .http_bridge.opencode import OpencodeRuntime
+from .pi.adapter import PiRuntime
 
 _REGISTRY: dict[str, type[AgentRuntime]] = {
     ClaudeCodeRuntime.name: ClaudeCodeRuntime,

@@ -27,21 +27,22 @@ import pytest
 from tests.unit.test_agent_runner import _run_shared_boundary_case
 from tests.unit.test_agent_sandbox_manager import _app, _SharedSupervisor
 
-from cloud_agent_host import claude_background, runner as runner_mod
-from cloud_agent_host.claude_background import notified_tasks
+from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.drivers import (
     TURN_COMPLETED,
     USER_MESSAGE_EVENT,
-    ClaudeCodeLiveSession,
     InputOutcome,
     LaunchContext,
     TurnInput,
     TurnResult,
-    driver_for,
 )
 from cloud_agent_host.guest_observer import GuestObservation
 from cloud_agent_host.resident_transport import ResidentTurn
 from cloud_agent_host.runtimes import EMPTY_RUNTIME_MCP_CONFIG, ClaudeCodeRuntime
+from cloud_agent_host.runtimes.claude import background as claude_background
+from cloud_agent_host.runtimes.claude.background import notified_tasks
+from cloud_agent_host.runtimes.claude.session import ClaudeCodeLiveSession
+from cloud_agent_host.runtimes.live import driver_for
 from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
 from cloud_agent_host.shared_session_supervisor import SharedTurnTelemetry
 

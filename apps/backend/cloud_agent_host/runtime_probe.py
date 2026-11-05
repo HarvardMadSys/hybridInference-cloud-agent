@@ -26,8 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
-from cloud_agent_host.drivers import LaunchContext, TurnInput, get_driver
+from cloud_agent_host.drivers import LaunchContext, TurnInput
 from cloud_agent_host.runtimes.events import MESSAGE, RAW
+from cloud_agent_host.runtimes.live import get_driver
 from cloud_agent_host.sandbox import (
     SANDBOX_GID,
     SANDBOX_PATH,

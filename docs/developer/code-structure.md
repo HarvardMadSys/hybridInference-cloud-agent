@@ -147,20 +147,31 @@ groups remain available; failed checks release their temporary reservation,
 while durable archive and native-flush barriers remain in force. Public sandbox model imports through
 `chat_sandbox` continue to work.
 
-The runtime adapters are a package under `cloud_agent_host/runtimes/`:
+The runtime adapters are a package under `cloud_agent_host/runtimes/`, with one
+package per CLI:
 
 | Module | Responsibility |
 |---|---|
 | `base.py` | Adapter contracts, capabilities, MCP configuration, and runtime errors |
 | `events.py` | Normalized event vocabulary and bounded payload helpers |
 | `preview.py` | Partial-reply preview batching |
-| `claude.py`, `codex.py`, `pi.py` | One CLI's live launch; Claude's and pi's event parsing |
-| `http_bridge.py` | The live launch OpenCode and Kilo share, behind the HTTP bridge |
-| `opencode.py`, `kilo.py` | One CLI's name, wrapper binary and catalog entry |
+| `claude/` | Claude Code: its launch and event parsing (`adapter`), live session (`session`), background tasks (`background`), and member config and native Fork (`member`) |
+| `codex/` | Codex: its app-server launch (`adapter`), notification readings (`app_server`), live session (`session`), MCP relay policy (`mcp`), plugins (`plugins`), and member home and Fork recovery (`member`) |
+| `pi/` | pi: its launch and event parsing (`adapter`), and live session with its native Fork (`session`) |
+| `http_bridge/` | OpenCode and Kilo: the launch they share (`adapter`), each CLI's name, wrapper binary and catalog entry (`opencode`, `kilo`), the bridge's records and live session (`parts`, `session`), Kilo's MCP runtime (`kilo_mcp`), and member home and server locks (`member`) |
 | `registry.py` | Adapter lookup and construction |
+| `live.py` | Each CLI's live session class, and the driver that opens it |
+
+`drivers.py` keeps the generic Driver, Session and Turn contract and the base
+classes the sessions share. `resident_transport.py` opens member processes and
+journals native Forks; it calls a CLI's `member` module for that CLI's own
+steps. `member_homes.py` holds the private provider homes that Codex, OpenCode
+and Kilo members use.
 
 Existing callers use `cloud_agent_host.runtimes`; the package explicitly
-exports its public API. Runtime discovery facts live in the immutable
+exports its public API, which is the dialect layer. Sessions, `live` and the
+`member` modules build on `drivers.py`, which imports that API, so callers
+import them by module name. Runtime discovery facts live in the immutable
 `cloud_agent_shared/runtime_catalog.py`, so the control plane advertises runtime
 IDs, MCP support, and reasoning efforts without loading host adapters. Runtime
 version pins remain in `cloud_agent_shared/shared_protocol.py` and image files.

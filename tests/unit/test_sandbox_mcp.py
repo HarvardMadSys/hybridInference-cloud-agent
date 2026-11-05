@@ -37,7 +37,7 @@ from cloud_agent_host.resident_transport import (
     ResidentTransportFactory,
 )
 from cloud_agent_host.runtimes.base import AgentRuntime, RuntimeMCPConfig
-from cloud_agent_host.runtimes.codex import CodexRuntime
+from cloud_agent_host.runtimes.codex.adapter import CodexRuntime
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.sandbox_mcp import (
     SANDBOX_MCP_URL,

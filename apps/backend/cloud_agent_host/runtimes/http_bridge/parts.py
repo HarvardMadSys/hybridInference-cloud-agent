@@ -1,6 +1,6 @@
 """Message parts of the OpenCode/Kilo HTTP bridge, turned into turn events.
 
-The part-level pieces of :class:`cloud_agent_host.drivers.HttpAgentLiveSession`:
+The part-level pieces of :class:`~cloud_agent_host.runtimes.http_bridge.session.HttpAgentLiveSession`:
 a tool part's call, an answer's preview, and the Context events the pinned
 servers write on their stream anyway (context design record, section 7.2):
 

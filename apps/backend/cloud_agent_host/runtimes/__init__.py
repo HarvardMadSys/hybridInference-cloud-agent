@@ -1,14 +1,20 @@
 """Agent CLI dialect adapters, exposed through a stable package API.
 
-The Claude, Codex and pi modules each build their CLI's resident live process;
-the OpenCode and Kilo modules name their CLI for the launch the two share in
-``http_bridge``. Claude's and pi's adapters also normalize the events their
-process writes; Codex, OpenCode and Kilo speak protocols their sessions in
-:mod:`cloud_agent_host.drivers` read. ``base`` defines adapter and MCP
-contracts, ``events`` bounds normalized payloads, and ``preview`` batches
-partial replies. ``registry`` creates one adapter per run. Shared discovery
+Each CLI's knowledge lives in one package: ``claude``, ``codex``, ``pi``, and
+``http_bridge`` for OpenCode and Kilo, which share its launch. A package's
+``adapter`` builds the CLI's resident live process (Claude's and pi's also
+normalize the events it writes); its ``session`` speaks the CLI's live
+protocol over :mod:`cloud_agent_host.drivers`; its ``member`` prepares a
+member's private state and native Fork; MCP and plugin configuration sit beside
+them. ``base`` defines adapter and MCP contracts, ``events`` bounds normalized
+payloads, and ``preview`` batches partial replies. ``registry`` creates one
+adapter per run, and ``live`` maps each CLI to its session. Shared discovery
 metadata lives in :mod:`cloud_agent_shared.runtime_catalog` so the control
 plane can advertise capabilities without loading host code.
+
+This module exports the dialect layer only. The sessions, ``live`` and the
+``member`` modules build on :mod:`cloud_agent_host.drivers`, which imports this
+API, so they are imported by their own module names.
 
 The adapters preserve unrecognized output as ``raw`` events. Contract fixtures
 under ``tests/fixtures/agent_runtime_streams/`` pin their observed CLI formats;
@@ -35,8 +41,8 @@ from .base import (
     connection_base_url,
     merged_mcp_server,
 )
-from .claude import ClaudeCodeRuntime
-from .codex import CodexRuntime
+from .claude.adapter import ClaudeCodeRuntime
+from .codex.adapter import CodexRuntime
 from .events import (
     DIFF,
     ERROR,
@@ -50,9 +56,9 @@ from .events import (
     USAGE,
     NormalizedEvent,
 )
-from .kilo import KiloRuntime
-from .opencode import OpencodeRuntime
-from .pi import PI_MCP_BRIDGE, PiRuntime
+from .http_bridge.kilo import KiloRuntime
+from .http_bridge.opencode import OpencodeRuntime
+from .pi.adapter import PI_MCP_BRIDGE, PiRuntime
 from .preview import REPLY_PREVIEW, ReplyPreview
 from .registry import get_runtime, registered_runtimes
 

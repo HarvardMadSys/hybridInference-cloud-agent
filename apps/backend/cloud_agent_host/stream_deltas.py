@@ -54,7 +54,7 @@ class DeltaBatcher:
     reordered: the first piece of a quiet stream goes out at once, later ones
     at most once per :attr:`INTERVAL_S`, and any other protocol line -- the
     item's completion, the turn's boundary, an interrupt's settlement --
-    first flushes what is gathered (see ``_JsonResidentTurn.events_for_line``).
+    first flushes what is gathered (see ``JsonResidentTurn.events_for_line``).
     """
 
     INTERVAL_S = ReplyPreview.INTERVAL_S

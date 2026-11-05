@@ -8,8 +8,9 @@ from pathlib import Path
 import pytest
 from tests.unit.test_live_sessions import _LiveProcess, _protocol_context, _turn_lines
 
-from cloud_agent_host.drivers import TurnInput, driver_for
+from cloud_agent_host.drivers import TurnInput
 from cloud_agent_host.runtimes import KiloRuntime, OpencodeRuntime
+from cloud_agent_host.runtimes.live import driver_for
 
 
 def test_bridge_preserves_nested_message_metadata_only_for_its_session():
