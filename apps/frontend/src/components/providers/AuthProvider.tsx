@@ -7,7 +7,7 @@
 // provider.
 //
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { clearSideChatDrafts } from '@/components/features/agents/sideChatStorage';
+import { clearSideChatDrafts } from '@/components/features/agents/conversation/sideChatStorage';
 import { clearAccountResources } from '@/components/features/profile/accountResource';
 import { ACCOUNT_SWITCHED_EVENT, AUTH_EXPIRED_EVENT, pinAccount } from '@/lib/api/client';
 import { announceSession, listenForSession } from '@/lib/auth/sessionSync';

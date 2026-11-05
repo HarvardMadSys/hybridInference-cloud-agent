@@ -40,10 +40,10 @@ import {
   rawNotification,
   record,
   replyPreviewPiece,
-} from './trajectoryProtocol';
-import { agentLiveStatus } from './agentLiveStatus';
+} from './trajectory/trajectoryProtocol';
+import { agentLiveStatus } from './trajectory/agentLiveStatus';
 import { projectKey } from '@/lib/temporaryWorkspace';
-import { workspaceGitProjection, type WorkspaceGitOptions } from './workspaceGitMetadata';
+import { workspaceGitProjection, type WorkspaceGitOptions } from './workspace/workspaceGitMetadata';
 
 /**
  * Preserve a server result as a per-turn display state.

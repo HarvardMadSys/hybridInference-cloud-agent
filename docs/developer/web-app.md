@@ -80,8 +80,8 @@ index, applies the page boundary, and only then reads the latest turn for that
 page; keyset pagination does not make the query constant-time across all of an
 owner's conversations. `/jobs` keeps its separate semantics.
 
-Sources: [`AgentsSidebar.tsx`](../../apps/frontend/src/components/features/agents/AgentsSidebar.tsx),
-[`sidebarPreferences.ts`](../../apps/frontend/src/components/features/agents/sidebarPreferences.ts),
+Sources: [`AgentsSidebar.tsx`](../../apps/frontend/src/components/features/agents/sidebar/AgentsSidebar.tsx),
+[`sidebarPreferences.ts`](../../apps/frontend/src/components/features/agents/sidebar/sidebarPreferences.ts),
 [`catalog.py`](../../apps/backend/cloud_agent/api/catalog.py) and
 [`conversation_queries.py`](../../apps/backend/cloud_agent/storage/repositories/conversation_queries.py).
 
@@ -192,9 +192,9 @@ several turns:
 The design and its sizing measurements are in the
 [turn navigation design](../agents/specs/2026-09-11-conversation-turn-navigation-design.zh.md).
 Sources: [`JobDetail.tsx`](../../apps/frontend/src/components/features/agents/JobDetail.tsx),
-[`TurnNavigator.tsx`](../../apps/frontend/src/components/features/agents/TurnNavigator.tsx),
-[`conversationTurnNavigation.ts`](../../apps/frontend/src/components/features/agents/conversationTurnNavigation.ts)
-and [`useConversationScroll.ts`](../../apps/frontend/src/components/features/agents/useConversationScroll.ts).
+[`TurnNavigator.tsx`](../../apps/frontend/src/components/features/agents/conversation/TurnNavigator.tsx),
+[`conversationTurnNavigation.ts`](../../apps/frontend/src/components/features/agents/conversation/conversationTurnNavigation.ts)
+and [`useConversationScroll.ts`](../../apps/frontend/src/components/features/agents/conversation/useConversationScroll.ts).
 
 ## Tool approvals
 

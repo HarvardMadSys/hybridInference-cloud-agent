@@ -14,11 +14,11 @@ import {
   receiveThreadChange,
   resetAgentPush,
 } from './agentPush';
-import { clearWorkspaceGitCache } from './workspaceGitCache';
+import { clearWorkspaceGitCache } from './workspace/workspaceGitCache';
 
 vi.mock('@/lib/api/agents', () => ({ getAgentJob: vi.fn(), getAgentJobThread: vi.fn() }));
 vi.mock('@/lib/api/questions', () => ({ listThreadQuestions: vi.fn() }));
-vi.mock('./workspaceGitCache', () => ({ clearWorkspaceGitCache: vi.fn() }));
+vi.mock('./workspace/workspaceGitCache', () => ({ clearWorkspaceGitCache: vi.fn() }));
 
 beforeEach(() => {
   vi.resetAllMocks();

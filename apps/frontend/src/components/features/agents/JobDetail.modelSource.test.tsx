@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgentConfig, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
 import { submitThreadMessage } from '@/lib/api/pendingMessages';
 import { JobDetail } from './JobDetail';
-import { announceModelConnectionsChanged } from './modelConnectionEvents';
+import { announceModelConnectionsChanged } from './composer/modelConnectionEvents';
 import type { AgentJob } from './types';
 
 // A follow-up inherits its model *and* that model's source, and a switch

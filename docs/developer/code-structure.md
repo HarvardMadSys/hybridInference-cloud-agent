@@ -212,6 +212,21 @@ streams. Shared create/Fork idempotency response handling stays private to that
 package. Keep endpoint paths, retries, credentials, cursor handling, and
 notifications with their owning operation.
 
+Inside `components/features/agents/`, each concern has its own folder:
+
+| Folder | Responsibility |
+|---|---|
+| `conversation/` | Transcript, turns, tool activity, turn navigation and the side chat |
+| `composer/` | Message input, the new-task composer, model and repository pickers, queued messages |
+| `sidebar/` | Conversation list, folders, search, archive and getting started |
+| `workspace/` | Workspace files and tabs, terminals, recorded diffs, temporary workspaces |
+| `trajectory/` | Trajectory view, step inspector, and the protocol and step projections |
+
+Feature areas such as `context/`, `environment/`, `goal/`, `mcp/` and `skills/`
+follow the same rule. The top level keeps what several folders share: the
+API-shape adapters, `types.ts`, the job and conversation records, the read and
+push providers, and the job page. Tests sit next to the module they test.
+
 `components/features/agents/JobDetail.tsx` composes the job page. Its extracted
 implementation lives under `job-detail/`:
 

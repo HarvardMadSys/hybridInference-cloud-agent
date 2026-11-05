@@ -725,6 +725,65 @@ msgstr ""
 "下各管一摊的模块：任务、对话、会话、目标、配置、集成、资源和用量查询、工作区文件、终端和事件流。创建和 Fork "
 "共用的幂等响应处理只在这个包内部使用。端点路径、重试、凭据、游标处理和通知，都跟着它所属的那个操作放。"
 
+#: ../developer/code-structure.md:215
+msgid "Inside `components/features/agents/`, each concern has its own folder:"
+msgstr "在 `components/features/agents/` 下，每个关注点各有一个目录："
+
+#: ../developer/code-structure.md
+msgid "Folder"
+msgstr "目录"
+
+#: ../developer/code-structure.md
+msgid "`conversation/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid "Transcript, turns, tool activity, turn navigation and the side chat"
+msgstr "对话记录、轮次、工具活动、轮次导航和侧边对话"
+
+#: ../developer/code-structure.md
+msgid "`composer/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"Message input, the new-task composer, model and repository pickers, "
+"queued messages"
+msgstr "消息输入框、新任务输入区、模型和仓库选择器、排队中的消息"
+
+#: ../developer/code-structure.md
+msgid "`sidebar/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid "Conversation list, folders, search, archive and getting started"
+msgstr "对话列表、文件夹、搜索、归档和入门引导"
+
+#: ../developer/code-structure.md
+msgid "`workspace/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid "Workspace files and tabs, terminals, recorded diffs, temporary workspaces"
+msgstr "工作区文件和标签页、终端、记录下来的 diff、临时工作区"
+
+#: ../developer/code-structure.md
+msgid "`trajectory/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid "Trajectory view, step inspector, and the protocol and step projections"
+msgstr "轨迹视图、步骤检查器，以及协议和步骤的投影"
+
+#: ../developer/code-structure.md:225
+msgid ""
+"Feature areas such as `context/`, `environment/`, `goal/`, `mcp/` and "
+"`skills/` follow the same rule. The top level keeps what several folders "
+"share: the API-shape adapters, `types.ts`, the job and conversation "
+"records, the read and push providers, and the job page. Tests sit next to"
+" the module they test."
+msgstr "`context/`、`environment/`、`goal/`、`mcp/` 和 `skills/` 这些功能区也照此组织。顶层只放几个目录共用的东西：按 API 形状划分的 adapter、`types.ts`、任务和对话记录、读取和推送 provider，以及任务页面。测试和被测模块放在一起。"
+
 #: ../developer/code-structure.md:209
 msgid ""
 "`components/features/agents/JobDetail.tsx` composes the job page. Its "

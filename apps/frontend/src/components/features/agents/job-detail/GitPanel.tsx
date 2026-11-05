@@ -7,7 +7,7 @@ import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ownerFailureMessage, toDiffFileDetails } from '../adapt';
 import type { AgentDiffFile, AgentJob } from '../types';
-import { loadWorkspaceGit } from '../workspaceGitCache';
+import { loadWorkspaceGit } from '../workspace/workspaceGitCache';
 import { ReviewButton, WatchPullRequestButton } from './RunOutcome';
 
 /** Rows drawn at once, as in the file preview: a lockfile's diff runs to tens of thousands. */

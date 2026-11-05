@@ -19,24 +19,24 @@ import { APIError } from '@/lib/utils/errors';
 
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import type { SelectedSkillApi } from '@/lib/api/skills';
-import { ActivityWindow } from './ActivityWindow';
+import { ActivityWindow } from './conversation/ActivityWindow';
 import { ownedBySubagent, subagentDisplayEvents } from './adapt';
-import { SubagentLinks, type SubagentOfCall } from './ChatMessages';
-import { composerOverrides } from './ConversationComposer';
-import { FloatingActivityWindow } from './FloatingActivityWindow';
-import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
-import { notDeliveredText } from './PendingMessageQueue';
-import { SubagentConversation } from './SubagentConversation';
-import { BackToBottom, TurnRail } from './TurnNavigator';
+import { SubagentLinks, type SubagentOfCall } from './conversation/ChatMessages';
+import { composerOverrides } from './composer/ConversationComposer';
+import { FloatingActivityWindow } from './conversation/FloatingActivityWindow';
+import { LedgerUsage, useLedgerUsage } from './conversation/LedgerUsage';
+import { notDeliveredText } from './composer/PendingMessageQueue';
+import { SubagentConversation } from './conversation/SubagentConversation';
+import { BackToBottom, TurnRail } from './conversation/TurnNavigator';
 import {
   hasActivityOverview,
   subagentStartedBy,
   turnActivityOverview,
   type OverviewSubagent,
-} from './activityOverview';
+} from './conversation/activityOverview';
 import { useAttachments } from './attachments/useAttachments';
-import { codeReviewPrompt } from './codeReview';
-import { composerCommandMatches } from './composerCommands';
+import { codeReviewPrompt } from './conversation/codeReview';
+import { composerCommandMatches } from './composer/composerCommands';
 import { hasLostContext, isActiveConversationState, isBusyJob, latestJob } from './conversationJob';
 import { useFirstRun } from './firstRun';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
@@ -44,12 +44,12 @@ import { hasLiveWork } from './goal/liveWork';
 import { GOAL_COMMAND_PREFIX, type GoalCommandControls } from './goal/useGoalCommand';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import { useThreadComposerSsh } from './ssh/useComposerSsh';
-import { createRecordedOutputsSelector } from './recordedTurnOutputs';
-import { useTranscriptPresentation } from './transcriptPresentation';
+import { createRecordedOutputsSelector } from './conversation/recordedTurnOutputs';
+import { useTranscriptPresentation } from './conversation/transcriptPresentation';
 import type { AgentJob } from './types';
-import { useComposerDraftStore } from './useComposerDraft';
-import { usePendingMessages } from './usePendingMessages';
-import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
+import { useComposerDraftStore } from './composer/useComposerDraft';
+import { usePendingMessages } from './composer/usePendingMessages';
+import { watchPullRequestPrompt, watchPullRequestRequestId } from './conversation/watchPullRequest';
 
 export {
   INSPECTOR_WIDTH_STORAGE_KEY,

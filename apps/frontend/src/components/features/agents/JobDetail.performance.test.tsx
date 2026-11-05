@@ -21,8 +21,8 @@ const drawn = vi.hoisted(() => ({
   storedEvents: new Set<unknown>(),
 }));
 
-vi.mock('./ChatMessages', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./ChatMessages')>();
+vi.mock('./conversation/ChatMessages', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./conversation/ChatMessages')>();
   return {
     ...original,
     // The page draws the current turn's list; stored turns draw their own.
@@ -33,8 +33,8 @@ vi.mock('./ChatMessages', async (importOriginal) => {
   };
 });
 
-vi.mock('./WorkspaceTabBar', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./WorkspaceTabBar')>();
+vi.mock('./workspace/WorkspaceTabBar', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./workspace/WorkspaceTabBar')>();
   return {
     ...original,
     WorkspaceTabBar: (props: Parameters<typeof original.WorkspaceTabBar>[0]) => {
@@ -56,8 +56,8 @@ vi.mock('@/lib/workspaceLink', async (importOriginal) => {
   };
 });
 
-vi.mock('./activityOverview', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./activityOverview')>();
+vi.mock('./conversation/activityOverview', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./conversation/activityOverview')>();
   return {
     ...original,
     subagentStartedBy: (...args: Parameters<typeof original.subagentStartedBy>) => {

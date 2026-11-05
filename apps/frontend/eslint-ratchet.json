@@ -35,7 +35,7 @@
         "src/app/(agents)/admin/database/DatabaseExplorer.tsx",
         "src/app/(agents)/admin/usage/page.tsx",
         "src/app/(agents)/layout.tsx",
-        "src/components/features/agents/ArchiveProjectSection.tsx"
+        "src/components/features/agents/sidebar/ArchiveProjectSection.tsx"
       ],
       "rules": {
         "complexity": ["error", 16]
@@ -44,11 +44,11 @@
     {
       "files": [
         "src/app/(agents)/admin/database/PgAdminTools.tsx",
-        "src/components/features/agents/NativeQuestionPrompt.tsx",
-        "src/components/features/agents/TerminalWorkspace.tsx",
+        "src/components/features/agents/conversation/NativeQuestionPrompt.tsx",
+        "src/components/features/agents/workspace/TerminalWorkspace.tsx",
         "src/components/features/agents/job-detail/JobDetailHeader.tsx",
         "src/components/features/agents/skills/SkillsSection.tsx",
-        "src/components/features/agents/trajectory.ts"
+        "src/components/features/agents/trajectory/trajectory.ts"
       ],
       "rules": {
         "complexity": ["error", 17]
@@ -73,7 +73,7 @@
       "files": [
         "src/app/(agents)/admin/measurements/present.ts",
         "src/app/(agents)/admin/settings/settingValues.ts",
-        "src/components/features/agents/AddWorkspace.tsx",
+        "src/components/features/agents/sidebar/AddWorkspace.tsx",
         "src/components/features/agents/agentPush.ts",
         "src/lib/workspaceLink.ts"
       ],
@@ -84,9 +84,9 @@
     {
       "files": [
         "src/app/(agents)/admin/runs/Resources.tsx",
-        "src/components/features/agents/recordedTurnOutputs.ts",
-        "src/components/features/agents/useConversationReadState.ts",
-        "src/components/features/agents/useNativeQuestions.ts",
+        "src/components/features/agents/conversation/recordedTurnOutputs.ts",
+        "src/components/features/agents/sidebar/useConversationReadState.ts",
+        "src/components/features/agents/conversation/useNativeQuestions.ts",
         "src/components/features/teams/JoinTeamView.tsx"
       ],
       "rules": {
@@ -113,9 +113,9 @@
     },
     {
       "files": [
-        "src/components/features/agents/ComposerPlusMenu.tsx",
-        "src/components/features/agents/Picker.tsx",
-        "src/components/features/agents/ToolActivityDetails.tsx",
+        "src/components/features/agents/composer/ComposerPlusMenu.tsx",
+        "src/components/features/agents/composer/Picker.tsx",
+        "src/components/features/agents/conversation/ToolActivityDetails.tsx",
         "src/lib/api/agents/terminals.ts"
       ],
       "rules": {
@@ -125,7 +125,7 @@
     {
       "files": [
         "src/app/(agents)/admin/users/teams/\\[teamId\\]/page.tsx",
-        "src/components/features/agents/conversationTurnNavigation.ts",
+        "src/components/features/agents/conversation/conversationTurnNavigation.ts",
         "src/components/features/agents/job-detail/JobTranscript.tsx",
         "src/components/features/agents/mcp/McpApprovalsProvider.tsx",
         "src/components/features/settings/ProfileSettings.tsx"
@@ -139,7 +139,7 @@
         "src/app/(agents)/admin/hosts/CapacityPanel.tsx",
         "src/app/(agents)/admin/runs/\\[jobId\\]/page.tsx",
         "src/app/(agents)/admin/settings/AgentVersions.tsx",
-        "src/components/features/agents/PendingMessageQueue.tsx",
+        "src/components/features/agents/composer/PendingMessageQueue.tsx",
         "src/lib/api/client.ts"
       ],
       "rules": {
@@ -159,7 +159,7 @@
     {
       "files": [
         "src/app/(agents)/admin/hosts/HostSettings.tsx",
-        "src/components/features/agents/TrajectoryInspector.tsx",
+        "src/components/features/agents/trajectory/TrajectoryInspector.tsx",
         "src/components/features/agents/mcp/McpAddDialog.tsx"
       ],
       "rules": {
@@ -168,7 +168,7 @@
     },
     {
       "files": [
-        "src/components/features/agents/ChatMessages.tsx",
+        "src/components/features/agents/conversation/ChatMessages.tsx",
         "src/components/features/agents/job-detail/GitPanel.tsx"
       ],
       "rules": {
@@ -177,8 +177,8 @@
     },
     {
       "files": [
-        "src/components/features/agents/SidebarRows.tsx",
-        "src/components/features/agents/TurnFooter.tsx",
+        "src/components/features/agents/sidebar/SidebarRows.tsx",
+        "src/components/features/agents/conversation/TurnFooter.tsx",
         "src/lib/codeHighlight.ts"
       ],
       "rules": {
@@ -196,8 +196,8 @@
     },
     {
       "files": [
-        "src/components/features/agents/ArchivedTasksView.tsx",
-        "src/components/features/agents/TrajectoryView.tsx"
+        "src/components/features/agents/sidebar/ArchivedTasksView.tsx",
+        "src/components/features/agents/trajectory/TrajectoryView.tsx"
       ],
       "rules": {
         "complexity": ["error", 33]
@@ -207,15 +207,15 @@
       "files": [
         "src/app/(agents)/admin/hosts/capacity.ts",
         "src/app/(agents)/admin/hosts/page.tsx",
-        "src/components/features/agents/AccountMenu.tsx",
-        "src/components/features/agents/toolActivity.ts"
+        "src/components/features/agents/sidebar/AccountMenu.tsx",
+        "src/components/features/agents/conversation/toolActivity.ts"
       ],
       "rules": {
         "complexity": ["error", 34]
       }
     },
     {
-      "files": ["src/components/features/agents/RepositoryPicker.tsx"],
+      "files": ["src/components/features/agents/composer/RepositoryPicker.tsx"],
       "rules": {
         "complexity": ["error", 36]
       }
@@ -223,7 +223,7 @@
     {
       "files": [
         "src/app/(agents)/admin/measurements/page.tsx",
-        "src/components/features/agents/agentLiveStatus.ts"
+        "src/components/features/agents/trajectory/agentLiveStatus.ts"
       ],
       "rules": {
         "complexity": ["error", 37]
@@ -253,20 +253,20 @@
         "src/app/(agents)/admin/measurements/MeasurementControlPanel.tsx",
         "src/app/(agents)/admin/settings/SandboxArchiveSettings.tsx",
         "src/components/features/agents/job-detail/JobComposer.tsx",
-        "src/components/features/agents/useSideChatSession.ts"
+        "src/components/features/agents/conversation/useSideChatSession.ts"
       ],
       "rules": {
         "complexity": ["error", 44]
       }
     },
     {
-      "files": ["src/components/features/agents/AssistantStepDetails.tsx"],
+      "files": ["src/components/features/agents/trajectory/AssistantStepDetails.tsx"],
       "rules": {
         "complexity": ["error", 45]
       }
     },
     {
-      "files": ["src/components/features/agents/LedgerUsage.tsx"],
+      "files": ["src/components/features/agents/conversation/LedgerUsage.tsx"],
       "rules": {
         "complexity": ["error", 46]
       }
@@ -274,7 +274,7 @@
     {
       "files": [
         "src/app/(agents)/admin/hosts/ComputeResources.tsx",
-        "src/components/features/agents/trajectoryProtocol.ts"
+        "src/components/features/agents/trajectory/trajectoryProtocol.ts"
       ],
       "rules": {
         "complexity": ["error", 48]
@@ -292,7 +292,7 @@
     {
       "files": [
         "src/app/(agents)/admin/sandboxes/sandboxActions.ts",
-        "src/components/features/agents/WorkspaceFiles.tsx"
+        "src/components/features/agents/workspace/WorkspaceFiles.tsx"
       ],
       "rules": {
         "complexity": ["error", 56]
@@ -300,15 +300,15 @@
     },
     {
       "files": [
-        "src/components/features/agents/AgentsSidebar.tsx",
-        "src/components/features/agents/ToolStepDetails.tsx"
+        "src/components/features/agents/sidebar/AgentsSidebar.tsx",
+        "src/components/features/agents/trajectory/ToolStepDetails.tsx"
       ],
       "rules": {
         "complexity": ["error", 61]
       }
     },
     {
-      "files": ["src/components/features/agents/RunDetails.tsx"],
+      "files": ["src/components/features/agents/trajectory/RunDetails.tsx"],
       "rules": {
         "complexity": ["error", 65]
       }
@@ -323,7 +323,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/SideChat.tsx"],
+      "files": ["src/components/features/agents/conversation/SideChat.tsx"],
       "rules": {
         "complexity": ["error", 78]
       }
@@ -341,13 +341,13 @@
       }
     },
     {
-      "files": ["src/components/features/agents/activityOverview.ts"],
+      "files": ["src/components/features/agents/conversation/activityOverview.ts"],
       "rules": {
         "complexity": ["error", 81]
       }
     },
     {
-      "files": ["src/components/features/agents/TaskComposer.tsx"],
+      "files": ["src/components/features/agents/composer/TaskComposer.tsx"],
       "rules": {
         "complexity": ["error", 84]
       }
@@ -359,7 +359,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/trajectorySteps.ts"],
+      "files": ["src/components/features/agents/trajectory/trajectorySteps.ts"],
       "rules": {
         "complexity": ["error", 115]
       }
@@ -420,7 +420,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/AgentsSidebar.tsx"],
+      "files": ["src/components/features/agents/sidebar/AgentsSidebar.tsx"],
       "rules": {
         "max-lines": [
           "error",
@@ -431,7 +431,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/ChatMessages.tsx"],
+      "files": ["src/components/features/agents/conversation/ChatMessages.tsx"],
       "rules": {
         "max-lines": [
           "error",
@@ -453,7 +453,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/TaskComposer.tsx"],
+      "files": ["src/components/features/agents/composer/TaskComposer.tsx"],
       "rules": {
         "max-lines": [
           "error",
@@ -464,7 +464,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/TrajectoryView.tsx"],
+      "files": ["src/components/features/agents/trajectory/TrajectoryView.tsx"],
       "rules": {
         "max-lines": [
           "error",
@@ -475,7 +475,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/WorkspaceFiles.tsx"],
+      "files": ["src/components/features/agents/workspace/WorkspaceFiles.tsx"],
       "rules": {
         "max-lines": [
           "error",
@@ -508,7 +508,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/trajectorySteps.ts"],
+      "files": ["src/components/features/agents/trajectory/trajectorySteps.ts"],
       "rules": {
         "max-lines": [
           "error",
@@ -530,7 +530,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/useConversationScroll.ts"],
+      "files": ["src/components/features/agents/conversation/useConversationScroll.ts"],
       "rules": {
         "max-lines": [
           "error",
