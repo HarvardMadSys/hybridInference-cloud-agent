@@ -33,11 +33,11 @@ from tests.unit.test_shared_session_supervisor import (
     time,
 )
 
-from cloud_agent_host.guest_observer import GUEST_OBSERVER_SOURCE
+from cloud_agent_host.observe.guest_observer import GUEST_OBSERVER_SOURCE
+from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_host.resident_transport import ResidentTransport
 from cloud_agent_host.sandbox import KATA_RUNTIME
 from cloud_agent_host.shared_session_supervisor import archive_failure_http_detail
-from cloud_agent_host.tool_windows import ToolMark
 
 
 class _HeldStartManager(_Manager):

@@ -38,9 +38,9 @@ from cloud_agent_host.chat_sandbox_markers import (
     INITIAL_ARCHIVE_MARKER_ROOT,
 )
 from cloud_agent_host.drivers import DriverError, InputOutcome
-from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
 from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest
 from cloud_agent_host.member_homes import legacy_member_state_dir, member_state_dir
+from cloud_agent_host.observe.guest_observer import GuestObservation, GuestObserverCursor
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransportFactory,

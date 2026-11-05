@@ -24,7 +24,7 @@ from tests.support.owners import connection_access
 from cloud_agent_host import group_reservation, shared_live_attempt, turn_child, turn_stream
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
 from cloud_agent_host.control_plane_client import ControlPlane
-from cloud_agent_host.member_resources import CheckpointSchedule
+from cloud_agent_host.observe.member_resources import CheckpointSchedule
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_shared import shared_protocol
@@ -443,10 +443,10 @@ def test_the_sandbox_manager_and_the_runner_agree_about_where_the_summary_lives(
     hand-built fixture kept the test green. This asserts the producer's actual
     key path and the consumer's read of it in one place.
     """
-    from cloud_agent_host.guest_observer import GuestObservation
     from cloud_agent_host.manager_api.turns import build_turn_resources
     from cloud_agent_host.member_sessions import SharedTurnTelemetry
-    from cloud_agent_host.tool_windows import ToolWindowTracker
+    from cloud_agent_host.observe.guest_observer import GuestObservation
+    from cloud_agent_host.observe.tool_windows import ToolWindowTracker
 
     payload = _snapshot()
     telemetry = SharedTurnTelemetry(

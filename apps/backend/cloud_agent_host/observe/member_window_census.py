@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.member_resources import (
+from cloud_agent_host.observe.member_resources import (
     CheckpointSchedule,
     MemberWindowHandle,
     MemberWindowSampler,
@@ -31,7 +31,7 @@ from cloud_agent_host.member_resources import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
+    from cloud_agent_host.observe.guest_observer import GuestObservation, GuestObserverCursor
 
 #: The supervisor's logger, so these records keep the name operators filter on.
 logger = logging.getLogger("cloud_agent_host.shared_session_supervisor")

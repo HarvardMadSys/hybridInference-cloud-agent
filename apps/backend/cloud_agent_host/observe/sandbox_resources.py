@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.resources import Sample, daemon_client, sample_from_stats
+from cloud_agent_host.observe.resources import Sample, daemon_client, sample_from_stats
 from cloud_agent_shared.sandbox_resources import SandboxResourceSample
 
 if TYPE_CHECKING:

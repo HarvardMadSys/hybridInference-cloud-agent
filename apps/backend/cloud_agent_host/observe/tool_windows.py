@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-from cloud_agent_host.resources import Sample, _delta, _readable
+from cloud_agent_host.observe.resources import Sample, _delta, _readable
 
 #: Windows kept per attempt. A turn issuing more than this reports the
 #: overflow through ``truncated`` — a cap nobody is told about reads exactly

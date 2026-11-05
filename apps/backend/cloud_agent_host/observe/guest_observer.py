@@ -22,18 +22,18 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from cloud_agent_host.guest_observer_scripts import (
+from cloud_agent_host.observe.guest_observer_scripts import (
     BEGIN_SCRIPT,
     CLEANUP_SCRIPT,
     DRAIN_SCRIPT,
     SNAPSHOT_SCRIPT,
 )
-from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolMark
+from cloud_agent_host.observe.tool_windows import TOOL_MARK_HELPER, ToolMark
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent_host.tool_windows import ToolWindow
+    from cloud_agent_host.observe.tool_windows import ToolWindow
 
 #: The observer protocol this host speaks. It must equal
 #: ``FI_OBSERVER_VERSION`` in ``deploy/sandbox/guest-observer.h``: the guest
@@ -1256,7 +1256,7 @@ def finish_observation(
     # Imported here rather than at module scope: the reducer pulls in the
     # window's own vocabulary, and this module is imported by paths that only
     # ever read process events.
-    from cloud_agent_host.member_resources import parse_window_samples
+    from cloud_agent_host.observe.member_resources import parse_window_samples
 
     window_samples = tuple(
         parse_window_samples(

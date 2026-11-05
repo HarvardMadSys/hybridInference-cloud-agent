@@ -21,9 +21,9 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.guest_observer import GUEST_OBSERVER_BINARY
+from cloud_agent_host.observe.guest_observer import GUEST_OBSERVER_BINARY
+from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
-from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared.egress import network_from_env
 
 

@@ -26,7 +26,7 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
 from cloud_agent_host.group_lifecycle import Operation
-from cloud_agent_host.guest_observer import (
+from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
     GuestObserverCursor,
@@ -63,14 +63,14 @@ if TYPE_CHECKING:
     from cloud_agent_host.archive.sandbox_checkpoints import CheckpointRestore
     from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
     from cloud_agent_host.group_registration import GroupRegistration
-    from cloud_agent_host.member_window_census import MemberWindow
+    from cloud_agent_host.observe.member_window_census import MemberWindow
+    from cloud_agent_host.observe.tool_windows import ToolMark
     from cloud_agent_host.resident_transport import (
         ResidentLaunch,
         ResidentTransport,
         ResidentTransportFactory,
         ResidentTurn,
     )
-    from cloud_agent_host.tool_windows import ToolMark
     from cloud_agent_shared.sandbox_manager_wire import ContextStatus
 
 # The supervisor's operational log names are stable: this component logs

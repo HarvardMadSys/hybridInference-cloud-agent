@@ -27,9 +27,9 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
-from cloud_agent_host.guest_observer import GuestObserverCursor
-from cloud_agent_host.member_resources import MemberWindowSampler
-from cloud_agent_host.member_window_census import MemberWindow, window_boot_id
+from cloud_agent_host.observe.guest_observer import GuestObserverCursor
+from cloud_agent_host.observe.member_resources import MemberWindowSampler
+from cloud_agent_host.observe.member_window_census import MemberWindow, window_boot_id
 from cloud_agent_host.sandbox import KATA_RUNTIME
 from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
@@ -38,8 +38,8 @@ if TYPE_CHECKING:
 
     from cloud_agent_host.chat_sandbox import ChatSandboxManager
     from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
-    from cloud_agent_host.member_resources import MemberWindowHandle
-    from cloud_agent_host.tool_windows import ToolMarkReader
+    from cloud_agent_host.observe.member_resources import MemberWindowHandle
+    from cloud_agent_host.observe.tool_windows import ToolMarkReader
 
 _Background = TypeVar("_Background")
 _Foreground = TypeVar("_Foreground")
