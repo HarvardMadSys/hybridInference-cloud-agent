@@ -65,8 +65,8 @@ class _ProofManager:
 
     def prove(self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection) -> float:
         proved_from = time.monotonic()
-        self.exact.proven.record(spec, inspection)
-        self.exact.proven.note_proof(spec, proved_from)
+        self.exact._proven.record(spec, inspection)
+        self.exact._proven.note_proof(spec, proved_from)
         return proved_from
 
 
@@ -159,12 +159,12 @@ def test_a_failed_proof_withdraws_the_one_before_it_and_any_begun_earlier() -> N
     manager.prove(spec, _running(spec))
     begun_before_failure = time.monotonic()
 
-    manager.exact.proven.withdraw_proof(spec)
+    manager.exact._proven.withdraw_proof(spec)
     assert _standing(manager, spec, _running(spec)) is None
 
     # A proof that began before the failure and passed after it proves
     # nothing about the state the failure saw.
-    manager.exact.proven.note_proof(spec, begun_before_failure)
+    manager.exact._proven.note_proof(spec, begun_before_failure)
     assert _standing(manager, spec, _running(spec)) is None
 
     proved_from = manager.prove(spec, _running(spec))
@@ -176,7 +176,7 @@ def test_forgetting_a_container_drops_its_proof() -> None:
     spec = _spec()
     manager.prove(spec, _running(spec))
 
-    manager.exact.proven.forget(spec)
+    manager.exact._proven.forget(spec)
 
     assert _standing(manager, spec, _running(spec)) is None
 
@@ -189,7 +189,7 @@ def test_a_proving_method_keeps_its_proof_or_withdraws_it_on_failure() -> None:
         def start(self, spec: ChatSandboxSpec, *, current: ChatSandboxInspection):
             if self.fail:
                 raise SandboxError("guest network sync failed")
-            return self.exact.proven.record(spec, current)
+            return self.exact._proven.record(spec, current)
 
     manager = Prover()
     spec = _spec()
@@ -224,7 +224,7 @@ class _ProvingManager(_Manager):
     def start(self, spec: ChatSandboxSpec, **kwargs: Any) -> ChatSandboxInspection:
         if self.fail_start:
             raise SandboxError("group network changed during activation")
-        return self.exact.proven.record(spec, super().start(spec, **kwargs))
+        return self.exact._proven.record(spec, super().start(spec, **kwargs))
 
     def require_host_rules(self) -> None:
         self.host_rule_requirements += 1
@@ -259,7 +259,7 @@ def test_a_second_workspace_operation_stands_on_the_first_ones_proof() -> None:
     backend = supervisor.backend("athr_source", network_proved_at=time.monotonic())
     proved_at = backend._network_proved_at
     assert proved_at is not None and before <= proved_at
-    assert proved_at == manager.exact.proven.standing_proof(spec)[1]  # type: ignore[index]
+    assert proved_at == manager.exact._proven.standing_proof(spec)[1]  # type: ignore[index]
 
 
 def test_a_terminal_admission_proves_the_network_again() -> None:

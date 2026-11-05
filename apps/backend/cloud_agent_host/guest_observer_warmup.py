@@ -60,7 +60,7 @@ def _warm(manager: ChatSandboxManager, spec: ChatSandboxSpec, container_id: str)
     """Ensure the helper under its container's lock, if that container is still this one."""
     try:
         with manager._guest_observers.container(spec.container_name) as observers:
-            proven = manager.exact.proven.get(spec)
+            proven = manager.exact.proven_container(spec)
             if observers.active or proven is None or proven.container_id != container_id:
                 # A turn is already observed here, or the name now holds
                 # another container: whatever runs there next starts its own

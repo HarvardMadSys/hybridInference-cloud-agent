@@ -442,13 +442,13 @@ class _Guest:
 def _manager(guest: _Guest) -> ChatSandboxManager:
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_namespace="ns"))
     # The reaper was found in this container at an earlier census.
-    proven = manager.exact.proven.record(
+    proven = manager.exact._proven.record(
         _SPEC,
         container_inspection(
             {"Id": "container", "Name": "/chat", "State": {"Status": "running", "Running": True}}
         ),
     )
-    manager.exact.proven.note_helper(proven, MEMBER_REAPER_TARGET)
+    manager.exact._proven.note_helper(proven, MEMBER_REAPER_TARGET)
     manager.exec_capture = guest.exec_capture
     manager.spawn = lambda *_a, **_kw: guest.events.append(("spawn", None, None))
     for root_only in ("ensure_mcp_helpers", "ensure_kilo_mcp_runtime", "ensure_codex_mcp_policy"):
