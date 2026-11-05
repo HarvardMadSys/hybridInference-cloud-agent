@@ -339,7 +339,49 @@ def _can_refresh(row: Mapping[str, Any]) -> bool:
     )
 
 
-async def resolve_connection(  # noqa: PLR0912 complexity baseline, #771
+def _credential_refusal(
+    row: Mapping[str, Any], connection: McpConnection, snapshot: CapabilitySnapshot | None
+) -> ResolvedConnection | None:
+    """Refuse a connection whose stored sign-in cannot be sent to its server."""
+    # The access token (or static secret) only. A client secret is how this
+    # platform authenticates to the authorization server, under its own cipher
+    # domain; it is never what the MCP server is sent, and a row holding only
+    # one is a sign-in that has not completed yet.
+    if not row.get("access_token_ciphertext"):
+        return ResolvedConnection(
+            connection=connection,
+            snapshot=snapshot,
+            error="This connection needs to be authorized.",
+            error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
+        )
+    if _has_expired(row) and not _can_refresh(row):
+        return ResolvedConnection(
+            connection=connection,
+            snapshot=snapshot,
+            error="This connection has expired. Connect it again.",
+            error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
+        )
+    resource = _optional(row.get("resource"))
+    if (
+        connection.auth.kind is AuthKind.OAUTH
+        and connection.config.url
+        # Without its trailing slash, as discovery compares a resource to the
+        # address: a server may name ``.../mcp/`` for a connection at ``.../mcp``.
+        and not resource_covers(resource.rstrip("/") if resource else None, connection.config.url)
+    ):
+        # A token is minted for one resource (RFC 8707). A connection whose
+        # address was edited while it held one -- before edits cleared it --
+        # must not send it to the new address.
+        return ResolvedConnection(
+            connection=connection,
+            snapshot=snapshot,
+            error="This connection's sign-in was for another address. Sign in again.",
+            error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
+        )
+    return None
+
+
+async def resolve_connection(
     store: McpConnectionRepository,
     *,
     row: Mapping[str, Any],
@@ -377,41 +419,9 @@ async def resolve_connection(  # noqa: PLR0912 complexity baseline, #771
         # by network position or not at all is usable as soon as it is reachable.
         return ResolvedConnection(connection=connection, snapshot=snapshot)
 
-    # The access token (or static secret) only. A client secret is how this
-    # platform authenticates to the authorization server, under its own cipher
-    # domain; it is never what the MCP server is sent, and a row holding only
-    # one is a sign-in that has not completed yet.
-    if not row.get("access_token_ciphertext"):
-        return ResolvedConnection(
-            connection=connection,
-            snapshot=snapshot,
-            error="This connection needs to be authorized.",
-            error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
-        )
-    if _has_expired(row) and not _can_refresh(row):
-        return ResolvedConnection(
-            connection=connection,
-            snapshot=snapshot,
-            error="This connection has expired. Connect it again.",
-            error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
-        )
-    resource = _optional(row.get("resource"))
-    if (
-        connection.auth.kind is AuthKind.OAUTH
-        and connection.config.url
-        # Without its trailing slash, as discovery compares a resource to the
-        # address: a server may name ``.../mcp/`` for a connection at ``.../mcp``.
-        and not resource_covers(resource.rstrip("/") if resource else None, connection.config.url)
-    ):
-        # A token is minted for one resource (RFC 8707). A connection whose
-        # address was edited while it held one -- before edits cleared it --
-        # must not send it to the new address.
-        return ResolvedConnection(
-            connection=connection,
-            snapshot=snapshot,
-            error="This connection's sign-in was for another address. Sign in again.",
-            error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
-        )
+    refusal = _credential_refusal(row, connection, snapshot)
+    if refusal is not None:
+        return refusal
 
     resolved_cipher = cipher
     if resolved_cipher is None:
