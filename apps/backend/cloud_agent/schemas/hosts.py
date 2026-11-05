@@ -459,7 +459,7 @@ class HostResidencyEstablishResponse(BaseModel):
     thread_id: str
     generation: int
     ttl_seconds: float
-    #: A Gateway grant, or an owner connection's own long-lived key: never in a repr.
+    #: The owner model connection's own long-lived key: never in a repr.
     credential: str | None = Field(None, repr=False)
     model: str | None = None
     #: For a residency on an owner model connection, the credential revision

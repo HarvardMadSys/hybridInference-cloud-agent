@@ -8,8 +8,8 @@ Three reads, each scoped to the signed-in owner:
   the lifecycle events the database records on every state change, and the
   CPU and memory measured while they ran, read from
   ``agent_sandbox_usage_days``.
-- **Tokens**: the per-run Gateway accounting the admin Usage page sums,
-  selected for this owner's runs only.
+- **Tokens**: the per-run counts agents reported about their own model
+  calls, which the admin Usage page sums, selected for this owner's runs only.
 
 None of them names a host, container ID, image or generation: those describe
 the platform, not the owner's work.

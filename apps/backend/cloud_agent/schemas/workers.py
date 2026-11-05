@@ -250,8 +250,8 @@ class WorkerClaimResponse(BaseModel):
     #: The sandbox group's whole SSH state, keys included; absent for a group
     #: whose chats never selected an SSH server.
     ssh_access: SshAccess | None = Field(None, repr=False)
-    #: The owner's own model connection this turn runs on, key included;
-    #: absent for a Gateway turn. Only a host advertising
+    #: The owner's own model connection this turn runs on, key included. The
+    #: control plane hands a claim out only with one; only a host advertising
     #: ``MODEL_CONNECTION_CAPABILITY`` is ever handed one.
     model_connection: ModelConnectionAccess | None = Field(None, repr=False)
 

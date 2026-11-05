@@ -1,9 +1,8 @@
 """The time ranges an owner's Usage page offers, and the buckets they are drawn in.
 
-Every range is in UTC calendar days, the convention the Usage page and the
-Gateway's daily quota already share, and every read of one owner's history —
-model usage, container use, context insights — resolves its range here, so
-the three describe the same interval:
+Every range is in UTC calendar days, the convention the Usage pages share,
+and every read of one owner's history — model usage, container use, context
+insights — resolves its range here, so the three describe the same interval:
 
 - ``today``: from the current UTC day's midnight to now.
 - ``7d`` and ``30d``: the last 7 or 30 UTC days, today included, to now.

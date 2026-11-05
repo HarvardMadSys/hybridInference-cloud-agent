@@ -26,6 +26,25 @@ imports the other. Shared code provides the facts and contracts they agree on;
 it imports neither implementation. Accounts, admission and usage live in the
 agent database; model calls go from the sandbox to the owner's provider.
 
+## Vocabulary
+
+The code and the wire keep their historical names; documentation and new code
+use the terms in the first column. A job is one turn of a conversation, not the
+user's whole task.
+
+| Term | In code and on the wire | Meaning |
+|---|---|---|
+| Conversation | thread, `thread_id` | One user session, made of turns; a chat or task in the UI |
+| Turn | job, `job_id`, `turn_no` | One user message and the agent's work on it; every turn after the first names its `parent_job_id` |
+| Attempt | `attempt_id`, `attempt_no`, `lease_generation` | One execution of a turn on one host; it carries the lease fence |
+| Sandbox group | `agent_sandboxes`, `sandbox_id`, `sandbox_generation` | One retained container and its workspace |
+| Member | membership, member | One conversation in a group, with its own native session and CLI process |
+| Activation, residency, process | `activation_generation`, `residency_generation`, `process_generation` | A member's three layers: its activation in the container, the residency that lets one live CLI process serve later turns, and that process. A stale generation is refused at its layer |
+| Placeholder credential | `amr.` (MCP), `agh.` (GitHub) | A bearer that names one residency. Only its relay accepts it, and the relay resolves the fence again on every request |
+
+Never name a new field a bare `generation`: say what it counts, as in
+`sandbox_generation` or `residency_generation`.
+
 ## Follow a control-plane request
 
 ```mermaid

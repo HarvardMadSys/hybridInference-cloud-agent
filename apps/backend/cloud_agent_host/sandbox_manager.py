@@ -1,8 +1,8 @@
 """Internal sandbox manager for live agent workspaces.
 
-The public gateway authenticates workspace owners and forwards only a validated
-job id. This service is deliberately separate from the gateway: it can reach
-the host Docker daemon, while the public-facing backend cannot. Commands, Git
+The control plane authenticates workspace owners and forwards only a validated
+job id. This service is deliberately separate from it: it can reach the host
+Docker daemon, while the public-facing control plane cannot. Commands, Git
 inspection, terminals, and Agent CLI transports all execute inside the exact
 retained chat container; no host workspace is mounted into either service.
 """
@@ -1334,7 +1334,7 @@ def _run_git_metadata(
 
 
 def _terminal_sse_frame(event: _TerminalEvent) -> str:
-    """Serialize one terminal event using the gateway's stable SSE contract."""
+    """Serialize one terminal event using the control plane's stable SSE contract."""
     if event.kind == "output":
         payload = {
             "seq": event.seq,

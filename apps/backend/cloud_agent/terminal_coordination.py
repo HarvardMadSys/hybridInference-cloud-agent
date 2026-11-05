@@ -1,4 +1,4 @@
-"""Gateway-owned recovery for terminal sessions left behind by settled jobs.
+"""Control-plane recovery for terminal sessions left behind by settled jobs.
 
 The sandbox manager is passed in rather than read from the environment here.
 This runs for jobs that have already settled — including from the reaper's

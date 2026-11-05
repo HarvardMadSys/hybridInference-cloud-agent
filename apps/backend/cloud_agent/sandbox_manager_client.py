@@ -1,4 +1,4 @@
-"""Gateway-side client for the private agent sandbox manager."""
+"""The control plane's client for the private agent sandbox manager."""
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ class SandboxManagerError(RuntimeError):
 
 @dataclass
 class SandboxManagerStream:
-    """An already-authorized sandbox manager response that the gateway must close."""
+    """An already-authorized sandbox manager response that the control plane must close."""
 
     _client: httpx.AsyncClient
     _response: httpx.Response
