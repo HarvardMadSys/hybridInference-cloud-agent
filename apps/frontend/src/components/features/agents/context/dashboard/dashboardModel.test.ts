@@ -150,6 +150,8 @@ describe('trend model', () => {
     const columns = trendColumns(points, 'step');
     expect(maxima(columns).total).toBe(300);
     expect(maxima(columns, 2, 3).total).toBe(250);
+    // The duration overlay is the events' step time now; latency is gone.
+    expect(maxima(columns).durationMs).toBe(500);
     const delta = maxima(deltaColumns(columns));
     expect(delta.up).toBe(200);
     expect(delta.down).toBe(100);
@@ -343,6 +345,19 @@ describe('timingRows', () => {
     const rows = timingRows(timing(), t);
     expect(rows.find((row) => row.key === 'reasoning')?.count).toBe('not recorded');
     expect(rows.find((row) => row.key === 'tools')?.pct).toBe('40%');
+  });
+
+  it('shows a measured split with its share', () => {
+    const rows = timingRows(
+      timing({
+        blocks: { reasoning: 1 },
+        totals: { reasoning: 200, text: 0, toolarg: 0, tools: 400, unsplit: 400 },
+      }),
+      t,
+    );
+    expect(rows.map((row) => row.key)).toEqual(['reasoning', 'tools', 'unsplit']);
+    expect(rows[0].pct).toBe('20%');
+    expect(rows[0].count).not.toBe('not recorded');
   });
 });
 

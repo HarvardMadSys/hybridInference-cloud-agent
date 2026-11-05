@@ -63,14 +63,14 @@
 
 ### 3.2 A 层：线上协议对照，不用镜像
 
-**放在哪里。** 新脚本 `scripts/check_mixed_protocol.py`，在 test-db 任务（`ci.yml:544`）里紧接滚动升级检查执行，用同一个 Postgres 服务，只在 shard 1 上跑。只要改动涉及下列任何一处，`changes` 任务就把它标成需要跑：`schemas/workers.py`、`schemas/hosts.py`、`api/worker.py`、`api/hosts.py`、`cloud_agent_shared/`、`cloud_agent_host/control_plane_client.py`、`cloud_agent_host/enrollment.py`、`cloud_agent_host/claimed_job.py`、`sandbox_manager/`、`cloud_agent_host/manager_api/`。
+**放在哪里。** 新脚本 `scripts/check_mixed_protocol.py`，在 test-db 任务（`ci.yml:544`）里紧接滚动升级检查执行，用同一个 Postgres 服务，只在 shard 1 上跑。只要改动涉及下列任何一处，`changes` 任务就把它标成需要跑：`schemas/workers.py`、`schemas/hosts.py`、`api/worker.py`、`api/hosts.py`、`cloud_agent_shared/`、`cloud_agent_host/control_plane_client.py`、`cloud_agent_host/service/enrollment.py`、`cloud_agent_host/claimed_job.py`、`sandbox_manager/`、`cloud_agent_host/manager_api/`。
 
 **做法。** 两个方向各起一个随机数据库，用对应控制面那一版自己的 Alembic 迁移：
 
 - **方向 1：本版 host 对上一版控制面。**
   1. 用上一版的 venv，在回环地址上以 uvicorn 起上一版的控制面 app，不设 `AGENT_DEPLOYMENT_SHA`，这样建 group 不受同一 SHA 的限制。A 层测的是线上形状，不是放置策略。
   2. 用上一版的 `Storage` 写入夹具：一个账户、一条模型连接（直接写行，跳过验证）、一个临时工作区对话、一个 host 注册令牌。写法和 `rolling_api_worker.py` 一样：调的是上一版的存储 API，签名变了，就要在这里保留旧写法，直到新写法发布。
-  3. 用本版的 host 端代码，也就是 `cloud_agent_host.enrollment` 的注册和心跳，以及 `control_plane_client` 的 claim、attempt 心跳、sandbox 转移、residency、事件和 finish，按 §3.4 的脚本走一遍。Sandbox Manager 换成一个按脚本应答的假实现。
+  3. 用本版的 host 端代码，也就是 `cloud_agent_host.service.enrollment` 的注册和心跳，以及 `control_plane_client` 的 claim、attempt 心跳、sandbox 转移、residency、事件和 finish，按 §3.4 的脚本走一遍。Sandbox Manager 换成一个按脚本应答的假实现。
 - **方向 2：上一版 host 对本版控制面。** 本版控制面在本版 venv 里起；上一版的 host 端代码在上一版的 venv 里，由本仓库的驱动脚本 `tests/support/mixed_protocol_host.py` 调用。这个驱动脚本只调用上一版存在的 API，和 `rolling_api_worker.py` 是同一种约定。
 - **Sandbox Manager 的线上协议**单独对照一次：一边是本版的 `SandboxManagerClient`，另一边是上一版的 `manager_api` app（后端是假的，用上一版 `tests/` 里的 fake）；反过来再跑一次。只覆盖 §2.1 表里那 35 个方法中、§9.1 分类为"命令"或"状态"的那些，交互式调用不做。
 

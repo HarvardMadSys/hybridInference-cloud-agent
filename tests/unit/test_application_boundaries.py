@@ -73,20 +73,20 @@ def test_domain_and_ports_do_not_import_storage_or_http_frameworks(layer: str) -
 #: ``setting_definition``), ``logging_utils`` and ``tokens``; every other module
 #: belongs to a layer or a feature package. ``task_titles`` is the one still
 #: flat: its only caller is a repository and it reads a setting at call time.
-#: The count only goes down: lower it when a module leaves the top level.
-TOP_LEVEL_MODULES = 6
+#: The set only shrinks: remove a name when its module leaves the top level.
+#: Compared as names, so swapping one flat module for another is caught too.
+TOP_LEVEL_MODULES = frozenset(
+    {"app", "logging_utils", "setting_definition", "settings", "task_titles", "tokens"}
+)
 
 
 def test_the_top_level_only_shrinks() -> None:
     """A new control-plane module goes into a layer or a feature package."""
-    modules = sorted(path.stem for path in CONTROL.glob("*.py") if path.name != "__init__.py")
-    assert len(modules) <= TOP_LEVEL_MODULES, (
-        f"a new module directly in cloud_agent/ ({len(modules)} > {TOP_LEVEL_MODULES}); "
-        f"put it in a layer or a feature package: {modules}"
-    )
-    assert len(modules) == TOP_LEVEL_MODULES, (
-        f"the top level shrank to {len(modules)}; lower TOP_LEVEL_MODULES to match: {modules}"
-    )
+    modules = {path.stem for path in CONTROL.glob("*.py") if path.name != "__init__.py"}
+    added = sorted(modules - TOP_LEVEL_MODULES)
+    assert not added, f"new modules directly in cloud_agent/: {added}; put them in a layer"
+    gone = sorted(TOP_LEVEL_MODULES - modules)
+    assert not gone, f"{gone} left the top level; remove them from TOP_LEVEL_MODULES"
 
 
 #: What a port may name besides the standard library and third-party packages:
