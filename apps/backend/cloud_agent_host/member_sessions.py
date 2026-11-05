@@ -13,7 +13,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from cloud_agent_host.archive_failure_diagnostics import (
     _safe_error_type,
@@ -29,6 +29,7 @@ from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
+    GuestObserverCursor,
 )
 from cloud_agent_host.resident_probe import probe_refusal_message
 from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
 
     from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
     from cloud_agent_host.group_registration import GroupRegistration
+    from cloud_agent_host.member_window_census import MemberWindow
     from cloud_agent_host.resident_transport import (
         ResidentLaunch,
         ResidentTransport,
@@ -153,7 +155,7 @@ class MemberSessions:
         self._sample_interval_s = sample_interval_s
         self._checkpoint_interval_s = checkpoint_interval_s
 
-    def acquire(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def acquire(
         self,
         spec: ChatSandboxSpec,
         *,
@@ -194,14 +196,17 @@ class MemberSessions:
             group.lifecycle.admit(Operation.RUN)
             if member.context_status == "lost":
                 raise RetainedChatLost("shared member context was lost")
-            if member.lease_token is not None:
-                if member.lease_owner == owner:
-                    return self._lease(
-                        group, member, facts=facts, recorder=recorder, call_id=call_id
-                    )
-                raise SessionBusy(f"chat {thread_id!r} already has an active turn")
-            if member.current_turn is not None:
-                raise SessionBusy(f"chat {thread_id!r} already has a running turn")
+            existing = self._owner_lease_locked(
+                thread_id,
+                group,
+                member,
+                owner=owner,
+                facts=facts,
+                recorder=recorder,
+                call_id=call_id,
+            )
+            if existing is not None:
+                return existing
             # Fence stale attempt owners before doing anything observable to
             # the shared container. In particular, an old lease must not wake
             # a stopped workspace only to be rejected after ``docker start``.
@@ -214,16 +219,7 @@ class MemberSessions:
         if current is None or (
             expected_container_id and current.container_id != expected_container_id
         ):
-            with self._state.lock:
-                if (
-                    self._state.members.get(thread_id) is group
-                    and group.members.get(thread_id) is member
-                ):
-                    member.context_status = "lost"
-                    member.resident_state = "lost"
-            if current is None:
-                raise RetainedChatLost("shared sandbox container is missing")
-            raise RetainedChatLost("shared sandbox container identity changed")
+            self._lose_missing_container(thread_id, group, member, missing=current is None)
 
         inspection = self._lifecycle.start_and_prove(
             group,
@@ -248,14 +244,17 @@ class MemberSessions:
             ):
                 raise SessionLeaseLost("shared sandbox lifecycle changed during activation")
             group.lifecycle.admit(Operation.MUTATION)
-            if member.lease_token is not None:
-                if member.lease_owner == owner:
-                    return self._lease(
-                        group, member, facts=facts, recorder=recorder, call_id=call_id
-                    )
-                raise SessionBusy(f"chat {thread_id!r} already has an active turn")
-            if member.current_turn is not None:
-                raise SessionBusy(f"chat {thread_id!r} already has a running turn")
+            existing = self._owner_lease_locked(
+                thread_id,
+                group,
+                member,
+                owner=owner,
+                facts=facts,
+                recorder=recorder,
+                call_id=call_id,
+            )
+            if existing is not None:
+                return existing
             if activation_generation < member.activation_generation:
                 raise SessionLeaseLost("member activation generation is stale")
             if expected_container_id and inspection.container_id != expected_container_id:
@@ -283,6 +282,44 @@ class MemberSessions:
                 call_id=call_id,
                 network_verified=True,
             )
+
+    def _owner_lease_locked(
+        self,
+        thread_id: str,
+        group: _Group,
+        member: _Member,
+        *,
+        owner: str,
+        facts: SandboxActionFacts,
+        recorder: StageRecorder | None,
+        call_id: str | None,
+    ) -> SharedSessionLease | None:
+        """Return the owner's existing lease, refuse a busy member, else None.
+
+        The caller holds the lock.
+        """
+        if member.lease_token is not None:
+            if member.lease_owner == owner:
+                return self._lease(group, member, facts=facts, recorder=recorder, call_id=call_id)
+            raise SessionBusy(f"chat {thread_id!r} already has an active turn")
+        if member.current_turn is not None:
+            raise SessionBusy(f"chat {thread_id!r} already has a running turn")
+        return None
+
+    def _lose_missing_container(
+        self, thread_id: str, group: _Group, member: _Member, *, missing: bool
+    ) -> NoReturn:
+        """Mark a still-current member lost and refuse its missing or replaced container."""
+        with self._state.lock:
+            if (
+                self._state.members.get(thread_id) is group
+                and group.members.get(thread_id) is member
+            ):
+                member.context_status = "lost"
+                member.resident_state = "lost"
+        if missing:
+            raise RetainedChatLost("shared sandbox container is missing")
+        raise RetainedChatLost("shared sandbox container identity changed")
 
     def ensure_resident(
         self,
@@ -320,7 +357,7 @@ class MemberSessions:
                 truncated=recorder is not None and recorder.stopped_early(),
             )
 
-    def start_turn(  # noqa: PLR0915 complexity baseline, #771
+    def start_turn(
         self,
         thread_id: str,
         token: str,
@@ -407,22 +444,32 @@ class MemberSessions:
                     self._manager, group.spec, checkpoint_interval_s=self._checkpoint_interval_s
                 )
         if not admitted:
-            with contextlib.suppress(Exception):
-                turn.interrupt()
-            fences.close_unadmitted(self._manager, group.spec)
-            with contextlib.suppress(Exception):
-                self._manager.reap_member_processes_except(
-                    group.spec,
-                    slot_id=member.resident_slot_id,
-                    user_uid=MEMBER_UID_BASE + member.resident_slot_id,
-                    user_gid=self._manager.backend.gid,
-                    baseline=fences.activation_processes,
-                )
-            member.turn_lock.release()
+            self._unwind_unadmitted_turn(group, member, turn, fences)
             raise SessionLeaseLost("shared sandbox lifecycle changed during turn admission")
         for pending in held_inputs:
             turn.inject(pending.text, message_id=pending.message_id)
         return turn
+
+    def _unwind_unadmitted_turn(
+        self,
+        group: _Group,
+        member: _Member,
+        turn: ResidentTurn[DialectRuntime],
+        fences: TurnFences,
+    ) -> None:
+        """Stop a started turn admission refused, then release its member lock."""
+        with contextlib.suppress(Exception):
+            turn.interrupt()
+        fences.close_unadmitted(self._manager, group.spec)
+        with contextlib.suppress(Exception):
+            self._manager.reap_member_processes_except(
+                group.spec,
+                slot_id=member.resident_slot_id,
+                user_uid=MEMBER_UID_BASE + member.resident_slot_id,
+                user_gid=self._manager.backend.gid,
+                baseline=fences.activation_processes,
+            )
+        member.turn_lock.release()
 
     def _take_held_inputs(self, thread_id: str, owner: str | None) -> list[PendingInput]:
         """Remove and return what was held for ``owner``'s turn; drop the rest."""
@@ -433,7 +480,7 @@ class MemberSessions:
             if held.owner == owner and now - held.held_at < HELD_INPUT_TTL_S
         ]
 
-    def complete_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def complete_turn(
         self,
         thread_id: str,
         token: str,
@@ -460,43 +507,11 @@ class MemberSessions:
         # that would measure activity the slice does not contain.
         if window is not None:
             window.sampler.sample(window.handle, closing_census)
-        observation = GuestObservation.unavailable("sandbox is not a Kata guest")
-        if self._manager.backend.runtime == KATA_RUNTIME:
-            finish_observation = getattr(self._manager, "finish_guest_observation", None)
-            if finish_observation is None:
-                observation = GuestObservation.unavailable(
-                    "sandbox manager has no guest observer client",
-                    source=GUEST_OBSERVER_SOURCE,
-                )
-            else:
-                # Close before the member reaper/permission normalizer below:
-                # those are platform processes and must not be billed to the
-                # tool call whose background children they clean up.
-                try:
-                    finished = finish_observation(group.spec, observer_cursor)
-                    if isinstance(finished, GuestObservation):
-                        observation = (
-                            finished
-                            if finished.source is not None
-                            else replace(finished, source=GUEST_OBSERVER_SOURCE)
-                        )
-                    else:
-                        observation = GuestObservation.unavailable(
-                            "sandbox manager returned invalid process telemetry",
-                            source=GUEST_OBSERVER_SOURCE,
-                        )
-                except Exception as exc:
-                    observation = GuestObservation.unavailable(
-                        str(exc),
-                        source=GUEST_OBSERVER_SOURCE,
-                    )
-        turn_resources: dict[str, Any] | None = None
-        if window is not None:
-            with self._state.lock:
-                self._state.leased_member(thread_id, token)
-                window.report_seq += 1
-                final_sequence = window.report_seq
-            turn_resources = window.freeze(observation, final_sequence)
+        # Close before the member reaper/permission normalizer below: those are
+        # platform processes and must not be billed to the tool call whose
+        # background children they clean up.
+        observation = self._finish_guest_observation(group, observer_cursor)
+        turn_resources = self._freeze_turn_window(thread_id, token, window, observation)
         telemetry = SharedTurnTelemetry(
             observation=observation,
             tool_marks=(
@@ -505,36 +520,9 @@ class MemberSessions:
             ),
             turn_resources=turn_resources,
         )
-        boundary_error: Exception | None = None
-        try:
-            if activation_processes is None:
-                raise SandboxError("member activation process baseline is missing")
-            self._manager.reap_member_processes_except(
-                group.spec,
-                slot_id=slot_id,
-                user_uid=MEMBER_UID_BASE + slot_id,
-                user_gid=self._manager.backend.gid,
-                baseline=activation_processes,
-            )
-            self._manager.normalize_member_files(
-                group.spec,
-                slot_id=slot_id,
-                user_uid=MEMBER_UID_BASE + slot_id,
-                user_gid=self._manager.backend.gid,
-            )
-        except Exception as exc:  # the caller must fail this settlement closed
-            boundary_error = exc
-            logger.warning(
-                "shared member activation boundary failed for %s: %s",
-                thread_id,
-                exc,
-                extra={
-                    "event": "shared_member_activation_boundary_failed",
-                    "thread_id": thread_id,
-                    "resident_slot_id": slot_id,
-                },
-                exc_info=True,
-            )
+        boundary_error = self._enforce_activation_boundary(
+            group, thread_id, slot_id=slot_id, activation_processes=activation_processes
+        )
         detached = False
         lost_turn: _LostTurn | None = None
         try:
@@ -554,22 +542,13 @@ class MemberSessions:
                 member.tool_mark_reader = None
                 member.window = None
                 transport = member.transport
-                if boundary_error is not None:
-                    member.transport = None
-                    member.resident_state = "restarting"
-                elif transport is None or not transport.alive:
-                    member.resident_state = "restarting"
-                    logger.warning(
-                        "shared member resident transport exited across activation boundary",
-                        extra={
-                            "event": "shared_member_transport_exited",
-                            "thread_id": thread_id,
-                            "resident_slot_id": slot_id,
-                            "activation_processes": activation_processes,
-                        },
-                    )
-                else:
-                    member.resident_state = "live"
+                self._record_boundary_state_locked(
+                    member,
+                    boundary_error,
+                    thread_id=thread_id,
+                    slot_id=slot_id,
+                    activation_processes=activation_processes,
+                )
         finally:
             if detached:
                 member.turn_lock.release()
@@ -588,6 +567,130 @@ class MemberSessions:
                 telemetry,
             ) from boundary_error
         return telemetry
+
+    def _freeze_turn_window(
+        self,
+        thread_id: str,
+        token: str,
+        window: MemberWindow | None,
+        observation: GuestObservation,
+    ) -> dict[str, Any] | None:
+        """Close the member window, if this turn opened one, at its last report."""
+        if window is None:
+            return None
+        with self._state.lock:
+            self._state.leased_member(thread_id, token)
+            window.report_seq += 1
+            final_sequence = window.report_seq
+        return window.freeze(observation, final_sequence)
+
+    @staticmethod
+    def _record_boundary_state_locked(
+        member: _Member,
+        boundary_error: Exception | None,
+        *,
+        thread_id: str,
+        slot_id: int,
+        activation_processes: tuple[tuple[int, int], ...] | None,
+    ) -> None:
+        """Set the member's resident state after its activation boundary.
+
+        The caller holds the lock.
+        """
+        transport = member.transport
+        if boundary_error is not None:
+            member.transport = None
+            member.resident_state = "restarting"
+        elif transport is None or not transport.alive:
+            member.resident_state = "restarting"
+            logger.warning(
+                "shared member resident transport exited across activation boundary",
+                extra={
+                    "event": "shared_member_transport_exited",
+                    "thread_id": thread_id,
+                    "resident_slot_id": slot_id,
+                    "activation_processes": activation_processes,
+                },
+            )
+        else:
+            member.resident_state = "live"
+
+    def _finish_guest_observation(
+        self, group: _Group, observer_cursor: GuestObserverCursor | None
+    ) -> GuestObservation:
+        """Close the turn's guest process observation, or say why there is none."""
+        observation = GuestObservation.unavailable("sandbox is not a Kata guest")
+        if self._manager.backend.runtime == KATA_RUNTIME:
+            finish_observation = getattr(self._manager, "finish_guest_observation", None)
+            if finish_observation is None:
+                observation = GuestObservation.unavailable(
+                    "sandbox manager has no guest observer client",
+                    source=GUEST_OBSERVER_SOURCE,
+                )
+            else:
+                try:
+                    finished = finish_observation(group.spec, observer_cursor)
+                    if isinstance(finished, GuestObservation):
+                        observation = (
+                            finished
+                            if finished.source is not None
+                            else replace(finished, source=GUEST_OBSERVER_SOURCE)
+                        )
+                    else:
+                        observation = GuestObservation.unavailable(
+                            "sandbox manager returned invalid process telemetry",
+                            source=GUEST_OBSERVER_SOURCE,
+                        )
+                except Exception as exc:
+                    observation = GuestObservation.unavailable(
+                        str(exc),
+                        source=GUEST_OBSERVER_SOURCE,
+                    )
+        return observation
+
+    def _enforce_activation_boundary(
+        self,
+        group: _Group,
+        thread_id: str,
+        *,
+        slot_id: int,
+        activation_processes: tuple[tuple[int, int], ...] | None,
+    ) -> Exception | None:
+        """Reap the member's leftover processes and normalize its files.
+
+        Returns the failure instead of raising it: the caller must still detach
+        the turn, then fail this settlement closed.
+        """
+        try:
+            if activation_processes is None:
+                raise SandboxError("member activation process baseline is missing")
+            self._manager.reap_member_processes_except(
+                group.spec,
+                slot_id=slot_id,
+                user_uid=MEMBER_UID_BASE + slot_id,
+                user_gid=self._manager.backend.gid,
+                baseline=activation_processes,
+            )
+            self._manager.normalize_member_files(
+                group.spec,
+                slot_id=slot_id,
+                user_uid=MEMBER_UID_BASE + slot_id,
+                user_gid=self._manager.backend.gid,
+            )
+        except Exception as exc:  # the caller must fail this settlement closed
+            logger.warning(
+                "shared member activation boundary failed for %s: %s",
+                thread_id,
+                exc,
+                extra={
+                    "event": "shared_member_activation_boundary_failed",
+                    "thread_id": thread_id,
+                    "resident_slot_id": slot_id,
+                },
+                exc_info=True,
+            )
+            return exc
+        return None
 
     def interrupt(self, thread_id: str, token: str) -> None:
         """Interrupt the exact member activation, leaving siblings untouched."""
@@ -735,7 +838,7 @@ class MemberSessions:
             return None
         return receipt[1]
 
-    def settle(  # noqa: PLR0912, PLR0915 complexity baseline, #771
+    def settle(
         self,
         thread_id: str,
         token: str,
@@ -760,38 +863,11 @@ class MemberSessions:
             if member.current_turn is not None:
                 raise SessionBusy("cannot settle a member while its turn is running")
             if member.transport is None or not member.transport.alive:
-                diagnostic = "" if member.transport is None else member.transport.stderr_text()
-                exit_code = None if member.transport is None else member.transport.exit_code
-                logger.warning(
-                    "shared member resident transport is unavailable before settlement "
-                    "(exit_code=%s)",
-                    exit_code,
-                    extra={
-                        "event": "shared_member_transport_unavailable_before_settlement",
-                        "thread_id": thread_id,
-                        "resident_slot_id": member.resident_slot_id,
-                    },
-                )
-                if diagnostic:
-                    logger.warning(
-                        "shared member resident transport exited before settlement: %s",
-                        diagnostic,
-                        extra={
-                            "event": "shared_member_transport_exited_before_settlement",
-                            "thread_id": thread_id,
-                            "resident_slot_id": member.resident_slot_id,
-                        },
-                    )
+                self._log_unavailable_transport_locked(thread_id, member)
                 raise SandboxError("cannot settle without a live resident transport")
-            observed = member.transport.native_session_id
-            if native_session_id and observed and observed != native_session_id:
-                raise SandboxError("resident transport reported a different native session id")
-            settled_session_id = observed or native_session_id
-            if not settled_session_id:
-                raise SandboxError("resident transport did not report a native session id")
-            if member.native_session_id and settled_session_id != member.native_session_id:
-                raise SandboxError("resident transport settled a different native session")
-            member.native_session_id = settled_session_id
+            member.native_session_id = self._settled_session_id(
+                member, member.transport, native_session_id
+            )
             member.last_settled_job_id = job_id
             member.context_status = context_status
             # Preserve the observed native locator before gracefully retiring
@@ -831,6 +907,51 @@ class MemberSessions:
                     self._state.arm_idle_if_quiescent(group)
                 member.turn_lock.release()
         return descriptor
+
+    @staticmethod
+    def _log_unavailable_transport_locked(thread_id: str, member: _Member) -> None:
+        """Log why the member has no live transport to settle with.
+
+        The caller holds the lock.
+        """
+        diagnostic = "" if member.transport is None else member.transport.stderr_text()
+        exit_code = None if member.transport is None else member.transport.exit_code
+        logger.warning(
+            "shared member resident transport is unavailable before settlement (exit_code=%s)",
+            exit_code,
+            extra={
+                "event": "shared_member_transport_unavailable_before_settlement",
+                "thread_id": thread_id,
+                "resident_slot_id": member.resident_slot_id,
+            },
+        )
+        if diagnostic:
+            logger.warning(
+                "shared member resident transport exited before settlement: %s",
+                diagnostic,
+                extra={
+                    "event": "shared_member_transport_exited_before_settlement",
+                    "thread_id": thread_id,
+                    "resident_slot_id": member.resident_slot_id,
+                },
+            )
+
+    @staticmethod
+    def _settled_session_id(
+        member: _Member,
+        transport: ResidentTransport[DialectRuntime],
+        native_session_id: str | None,
+    ) -> str:
+        """Return the native session the live transport settles, refusing any mismatch."""
+        observed = transport.native_session_id
+        if native_session_id and observed and observed != native_session_id:
+            raise SandboxError("resident transport reported a different native session id")
+        settled_session_id = observed or native_session_id
+        if not settled_session_id:
+            raise SandboxError("resident transport did not report a native session id")
+        if member.native_session_id and settled_session_id != member.native_session_id:
+            raise SandboxError("resident transport settled a different native session")
+        return settled_session_id
 
     @staticmethod
     def _retire(transport: ResidentTransport[DialectRuntime], thread_id: str) -> None:
@@ -1038,7 +1159,7 @@ class MemberSessions:
                     },
                 )
 
-    def ensure_transport(  # noqa: PLR0912, PLR0915 complexity baseline, #771
+    def ensure_transport(
         self,
         group: _Group,
         member: _Member,
@@ -1100,15 +1221,7 @@ class MemberSessions:
                 current.close()
         with substage(observer, "cli_spawn"):
             transport = self._transport_factory.open(group.spec, launch)
-        observed = transport.native_session_id
-        if launch.native_session_id and observed and observed != launch.native_session_id:
-            with contextlib.suppress(Exception):
-                transport.close()
-            raise SandboxError("resident transport resumed a different native session")
-        if launch.residency_generation <= 0:
-            with contextlib.suppress(Exception):
-                transport.close()
-            raise SandboxError("a new resident process needs a residency generation fence")
+        self._refuse_unfenced_process(transport, launch)
         launch_invalid = False
         with self._state.lock:
             rechecked_group = self._state.members.get(member.thread_id)
@@ -1125,18 +1238,7 @@ class MemberSessions:
                 or (lease_token is not None and member.lease_token != lease_token)
             )
             if not launch_invalid:
-                member.transport = transport
-                member.process_generation += 1
-                member.residency_generation = launch.residency_generation
-                if lease_token is not None:
-                    member.lease_residency = (lease_token, launch.residency_generation)
-                member.native_session_id = transport.native_session_id or member.native_session_id
-                # HOT means this exact process accepted another turn. Any
-                # newly opened process is a native resume (or the first NEW
-                # process), even when acquire observed the predecessor alive
-                # before a model/MCP/residency compatibility check replaced it.
-                member.context_status = "restored" if launch.native_session_id else "new"
-                member.resident_state = "live"
+                self._install_transport_locked(member, transport, launch, lease_token)
         if launch_invalid:
             with contextlib.suppress(Exception):
                 transport.close()
@@ -1145,6 +1247,45 @@ class MemberSessions:
         # to resume, and a new CLI otherwise. It is never a reuse: the HOT
         # process returned above.
         return "resume" if launch.native_session_id else "new"
+
+    @staticmethod
+    def _refuse_unfenced_process(
+        transport: ResidentTransport[DialectRuntime], launch: ResidentLaunch
+    ) -> None:
+        """Close and refuse a new process that resumed another session or has no fence."""
+        observed = transport.native_session_id
+        if launch.native_session_id and observed and observed != launch.native_session_id:
+            with contextlib.suppress(Exception):
+                transport.close()
+            raise SandboxError("resident transport resumed a different native session")
+        if launch.residency_generation <= 0:
+            with contextlib.suppress(Exception):
+                transport.close()
+            raise SandboxError("a new resident process needs a residency generation fence")
+
+    @staticmethod
+    def _install_transport_locked(
+        member: _Member,
+        transport: ResidentTransport[DialectRuntime],
+        launch: ResidentLaunch,
+        lease_token: str | None,
+    ) -> None:
+        """Make a freshly opened process the member's live transport.
+
+        The caller holds the lock and has rechecked the member's lease.
+        """
+        member.transport = transport
+        member.process_generation += 1
+        member.residency_generation = launch.residency_generation
+        if lease_token is not None:
+            member.lease_residency = (lease_token, launch.residency_generation)
+        member.native_session_id = transport.native_session_id or member.native_session_id
+        # HOT means this exact process accepted another turn. Any newly opened
+        # process is a native resume (or the first NEW process), even when
+        # acquire observed the predecessor alive before a model/MCP/residency
+        # compatibility check replaced it.
+        member.context_status = "restored" if launch.native_session_id else "new"
+        member.resident_state = "live"
 
     @staticmethod
     def _lease(
