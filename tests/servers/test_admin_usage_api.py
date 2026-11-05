@@ -13,7 +13,6 @@ from fastapi import FastAPI  # noqa: TC002 — used in a runtime annotation.
 from httpx import ASGITransport, AsyncClient
 from tests.support.owners import use_session_secret
 
-from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES, MAX_USAGE_RUNS
 from cloud_agent.api import admin_usage
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app, create_mcp_app
@@ -21,6 +20,7 @@ from cloud_agent.storage.admin_usage_queries import (
     UsageQueryTooLarge,
     UsageQueryUnavailable,
 )
+from cloud_agent.usage.admin_usage import MAX_USAGE_RESPONSE_BYTES, MAX_USAGE_RUNS
 
 ADMIN = {"Authorization": "Bearer admin-usage-test"}
 PATH = "/admin/agent/usage"

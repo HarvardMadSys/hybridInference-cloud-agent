@@ -27,12 +27,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from cloud_agent.admin_observability import cursor_scope
 
 # Pydantic resolves these annotations when it builds the token usage view.
-from cloud_agent.admin_usage import (  # noqa: TC001
+from cloud_agent.usage.admin_usage import (  # noqa: TC001
     AdminUsageAggregate,
     AdminUsageBreakdown,
     AdminUsageDay,
 )
-from cloud_agent.usage_range import UsageRange  # noqa: TC001
+from cloud_agent.usage.usage_range import UsageRange  # noqa: TC001
 
 ContainerState = Literal[
     "starting", "running", "stopping", "stopped", "stored", "deleting", "unavailable"

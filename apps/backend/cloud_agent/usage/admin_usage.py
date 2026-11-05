@@ -3,7 +3,7 @@
 One run is one ``agent_jobs`` turn and every execution attempt it made. A
 selection is by job creation time, a day bucket is a UTC creation day, and every
 number is the agent's own report, reduced per turn by
-:mod:`cloud_agent.runtime_usage`. A turn that reported nothing stays missing:
+:mod:`cloud_agent.usage.runtime_usage`. A turn that reported nothing stays missing:
 this module never converts it into zeroes. Cost and model calls belong to the
 owner's provider and are never known here.
 """
@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.runtime_usage import RuntimeJobUsage, summarize_runtime_job
+from cloud_agent.usage.runtime_usage import RuntimeJobUsage, summarize_runtime_job
 from cloud_agent.usage.sums import (
     DERIVED_AMOUNT_CHARS,
     USAGE_METRICS,

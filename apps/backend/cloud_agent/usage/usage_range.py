@@ -9,7 +9,7 @@ insights — resolves its range here, so the three describe the same interval:
 - ``all``: from the UTC day of the owner's earliest retained record (their
   first run or their first container, whichever came first) to now. Nothing
   narrows it: an owner whose history is too large for one bounded read is read
-  in bounded batches instead (see :mod:`cloud_agent.usage_batches`).
+  in bounded batches instead (see :mod:`cloud_agent.usage.usage_batches`).
 
 A range's bars are buckets chosen here, so the browser never merges or sums
 them: days for up to :data:`MAX_DAY_BUCKETS`, ISO weeks (Monday, UTC) for up

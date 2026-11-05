@@ -25,14 +25,14 @@ from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db
 from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent.admin_usage import MAX_USAGE_RUNS
 from cloud_agent.api import context as context_api, owner_usage as owner_usage_api
 from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.context.context_insights import ContextInsightsCursor, context_cursor_scope
 from cloud_agent.context.context_profile import CONTEXT_PROFILE_VERSION
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.thread_stats import ATTEMPT_ROLLUP_VERSION
-from cloud_agent.usage_batches import owner_usage
+from cloud_agent.usage.admin_usage import MAX_USAGE_RUNS
+from cloud_agent.usage.usage_batches import owner_usage
 from cloud_agent_shared.text_tokens import estimate_text_tokens
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

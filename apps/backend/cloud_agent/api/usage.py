@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
-from cloud_agent.ledger import JobUsageResponse, summarize_job_usage
+from cloud_agent.usage.turn_report import JobUsageResponse, summarize_job_usage
 
 if TYPE_CHECKING:
     from cloud_agent.ports import ConversationQueries, LedgerRepository

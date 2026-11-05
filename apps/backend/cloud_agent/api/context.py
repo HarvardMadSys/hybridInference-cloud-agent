@@ -52,8 +52,8 @@ from cloud_agent.context.context_timing import ThreadTiming, assemble_timing
 from cloud_agent.context.context_view import ThreadContextView, assemble_thread_context
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage.admin_usage_queries import UsageQueryTooLarge, UsageQueryUnavailable
-from cloud_agent.usage_batches import owner_usage
-from cloud_agent.usage_range import RangePreset  # noqa: TC001 — FastAPI resolves it.
+from cloud_agent.usage.usage_batches import owner_usage
+from cloud_agent.usage.usage_range import RangePreset  # noqa: TC001 — FastAPI resolves it.
 
 if TYPE_CHECKING:
     from cloud_agent.ports import CommandExecutionQueries, ContextQueries, OwnerUsageQueries

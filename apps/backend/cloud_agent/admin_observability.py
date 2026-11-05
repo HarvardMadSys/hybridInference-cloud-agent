@@ -11,12 +11,14 @@ from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 
-from cloud_agent.ledger import JobUsageResponse  # noqa: TC001 — Pydantic resolves this at runtime.
 from cloud_agent.schemas import (
     RunResourceSummary,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
 from cloud_agent.thread_stats import (
     SessionStatistics,  # noqa: TC001 — Pydantic resolves this at runtime.
+)
+from cloud_agent.usage.turn_report import (
+    JobUsageResponse,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
 
 

@@ -6,7 +6,7 @@ owner's ``all`` range must cover everything they have, so it is read in
 batches instead (:meth:`AdminUsageQueries.batched_selection`): each batch is
 held to the same budgets, all of them come from one snapshot, and each is
 reduced and merged before the next is read, so memory stays bounded by one
-batch. The merge is exact (:func:`cloud_agent.admin_usage.merge_aggregates`):
+batch. The merge is exact (:func:`cloud_agent.usage.admin_usage.merge_aggregates`):
 the result is the aggregate a single unbounded selection would have returned.
 
 Two more bounds protect the service: a read that needs more than one batch
@@ -22,7 +22,9 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.admin_usage import (
+from cloud_agent.domain.execution import TERMINAL_STATES
+from cloud_agent.storage.admin_usage_queries import UsageQueryUnavailable
+from cloud_agent.usage.admin_usage import (
     MAX_USAGE_ATTEMPTS,
     MAX_USAGE_RUNS,
     UNKNOWN_MODEL_GROUP,
@@ -34,9 +36,7 @@ from cloud_agent.admin_usage import (
     prepare_jobs,
     ranked_breakdown,
 )
-from cloud_agent.domain.execution import TERMINAL_STATES
-from cloud_agent.storage.admin_usage_queries import UsageQueryUnavailable
-from cloud_agent.usage_range import BucketSize, bucket_key, buckets
+from cloud_agent.usage.usage_range import BucketSize, bucket_key, buckets
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

@@ -21,9 +21,9 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.admin_observability import cursor_scope
-from cloud_agent.admin_usage import AdminUsageAggregate  # noqa: TC001
 from cloud_agent.context.context_profile import CONTENT_CATEGORIES, TOTAL_FIELDS
-from cloud_agent.usage_range import UsageRange  # noqa: TC001
+from cloud_agent.usage.admin_usage import AdminUsageAggregate  # noqa: TC001
+from cloud_agent.usage.usage_range import UsageRange  # noqa: TC001
 from cloud_agent_shared.text_tokens import ESTIMATE_BASIS
 
 if TYPE_CHECKING:

@@ -22,9 +22,9 @@ from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations
 from tests.support.usage import job_usage_inputs
 
-from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.thread_stats import summarize_thread
+from cloud_agent.usage.turn_report import summarize_job_usage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

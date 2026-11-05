@@ -23,7 +23,6 @@ from cloud_agent.domain.sandbox_group import (
     sql_list,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.owner_usage import measured_interval, utc_day_shares
 from cloud_agent.ports.sandbox import DeletionFailureDecision, TerminalControlRoute
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.fences import (
@@ -68,6 +67,7 @@ from cloud_agent.storage._sql.terminal_replay import (
     page as terminal_replay_page,
     pending_ids as terminal_replay_ids,
 )
+from cloud_agent.usage.owner_usage import measured_interval, utc_day_shares
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
 

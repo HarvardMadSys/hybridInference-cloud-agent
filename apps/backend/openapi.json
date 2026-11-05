@@ -46102,7 +46102,7 @@
     },
     "/v1/agent/usage/tokens": {
       "get": {
-        "description": "Agent-reported model usage of the owner's runs created in the range.\n\nA range larger than one bounded selection is summed in bounded batches\n(:mod:`cloud_agent.usage_batches`), never narrowed.\n\nRaises:\n    HTTPException: 422 when even a minimal batch exceeds the aggregation's\n        bounds or the response would, 503 when it cannot be read in time.\n        Neither returns a partial sum.",
+        "description": "Agent-reported model usage of the owner's runs created in the range.\n\nA range larger than one bounded selection is summed in bounded batches\n(:mod:`cloud_agent.usage.usage_batches`), never narrowed.\n\nRaises:\n    HTTPException: 422 when even a minimal batch exceeds the aggregation's\n        bounds or the response would, 503 when it cannot be read in time.\n        Neither returns a partial sum.",
         "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
         "parameters": [
           {

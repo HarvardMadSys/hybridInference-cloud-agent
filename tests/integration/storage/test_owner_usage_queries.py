@@ -13,8 +13,8 @@ from tests.integration.storage.test_attempt_ledger import db as db, store as sto
 from tests.unit.test_sandbox_resource_protocol import sample
 
 from cloud_agent.admin_observability import decode_cursor
-from cloud_agent.owner_usage import CONTAINER_CURSOR_SCOPE, OwnerContainerCursor
-from cloud_agent.usage_range import buckets
+from cloud_agent.usage.owner_usage import CONTAINER_CURSOR_SCOPE, OwnerContainerCursor
+from cloud_agent.usage.usage_range import buckets
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

@@ -2,7 +2,7 @@
 
 Turns run on the owner's own model connections, whose provider keeps the key,
 the quota and the bill. What this service has is the agent's own token report
-(see :mod:`cloud_agent.runtime_usage` for which counters each agent reports),
+(see :mod:`cloud_agent.usage.runtime_usage` for which counters each agent reports),
 counted once per model call. It records no cost and estimates none.
 """
 
