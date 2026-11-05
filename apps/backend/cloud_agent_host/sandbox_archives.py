@@ -951,11 +951,14 @@ class SandboxArchiveService:
         spec: ChatSandboxSpec,
         inspection: ChatSandboxInspection,
         members: tuple[SharedMemberManifest, ...],
+        *,
+        start_seq: int | None = None,
     ) -> SandboxCheckpointReceipt:
         """Upload a restorable checkpoint of an exact cleanly stopped container.
 
         It shares the final archive's capture slot, so scratch space stays
-        within the same budget, and its operation deadline.
+        within the same budget, and its operation deadline. ``start_seq``
+        labels the run the stop ended.
         """
         capture = self._checkpoint_capture
         if capture is None:
@@ -974,6 +977,7 @@ class SandboxArchiveService:
                 upload=self._uploader.upload_checkpoint,
                 max_bytes=self._config.max_archive_bytes,
                 deadline=operation.deadline,
+                start_seq=start_seq,
             )
             operation.outcome = True
             return receipt

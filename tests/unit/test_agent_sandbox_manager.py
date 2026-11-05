@@ -40,6 +40,11 @@ from cloud_agent_host.chat_sandbox_models import (
     ChatSandboxStatus,
 )
 from cloud_agent_host.drivers import InputOutcome
+from cloud_agent_host.group_archive_policy import (
+    ControllerArchivePolicy,
+    NullArchivePolicy,
+    ServiceArchivePolicy,
+)
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
@@ -333,7 +338,8 @@ class _SharedSupervisor:
     def set_idle_timeout_s(self, idle_timeout_s: float) -> None:
         self.idle_timeout_s = idle_timeout_s
 
-    def __init__(self, *, events: list[str] | None = None) -> None:
+    def __init__(self, *, events: list[str] | None = None, archive_policy=None) -> None:
+        self.archive_policy = archive_policy or NullArchivePolicy()
         self.workspace_backend = _WorkspaceBackend()
         self.calls: list[tuple] = []
         # The proof time the last backend was handed, from its admission.
@@ -349,12 +355,6 @@ class _SharedSupervisor:
         self.shutdown_error: Exception | None = None
         self.pending_archive_work = False
         self.events = events if events is not None else []
-        self.archive_hook = None
-        self.archive_prepare_hook = None
-        self.archive_invalidate_hook = None
-        self.archive_prepare_start_hook = None
-        self.archive_complete_start_hook = None
-        self.archive_markerless_prepare_hook = None
         self.threads = {"athr_source", "athr_child"}
 
     def start(self):
@@ -379,24 +379,9 @@ class _SharedSupervisor:
         self.closed = True
         self.events.append("supervisor.close")
 
-    def configure_stopped_archive_hook(self, hook):
-        self.archive_hook = hook
-
-    def configure_stopped_archive_prepare_hook(self, hook):
-        self.archive_prepare_hook = hook
-
-    def configure_archive_transition_hooks(
-        self,
-        *,
-        invalidate_final,
-        prepare_start,
-        complete_start,
-        prepare_markerless_final,
-    ):
-        self.archive_invalidate_hook = invalidate_final
-        self.archive_prepare_start_hook = prepare_start
-        self.archive_complete_start_hook = complete_start
-        self.archive_markerless_prepare_hook = prepare_markerless_final
+    @property
+    def archive_markerless_prepare_hook(self):
+        return self.archive_policy.markerless_final
 
     def owns(self, thread_id: str) -> bool:
         return thread_id in self.threads
@@ -653,7 +638,9 @@ def _snapshot_app(controller: _SnapshotController):
     return create_app(
         backend=ContainerBackend(image="img"),
         token="sandbox-manager-secret",
-        shared_session_supervisor=_SharedSupervisor(),  # type: ignore[arg-type]
+        shared_session_supervisor=_SharedSupervisor(  # type: ignore[arg-type]
+            archive_policy=ControllerArchivePolicy(controller)  # type: ignore[arg-type]
+        ),
         sandbox_archive_controller=controller,  # type: ignore[arg-type]
     )
 
@@ -756,7 +743,8 @@ async def test_initial_archive_routes_return_only_sanitized_failure_diagnostics(
     path: str,
     extra: dict[str, object],
 ) -> None:
-    supervisor = _SharedSupervisor()
+    archive = _ArchiveService([])
+    supervisor = _SharedSupervisor(archive_policy=ServiceArchivePolicy(archive))  # type: ignore[arg-type]
     unsafe = "https://s3.invalid/private-object?credential=secret s3://private-bucket/private-key"
     failure = SandboxError(unsafe)
     safe = (
@@ -778,7 +766,7 @@ async def test_initial_archive_routes_return_only_sanitized_failure_diagnostics(
         backend=ProcessBackend(acknowledged_unsafe=True),
         token="sandbox_manager-secret",
         shared_session_supervisor=supervisor,  # type: ignore[arg-type]
-        sandbox_archive_service=_ArchiveService([]),  # type: ignore[arg-type]
+        sandbox_archive_service=archive,  # type: ignore[arg-type]
     )
     payload = {
         **_identity(),
@@ -829,8 +817,8 @@ async def test_sandbox_manager_lifespan_preflights_without_a_host_worktree():
 @pytest.mark.asyncio
 async def test_archive_shutdown_quiesces_then_strictly_stops_before_cleanup() -> None:
     events: list[str] = []
-    supervisor = _SharedSupervisor(events=events)
     archive = _ArchiveService(events)
+    supervisor = _SharedSupervisor(events=events, archive_policy=ServiceArchivePolicy(archive))  # type: ignore[arg-type]
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
         token="sandbox-manager-secret",
@@ -856,13 +844,13 @@ async def test_archive_shutdown_surfaces_sanitized_stop_failure_before_closing_s
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     events: list[str] = []
-    supervisor = _SharedSupervisor(events=events)
+    archive = _ArchiveService(events)
+    supervisor = _SharedSupervisor(events=events, archive_policy=ServiceArchivePolicy(archive))  # type: ignore[arg-type]
     unsafe = "https://user:secret@example.com/private-final?token=leaked"
     provider_error = RuntimeError(unsafe)
     archive_error = SandboxError("final sandbox archive could not be stored")
     archive_error.__cause__ = provider_error
     supervisor.shutdown_error = archive_error
-    archive = _ArchiveService(events)
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
         token="sandbox-manager-secret",
@@ -904,8 +892,10 @@ async def test_disabled_dynamic_policy_still_strictly_stops_on_clean_sandbox_man
     None
 ):
     events: list[str] = []
-    supervisor = _SharedSupervisor(events=events)
     controller = _ArchiveController(events)
+    supervisor = _SharedSupervisor(
+        events=events, archive_policy=ControllerArchivePolicy(controller)
+    )  # type: ignore[arg-type]
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
         token="sandbox-manager-secret",

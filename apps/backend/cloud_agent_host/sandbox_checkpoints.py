@@ -191,9 +191,6 @@ class SandboxCheckpointCapture:
         self._now = now
         self._base_layers: dict[str, frozenset[str]] = {}
         self._base_lock = threading.Lock()
-        #: Where a receipt learns its group's start fence; the sandbox manager
-        #: wires its supervisor in once both exist.
-        self.start_seq_for: Callable[[str], int | None] = lambda _sandbox_id: None
 
     def receipt_start_seq(
         self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection
@@ -217,14 +214,17 @@ class SandboxCheckpointCapture:
         upload: Callable[..., SandboxArchiveReceipt],
         max_bytes: int,
         deadline: float,
+        start_seq: int | None = None,
     ) -> SandboxCheckpointReceipt:
-        """Checkpoint one exact stopped container and remember its receipt."""
+        """Checkpoint one exact stopped container and remember its receipt.
+
+        ``start_seq`` is the start fence of the run the stop ended.
+        """
         if inspection.running:
             raise SandboxCheckpointError("refusing to checkpoint a running sandbox")
         base_image = spec.sandbox_image_digest or inspection.image
         if not base_image:
             raise SandboxCheckpointError("sandbox checkpoint needs its base image identity")
-        start_seq = self.start_seq_for(spec.sandbox_id)
         checkpoint_id = secrets.token_hex(16)
         reference = checkpoint_image_reference(spec.sandbox_id, checkpoint_id)
         durations: dict[str, int] = {}

@@ -6,6 +6,7 @@ import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_chat_group_network import _world
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
@@ -379,10 +380,10 @@ def test_guard_exact_stops_a_stopping_group_then_its_archive_finishes() -> None:
         prepare_entered.set()
         assert finish_prepare.wait(timeout=5)
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=lambda _spec, inspection, _members: archived.append(
+        prepare_final=prepare,
+        stopped=lambda _spec, inspection, _members: archived.append(
             (inspection.running, inspection.networks)
         ),
     )

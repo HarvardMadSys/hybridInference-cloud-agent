@@ -49,6 +49,12 @@ from cloud_agent_host.chat_sandbox import (
 from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.environment_tests import environment_run_spec
+from cloud_agent_host.group_archive_policy import (
+    ControllerArchivePolicy,
+    GroupArchivePolicy,
+    NullArchivePolicy,
+    ServiceArchivePolicy,
+)
 from cloud_agent_host.guest_observer import (
     GuestObservation,
     add_process_counts,
@@ -1438,86 +1444,25 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             initial_upload_dir=state_dir / INITIAL_UPLOAD_DIRNAME,
         )
     archive_boundary = archive_service or archive_controller
+    archive_policy: GroupArchivePolicy = (
+        ControllerArchivePolicy(archive_controller)
+        if archive_controller is not None
+        else ServiceArchivePolicy(archive_service)
+        if archive_service is not None
+        else NullArchivePolicy()
+    )
     if shared_supervisor is None:
         if retained_manager is None:
             raise ValueError("shared-live chat sandboxes require the container or kata backend")
         shared_supervisor = SharedChatSessionSupervisor(
             retained_manager,
             idle_timeout_s=chat_idle_timeout_s,
-            stopped_archive_prepare_hook=(
-                archive_controller.prepare_final if archive_controller is not None else None
-            ),
-            stopped_archive_invalidate_hook=(
-                archive_controller.invalidate_final if archive_controller is not None else None
-            ),
-            starting_archive_prepare_hook=(
-                archive_controller.prepare_start if archive_controller is not None else None
-            ),
-            started_archive_hook=(
-                archive_controller.complete_start if archive_controller is not None else None
-            ),
-            markerless_final_prepare_hook=(
-                archive_controller.prepare_markerless_final
-                if archive_controller is not None
-                else None
-            ),
-            stopped_archive_hook=(
-                archive_boundary.queue_final if archive_boundary is not None else None
-            ),
+            archive_policy=archive_policy,
         )
-    if archive_boundary is not None:
-        configure_archive_hook = getattr(
-            shared_supervisor,
-            "configure_stopped_archive_hook",
-            None,
-        )
-        configure_archive_prepare_hook = getattr(
-            shared_supervisor,
-            "configure_stopped_archive_prepare_hook",
-            None,
-        )
-        configure_archive_transition_hooks = getattr(
-            shared_supervisor,
-            "configure_archive_transition_hooks",
-            None,
-        )
-        final_archive_prepare_hook = getattr(archive_boundary, "prepare_final", None)
-        final_archive_hook = getattr(archive_boundary, "queue_final", None)
-        if not callable(configure_archive_hook) or not callable(final_archive_hook):
-            raise ValueError("configured sandbox archives require a shared supervisor archive hook")
-        if callable(final_archive_prepare_hook):
-            if not callable(configure_archive_prepare_hook):
-                raise ValueError(
-                    "dynamic sandbox archives require a shared supervisor prepare hook"
-                )
-            configure_archive_prepare_hook(final_archive_prepare_hook)
-        if archive_controller is not None:
-            if not callable(configure_archive_transition_hooks):
-                raise ValueError(
-                    "dynamic sandbox archives require shared supervisor transition hooks"
-                )
-            configure_archive_transition_hooks(
-                invalidate_final=archive_controller.invalidate_final,
-                prepare_start=archive_controller.prepare_start,
-                complete_start=archive_controller.complete_start,
-                prepare_markerless_final=archive_controller.prepare_markerless_final,
-            )
-            if hasattr(shared_supervisor, "checkpoint_restore_hook"):
-                # A moved group is recreated from its checkpoint with the
-                # same archive policy and credentials that captured it.
-                shared_supervisor.checkpoint_restore_hook = archive_controller.restore_checkpoint
-            if hasattr(shared_supervisor, "environment_snapshot_hook"):
-                shared_supervisor.environment_snapshot_hook = (
-                    archive_controller.load_environment_snapshot
-                )
-        configure_archive_hook(final_archive_hook)
-    start_seq_for = getattr(shared_supervisor, "start_seq_for", None)
-    if checkpoint_capture is not None and callable(start_seq_for):
-        # A receipt names the start fence of the run its stop ended.
-        checkpoint_capture.start_seq_for = start_seq_for
-        # A group found again after a restart seals the fence of the last
-        # checkpoint this host kept of its container.
-        shared_supervisor.checkpoint_seq_for = checkpoint_capture.receipt_start_seq
+    elif archive_boundary is not None and shared_supervisor.archive_policy != archive_policy:
+        # An injected supervisor must already hold this app's archive: clean
+        # stops would otherwise never reach the archive it starts and closes.
+        raise ValueError("an injected shared supervisor must hold the sandbox archive policy")
     terminals = _TerminalManager(
         idle_ttl_s=idle_ttl_s,
         hard_ttl_s=hard_ttl_s,

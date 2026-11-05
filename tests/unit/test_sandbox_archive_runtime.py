@@ -885,7 +885,7 @@ class _CheckpointingService(_Service):
         self.checkpoint_calls: list[tuple[str, int]] = []
         self.fail_checkpoint = False
 
-    def capture_checkpoint(self, spec, _inspection, _members) -> Any:
+    def capture_checkpoint(self, spec, _inspection, _members, *, start_seq=None) -> Any:
         self.checkpoint_calls.append((spec.sandbox_id, spec.generation))
         if self.fail_checkpoint:
             raise RuntimeError("commit failed")

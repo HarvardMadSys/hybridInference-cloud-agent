@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_shared_session_supervisor import (
     ASGITransport,
     AsyncClient,
@@ -87,10 +88,10 @@ def test_a_request_after_a_failed_start_completion_is_proved_exactly_once(entryp
         if completions == 1:
             raise RuntimeError("marker clear failed")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=lambda *_args: None,
-        started_archive_hook=complete,
+        prepare_start=lambda *_args: None,
+        started=complete,
     )
     supervisor.register_manifest(_spec(), _members())
     manager.stop(_spec(), release_networks=False)

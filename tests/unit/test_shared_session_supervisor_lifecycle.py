@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_shared_session_supervisor import (
     _HELD_S,
     _UNBLOCKED_S,
@@ -64,7 +65,7 @@ def test_http_observations_and_runner_heartbeats_do_not_wait_for_final_archive(m
         entered.set()
         assert release.wait(timeout=_HELD_S)
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     supervisor.register_manifest(_spec(), _members())
     manager.items[orphan.container_name] = manager._inspection(orphan, running=True)
     manager.read_running_final_archive_marker = lambda *_args, **_kwargs: b"pending"
@@ -150,7 +151,7 @@ def test_background_recovery_drains_queued_groups_before_quiesce_returns(replace
             entered.set()
             assert release.wait(timeout=_HELD_S)
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     calls = ThreadPoolExecutor(max_workers=1)
     try:
         rows = supervisor.list(background_recovery=True)
@@ -199,7 +200,7 @@ def test_background_final_archive_failure_preserves_fence_and_retries():
         if len(attempts) == 1:
             raise SandboxError("upload failed")
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     try:
         supervisor.list(background_recovery=True)
         with supervisor._condition:
@@ -904,13 +905,11 @@ def _fenced_supervisor(
     """A supervisor whose stops record the label their checkpoint would carry."""
     manager = _Manager()
     labels: list[int | None] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda spec, *_args: labels.append(
-            supervisor.start_seq_for(spec.sandbox_id)
-        ),
+        stopped=lambda spec, *_args: labels.append(supervisor.start_seq_for(spec.sandbox_id)),
+        checkpoint_seq=lambda _spec, _inspection: sealed_by_checkpoint,
     )
-    supervisor.checkpoint_seq_for = lambda _spec, _inspection: sealed_by_checkpoint
     supervisor.register_manifest(_spec(), _members())
     return manager, supervisor, labels
 

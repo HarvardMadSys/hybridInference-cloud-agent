@@ -35,6 +35,7 @@ from tests.unit.test_shared_session_supervisor import _FinalMarkerManager, _memb
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent.storage._sql.hosts import superseded_removal_request_id
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, ChatSandboxStatus
+from cloud_agent_host.group_archive_policy import ControllerArchivePolicy
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import (
@@ -264,11 +265,8 @@ def _host(tmp_path, docker: _Docker, bucket: _Bucket) -> _Host:
         # The test sweeps itself; the background sweep never comes round.
         sweep_interval_s=3_600,
         clock=lambda: now[0],
-        stopped_archive_prepare_hook=controller.prepare_final,
-        stopped_archive_hook=controller.queue_final,
+        archive_policy=ControllerArchivePolicy(controller),
     )
-    capture.start_seq_for = supervisor.start_seq_for
-    supervisor.checkpoint_seq_for = capture.receipt_start_seq
     app = create_app(
         token=_TOKEN,
         backend=ProcessBackend(),

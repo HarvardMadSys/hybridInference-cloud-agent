@@ -131,6 +131,8 @@ class _ArchiveService(Protocol):
         spec: ChatSandboxSpec,
         inspection: ChatSandboxInspection,
         members: tuple[SharedMemberManifest, ...],
+        *,
+        start_seq: int | None = None,
     ) -> SandboxCheckpointReceipt: ...
 
     def restore_checkpoint(self, sandbox_id: str, restore: CheckpointRestore) -> str: ...
@@ -971,8 +973,13 @@ class SandboxArchiveController:
         spec: ChatSandboxSpec,
         inspection: ChatSandboxInspection,
         members: tuple[SharedMemberManifest, ...],
+        *,
+        start_seq: int | None = None,
     ) -> None:
-        """Archive a clean stop, pinning failed retries to their original service."""
+        """Archive a clean stop, pinning failed retries to their original service.
+
+        ``start_seq`` labels the run the stop ended; its checkpoint records it.
+        """
         key = (spec.sandbox_id, spec.generation, inspection.container_id)
         slot = self._acquire_final_slot(spec, inspection, key)
         if slot is None:
@@ -997,7 +1004,7 @@ class SandboxArchiveController:
                 expected_container_id=inspection.container_id,
             )
             if slot.policy.checkpoints_enabled and self._checkpoint_capture is not None:
-                self._capture_checkpoint(slot, spec, inspection, members)
+                self._capture_checkpoint(slot, spec, inspection, members, start_seq)
             succeeded = True
         finally:
             services_to_close: list[_ArchiveService]
@@ -1017,6 +1024,7 @@ class SandboxArchiveController:
         spec: ChatSandboxSpec,
         inspection: ChatSandboxInspection,
         members: tuple[SharedMemberManifest, ...],
+        start_seq: int | None,
     ) -> None:
         """Checkpoint a clean stop whose final archive is already durable.
 
@@ -1024,7 +1032,9 @@ class SandboxArchiveController:
         condition of stopping it: a failure is logged and the stop completes.
         """
         try:
-            receipt = slot.service.capture_checkpoint(spec, inspection, members)
+            receipt = slot.service.capture_checkpoint(
+                spec, inspection, members, start_seq=start_seq
+            )
         except Exception as exc:
             logger.warning(
                 "sandbox checkpoint failed; the clean stop still completes",
@@ -1047,6 +1057,14 @@ class SandboxArchiveController:
                 "durations_ms": receipt.durations_ms,
             },
         )
+
+    def checkpoint_start_seq(
+        self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection
+    ) -> int | None:
+        """The start fence of this host's last checkpoint of exactly this container."""
+        if self._checkpoint_capture is None:
+            return None
+        return self._checkpoint_capture.receipt_start_seq(spec, inspection)
 
     def restore_checkpoint(self, sandbox_id: str, restore: CheckpointRestore) -> str:
         """Load a moved group's checkpoint image with the currently applied policy.
