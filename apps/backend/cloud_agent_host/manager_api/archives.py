@@ -18,7 +18,7 @@ from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI res
     SharedInitialArchiveStatusRequest,
 )
 from cloud_agent_host.manager_api.routing import route
-from cloud_agent_host.shared_session_supervisor import archive_failure_http_detail
+from cloud_agent_host.supervisor.shared_session_supervisor import archive_failure_http_detail
 from cloud_agent_host.workspace_git import COMMIT_SHA as _COMMIT_SHA
 
 if TYPE_CHECKING:

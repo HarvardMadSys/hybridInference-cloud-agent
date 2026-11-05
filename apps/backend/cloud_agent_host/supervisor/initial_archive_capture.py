@@ -24,17 +24,17 @@ from cloud_agent_host.container.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.container.sandbox import SandboxError
-from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,
 )
+from cloud_agent_host.supervisor.group_lifecycle import Operation
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
-    from cloud_agent_host.shared_session_state import (
+    from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.supervisor.shared_session_state import (
         SharedMemberManifest,
         SharedSessionState,
         _Group,

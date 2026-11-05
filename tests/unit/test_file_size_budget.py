@@ -49,7 +49,7 @@ TEST_BASELINE = {
     "tests/servers/test_admin_compute.py": 2089,
     "tests/servers/test_agent_jobs_api.py": 5993,
     "tests/unit/test_agent_runner.py": 2330,
-    "tests/unit/test_agent_sandbox_manager.py": 3437,
+    "tests/unit/test_agent_sandbox_manager.py": 3440,
     "tests/unit/test_chat_sandbox.py": 3146,
     "tests/unit/test_compute_providers.py": 2002,
     "tests/unit/test_compute_reconcile.py": 2291,
@@ -58,7 +58,7 @@ TEST_BASELINE = {
     "tests/unit/test_mcp_connections_api.py": 3043,
     "tests/unit/test_retained_deploy.py": 2231,
     "tests/unit/test_runner_host_service.py": 2829,
-    "tests/unit/test_shared_session_supervisor.py": 5147,
+    "tests/unit/test_shared_session_supervisor.py": 5150,
 }
 
 

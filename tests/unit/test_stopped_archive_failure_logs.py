@@ -36,7 +36,7 @@ from cloud_agent_host.session_lifecycle import SessionBusy
 from cloud_agent_shared.logging_utils import JsonLogFormatter
 
 if TYPE_CHECKING:
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 _FINAL = "sandbox_final_archive_failed"
 _RELEASE = "sandbox_final_network_release_failed"

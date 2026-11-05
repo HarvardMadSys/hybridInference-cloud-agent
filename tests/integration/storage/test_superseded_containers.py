@@ -52,8 +52,8 @@ from cloud_agent_host.archive.sandbox_deletion_backup import (
     SandboxDeletionBackupService,
 )
 from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.shared_session_state import SharedMemberManifest
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, RESTORE_RETRY_DELAYS_S
 
 if TYPE_CHECKING:

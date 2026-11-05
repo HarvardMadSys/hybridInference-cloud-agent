@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
-from cloud_agent_host import shared_admission_proof
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
@@ -26,7 +25,8 @@ from cloud_agent_host.container.chat_sandbox import (
 from cloud_agent_host.container.chat_sandbox_exec import network_proof, standing_network_proof
 from cloud_agent_host.container.exact_container import ExactContainer
 from cloud_agent_host.container.sandbox import SandboxError
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor import shared_admission_proof
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 STARTED_AT = "2026-11-03T10:00:00.000000000Z"
 

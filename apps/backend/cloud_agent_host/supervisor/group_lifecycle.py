@@ -26,7 +26,7 @@ from cloud_agent_host.session_lifecycle import SessionBusy
 
 if TYPE_CHECKING:
     from cloud_agent_host.container.sandbox import SandboxError
-    from cloud_agent_host.shared_session_state import _Group
+    from cloud_agent_host.supervisor.shared_session_state import _Group
 
 
 class Operation(Enum):

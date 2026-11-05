@@ -57,10 +57,10 @@ from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxStatus,
 )
 from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.group_archive_policy import ControllerArchivePolicy
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionLeaseLost
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.group_archive_policy import ControllerArchivePolicy
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 _TOKEN = "host-secret"

@@ -13,7 +13,7 @@ from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 from cloud_agent_host.container.chat_sandbox_models import CHAT_PROBE_LABEL
 from cloud_agent_host.environment_tests import environment_run_spec
 from cloud_agent_host.network.guarded_workloads import running_guarded_workloads
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.errors import SandboxError
 
 

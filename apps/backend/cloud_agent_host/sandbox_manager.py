@@ -38,12 +38,6 @@ from cloud_agent_host.archive.sandbox_initial_uploads import INITIAL_UPLOAD_DIRN
 from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
 from cloud_agent_host.container.sandbox import ContainerBackend, build_backend_from_env
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.group_archive_policy import (
-    ControllerArchivePolicy,
-    GroupArchivePolicy,
-    NullArchivePolicy,
-    ServiceArchivePolicy,
-)
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.manager_api.archives import ArchiveRoutes
 from cloud_agent_host.manager_api.calls import _CommandSlots, _EndpointLifecycleCalls
@@ -70,7 +64,13 @@ from cloud_agent_host.manager_api.workspaces import WorkspaceRoutes
 from cloud_agent_host.observe.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.sandbox_incident_routes import install_incident_routes, sandbox_incidents_for
 from cloud_agent_host.session_lifecycle import DEFAULT_CHAT_IDLE_TIMEOUT_S
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.group_archive_policy import (
+    ControllerArchivePolicy,
+    GroupArchivePolicy,
+    NullArchivePolicy,
+    ServiceArchivePolicy,
+)
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_host.terminal_session import _TerminalLimits
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,

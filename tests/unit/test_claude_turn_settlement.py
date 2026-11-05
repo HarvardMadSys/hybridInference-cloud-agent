@@ -36,7 +36,6 @@ from cloud_agent_host.drivers import (
     TurnInput,
     TurnResult,
 )
-from cloud_agent_host.member_sessions import SharedTurnTelemetry
 from cloud_agent_host.observe.guest_observer import GuestObservation
 from cloud_agent_host.resident_transport import ResidentTurn
 from cloud_agent_host.runtimes import EMPTY_RUNTIME_MCP_CONFIG, ClaudeCodeRuntime
@@ -45,6 +44,7 @@ from cloud_agent_host.runtimes.claude.background import notified_tasks
 from cloud_agent_host.runtimes.claude.session import ClaudeCodeLiveSession
 from cloud_agent_host.runtimes.live import driver_for
 from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
+from cloud_agent_host.supervisor.member_sessions import SharedTurnTelemetry
 
 if TYPE_CHECKING:
     from collections.abc import Callable
