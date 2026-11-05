@@ -297,7 +297,7 @@ def test_a_privileged_helper_enters_a_proven_kata_container_by_id(monkeypatch):
         monkeypatch, runtime=KATA_RUNTIME, container_runtime=KATA_RUNTIME
     )
 
-    manager.exact.guest_root_exec(spec, ["true"])
+    manager._kata_privileged_exec(spec, ["true"])
 
     assert docker.inspections() == []
     assert docker.calls == [
@@ -319,7 +319,7 @@ def test_a_privileged_helper_is_still_refused_a_proven_container_not_under_kata(
     manager, docker, spec = _proven(monkeypatch, runtime=KATA_RUNTIME, container_runtime="runc")
 
     with pytest.raises(SandboxError, match="inspected Kata container"):
-        manager.exact.guest_root_exec(spec, ["true"])
+        manager._kata_privileged_exec(spec, ["true"])
 
     assert docker.calls == []
 
@@ -334,6 +334,20 @@ def test_a_proof_names_one_spec_and_goes_with_its_container():
     assert proven.get(_spec(generation=4)) is None, "another generation inspects first"
     proven.forget(spec)
     assert proven.get(spec) is None
+
+
+def test_only_an_inspection_of_exactly_the_spec_is_recorded_as_its_proof(monkeypatch):
+    manager, _docker, spec = _proven(monkeypatch)
+    proven = manager.exact.proven_container(spec)
+    assert proven is not None
+    manager.exact.forget_proof(spec)
+    other = _spec(generation=4)
+
+    with pytest.raises(SandboxError, match="outside this chat/generation"):
+        manager.exact.record_proof(other, proven)
+    assert manager.exact.proven_container(other) is None
+    assert manager.exact.record_proof(spec, proven) is proven
+    assert manager.exact.proven_container(spec) is proven
 
 
 def test_creating_a_container_forgets_the_proof_its_name_held(monkeypatch):
@@ -352,7 +366,7 @@ def test_creating_a_container_forgets_the_proof_its_name_held(monkeypatch):
 
     manager.create(spec)
 
-    assert manager.exact.proven.get(spec) is None
+    assert manager.exact._proven.get(spec) is None
 
 
 # ── the host listing ──────────────────────────────────────────────────

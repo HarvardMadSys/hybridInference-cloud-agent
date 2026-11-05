@@ -176,6 +176,18 @@ class ChatNetworkContainers(Protocol):
         """Inspect a container without replacing its immutable identity."""
         ...
 
+    def sync_guest_network(
+        self, spec: ChatSandboxSpec, addresses: dict[str, str], resolver: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Write the guest's relay hosts and its one resolver, as Kata guest root.
+
+        The group network's one guest-root operation, with no argv of its own.
+        Running a helper as guest root is not one of :attr:`exact`'s
+        operations: only the sandbox manager has it
+        (:mod:`cloud_agent_host.guest_root_exec`).
+        """
+        ...
+
     def exec_capture(
         self,
         spec: ChatSandboxSpec,
@@ -458,42 +470,8 @@ class ChatSandboxNetwork:
             return
         if addresses is None:
             addresses = self.relay_addresses(network)
-        script = (
-            "import fcntl, ipaddress, json, os, stat, sys\n"
-            "entries=json.loads(sys.argv[1])\n"
-            "resolver=str(ipaddress.IPv4Address(sys.argv[2]))\n"
-            "def protected(f, name):\n"
-            " s=os.fstat(f.fileno())\n"
-            " if not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022:\n"
-            "  raise RuntimeError('guest '+name+' is not root-owned and protected')\n"
-            "begin='# BEGIN FREEINFERENCE RELAYS\\n'\n"
-            "end='# END FREEINFERENCE RELAYS\\n'\n"
-            "fd=os.open('/etc/hosts', os.O_RDWR | os.O_NOFOLLOW)\n"
-            "with os.fdopen(fd, 'r+') as f:\n"
-            " fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
-            " protected(f, 'hosts file')\n"
-            " original=f.read(65537)\n"
-            " text=original\n"
-            " if len(text)>65536: raise RuntimeError('guest hosts file is too large')\n"
-            " if begin in text:\n"
-            "  before, rest=text.split(begin,1)\n"
-            "  if end not in rest: raise RuntimeError('invalid managed relay block')\n"
-            "  text=before+rest.split(end,1)[1]\n"
-            " text=text.rstrip()+'\\n'+begin\n"
-            " text+=''.join(ip+' '+host+'\\n' for host,ip in sorted(entries.items()))\n"
-            " if original != text+end:\n"
-            "  f.seek(0); f.write(text+end); f.truncate()\n"
-            "fd=os.open('/etc/resolv.conf', os.O_RDWR | os.O_NOFOLLOW)\n"
-            "with os.fdopen(fd, 'r+') as f:\n"
-            " fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
-            " protected(f, 'resolv.conf')\n"
-            " desired='nameserver '+resolver+'\\n'\n"
-            " if f.read(len(desired)+1) != desired:\n"
-            "  f.seek(0); f.write(desired); f.truncate()\n"
-        )
         resolver = str(self._network().dns_server)
-        argv = ["python3", "-I", "-c", script, json.dumps(addresses), resolver]
-        result = self._containers.exact.guest_root_exec(spec, argv, timeout_s=30)
+        result = self._containers.sync_guest_network(spec, addresses, resolver)
         if result.returncode != 0:
             raise SandboxError("Kata guest network sync failed: " + result.stderr[:300])
 

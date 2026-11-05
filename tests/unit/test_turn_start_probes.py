@@ -67,7 +67,7 @@ def _manager(monkeypatch, answers: list[int] | None = None):
 def test_a_reaper_found_in_a_proven_container_is_not_probed_again(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
 
     manager.ensure_member_process_reaper(spec)
     manager.ensure_member_process_reaper(spec)
@@ -80,7 +80,7 @@ def test_an_unproven_container_is_probed_every_time(monkeypatch):
     """Without the exact container a proof names, there is nothing to remember it by."""
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(_spec(generation=4), _running("container-other"))
+    manager.exact._proven.record(_spec(generation=4), _running("container-other"))
 
     manager.ensure_member_process_reaper(spec)
     manager.ensure_member_process_reaper(spec)
@@ -91,11 +91,11 @@ def test_an_unproven_container_is_probed_every_time(monkeypatch):
 def test_a_replacement_under_the_same_name_is_probed_again(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
     manager.ensure_member_process_reaper(spec)
 
-    manager.exact.proven.forget(spec)
-    manager.exact.proven.record(spec, _running("container-two"))
+    manager.exact._proven.forget(spec)
+    manager.exact._proven.record(spec, _running("container-two"))
     manager.ensure_member_process_reaper(spec)
     manager.ensure_member_process_reaper(spec)
 
@@ -106,13 +106,13 @@ def test_forgetting_a_container_forgets_what_was_found_in_it(monkeypatch):
     manager, _execs = _manager(monkeypatch)
     spec = _spec()
     first = _running("container-one")
-    manager.exact.proven.record(spec, first)
+    manager.exact._proven.record(spec, first)
     manager.ensure_member_process_reaper(spec)
-    assert manager.exact.proven.holds_helper(first, MEMBER_REAPER_TARGET)
+    assert manager.exact._proven.holds_helper(first, MEMBER_REAPER_TARGET)
 
-    manager.exact.proven.forget(spec)
+    manager.exact._proven.forget(spec)
 
-    assert not manager.exact.proven.holds_helper(first, MEMBER_REAPER_TARGET)
+    assert not manager.exact._proven.holds_helper(first, MEMBER_REAPER_TARGET)
 
 
 @pytest.fixture
@@ -127,7 +127,7 @@ def test_an_installed_reaper_is_remembered(monkeypatch, reaper_source):
     manager, execs = _manager(monkeypatch, answers=[1, 0])
     spec = _spec()
     proven = _running("container-one")
-    manager.exact.proven.record(spec, proven)
+    manager.exact._proven.record(spec, proven)
     monkeypatch.setattr(manager.exact, "require", lambda _spec: proven)
     monkeypatch.setattr(
         manager.exact, "run", lambda argv, **_kwargs: SimpleNamespace(returncode=0, stderr="")
@@ -143,7 +143,7 @@ def test_a_failed_install_is_not_remembered(monkeypatch, reaper_source):
     manager, execs = _manager(monkeypatch, answers=[1, 1, 0, 0])
     spec = _spec()
     proven = _running("container-one")
-    manager.exact.proven.record(spec, proven)
+    manager.exact._proven.record(spec, proven)
     monkeypatch.setattr(manager.exact, "require", lambda _spec: proven)
     monkeypatch.setattr(
         manager.exact, "run", lambda argv, **_kwargs: SimpleNamespace(returncode=0, stderr="")
@@ -160,7 +160,7 @@ def test_a_known_reaper_does_not_wait_behind_an_install_into_its_container(monke
     """Runtime and MCP installs hold the container's install lock for minutes."""
     manager, _execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
     manager.ensure_member_process_reaper(spec)
 
     with install_lock(spec.container_name):

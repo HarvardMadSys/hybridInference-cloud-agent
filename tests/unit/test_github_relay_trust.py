@@ -20,7 +20,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
 )
-from cloud_agent_host.exact_container import ProvenContainers
+from cloud_agent_host.exact_container import ExactContainer
 from cloud_agent_host.github_relay_trust import (
     _INSTALL,
     CA_BUNDLE_PATH,
@@ -56,9 +56,11 @@ def _fake_manager(exec_results):
         returncode, stderr = exec_results.pop(0) if exec_results else (0, b"")
         return subprocess.CompletedProcess(argv, returncode, b"", stderr)
 
-    proven = ProvenContainers()
-    manager = SimpleNamespace(exact=SimpleNamespace(proven=proven), exec_capture=exec_capture)
-    return manager, proven, execs
+    # Its proofs are recorded straight into the store: these stand-ins are no
+    # container an inspection could verify.
+    exact = ExactContainer(SimpleNamespace(), state_roots=("/workspace",))  # type: ignore[arg-type]
+    manager = SimpleNamespace(exact=exact, exec_capture=exec_capture)
+    return manager, exact._proven, execs
 
 
 def _relay(monkeypatch, tmp_path, pem=_CA):

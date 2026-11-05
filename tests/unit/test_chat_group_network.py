@@ -1102,8 +1102,8 @@ def test_a_kata_guest_is_given_its_relays_and_the_one_resolver(monkeypatch):
     docker.connect(docker.network(name)["Id"], "sandbox-container", [])
     captured: list[list[str]] = []
     monkeypatch.setattr(
-        manager.exact,
-        "guest_root_exec",
+        manager,
+        "_kata_privileged_exec",
         lambda _spec, argv, **_kwargs: (
             captured.append(argv) or subprocess.CompletedProcess(argv, 0, "", "")
         ),
@@ -1131,8 +1131,8 @@ def _running_kata_group(monkeypatch):
     docker.connect(network["Id"], "sandbox-container", [])
     synced: list[dict[str, str]] = []
     monkeypatch.setattr(
-        manager.exact,
-        "guest_root_exec",
+        manager,
+        "_kata_privileged_exec",
         lambda _spec, argv, **_kwargs: (
             synced.append(json.loads(argv[4])) or subprocess.CompletedProcess(argv, 0, "", "")
         ),
@@ -1325,8 +1325,8 @@ def test_attach_discards_network_evidence_from_before_connection(monkeypatch, ra
 
     monkeypatch.setattr(manager.exact, "run", connect_then_change)
     monkeypatch.setattr(
-        manager.exact,
-        "guest_root_exec",
+        manager,
+        "_kata_privileged_exec",
         lambda _spec, argv, **_kwargs: (
             synced.append(json.loads(argv[4])) or subprocess.CompletedProcess(argv, 0, "", "")
         ),
@@ -1376,7 +1376,7 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
             return subprocess.CompletedProcess(argv, 1, "", str(exc))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(manager.exact, "guest_root_exec", run_script)
+    monkeypatch.setattr(manager, "_kata_privileged_exec", run_script)
     current = manager.exact.require(spec)
     addresses = {"agent-mcp": "10.240.9.3"}
     manager._network_lifecycle._sync_kata_guest_network(spec, current, addresses)

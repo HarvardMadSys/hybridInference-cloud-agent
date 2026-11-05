@@ -118,6 +118,7 @@ from cloud_agent_host.guest_observer import (
 )
 from cloud_agent_host.guest_observer_locks import GuestObserverLocks
 from cloud_agent_host.guest_observer_scripts import WINDOW_DELTA_SCRIPT
+from cloud_agent_host.guest_root_exec import GuestRootExec
 from cloud_agent_host.install_locks import install_lock
 from cloud_agent_host.member_preparation import TOOL_HOOKS_SCRIPT, MemberStep, run_member_steps
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
@@ -400,7 +401,7 @@ _INIT_COMMAND = (
 )
 
 
-class ChatSandboxManager:
+class ChatSandboxManager(GuestRootExec):
     """Create and operate retained chat containers through Docker only."""
 
     def __init__(self, backend: ContainerBackend) -> None:
@@ -621,7 +622,7 @@ class ChatSandboxManager:
             # `docker start`, and that is what classifies the path.
             self.exact.verify_identity(existing, spec)
             return existing
-        self.exact.proven.forget(spec)
+        self.exact.forget_proof(spec)
         command = self.build_create_command(
             spec,
             image=image,
@@ -719,7 +720,7 @@ class ChatSandboxManager:
             raise SandboxError(
                 "superseded chat sandbox could not be removed: " + removed.stderr.strip()[:300]
             )
-        self.exact.proven.forget(spec)
+        self.exact.forget_proof(spec)
         checkpoint_id = labels.get(CHAT_CHECKPOINT_LABEL)
         if checkpoint_id and checkpoint_id != keep_checkpoint:
             self.remove_checkpoint_image(spec, checkpoint_id)
@@ -885,7 +886,7 @@ class ChatSandboxManager:
         result = self.exact.run([self.backend.docker_binary, "rm", container_id], timeout=120)
         if result.returncode:
             raise SandboxError("Environment test cleanup failed")
-        self.exact.proven.forget(spec)
+        self.exact.forget_proof(spec)
 
     def remove_stopped_archived(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
         """Remove only a verified archive's exact stopped container, without force."""
@@ -898,7 +899,7 @@ class ChatSandboxManager:
             raise SandboxError("archived sandbox removal failed")
         if self.inspect(container_id) is not None:
             raise SandboxError("archived sandbox still exists after removal")
-        self.exact.proven.forget(spec)
+        self.exact.forget_proof(spec)
         # Remove first, without force: a start after the stopped fence makes
         # Docker refuse removal. Generic stop/network release before rm could
         # stop a newly running original and discard post-backup writes.
@@ -1067,7 +1068,7 @@ class ChatSandboxManager:
                 self._network_lifecycle._sync_kata_guest_network(
                     spec, current, network_snapshot.addresses
                 )
-            return self.exact.proven.record(spec, current)
+            return self.exact.record_proof(spec, current)
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
         if current.status is ChatSandboxStatus.DEAD:
@@ -1159,7 +1160,7 @@ class ChatSandboxManager:
         verified = self.exact.require(spec)
         if verified.container_id != container_id:
             raise RetainedChatLost("chat sandbox container identity changed during start")
-        return self.exact.proven.record(spec, verified)
+        return self.exact.record_proof(spec, verified)
 
     def stop(
         self,
@@ -1267,7 +1268,7 @@ class ChatSandboxManager:
             )
         with substage(observer, "guest_network_sync"):
             self._network_lifecycle._sync_kata_guest_network(spec, current, snapshot.addresses)
-        self.exact.proven.record(spec, current)
+        self.exact.record_proof(spec, current)
 
     def build_exec_command(
         self,
@@ -1466,11 +1467,11 @@ class ChatSandboxManager:
     def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
         """Install the immutable helper into retained pre-upgrade containers.
 
-        Found or installed once per proven container (``ProvenContainers.note_helper``),
+        Found or installed once per proven container (``ExactContainer.note_helper``),
         then not probed again on each turn's census and reap.
         """
-        proven = self.exact.proven.get(spec)
-        if self.exact.proven.holds_helper(proven, MEMBER_REAPER_TARGET):
+        proven = self.exact.proven_container(spec)
+        if self.exact.holds_helper(proven, MEMBER_REAPER_TARGET):
             return
         with install_lock(spec.container_name):
             probe = self.exec_capture(
@@ -1488,7 +1489,7 @@ class ChatSandboxManager:
                 user_gid=0,
             )
             if probe.returncode == 0:
-                self.exact.proven.note_helper(proven, MEMBER_REAPER_TARGET)
+                self.exact.note_helper(proven, MEMBER_REAPER_TARGET)
                 return
             current = self.exact.require(spec)
             if not current.running:
@@ -1543,7 +1544,7 @@ class ChatSandboxManager:
                     "member-process-reaper compatibility activation failed: "
                     + installed.stderr.decode("utf-8", "replace")[:300]
                 )
-            self.exact.proven.note_helper(proven, MEMBER_REAPER_TARGET)
+            self.exact.note_helper(proven, MEMBER_REAPER_TARGET)
 
     def ensure_codex_mcp_policy(self, spec: ChatSandboxSpec, base_url: str) -> None:
         """Allow only this deployment's relay before starting a Codex member."""
@@ -1885,7 +1886,7 @@ class ChatSandboxManager:
             pidfile,
         ]
         result = (
-            self.exact.guest_root_exec(spec, argv, timeout_s=20)
+            self._kata_privileged_exec(spec, argv, timeout_s=20)
             if self.backend.runtime == KATA_RUNTIME
             else self.exec_capture(
                 spec,
@@ -2416,7 +2417,7 @@ class ChatSandboxManager:
                     "Kata member process cleanup self-test failed: "
                     + cleanup.stderr.decode("utf-8", "replace")[:300]
                 )
-            observer = self.exact.guest_root_exec(
+            observer = self._kata_privileged_exec(
                 spec, [GUEST_OBSERVER_BINARY, "--self-test"], timeout_s=30
             )
             if observer.returncode != 0:
@@ -2519,20 +2520,10 @@ class ChatSandboxManager:
             )
 
     def _observer_privileged_exec(
-        self,
-        spec: ChatSandboxSpec,
-        argv: builtins.list[str],
-        *,
-        detach: bool = False,
-        timeout_s: float = 30,
+        self, spec: ChatSandboxSpec, argv: builtins.list[str], **options: Any
     ) -> subprocess.CompletedProcess[str]:
         """Keep the observer-only seam explicit for tests and call sites."""
-        return self.exact.guest_root_exec(
-            spec,
-            argv,
-            detach=detach,
-            timeout_s=timeout_s,
-        )
+        return self._kata_privileged_exec(spec, argv, **options)
 
     def _guest_observer_snapshot(
         self,

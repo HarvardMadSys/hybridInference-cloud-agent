@@ -64,7 +64,7 @@ def _manager(monkeypatch, answers: list[int] | None = None):
 def test_a_downloaded_version_found_in_a_proven_container_is_not_probed_again(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
 
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.300")
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.300")
@@ -77,7 +77,7 @@ def test_a_downloaded_version_found_in_a_proven_container_is_not_probed_again(mo
 def test_another_version_has_a_marker_of_its_own(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
 
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.300")
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.301")
@@ -94,10 +94,10 @@ def test_an_unproven_or_replaced_container_is_probed_again(monkeypatch):
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.300")
     assert len(execs) == 2, "without a proven container there is nothing to remember it by"
 
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.300")
-    manager.exact.proven.forget(spec)
-    manager.exact.proven.record(spec, _running("container-two"))
+    manager.exact._proven.forget(spec)
+    manager.exact._proven.record(spec, _running("container-two"))
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.300")
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.300")
 
@@ -107,20 +107,20 @@ def test_an_unproven_or_replaced_container_is_probed_again(monkeypatch):
 def test_a_version_the_image_holds_is_neither_probed_nor_remembered(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    proven = manager.exact.proven.record(spec, _running("container-one"))
+    proven = manager.exact._proven.record(spec, _running("container-one"))
 
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.220")
 
     assert execs == []
-    assert manager.exact.proven._helpers == set()
-    assert not manager.exact.proven.holds_helper(proven, "/opt/runtimes/claude-code/2.1.220")
+    assert manager.exact._proven._helpers == set()
+    assert not manager.exact._proven.holds_helper(proven, "/opt/runtimes/claude-code/2.1.220")
 
 
 def test_only_a_copy_that_succeeded_is_remembered(monkeypatch):
     """The copy itself is ``test_runtime_downloads``'s; here it fails once, then succeeds."""
     manager, _execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
     copies: list[str] = []
 
     def copy(_manager, _spec, runtime_id, version):
@@ -142,7 +142,7 @@ def test_a_known_copy_does_not_wait_behind_an_install_into_its_container(monkeyp
     """Runtime and MCP installs hold the container's install lock for minutes."""
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    proven = manager.exact.proven.record(spec, _running("container-one"))
+    proven = manager.exact._proven.record(spec, _running("container-one"))
     monkeypatch.setattr(manager.exact, "require", lambda _spec: proven)
     manager.ensure_downloaded_runtime(spec, "claude-code", "2.1.300")
     manager.ensure_kilo_mcp_runtime(spec, KILO_MCP_VERSION)
@@ -168,7 +168,7 @@ def test_a_known_copy_does_not_wait_behind_an_install_into_its_container(monkeyp
 def test_kilos_patch_marker_is_probed_once_per_proven_container(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
 
     manager.ensure_kilo_mcp_runtime(spec, KILO_MCP_VERSION)
     manager.ensure_kilo_mcp_runtime(spec, KILO_MCP_VERSION)
@@ -181,7 +181,7 @@ def test_kilos_patch_marker_is_probed_once_per_proven_container(monkeypatch):
 def test_an_unreviewed_kilo_version_is_refused_every_time(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager.exact.proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
 
     for _ in range(2):
         with pytest.raises(SandboxError, match="no reviewed MCP isolation build"):
@@ -192,7 +192,7 @@ def test_an_unreviewed_kilo_version_is_refused_every_time(monkeypatch):
 def test_mcp_adapters_found_in_place_are_not_probed_again(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    proven = manager.exact.proven.record(spec, _running("container-one"))
+    proven = manager.exact._proven.record(spec, _running("container-one"))
     monkeypatch.setattr(manager.exact, "require", lambda _spec: proven)
 
     manager.ensure_mcp_helpers(spec, "opencode")
@@ -221,7 +221,7 @@ def test_an_adapter_is_remembered_with_its_content(monkeypatch):
     """A host that ships other content installs it, and forgets what was there before."""
     manager, execs = _manager(monkeypatch, answers=[0, 1, 0, 1, 0])
     spec = _spec()
-    proven = manager.exact.proven.record(spec, _running("container-one"))
+    proven = manager.exact._proven.record(spec, _running("container-one"))
     monkeypatch.setattr(manager.exact, "require", lambda _spec: proven)
     copies: list[list[str]] = []
     monkeypatch.setattr(
@@ -246,14 +246,14 @@ def test_an_adapter_is_remembered_with_its_content(monkeypatch):
     assert len(execs) == 5
     assert len(copies) == 2
     (current,) = mcp_helpers._helpers("kilo")
-    assert manager.exact.proven.holds_helper(proven, current.key)
-    assert [key for _id, key in manager.exact.proven._helpers] == [current.key]
+    assert manager.exact._proven.holds_helper(proven, current.key)
+    assert [key for _id, key in manager.exact._proven._helpers] == [current.key]
 
 
 def test_a_failed_adapter_install_is_not_remembered(monkeypatch):
     manager, execs = _manager(monkeypatch, answers=[1, 1, 0])
     spec = _spec()
-    proven = manager.exact.proven.record(spec, _running("container-one"))
+    proven = manager.exact._proven.record(spec, _running("container-one"))
     monkeypatch.setattr(manager.exact, "require", lambda _spec: proven)
     monkeypatch.setattr(
         manager.exact,

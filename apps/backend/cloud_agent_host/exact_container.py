@@ -7,7 +7,10 @@ or network proof verified. The sandbox manager, the group network and the
 helpers split out of the manager all reach Docker through it, so the checks
 live in one place instead of being rebuilt by each caller. :meth:`run` and
 :meth:`run_bytes` are the bare Docker CLI and check nothing themselves: callers
-reach a container only after :meth:`require` or a recorded proof.
+reach a container only after :meth:`require` or a recorded proof, and only
+:meth:`record_proof` records one, of an inspection that is exactly the spec's.
+Running a helper as Kata guest root is not one of its operations: it is the
+sandbox manager's own (:mod:`cloud_agent_host.guest_root_exec`).
 
 A container's labels, mounts, tmpfs, runtime and image never change for its
 id, and Docker refuses an exec into one that is stopped, paused or removed.
@@ -40,7 +43,7 @@ from cloud_agent_host.chat_sandbox_models import (
     RetainedChatLost,
 )
 from cloud_agent_host.docker_engine import run_docker
-from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
+from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_shared.environment_snapshots import snapshot_image_reference
 
@@ -174,8 +177,9 @@ class ExactContainer:
         self._unproven_guests: set[str] = set()
         self._unproven_guests_lock = threading.Lock()
         #: What each spec's last start or network proof verified, which a
-        #: bounded exec then enters by id (:meth:`exec_target`).
-        self.proven = ProvenContainers()
+        #: bounded exec then enters by id (:meth:`exec_target`). Written only
+        #: through :meth:`record_proof`, which verifies what it records.
+        self._proven = ProvenContainers()
 
     # ── started guests whose network check has not passed ──────────────
 
@@ -193,6 +197,56 @@ class ExactContainer:
         """Whether a start of this exact container has not passed its network check."""
         with self._unproven_guests_lock:
             return container_id in self._unproven_guests
+
+    # ── proofs ─────────────────────────────────────────────────────────
+
+    def record_proof(
+        self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection
+    ) -> ChatSandboxInspection:
+        """Remember ``inspection`` as the container verified for ``spec``, and return it.
+
+        The inspection a start or network proof just required: its mounts and
+        identity are checked again here, without Docker, so nothing can be
+        recorded for ``spec`` that is not exactly its container.
+        """
+        self.verify_mounts(inspection)
+        self.verify_identity(inspection, spec)
+        return self._proven.record(spec, inspection)
+
+    def forget_proof(self, spec: ChatSandboxSpec) -> None:
+        """Drop what was proven for ``spec``'s name, which is being created or removed."""
+        self._proven.forget(spec)
+
+    def proven_container(self, spec: ChatSandboxSpec) -> ChatSandboxInspection | None:
+        """The container verified for exactly ``spec``, if any."""
+        return self._proven.get(spec)
+
+    def note_network_proof(self, spec: ChatSandboxSpec, proved_from: float) -> None:
+        """Keep the container just proved for ``spec`` as its standing network proof."""
+        self._proven.note_proof(spec, proved_from)
+
+    def withdraw_network_proof(self, spec: ChatSandboxSpec) -> None:
+        """Drop ``spec``'s standing network proof: a proof of it just failed."""
+        self._proven.withdraw_proof(spec)
+
+    def standing_proof(self, spec: ChatSandboxSpec) -> tuple[ChatSandboxInspection, float] | None:
+        """The container ``spec``'s last passed network proof saw, and when it began."""
+        return self._proven.standing_proof(spec)
+
+    def holds_helper(self, proven: ChatSandboxInspection | None, path: str) -> bool:
+        """Whether ``path`` was found installed in exactly the container ``proven``."""
+        return self._proven.holds_helper(proven, path)
+
+    def note_helper(self, proven: ChatSandboxInspection | None, path: str) -> None:
+        """Remember a root-owned helper just found installed in ``proven``.
+
+        See :meth:`ProvenContainers.note_helper` for why it is not checked again.
+        """
+        self._proven.note_helper(proven, path)
+
+    def forget_helpers(self, proven: ChatSandboxInspection | None, prefix: str) -> None:
+        """Forget every helper under ``prefix`` in ``proven``, which a root exec is replacing."""
+        self._proven.forget_helpers(proven, prefix)
 
     # ── Docker ─────────────────────────────────────────────────────────
 
@@ -356,7 +410,7 @@ class ExactContainer:
         container, which is always inspected first. ``not_running=None`` leaves
         refusing a stopped container that was inspected now to the caller.
         """
-        proven = None if expected_container_id is not None else self.proven.get(spec)
+        proven = None if expected_container_id is not None else self._proven.get(spec)
         if proven is not None:
             return proven, proven
         current = (
@@ -389,41 +443,3 @@ class ExactContainer:
             if not current.running:
                 raise SandboxError(not_running)
         return result
-
-    def guest_root_exec(
-        self,
-        spec: ChatSandboxSpec,
-        argv: list[str],
-        *,
-        detach: bool = False,
-        timeout_s: float = 30,
-    ) -> subprocess.CompletedProcess[str]:
-        """Run one source-controlled platform helper as Kata guest root.
-
-        This is deliberately not a general privileged-exec API.  Callers pass
-        only source-controlled observer/cleanup/network argv, and the runtime
-        guard prevents them from gaining privilege on the host's shared kernel
-        under runc.
-        """
-        if self.backend.runtime != KATA_RUNTIME:
-            raise SandboxError("guest-root platform helpers require the Kata runtime")
-        not_running = "chat sandbox must be started before guest observation"
-        current, proven = self.exec_target(spec, not_running=None)
-        if current.sandbox_runtime != KATA_RUNTIME:
-            raise SandboxError("guest-root platform helpers require an inspected Kata container")
-        if proven is None and not current.running:
-            raise SandboxError(not_running)
-        command = [self.backend.docker_binary, "exec"]
-        if detach:
-            command.append("--detach")
-        command += [
-            "--privileged",
-            "--user",
-            "0:0",
-            "--workdir",
-            "/",
-            current.container_id,
-            *argv,
-        ]
-        result = self.run(command, timeout=timeout_s)
-        return self.checked_exec(spec, proven, result, not_running=not_running)

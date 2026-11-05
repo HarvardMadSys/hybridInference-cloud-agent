@@ -13,7 +13,7 @@ from cloud_agent_host.trusted_files import install_trusted_file
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection
-    from cloud_agent_host.exact_container import ProvenContainers
+    from cloud_agent_host.exact_container import ExactContainer
 
 _HELPERS = {
     "pi": ("pi-freeinference", "pi-mcp-bridge.ts"),
@@ -75,15 +75,13 @@ def install_mcp_helpers_once(
     forgotten when it is replaced, so a host that ships other content still
     installs it.
     """
-    proven = manager.exact.proven.get(spec)
+    proven = manager.exact.proven_container(spec)
     missing = [
-        helper
-        for helper in _helpers(runtime)
-        if not manager.exact.proven.holds_helper(proven, helper.key)
+        helper for helper in _helpers(runtime) if not manager.exact.holds_helper(proven, helper.key)
     ]
     if missing:
         with install_lock(spec.container_name):
-            _install(manager, spec, runtime, missing, found=(manager.exact.proven, proven))
+            _install(manager, spec, runtime, missing, found=(manager.exact, proven))
 
 
 def _install(
@@ -92,7 +90,7 @@ def _install(
     runtime: str,
     helpers: list[_Helper],
     *,
-    found: tuple[ProvenContainers, ChatSandboxInspection | None] | None = None,
+    found: tuple[ExactContainer, ChatSandboxInspection | None] | None = None,
 ) -> None:
     """Probe each helper as root, and install the ones that differ.
 

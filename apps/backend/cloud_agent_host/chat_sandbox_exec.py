@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
     from cloud_agent_host.chat_sandbox import ChatSandboxManager
     from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection, ChatSandboxSpec
-    from cloud_agent_host.exact_container import ExactContainer, ProvenContainers
+    from cloud_agent_host.exact_container import ExactContainer
 
 Proved = TypeVar("Proved")
 ProofArgs = ParamSpec("ProofArgs")
@@ -55,9 +55,9 @@ def network_proof(
         try:
             result = method(manager, spec, *args, **kwargs)
         except BaseException:
-            manager.exact.proven.withdraw_proof(spec)
+            manager.exact.withdraw_network_proof(spec)
             raise
-        manager.exact.proven.note_proof(spec, proved_from)
+        manager.exact.note_network_proof(spec, proved_from)
         return result
 
     return proving
@@ -82,8 +82,8 @@ def standing_network_proof(
     keeps no proofs has none standing.
     """
     exact: ExactContainer | None = getattr(manager, "exact", None)
-    proofs: ProvenContainers | None = getattr(exact, "proven", None)
-    standing = None if proofs is None else proofs.standing_proof(spec)
+    standing_of = getattr(exact, "standing_proof", None)
+    standing = None if standing_of is None else standing_of(spec)
     if exact is None or standing is None:
         return None
     proved, proved_from = standing
@@ -111,16 +111,16 @@ def install_once(
     finds it in place or puts it there, raising otherwise. Once it has, in
     the container ``spec``'s last start or network proof verified, it is not
     run there again
-    (:meth:`~cloud_agent_host.exact_container.ProvenContainers.note_helper`).
+    (:meth:`~cloud_agent_host.exact_container.ExactContainer.note_helper`).
     The check comes before the lock, so a launch whose file is known in place
     does not queue behind a runtime or MCP install into the same container.
     """
-    proven = manager.exact.proven.get(spec)
-    if manager.exact.proven.holds_helper(proven, key):
+    proven = manager.exact.proven_container(spec)
+    if manager.exact.holds_helper(proven, key):
         return
     with install_lock(spec.container_name):
         install()
-    manager.exact.proven.note_helper(proven, key)
+    manager.exact.note_helper(proven, key)
 
 
 def spawn_target(
@@ -137,7 +137,7 @@ def spawn_target(
     (:mod:`cloud_agent_host.github_relay_trust`).
     """
     current = manager.exact.require(spec)
-    proven = manager.exact.proven.get(spec)
+    proven = manager.exact.proven_container(spec)
     if proven is not None and proven.container_id != current.container_id:
         raise RetainedChatLost("chat sandbox container identity changed")
     if not current.running:

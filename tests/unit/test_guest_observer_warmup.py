@@ -53,7 +53,7 @@ def _proven_manager(*, runtime: str = KATA_RUNTIME) -> ChatSandboxManager:
     """A manager whose last start proved ``_CONTAINER`` for ``_spec()``."""
     manager = ChatSandboxManager(ContainerBackend(image="registry/agent:1", runtime=runtime))
     spec = _spec()
-    manager.exact.proven.record(
+    manager.exact._proven.record(
         spec,
         ChatSandboxInspection(
             container_id=_CONTAINER,
@@ -146,10 +146,10 @@ def test_only_the_exact_proven_container_is_warmed(controller, proven):
     """A container replaced under the same name since the proof is left alone."""
     manager = _proven_manager()
     if proven == "none":
-        manager.exact.proven.forget(_spec())
+        manager.exact._proven.forget(_spec())
     else:
-        current = manager.exact.proven.get(_spec())
-        manager.exact.proven.record(_spec(), replace(current, container_id="sha256:container-two"))
+        current = manager.exact._proven.get(_spec())
+        manager.exact._proven.record(_spec(), replace(current, container_id="sha256:container-two"))
 
     thread = warm_guest_observer(manager, _spec(), _CONTAINER)
     thread.join(5)
