@@ -2332,7 +2332,7 @@ def test_the_call_path_actually_passes_the_freeze_callback():
     import ast
     import inspect
 
-    source = ast.parse(inspect.getsource(shared_live_attempt._run_shared_live_attempt))
+    source = ast.parse(inspect.getsource(shared_live_attempt._SharedLiveAttempt))
     calls = [
         node
         for node in ast.walk(source)

@@ -28,6 +28,7 @@ from tests.unit.test_runner_host_settings import _JOB, _stamp
 
 from cloud_agent_host import (
     control_plane_client,
+    group_reservation,
     shared_live_attempt,
     source_preparation,
 )
@@ -106,7 +107,7 @@ def _run_turn(
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
     monkeypatch.setattr(
         shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
     )

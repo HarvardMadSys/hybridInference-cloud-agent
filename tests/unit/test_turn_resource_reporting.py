@@ -21,7 +21,7 @@ import httpx
 import pytest
 from tests.support.owners import connection_access
 
-from cloud_agent_host import shared_live_attempt, turn_child, turn_stream
+from cloud_agent_host import group_reservation, shared_live_attempt, turn_child, turn_stream
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
 from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.member_resources import CheckpointSchedule
@@ -127,7 +127,7 @@ def _run_terminal_turn(
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
     monkeypatch.setattr(
         shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
     )

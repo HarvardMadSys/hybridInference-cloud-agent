@@ -126,8 +126,9 @@ wire changes require the contract update described in the developer guide.
 the host, heartbeats, claims turns up to its limit, and drains on SIGTERM;
 `host_capabilities.py` holds what it advertises and the proof each claim
 carries. Each claimed turn runs in a child process (`turn_child.py`) that
-preflights, answers the handover, and then runs the attempt in
-`shared_live_attempt.py` under the lease `attempt_lease.py` renews;
+preflights, answers the handover, and then runs the attempt under the lease
+`attempt_lease.py` renews: `group_reservation.py` checks and reserves its
+sandbox group, `shared_live_attempt.py` runs it as a sequence of stages, and
 `turn_stream.py` relays the admitted turn. `source_preparation.py` is the
 trusted Git work on a chat's source outside the sandbox. `claimed_job.py`
 defines claim payloads and lease errors; `control_plane_client.py` owns

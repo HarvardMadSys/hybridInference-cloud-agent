@@ -20,6 +20,7 @@ from cloud_agent.schemas import WorkerSandboxAbandonRequest
 from cloud_agent_host import (
     attempt_lease,
     control_plane_client,
+    group_reservation,
     host_capabilities,
     host_service,
     local_settings,
@@ -371,7 +372,7 @@ def _run_shared_boundary_case(
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
     monkeypatch.setattr(
         shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
     )

@@ -17,6 +17,7 @@ from cloud_agent_host import (
     chat_sandbox,
     control_plane_client,
     github_relay_env,
+    group_reservation,
     host_capabilities,
     host_service,
     local_settings,
@@ -231,7 +232,7 @@ def _run_new_chat(
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
     manager = Mock()
-    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
     monkeypatch.setattr(
         shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
     )
@@ -521,7 +522,7 @@ def test_a_new_untrusted_sandbox_without_a_disk_quota_starts_with_a_warning(
     assert run.result == 0
     assert run.reserved["disk_limit_mib"] == 0
     (warning,) = _quota_warnings(caplog)
-    assert warning.getMessage() == shared_live_attempt.UNTRUSTED_DISK_QUOTA_RECOMMENDED
+    assert warning.getMessage() == group_reservation.UNTRUSTED_DISK_QUOTA_RECOMMENDED
     assert warning.job_id == _JOB.job_id  # type: ignore[attr-defined]
 
 
@@ -834,8 +835,8 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
     )
 
     assert result == 2
-    finish.assert_called_once_with("failed", shared_live_attempt.SITE_MISCONFIGURED_MCP)
-    assert shared_live_attempt.SITE_MISCONFIGURED_MCP.startswith("Site misconfigured:")
+    finish.assert_called_once_with("failed", group_reservation.SITE_MISCONFIGURED_MCP)
+    assert group_reservation.SITE_MISCONFIGURED_MCP.startswith("Site misconfigured:")
     assert not stamp.called
     assert not control.reserve_chat_sandbox.called
     assert not supervisors.called

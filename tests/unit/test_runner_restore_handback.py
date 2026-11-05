@@ -12,6 +12,7 @@ from tests.unit.test_runner_source_prefetch import Source
 
 from cloud_agent_host import (
     control_plane_client,
+    group_reservation,
     shared_live_attempt,
     source_preparation,
 )
@@ -40,7 +41,7 @@ def _restoring_turn(
     monkeypatch.setattr(backend, "version_stamp", _stamp)
     manager = Mock()
     manager.backend = backend
-    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
     control = Mock(spec=control_plane_client.ControlPlane)
     control.reserve_chat_sandbox.side_effect = lambda seed: {
         **seed,

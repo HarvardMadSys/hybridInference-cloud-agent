@@ -15,7 +15,7 @@ from unittest.mock import Mock
 from tests.support.owners import connection_access
 from tests.support.ssh_keys import host_key, private_key
 
-from cloud_agent_host import claimed_job, shared_live_attempt
+from cloud_agent_host import claimed_job, group_reservation, shared_live_attempt
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.runtimes import get_runtime
@@ -78,7 +78,7 @@ def _run(monkeypatch, job: ClaimedJob) -> Mock:
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: Mock())
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: Mock())
     monkeypatch.setattr(
         shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
     )

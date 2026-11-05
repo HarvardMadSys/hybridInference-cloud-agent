@@ -17,7 +17,7 @@ from unittest.mock import Mock
 import pytest
 from tests.support.owners import connection_access
 
-from cloud_agent_host import shared_live_attempt
+from cloud_agent_host import group_reservation, shared_live_attempt
 from cloud_agent_host.chat_sandbox import (
     MEMBER_REAPER_TARGET,
     ChatSandboxManager,
@@ -206,7 +206,7 @@ def _run_turn(monkeypatch, *, resident_state: str, has_binary: bool) -> tuple[Mo
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = has_binary
-    monkeypatch.setattr(shared_live_attempt, "ChatSandboxManager", lambda _backend: Mock())
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: Mock())
     monkeypatch.setattr(
         shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
     )
