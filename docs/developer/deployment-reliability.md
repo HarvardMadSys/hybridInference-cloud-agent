@@ -247,23 +247,14 @@ new work queued until the retry succeeds. The queue monitor detects this state.
 These checks protect and expose interrupted deployments; activation still spans
 two machines and PostgreSQL without a single transaction.
 
-### Snapshot publication failures
+### Push and pull-request failures
 
-A publication that fails — a refused patch, an unavailable GitHub credential,
-a failed Git or PR request — leaves its snapshot `failed` with a reason and its
-sandbox group `dirty`; the included agent turns stay successful. It does not
-hold the workspace back: the owner's next **Create PR** / **Update PR** request
-captures a new snapshot of the whole diff since the last published commit,
-which supersedes the failed one. If the failed attempt had already pushed its
-commit, the publisher recorded that commit as the snapshot's
-`pushed_commit_sha` before pushing, and the next snapshot builds on it rather
-than treating it as a moved branch. GitHub rate limits and transient
-draft-PR refusals are retried automatically. The full rules are in
-[Resume, Fork, and publication](operations.md#resume-fork-and-publication).
-
-To investigate one, read the snapshot's `last_error`, the anchor job's event
-whose phase is `shared_snapshot_publish_rejected`, and GitHub's branch and PR
-state.
-Do not edit snapshot or group state in the database: marking a snapshot
-published or clearing `dirty` bypasses the ordered publication lineage. Fix
-the cause — access, network, or the refused content — and publish again.
+The platform does not publish workspaces, so there is no publication to retry
+or repair. A push or pull request the agent could not make is part of its
+turn: the transcript shows what git or `gh` printed, and the owner asks again
+once the cause is fixed. The GitHub relay logs each request it refuses itself
+as `agent_github_relay_refused`, or `agent_github_relay_push_refused` for a
+push, with the conversation and job, and each pull request it records as
+`agent_github_relay_pull_request_recorded`. A refusal from GitHub itself, such
+as branch protection, push protection or a missing App permission, appears
+only in the transcript. See [the GitHub relay](operations.md#the-github-relay).

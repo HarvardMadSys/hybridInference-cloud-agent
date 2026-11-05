@@ -1607,9 +1607,11 @@ jobs:
           AGENT_EGRESS_CHAT_NETWORK_POOL=10.240.0.0/16
           AGENT_EGRESS_DNS_SERVER=192.0.2.53
           ENVFILE
+          # With the GitHub relay's profile, so its tunnel is part of what is checked.
           docker compose \
             -f deploy/host/docker-compose.sandbox.yml \
             --env-file .env \
+            --profile github-relay \
             config > ${RUNNER_TEMP}/rendered.yml
           echo "--- rendered services ---"
           docker compose -f ${RUNNER_TEMP}/rendered.yml config --services
@@ -1708,7 +1710,8 @@ jobs:
               for name, svc in stack["services"].items()
               if "agent-relays" in (svc.get("networks") or {})
           }
-          if on_relays != {"mcp-tunnel"}:
+          # The GitHub relay's tunnel is the second, rendered with its profile.
+          if on_relays != {"mcp-tunnel", "github-tunnel"}:
               failures.append(f"unexpected services on the relay network: {sorted(on_relays)}")
 
           # Either process may build or wake a group, so both must build the

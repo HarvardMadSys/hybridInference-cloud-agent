@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.workers.agent_memory import maintain_agent_memories
 from cloud_agent.workers.attempts import reap_expired_attempts
-from cloud_agent.workers.background_wake import BackgroundWake
 from cloud_agent.workers.environment_maintenance import run_environment_maintenance
 from cloud_agent.workers.job_event_signal import JobEventSignal
 from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
@@ -34,7 +33,6 @@ from cloud_agent.workers.recovery_maintenance import (
 )
 from cloud_agent.workers.sandbox_deletion import coordinate_sandbox_deletions
 from cloud_agent.workers.sandbox_move_out import coordinate_move_out
-from cloud_agent.workers.snapshots import coordinate_shared_snapshots
 from cloud_agent.workers.work_signal import WorkSignal
 
 if TYPE_CHECKING:
@@ -43,7 +41,6 @@ if TYPE_CHECKING:
     import asyncpg
     from fastapi import FastAPI
 
-    from cloud_agent.publish_worker import PublishStorage
 
 #: The moved lifespan keeps logging under the module it came from: the
 #: deployment's log selection is on ``cloud_agent.app``.
@@ -102,14 +99,8 @@ async def create_database_pool(dsn: str) -> asyncpg.Pool:
     return pool
 
 
-ENV_PUBLISH_BASE_BRANCH = "AGENT_PUBLISH_BASE_BRANCH"
-
-
-ENV_GITHUB_TOKEN = "AGENT_GITHUB_TOKEN"
-
-
 #: Held so the event loop cannot collect a running background task. Without
-#: this the reaper and publisher are eligible for garbage collection the moment
+#: this the reaper and the other loops are eligible for garbage collection the moment
 #: nothing else references them, and they stop without a word.
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -118,8 +109,8 @@ def _forget_background_task(task: asyncio.Task[Any]) -> None:
     """Drop a finished background task, and say so when it died rather than stopped.
 
     Every loop started here is meant to run until shutdown cancels it. One that
-    ends with an exception has stopped doing its work -- reaping, publishing,
-    renewing -- while the process goes on serving, and the only other place
+    ends with an exception has stopped doing its work -- reaping, renewing,
+    maintaining -- while the process goes on serving, and the only other place
     the error surfaces is shutdown, which re-raises it.
     """
     _BACKGROUND_TASKS.discard(task)
@@ -152,13 +143,11 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "goal_wakeup_maintenance_task",
     "goal_scheduling_maintenance_task",
     "pending_message_maintenance_task",
-    "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
     "capacity_task",
     "agent_memory_task",
     "queue_monitor_task",
-    "publish_task",
     "profiling_policy_task",
     "compute_resource_task",
     "account_access_task",
@@ -191,33 +180,6 @@ def _build_source_control(app: FastAPI) -> None:
     from cloud_agent.source_control_runtime import SourceControlRuntime
 
     app.state.source_control = SourceControlRuntime.from_env()
-
-
-def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
-    """Start the publish loop, idle if no git credential is configured."""
-    from cloud_agent.publish_worker import GitHubCredential, publish_loop
-    from cloud_agent.settings import setting_env
-
-    def credential_provider() -> GitHubCredential | None:
-        """Mint the credential for one publish, or None if unconfigured.
-
-        Read per call rather than captured, so rotating the token does not
-        need a restart.
-        """
-        token = setting_env(ENV_GITHUB_TOKEN, "")
-        return GitHubCredential(token) if token else None
-
-    _spawn(
-        app,
-        "publish_task",
-        publish_loop(
-            store,
-            credential_provider=credential_provider,
-            github_app=app.state.source_control.github,
-            http=app.state.http,
-            wake=getattr(app.state, "background_wake", None),
-        ),
-    )
 
 
 async def _invoke(action: Any, errors: list[BaseException]) -> None:
@@ -378,14 +340,19 @@ async def _shutdown_lifespan(  # noqa: PLR0912 complexity baseline, #771
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[None]:  # noqa: PLR0915 complexity baseline, #771
-    """Open the store, optionally start the reaper and publisher, tear down.
+async def lifespan(  # noqa: PLR0915 complexity baseline, #771
+    app: FastAPI, *, background: bool = True, source_control: bool | None = None
+) -> AsyncIterator[None]:
+    """Open the store, optionally start the reaper and maintenance, tear down.
 
     Args:
         app: The application whose state is being built.
-        background: Whether this process owns the reaper and the publisher.
+        background: Whether this process owns the reaper and the maintenance loops.
             False for a second listener sharing the database — see the comment
             below for why that is not merely wasteful.
+        source_control: Whether this listener loads the GitHub and GitLab
+            credentials. Defaults to ``background``; the GitHub relay needs the
+            App's (to renew an owner's token) without owning any background work.
 
     The database is required. A control plane without one cannot claim, fence
     or record anything, so it refuses to start rather than serving an API that
@@ -464,16 +431,15 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.http = http
         # Identity and admission are answered from this database.
         attach_owner_directory(app, storage)
-        if background:
+        if background if source_control is None else source_control:
             _build_source_control(app)
         else:
             app.state.source_control = None
 
         # **The background work belongs to exactly one process.** The attempt
-        # maintenance task supersedes lapsed attempts; the publisher opens pull
-        # requests. A second listener on this same database — the MCP relay is
-        # one — running its own copies would reap every lease twice and have two
-        # workers racing for the same publish.
+        # maintenance task supersedes lapsed attempts. A second listener on this
+        # same database — the MCP and GitHub relays are two — running its own
+        # copies would reap every lease twice and race the other maintenance.
         #
         # So this is a parameter of the lifespan rather than a property of it, and
         # `create_mcp_app` says no.
@@ -529,14 +495,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                     owners=app.state.owners,
                 ),
             )
-            # The workers below wait on this as well as their clocks; the shared
-            # listener started further down is what sets it.
-            app.state.background_wake = BackgroundWake()
-            _spawn(
-                app,
-                "snapshot_task",
-                coordinate_shared_snapshots(storage, wake=app.state.background_wake),
-            )
             _spawn(app, "sandbox_deletion_task", coordinate_sandbox_deletions(storage))
             _spawn(app, "sandbox_move_out_task", coordinate_move_out(storage))
             # Host capacity history keeps filling whether or not anybody has the
@@ -570,8 +528,8 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             # parked on the worker wait endpoint (a job was queued, requeued or
             # ended), owners' event streams (their job stored an event or changed
             # state), owners' change streams (one of their jobs, conversations,
-            # usage, queue, tool approvals or publications changed), and this
-            # process's own snapshot, publish and usage workers.
+            # usage, queue or tool approvals changed), and this process's own
+            # usage workers.
             app.state.work_signal = WorkSignal()
             app.state.job_event_signal = JobEventSignal()
             app.state.owner_change_signal = OwnerChangeSignal()
@@ -584,13 +542,11 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                         app.state.work_signal,
                         app.state.job_event_signal,
                         app.state.owner_change_signal,
-                        app.state.background_wake,
                     ),
                 ),
             )
             # This listener holds no tool call for its owner's decision.
             app.state.mcp_decision_signal = None
-            _start_publisher(app, storage)
             logger.info("cloud agent control plane started")
         else:
             # The relay listener roots no file or terminal request, so it has no
@@ -599,7 +555,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.work_signal = None
             app.state.job_event_signal = None
             app.state.owner_change_signal = None
-            app.state.background_wake = None
             # The relay holds tool calls for their owners' decisions, and a
             # decision wakes the call it names: its own connection, on that one
             # channel.
@@ -611,7 +566,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # including when a later setup step fails.
         entered = True
         # Each listener owns upstream sockets in its own process, even when it
-        # does not run the control plane's grant reaper or publisher.
+        # does not run the control plane's grant reaper or maintenance.
         _spawn(app, "mcp_maintenance_task", maintain_host_sessions(storage))
         # Created per process, but worker tasks remain lazy until a selected
         # file/terminal record is actually offered.

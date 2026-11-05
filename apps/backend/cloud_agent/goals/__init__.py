@@ -8,7 +8,7 @@ objective, and came from a turn that ended workably. A completion is therefore
 ``model_reported`` — real, and named for exactly what it is.
 
 Every automatic round is an ordinary queued turn: same lease, same fence, same
-metering, same cancellation, same publishing. The platform schedules them
+metering, same cancellation. The platform schedules them
 through durable wakeups, so a crash between "this turn ended" and "the next turn
 exists" cannot lose a goal.
 """

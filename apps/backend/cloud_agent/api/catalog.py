@@ -124,7 +124,6 @@ def _raise_session_mutation_error(result: dict[str, Any]) -> None:
     messages = {
         "not_found": "One or more selected sessions are no longer available.",
         "fork_in_progress": "A selected session is being forked. Wait for the fork to finish.",
-        "publication_pending": "A selected session has unfinished publication. Wait for it to finish.",
     }
     raise HTTPException(
         status_code=404 if error == "not_found" else 409,

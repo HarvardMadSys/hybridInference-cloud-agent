@@ -2,7 +2,7 @@
 
 Every idle host claims again whenever a turn is queued, requeued or ends, and
 each claim walks the queued turns oldest first until one is runnable here. The
-sandbox a claim returns -- its publication state, its members, whether its host
+sandbox a claim returns -- its pull request, its members, whether its host
 can fork it -- takes a dozen correlated reads, and was built for every queued
 turn the walk passed: a backlog of follow-ups held for other hosts made each
 claim, on every host, pay for all of them. The plan check runs the statement
@@ -126,7 +126,7 @@ async def test_a_claim_reads_no_sandbox_of_the_turns_it_passes(store, pool):
     reads = [
         node["Actual Loops"]
         for node in _plan_nodes(json.loads(plan)[0]["Plan"])
-        if node.get("Relation Name") == "agent_sandbox_snapshots"
+        if node.get("Relation Name") == "agent_thread_pull_requests"
     ]
-    assert reads, "the claim no longer reads any group's snapshots"
-    assert max(reads) <= 1, f"the claim read the snapshots of {max(reads)} groups"
+    assert reads, "the claim no longer reads any conversation's pull request"
+    assert max(reads) <= 1, f"the claim read the pull requests of {max(reads)} conversations"

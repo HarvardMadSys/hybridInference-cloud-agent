@@ -1070,8 +1070,8 @@ class PostgresEnvironmentRepository:
         owner is still the member who bound them: every path that gives them
         to a container (a turn, a terminal, an action, a Fork, preparation, a
         test) reads them here. ``for_masking`` reads them anyway, for the
-        redaction and publication scanning that must keep finding them after
-        the owner leaves; such a caller never passes them on.
+        redaction that must keep finding them after the owner leaves; such a
+        caller never passes them on.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1324,7 +1324,7 @@ class PostgresEnvironmentRepository:
         return (await self._environment_redactor(user_id, binding_id)).payload(steps)
 
     async def get_job_environment(self, job_id: str) -> BoundEnvironment | None:
-        """Resolve immutable owned configuration for trusted publication paths."""
+        """Resolve a turn's immutable owned configuration, for masking."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT t.user_id,t.environment_binding_id FROM agent_threads t JOIN agent_jobs j ON j.thread_id=t.id WHERE j.id=$1",

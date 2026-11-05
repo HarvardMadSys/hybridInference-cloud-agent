@@ -259,12 +259,12 @@ describe('sidebar navigation interactions', () => {
     expect(api.thread).not.toHaveBeenCalled();
   });
 
-  it('shows ten settings destinations without loading or polling chat lists', async () => {
+  it('shows eleven settings destinations without loading or polling chat lists', async () => {
     api.pathname = '/settings/plugins';
     vi.useFakeTimers();
     await act(async () => render(<AgentsSidebar settingsNavigation={{ backHref: '/a' }} />));
     const navigation = screen.getByRole('navigation', { name: 'Settings' });
-    expect(within(navigation).getAllByRole('link')).toHaveLength(10);
+    expect(within(navigation).getAllByRole('link')).toHaveLength(11);
     expect(within(navigation).getByRole('link', { name: 'My Settings' })).toHaveAttribute(
       'href',
       '/settings/my-settings',
@@ -568,9 +568,9 @@ describe('sidebar navigation interactions', () => {
     api.projects.mockClear();
     vi.useFakeTimers();
 
-    for (const kind of ['usage', 'mcp', 'queue', 'publication'] as const) {
+    for (const kind of ['usage', 'mcp', 'queue'] as const) {
       act(() => {
-        receiveHint(kind, kind === 'queue' || kind === 'publication' ? 'thread-a' : 'a');
+        receiveHint(kind, kind === 'queue' ? 'thread-a' : 'a');
         vi.advanceTimersByTime(PUSH_BATCH_MS);
       });
       expect(api.list).not.toHaveBeenCalled();

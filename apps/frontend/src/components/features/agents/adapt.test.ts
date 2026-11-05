@@ -1852,29 +1852,17 @@ describe('projecting a running turn again', () => {
   });
 });
 
-describe('workspace publication', () => {
-  it('carries what the owner has and has not published', () => {
-    const waiting = toDisplayJob(
-      { ...JOB, state: 'succeeded', workspace_unpublished_changes: true, workspace_pr_url: null },
-      {},
-    );
-    expect(waiting.workspaceUnpublishedChanges).toBe(true);
-    expect(waiting.workspacePrUrl).toBeUndefined();
+describe('workspace pull request', () => {
+  it('carries the newest pull request the conversation opened', () => {
+    const none = toDisplayJob({ ...JOB, state: 'succeeded', workspace_pr_url: null }, {});
+    expect(none.workspacePrUrl).toBeUndefined();
 
-    const unchanged = toDisplayJob(
-      {
-        ...JOB,
-        state: 'succeeded',
-        workspace_publication_state: 'published',
-        workspace_publication_unchanged: true,
-        workspace_pr_url: 'https://github.com/o/n/pull/4',
-        workspace_unpublished_changes: false,
-      },
+    const opened = toDisplayJob(
+      { ...JOB, state: 'succeeded', workspace_pr_url: 'https://github.com/o/n/pull/4' },
       {},
     );
-    expect(unchanged.workspacePublicationState).toBe('published');
-    expect(unchanged.workspacePublicationUnchanged).toBe(true);
-    expect(unchanged.workspacePrUrl).toBe('https://github.com/o/n/pull/4');
-    expect(unchanged.workspaceUnpublishedChanges).toBeUndefined();
+    expect(opened.workspacePrUrl).toBe('https://github.com/o/n/pull/4');
+    // A pull request opened in an earlier turn is not this turn's.
+    expect(opened.prUrl).toBeUndefined();
   });
 });

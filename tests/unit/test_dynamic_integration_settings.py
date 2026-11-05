@@ -2,40 +2,8 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-from cloud_agent import github_app, publisher, source_control
+from cloud_agent import github_app, source_control
 from cloud_agent.settings import number_setting
-
-
-def test_git_identity_changes_on_the_next_git_command(monkeypatch):
-    values = {
-        "AGENT_GIT_AUTHOR_NAME": "First Author",
-        "AGENT_GIT_AUTHOR_EMAIL": "first@example.org",
-    }
-    monkeypatch.setattr(
-        publisher, "setting_env", lambda name, default=None: values.get(name, default)
-    )
-    environments = []
-
-    def run(*args, **kwargs):
-        environments.append(kwargs["env"])
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(publisher.subprocess, "run", run)
-    publisher._run_git(["status"])
-    values.update(
-        AGENT_GIT_AUTHOR_NAME="Second Author", AGENT_GIT_AUTHOR_EMAIL="second@example.org"
-    )
-    publisher._run_git(["status"])
-    assert environments[0]["GIT_AUTHOR_NAME"] == "First Author"
-    assert (
-        environments[1]["GIT_AUTHOR_NAME"]
-        == environments[1]["GIT_COMMITTER_NAME"]
-        == "Second Author"
-    )
-    assert environments[1]["GIT_AUTHOR_EMAIL"] == "second@example.org"
-    assert environments[1]["GIT_CONFIG_GLOBAL"] == "/dev/null"
 
 
 async def test_provider_timeouts_update_existing_credentials_and_keep_explicit_overrides(

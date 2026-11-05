@@ -108,11 +108,11 @@ describe('the shell read scope', () => {
     const pending = (threadId: string) => !reads[threadId].at(-1)!.aborted;
     read('thread-a');
     read('thread-b');
-    // A new message moves the conversation, a publication its workspace, and a
-    // rename is the owner's own: none of them changes the turn's questions.
+    // A new message moves the conversation, a queue hint its waiting messages,
+    // and a rename is the owner's own: none of them changes the turn's questions.
     act(() => {
       receiveThreadChange({ id: 'thread-a', revision: 2, title: 'Fix login' });
-      receiveHint('publication', 'thread-a');
+      receiveHint('queue', 'thread-a');
       receiveJobChange({ id: 'job-b', thread_id: 'thread-b', state: 'succeeded', revision: 2 });
       announceAgentSessionsChanged({ threadIds: ['thread-b'], title: 'Renamed' });
       vi.advanceTimersByTime(PUSH_BATCH_MS);

@@ -269,7 +269,7 @@ export function AgentsSidebar({
   useEffect(() => {
     if (!active) return;
     const unsubscribe = onAgentRecordsChanged((change) => {
-      // Tool approvals, usage, queues and publication hints belong to detail
+      // Tool approvals, usage and queue hints belong to detail
       // panes. Only changed records or a stream gap can affect these lists.
       if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
       if (changesSidebarRows(change, pushedRecords)) {

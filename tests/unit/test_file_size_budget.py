@@ -22,11 +22,11 @@ TEST_LIMIT = 2000
 
 #: Line counts of the modules over the limit when it arrived.
 BASELINE = {
-    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5216,
-    "apps/backend/cloud_agent_host/runner.py": 4690,
+    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5113,
+    "apps/backend/cloud_agent_host/runner.py": 4686,
     "apps/backend/cloud_agent_host/chat_sandbox.py": 4044,
     "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3815,
-    "apps/backend/cloud_agent_host/sandbox_manager.py": 3545,
+    "apps/backend/cloud_agent_host/sandbox_manager.py": 3283,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3403,
     "apps/backend/cloud_agent_host/drivers.py": 2856,
     "apps/backend/cloud_agent/api/worker.py": 1971,
@@ -37,7 +37,6 @@ BASELINE = {
     "apps/backend/cloud_agent/storage/repositories/mcp.py": 1974,
     "apps/backend/cloud_agent/storage/repositories/environments.py": 1931,
     "apps/backend/cloud_agent/api/mcp_relay.py": 1795,
-    "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1673,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
     "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1569,
 }
@@ -46,17 +45,16 @@ BASELINE = {
 #: first behavior-focused splits. Unlike the older production baseline, these
 #: entries become stale on any shrink so they can only move downward.
 TEST_BASELINE = {
-    "tests/integration/servers/test_pending_message_queue.py": 2405,
-    "tests/integration/storage/test_agent_job_store.py": 5950,
+    "tests/integration/servers/test_pending_message_queue.py": 2122,
+    "tests/integration/storage/test_agent_job_store.py": 5275,
     "tests/integration/storage/test_compute_resources.py": 3862,
     "tests/integration/storage/test_goal_store.py": 2133,
     "tests/integration/storage/test_host_pool_store.py": 3212,
     "tests/integration/storage/test_mcp_connection_store.py": 3182,
     "tests/servers/test_admin_compute.py": 2090,
-    "tests/servers/test_agent_jobs_api.py": 6074,
-    "tests/unit/test_agent_publish_worker.py": 2009,
+    "tests/servers/test_agent_jobs_api.py": 6002,
     "tests/unit/test_agent_runner.py": 2542,
-    "tests/unit/test_agent_sandbox_manager.py": 3936,
+    "tests/unit/test_agent_sandbox_manager.py": 3451,
     "tests/unit/test_chat_sandbox.py": 3138,
     "tests/unit/test_compute_providers.py": 2002,
     "tests/unit/test_compute_reconcile.py": 2291,
@@ -65,7 +63,7 @@ TEST_BASELINE = {
     "tests/unit/test_mcp_connections_api.py": 3043,
     "tests/unit/test_retained_deploy.py": 2231,
     "tests/unit/test_runner_host_service.py": 2842,
-    "tests/unit/test_shared_session_supervisor.py": 5265,
+    "tests/unit/test_shared_session_supervisor.py": 5161,
 }
 
 

@@ -244,15 +244,16 @@ describe('the accounts on this browser', () => {
 });
 
 describe('account security', () => {
+  const open = async (name: string) => fireEvent.click(await screen.findByRole('button', { name }));
   it('changes the password with the current one', async () => {
     vi.mocked(self.getOwnAccount).mockResolvedValue(IDENTITY);
     vi.mocked(self.changePassword).mockResolvedValue({ ok: true });
     render(<AccountSecurity />);
-    await screen.findByText('Change password');
-    // Every section asks for the current password; the first is the password form's.
-    fireEvent.change(screen.getAllByLabelText('Current password')[0], {
-      target: { value: 'Oldpass123' },
-    });
+    // Every form stays closed until its row asks for it.
+    expect(await screen.findByText('me@example.edu', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Current password')).toBeNull();
+    await open('Change password');
+    fill('Current password', 'Oldpass123');
     fill('Password', 'Newpass123');
     fill('Confirm password', 'Newpass123');
     fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
@@ -263,6 +264,66 @@ describe('account security', () => {
         new_password: 'Newpass123',
       }),
     );
+    // The form closes on success; its notice stays on the row.
+    expect(await screen.findByText(/Password saved/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Current password')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Change password' })).toHaveFocus();
+  });
+  it('keeps a refused change open with its error', async () => {
+    vi.mocked(self.getOwnAccount).mockResolvedValue(IDENTITY);
+    vi.mocked(self.requestEmailBind).mockRejectedValue(new Error('Wrong password.'));
+    render(<AccountSecurity />);
+    await open('Change email');
+    fill('New email address', 'new@example.edu');
+    fill('Current password', 'Badpass123');
+    fireEvent.submit(
+      screen.getByRole('button', { name: 'Send confirmation link' }).closest('form')!,
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent('Wrong password.');
+    expect(screen.getByLabelText('New email address')).toHaveValue('new@example.edu');
+  });
+  it('discards what was typed on Cancel or Esc, but not while a change is pending', async () => {
+    vi.mocked(self.getOwnAccount).mockResolvedValue(IDENTITY);
+    let answer: (value: { ok: boolean }) => void = () => undefined;
+    vi.mocked(self.changePassword).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    render(<AccountSecurity />);
+    await open('Change password');
+    expect(screen.getByLabelText('Current password')).toHaveFocus();
+    fill('Current password', 'Oldpass123');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByLabelText('Current password')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Change password' })).toHaveFocus();
+    await open('Change password');
+    expect(screen.getByLabelText('Current password')).toHaveValue('');
+    fill('Current password', 'Oldpass123');
+    fireEvent.keyDown(screen.getByLabelText('Current password'), { key: 'Escape' });
+    expect(screen.queryByLabelText('Current password')).toBeNull();
+    await open('Change password');
+    expect(screen.getByLabelText('Current password')).toHaveValue('');
+    fill('Current password', 'Oldpass123');
+    fill('Password', 'Newpass123');
+    fill('Confirm password', 'Newpass123');
+    fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Save password' })).toBeDisabled();
+    fireEvent.keyDown(screen.getByLabelText('Current password'), { key: 'Escape' });
+    expect(screen.getByLabelText('Current password')).toBeInTheDocument();
+    answer({ ok: true });
+    expect(await screen.findByText(/Password saved/)).toBeInTheDocument();
+  });
+  it('shows the sign-in details without a link to the browser’s accounts', async () => {
+    vi.mocked(self.getOwnAccount).mockResolvedValue({
+      ...IDENTITY,
+      login_name: 'ada',
+      email_verified: false,
+      user_name: 'Ada',
+    });
+    render(<AccountSecurity />);
+    expect(await screen.findByText('ada')).toBeInTheDocument();
+    expect(screen.getByText('Not verified')).toBeInTheDocument();
+    expect(screen.getByText('Not added')).toBeInTheDocument();
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(screen.queryByText('Accounts on this browser')).toBeNull();
   });
   it('confirms a phone-only account with a code to its own number', async () => {
     vi.mocked(self.getOwnAccount).mockResolvedValue({
@@ -274,21 +335,19 @@ describe('account security', () => {
       label: '+8613800138000',
     });
     render(<AccountSecurity />);
-    expect(await screen.findByText('Set a password')).toBeInTheDocument();
-    expect(
-      screen.getAllByText(/A code will be sent to your verified number/).length,
-    ).toBeGreaterThan(0);
+    await open('Set a password');
+    expect(screen.getByText(/A code will be sent to your verified number/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Current password')).toBeNull();
   });
   it('deletes only once the identifier is typed, and never for an administrator', async () => {
     vi.mocked(self.getOwnAccount).mockResolvedValue(IDENTITY);
     vi.mocked(self.deleteOwnAccount).mockResolvedValue({ ok: true });
     const { unmount } = render(<AccountSecurity />);
-    const button = await screen.findByRole('button', { name: 'Delete my account' });
+    await open('Delete account');
+    const button = screen.getByRole('button', { name: 'Delete my account' });
     expect(button).toBeDisabled();
     fill('Type me@example.edu to confirm', 'ME@example.edu');
-    const proofs = screen.getAllByLabelText('Current password');
-    fireEvent.change(proofs[proofs.length - 1], { target: { value: 'Oldpass123' } });
+    fill('Current password', 'Oldpass123');
     fireEvent.click(screen.getByRole('button', { name: 'Delete my account' }));
     await waitFor(() =>
       expect(self.deleteOwnAccount).toHaveBeenCalledWith('ME@example.edu', {
@@ -298,6 +357,7 @@ describe('account security', () => {
     unmount();
     render(<AccountSecurity isAdmin />);
     expect(await screen.findByText(/cannot delete itself/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete account' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Delete my account' })).toBeNull();
   });
 });

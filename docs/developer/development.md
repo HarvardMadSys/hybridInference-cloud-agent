@@ -52,7 +52,7 @@ Choose the package based on who should own the behavior you are changing:
 
 | Package | Owns |
 |---|---|
-| [`cloud_agent/`](../../apps/backend/cloud_agent/) | Control plane: HTTP APIs, accounts and admission, scheduling, persistence, and publication. |
+| [`cloud_agent/`](../../apps/backend/cloud_agent/) | Control plane: HTTP APIs, accounts and admission, scheduling, persistence, and the MCP and GitHub relays. |
 | [`cloud_agent_host/`](../../apps/backend/cloud_agent_host/) | Host execution: claims, retained sandboxes, workspace/session sandbox manager, and Agent CLI adapters. |
 | [`cloud_agent_shared/`](../../apps/backend/cloud_agent_shared/) | Protocol versions, capability names, shared payloads and errors, profiling collection, and shared Git/archive algorithms. |
 

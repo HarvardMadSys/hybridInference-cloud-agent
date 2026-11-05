@@ -323,8 +323,8 @@ class PostgresConversationQueries:
 
         Activity is the thread's own update or the most recently updated of
         its turns, whichever is later. Any turn counts, not only the newest:
-        an earlier turn completes or is published after a later one was
-        cancelled, and that completion is the activity. It is one probe of the
+        an earlier turn completes or records a pull request after a later one
+        was cancelled, and that completion is the activity. It is one probe of the
         ``(thread_id, updated_at)`` index per owned thread, never an aggregate
         over the whole history, and the newest turn is fetched in full only
         for the bounded result page. Messages and job transitions move a

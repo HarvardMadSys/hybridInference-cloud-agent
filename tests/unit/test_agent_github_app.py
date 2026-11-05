@@ -682,32 +682,6 @@ async def test_cross_thread_retirement_clears_tokens_on_the_owning_loop(config, 
         assert not credentials._tokens and cached.token == ""
 
 
-async def test_a_token_github_refused_is_not_served_again(config):
-    """Dropped by value: a replacement another caller already minted stays."""
-    minted: list[str] = []
-    async with httpx.AsyncClient(transport=_minting(minted)) as client:
-        credentials = GitHubAppCredentials(config, client=client)
-        refused = await credentials.token_for("o/n", permissions=_WRITE, repository_scoped=True)
-        held = await credentials.token_for(
-            "o/n", permissions=_WRITE, repository_scoped=True, holder="athr_1"
-        )
-        credentials.forget_token(refused)
-        replacement = await credentials.token_for("o/n", permissions=_WRITE, repository_scoped=True)
-        credentials.forget_token(refused)
-        assert (
-            await credentials.token_for("o/n", permissions=_WRITE, repository_scoped=True)
-            == replacement
-        )
-        assert (
-            await credentials.token_for(
-                "o/n", permissions=_WRITE, repository_scoped=True, holder="athr_1"
-            )
-            == held
-        )
-
-    assert minted == [refused, held, replacement]
-
-
 async def test_an_expired_holder_s_token_is_not_kept(config, monkeypatch):
     """A slot per conversation must not grow with every conversation ever held."""
     import cloud_agent.github_app as github_app

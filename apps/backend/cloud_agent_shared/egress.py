@@ -120,6 +120,10 @@ class SandboxNetworkError(SandboxError):
     """The sandbox network cannot be configured safely."""
 
 
+#: The names the GitHub relay's tunnel carries on a group bridge.
+GITHUB_RELAY_NAMES = ("github.com", "api.github.com")
+
+
 @dataclass(frozen=True)
 class RelayEndpoint:
     """A fixed platform service the sandbox reaches on its own bridge."""
@@ -246,6 +250,10 @@ def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
     relays: list[RelayEndpoint] = []
     if relay := _relay(source.get("AGENT_SANDBOX_MCP_URL") or "", var="AGENT_SANDBOX_MCP_URL"):
         relays.append(relay)
+    if (source.get("AGENT_SANDBOX_GITHUB_RELAY_CA_FILE") or "").strip():
+        # The GitHub relay's tunnel answers for both names on every bridge;
+        # git and gh reach it as GitHub itself, over TLS on 443.
+        relays += [RelayEndpoint(host=name, port=443) for name in GITHUB_RELAY_NAMES]
     return SandboxNetwork(
         namespace=namespace,
         pool=pool,

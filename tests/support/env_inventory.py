@@ -84,7 +84,7 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "admin",
-        "Source control and publication. The inline App key falls back to the mounted "
+        "Source control. The inline App key falls back to the mounted "
         "AGENT_GITHUB_APP_PRIVATE_KEY_PATH when empty.",
         names=(
             "AGENT_REPO_ALLOWLIST",
@@ -94,13 +94,10 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_GITHUB_APP_PRIVATE_KEY",
             "AGENT_GITHUB_APP_INSTALL_URL",
             "AGENT_GITHUB_API",
+            "AGENT_GITHUB_COAUTHOR",
             "AGENT_GITLAB_OAUTH_CLIENT_ID",
             "AGENT_GITLAB_OAUTH_CLIENT_SECRET",
             "AGENT_GITLAB_OAUTH_REDIRECT_URI",
-            "AGENT_GITHUB_TOKEN",
-            "AGENT_PUBLISH_BASE_BRANCH",
-            "AGENT_GIT_AUTHOR_NAME",
-            "AGENT_GIT_AUTHOR_EMAIL",
         ),
     ),
     Family(
@@ -372,6 +369,9 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_SITE_CONTENT_DIR",
             "AGENT_MCP_RELAY_BIND",
             "AGENT_MCP_RELAY_PORT",
+            "AGENT_GITHUB_RELAY_BIND",
+            "AGENT_GITHUB_RELAY_PORT",
+            "AGENT_GITHUB_RELAY_TLS_DIR",
             "AGENT_WEB_BIND",
             "AGENT_WEB_PORT",
             "AGENT_NETWORK_NAME",
@@ -421,6 +421,7 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_GATEWAY_HOSTNAME",
             "AGENT_MCP_HOSTNAME",
             "AGENT_SANDBOX_MCP_URL",
+            "AGENT_SANDBOX_GITHUB_RELAY_CA_FILE",
             "AGENT_SHARED_LIVE_READY_FILE",
             "AGENT_RUNTIME_DOWNLOAD_NETWORK",
             "AGENT_REPO_CLONE_BASE_URL",
@@ -437,7 +438,12 @@ FAMILIES: tuple[Family, ...] = (
             "SIBLING_COMPOSE_PROJECTS",
             "SHARED_READY_TIMEOUT",
         ),
-        prefixes=("AGENT_TUNNEL_", "AGENT_MCP_TUNNEL_", "AGENT_CONTROL_PLANE_TUNNEL_"),
+        prefixes=(
+            "AGENT_TUNNEL_",
+            "AGENT_MCP_TUNNEL_",
+            "AGENT_CONTROL_PLANE_TUNNEL_",
+            "AGENT_GITHUB_TUNNEL_",
+        ),
     ),
     Family(
         "deployment",
@@ -547,8 +553,8 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "internal",
         "Handed by the host to a process it starts for one member or action: the "
-        "protocol-compatibility launcher, the live bridge, the CLI wrappers, environment "
-        "scripts and the snapshot secret scan.",
+        "protocol-compatibility launcher, the live bridge, the CLI wrappers (and the "
+        "platform instructions their configs list) and environment scripts.",
         names=(
             "AGENT_COMPAT_CLIENT",
             "AGENT_COMPAT_UPSTREAM_URL",
@@ -563,9 +569,11 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_SCRIPT_STATUS",
             "AGENT_ENVIRONMENT_SCRIPT",
             "KILO_FREEINFERENCE_CONFIG_DIR",
+            "KILO_FREEINFERENCE_INSTRUCTIONS",
             "KILO_GATEWAY_MODEL",
             "KILO_GATEWAY_REASONING_EFFORT",
             "OPENCODE_FREEINFERENCE_CONFIG_DIR",
+            "OPENCODE_FREEINFERENCE_INSTRUCTIONS",
             "OPENCODE_GATEWAY_MODEL",
             "OPENCODE_GATEWAY_REASONING_EFFORT",
             "PI_CODING_AGENT_DIR",
@@ -574,7 +582,6 @@ FAMILIES: tuple[Family, ...] = (
             "OPENAI_API_KEY",
             "OPENAI_BASE_URL",
         ),
-        prefixes=("AGENT_SECRET_PATTERN_",),
     ),
     Family(
         "internal",
@@ -932,16 +939,12 @@ UNMIGRATED_ENV_SETTINGS: frozenset[str] = frozenset(
         "AGENT_GITHUB_APP_ID",
         "AGENT_GITHUB_APP_INSTALL_URL",
         "AGENT_GITHUB_APP_PRIVATE_KEY",
-        "AGENT_GITHUB_TOKEN",
         "AGENT_GITLAB_OAUTH_CLIENT_ID",
         "AGENT_GITLAB_OAUTH_CLIENT_SECRET",
         "AGENT_GITLAB_OAUTH_REDIRECT_URI",
-        "AGENT_GIT_AUTHOR_EMAIL",
-        "AGENT_GIT_AUTHOR_NAME",
         "AGENT_LOG_FORMAT",
         "AGENT_LOG_LEVEL",
         "AGENT_MCP_PUBLIC_BASE_URL",
-        "AGENT_PUBLISH_BASE_BRANCH",
         "AGENT_REPO_ALLOWLIST",
         "AGENT_RESIDENCY_TTL_S",
         "AGENT_WEB_APP_NAME",

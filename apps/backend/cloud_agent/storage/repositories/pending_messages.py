@@ -223,11 +223,11 @@ class PostgresPendingMessageRepository:
 
         An idle-only action locks its membership, then its sandbox group after
         the thread lock. It requires the expected newest turn, no live turn,
-        waiting message, active member or Fork in the shared group, and its
-        latest snapshot to be published. Using the resolved skills, attachments
-        and effort choices, it creates the turn in this same transaction, never
-        a pending message. It replays its original receipt before these checks,
-        but cannot newly queue behind or resume waiting work.
+        waiting message, active member or Fork in the shared group. Using the
+        resolved skills, attachments and effort choices, it creates the turn
+        in this same transaction, never a pending message. It replays its
+        original receipt before these checks, but cannot newly queue behind or
+        resume waiting work.
 
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as
@@ -258,9 +258,8 @@ class PostgresPendingMessageRepository:
                     return {"error": "session_archived"}
                 if require_idle:
                     # The thread lock freezes the newest turn. Its job is not
-                    # locked until the group shows nothing in flight: snapshot
-                    # publication reaches that job without the thread lock, and
-                    # it locks the group only after its included jobs.
+                    # locked until the group shows nothing in flight, and then
+                    # under the group (see the lock order in storage).
                     latest_job_id = await conn.fetchval(
                         "SELECT id FROM agent_jobs WHERE thread_id = $1 "
                         "ORDER BY turn_no DESC LIMIT 1",
@@ -302,24 +301,7 @@ class PostgresPendingMessageRepository:
                                     WHERE member.sandbox_id = $1
                                       AND (member.active_attempt_id IS NOT NULL
                                            OR member.fork_operation_id IS NOT NULL))
-                                AS has_active_member,
-                            (SELECT snapshot.state
-                             FROM agent_sandbox_snapshots snapshot
-                             WHERE snapshot.sandbox_id = $1
-                             ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-                             LIMIT 1) AS workspace_publication_state,
-                            -- A turn settled since the newest snapshot: the
-                            -- published pull request is behind the workspace.
-                            -- A Fork's copies of its source's turns do not count.
-                            EXISTS (SELECT 1 FROM agent_thread_sandbox_memberships member
-                                    JOIN agent_jobs settled
-                                      ON settled.id = member.last_settled_job_id
-                                    WHERE member.sandbox_id = $1
-                                      AND settled.fork_source_job_id IS NULL
-                                      AND NOT EXISTS (
-                                          SELECT 1 FROM agent_snapshot_jobs held
-                                          WHERE held.job_id = member.last_settled_job_id
-                                      )) AS has_unpublished_turn
+                                AS has_active_member
                         """,
                         group["id"],
                     )
@@ -328,15 +310,10 @@ class PostgresPendingMessageRepository:
                         or current["has_pending_message"]
                         or current["has_active_member"]
                         or group["active_operation_count"] != 0
-                        or current["workspace_publication_state"] != "published"
                     ):
                         return {"error": "conversation_changed"}
-                    if current["has_unpublished_turn"]:
-                        return {"error": "unpublished_changes"}
-                    # Every group member is idle, this thread is fenced and the
-                    # newest snapshot is published, so no publication of this
-                    # group holds the parent: the helper can lock it under the
-                    # group without a publication waiting on the group in turn.
+                    # Every group member is idle and this thread is fenced, so
+                    # the helper can lock the parent under the group.
                     job = await insert_follow_up(
                         conn,
                         parent_job_id=expected_latest_job_id,

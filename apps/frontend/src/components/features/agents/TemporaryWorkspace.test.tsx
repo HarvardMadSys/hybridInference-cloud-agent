@@ -130,7 +130,7 @@ describe('a temporary workspace where a repository would be', () => {
     render(<OutcomeCard job={job()} onOpenDiff={() => {}} />);
 
     expect(screen.getByRole('button', { name: 'Download workspace' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Open draft PR' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open PR' })).not.toBeInTheDocument();
   });
 
   it('keeps the download for a run that failed, whose files are still there', async () => {

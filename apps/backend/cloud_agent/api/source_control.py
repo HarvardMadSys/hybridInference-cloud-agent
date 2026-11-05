@@ -206,8 +206,8 @@ async def create_github_repository(
             result.repo, user_id, store=source_control, app_credentials=app_credentials
         )
         # An operator allowlist can authorize a repository without the App
-        # covering it. The new workspace also needs that coverage for checkout
-        # and publication; failure here cannot undo the successful creation.
+        # covering it. The new workspace also needs that coverage for checkout;
+        # failure here cannot undo the successful creation.
         await app_credentials.installation_id_for(result.repo)
     except Exception:
         # Creation already succeeded. A failed status lookup must leave a
@@ -288,7 +288,7 @@ async def _complete_github_connection(
     # one sent them back to a Connect button they had just pressed.
     # The token is kept — encrypted, in this service only — because which
     # repositories the user may work on is asked of GitHub as them, long after
-    # this request: the publisher and the goal controller check again.
+    # this request: the GitHub relay and the goal controller check again.
     cipher = app_credentials.cipher
     await account_store.connect_github_account(
         user_id=user_id,
@@ -418,7 +418,7 @@ async def _source_control_providers(
             connected=github_connected,
             connect_url=github_connect_url,
             manage_url=github_manage_url,
-            capabilities=["Agent checkout", "branch discovery", "draft PR publishing"],
+            capabilities=["Agent checkout", "branch discovery", "pull requests as you"],
             accounts=[
                 SourceControlAccount(
                     id=str(grant["installation_id"]),

@@ -356,12 +356,13 @@ download limit is refused rather than saved in part. See
   available native Fork, so it cannot start from an archived chat or one whose
   context was lost. Selecting it again reopens the chat's existing review.
 - **Watch PR and merge.** Starts a follow-up in the same chat that watches
-  checks and reviews, fixes failures and feedback, and merges once the current
-  head meets the required checks and reviews; repository rules decide what may
-  merge without a person. It keeps unsent composer text and attachments, and
-  starts only while no chat sharing the workspace has active work or waiting
-  messages. The agent needs source-control tools that read checks and reviews,
-  mark drafts ready and merge: the GitHub preset with a token holding Contents
-  and Pull requests read and write. A connection to `/mcp/readonly` must be
-  reconnected with the preset. Watching ends with the turn's timeout, and a turn
-  that made fixes ends so the platform can publish them.
+  checks and reviews, fixes failures and feedback and pushes the fixes to the
+  pull request's branch, and merges once the current head meets the required
+  checks and reviews; repository rules decide what may merge without a person.
+  It keeps unsent composer text and attachments, and starts only while no chat
+  sharing the workspace has active work or waiting messages. The agent works
+  as the owner through the GitHub relay, with git and `gh api` REST calls, so
+  the owner needs a connected GitHub account that may push to the repository.
+  `gh` commands that use GraphQL are refused, and GitHub marks a draft ready
+  only through GraphQL, so the agent asks the owner to do that and never
+  merges a draft. Watching ends with the turn's timeout.

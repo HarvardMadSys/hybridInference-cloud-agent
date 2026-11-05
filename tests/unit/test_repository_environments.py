@@ -358,30 +358,6 @@ def test_task_only_variables_are_refused_and_an_empty_list_is_ignored():
     )
 
 
-def test_trusted_publisher_checks_known_secret_bytes_and_allows_removal(tmp_path, monkeypatch):
-    from cloud_agent import publisher
-
-    monkeypatch.setattr(publisher, "_blob_size", lambda _repo, _sha: 64)
-    content = {
-        "new": b"\x00demo-private-binary\xff",
-        "old": b"\x00demo-private-binary\xff",
-        "deleted": b"\x00\xff",
-    }
-    monkeypatch.setattr(publisher, "_read_blob", lambda _repo, sha, _size: content[sha])
-    with pytest.raises(publisher.PublishError) as rejected:
-        publisher._validate_staged_blobs(
-            tmp_path,
-            [publisher._StagedBlob("asset.bin", "new", None)],
-            {"TOKEN": "demo-private-binary"},
-        )
-    assert "demo-private-binary" not in str(rejected.value)
-    publisher._validate_staged_blobs(
-        tmp_path,
-        [publisher._StagedBlob("asset.bin", "deleted", "old")],
-        {"TOKEN": "demo-private-binary"},
-    )
-
-
 @pytest.mark.asyncio
 async def test_environment_repository_reads_without_app_installation_and_never_write_scope(
     monkeypatch,
@@ -621,13 +597,6 @@ def test_environment_status_uses_bounded_inspection_cache(tmp_path):
     for _ in range(20):
         assert prepare.status(backend, "b")["ready"]
     assert backend.manager.inspect.call_count == 1
-
-
-def test_encryption_publication_failure_is_retryable():
-    from cloud_agent.environments import EnvironmentEncryptionError
-    from cloud_agent.publish_worker import _is_retryable_publication_failure
-
-    assert _is_retryable_publication_failure(EnvironmentEncryptionError("temporary key failure"))
 
 
 @pytest.mark.asyncio
