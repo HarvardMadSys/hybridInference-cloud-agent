@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -615,7 +616,9 @@ async def create_connection(
         fallback_header=str(auth_config.get("header_name") or "Authorization"),
     )
     sealed_launch_spec = (
-        _sealed_launch_spec(launch_spec, body.env_secrets) if body.env_secrets else None
+        _sealed_launch_spec(launch_spec, body.env_secrets, location=location)
+        if body.env_secrets
+        else None
     )
 
     try:
@@ -670,6 +673,7 @@ async def import_connections(
     except config_import.ImportError_ as exc:
         raise _bad_request(str(exc)) from exc
     result = await pin_import(result)  # a bare package name, at its current release
+    result = _without_short_keys(result)
 
     preview = [draft.summary() for draft in result.drafts]
     if not body.save:
@@ -1748,19 +1752,28 @@ def _optional_static_credential(
 
 
 def _sealed_launch_spec(
-    launch_spec: Mapping[str, Any] | None, secrets: Mapping[str, str]
+    launch_spec: Mapping[str, Any] | None,
+    secrets: Mapping[str, str],
+    *,
+    location: ExecutionLocation,
+    label: str | None = None,
 ) -> dict[str, Any] | None:
     """Copy a launch spec with its ``secret://`` values encrypted.
 
     The reference stays ``secret://NAME``; the value lives as ciphertext under
     the same name. ``None`` means the spec declares nothing to seal. A missing
-    encryption key is refused here, before a connection row exists.
+    encryption key, and a program's key too short to be masked, are refused
+    here, before a connection row exists; ``label`` names an imported draft in
+    the refusal.
     """
     spec = dict(launch_spec) if isinstance(launch_spec, Mapping) else {}
     env = {str(key): str(value) for key, value in (spec.get("env") or {}).items()}
     wanted = launch.declared_secret_names(env, {})
     if not wanted:
         return None
+    sealing = {name: secrets[name] for name in wanted if name in secrets}
+    if refusal := sandbox.short_key_refusal(location, sealing):
+        raise _bad_request(f"{label}: {refusal}" if label else refusal)
     try:
         cipher = mcp_cipher()
     except CredentialCipherError as exc:
@@ -1771,6 +1784,29 @@ def _sealed_launch_spec(
             stored[name] = cipher.encrypt(secrets[name])
     spec["env_secrets"] = stored
     return spec
+
+
+def _without_short_keys(result: config_import.ImportResult) -> config_import.ImportResult:
+    """The paste, with each program whose pasted key is too short moved to ``rejected``.
+
+    Reported with the other entries that could not become a draft, in the
+    preview as at the save, so the owner sees it before anything is stored. A
+    key the owner types in later is checked when it is sealed.
+    """
+    drafts: list[config_import.ImportDraft] = []
+    rejected = list(result.rejected)
+    for draft in result.drafts:
+        pasted = {
+            secret.name: secret.value
+            for secret in draft.secrets
+            if secret.target == "env" and secret.value is not None
+        }
+        refusal = sandbox.short_key_refusal(_parse_location(draft.location), pasted)
+        if refusal:
+            rejected.append((draft.label, refusal))
+        else:
+            drafts.append(draft)
+    return replace(result, drafts=tuple(drafts), rejected=tuple(rejected))
 
 
 def _import_secrets(draft: config_import.ImportDraft, body: ImportRequest) -> dict[str, str]:
@@ -1826,7 +1862,9 @@ def _prepare_import_draft(
     auth_config_patch = None
     sealed_launch_spec = None
     if secrets and draft.transport is Transport.STDIO:
-        sealed_launch_spec = _sealed_launch_spec(launch_spec, secrets)
+        sealed_launch_spec = _sealed_launch_spec(
+            launch_spec, secrets, location=parsed_location, label=draft.label
+        )
     elif secrets:
         header_name = str(auth_config.get("header_name") or "Authorization")
         secret = secrets.get(header_name)

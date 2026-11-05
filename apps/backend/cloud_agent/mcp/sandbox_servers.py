@@ -8,7 +8,9 @@ under, and the gateway refuses anything the policy would.
 
 Its keys (``secret://NAME`` values, stored sealed) are opened here, for this
 claim only, and travel with it to the host, which hands them to the slot's
-runner alone.
+runner alone. A new key shorter than an environment Secret may be is refused
+when it is saved (`short_key_refusal`); one stored before that rule still
+opens here, and runs unmasked.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from cloud_agent_shared.sandbox_mcp import (
     SECRET_PREFIX,
     SandboxMcpServer,
 )
+from cloud_agent_shared.secret_redaction import MIN_SECRET_CHARS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -183,4 +186,24 @@ def refusal(location: ExecutionLocation, auth_kind: AuthKind | str) -> str | Non
         return None
     if AuthKind(auth_kind) is not AuthKind.NONE:
         return "a command takes its keys as environment values, not a sign-in"
+    return None
+
+
+def short_key_refusal(location: ExecutionLocation, keys: Mapping[str, str]) -> str | None:
+    """Why a program's keys, about to be sealed, cannot be saved, or ``None``.
+
+    The runner masks a program's keys in the turn's durable output only from
+    ``MIN_SECRET_CHARS`` up (``SandboxMcpServer.secrets``), as it masks an
+    environment Secret, so a shorter key is refused on the same terms. Asked
+    only when a key is saved: a short key stored before this rule still runs.
+    """
+    if location is not ExecutionLocation.SANDBOX:
+        return None
+    for name in sorted(keys):
+        value = keys[name]
+        if value and len(value.strip()) < MIN_SECRET_CHARS:
+            return (
+                f"Secret {name} must contain at least {MIN_SECRET_CHARS} characters; "
+                "a shorter value cannot be masked in the chat's output"
+            )
     return None

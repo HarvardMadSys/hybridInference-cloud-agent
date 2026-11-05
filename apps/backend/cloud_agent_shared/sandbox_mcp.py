@@ -134,8 +134,9 @@ class SandboxMcpServer(BaseModel):
 
         A value shorter than an environment Secret may be (``MIN_SECRET_CHARS``)
         is left out: masking ``"1"`` would blank every 1 in the turn's output,
-        and nothing that short is a key worth hiding. Saving does not refuse
-        one yet, so a stored short value runs but is not masked.
+        and nothing that short is a key worth hiding. Saving refuses a new one
+        (``cloud_agent.mcp.sandbox_servers.short_key_refusal``); a value stored
+        before that runs but is not masked.
         """
         return {
             f"sandbox-mcp:{self.alias}:{name}": value
