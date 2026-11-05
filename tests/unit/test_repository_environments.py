@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent.source_control.source_control import SourceControlCipher, SourceControlError
 from cloud_agent_host import environment_preparation
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.sandbox import SandboxError
@@ -367,7 +367,7 @@ async def test_environment_repository_reads_without_app_installation_and_never_w
     import httpx
 
     from cloud_agent import environment_source
-    from cloud_agent.github_app import AppNotInstalled
+    from cloud_agent.source_control.github_app import AppNotInstalled
 
     credentials = SimpleNamespace(token_for=AsyncMock(side_effect=AppNotInstalled("not installed")))
     requests = []

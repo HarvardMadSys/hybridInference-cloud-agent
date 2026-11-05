@@ -26,17 +26,6 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
-from cloud_agent.entitlement import RepoNotAllowed, repos_for_user, require_entitled_repo
-from cloud_agent.github_app import (
-    GitHubAppError,
-    RepositoryCreationError,
-    UserAuthorizationRevoked,
-)
-from cloud_agent.github_user_token import (
-    UserTokenUnavailable,
-    forget_revoked_token,
-    user_access_token,
-)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
@@ -53,7 +42,22 @@ from cloud_agent.schemas import (
     SourceControlRepository,
 )
 from cloud_agent.settings import setting_env
-from cloud_agent.source_control import (
+from cloud_agent.source_control.entitlement import (
+    RepoNotAllowed,
+    repos_for_user,
+    require_entitled_repo,
+)
+from cloud_agent.source_control.github_app import (
+    GitHubAppError,
+    RepositoryCreationError,
+    UserAuthorizationRevoked,
+)
+from cloud_agent.source_control.github_user_token import (
+    UserTokenUnavailable,
+    forget_revoked_token,
+    user_access_token,
+)
+from cloud_agent.source_control.source_control import (
     GitLabOAuthClient,
     OAuthStateError,
     SourceControlError,
@@ -62,7 +66,7 @@ from cloud_agent.source_control import (
     github_connect_configured,
     issue_oauth_state,
 )
-from cloud_agent.source_control_runtime import (  # noqa: TC001 — FastAPI resolves them.
+from cloud_agent.source_control.source_control_runtime import (  # noqa: TC001 — FastAPI resolves them.
     GitHubAppState,
     LoadStatus,
 )

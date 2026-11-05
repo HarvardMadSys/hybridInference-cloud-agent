@@ -37,7 +37,6 @@ from cloud_agent.application.ssh_servers import build_ssh_access, servers_for_th
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.execution import FAILED, RUNNING
-from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.logging_utils import get_logger
@@ -51,6 +50,11 @@ from cloud_agent.owner_access import (
 from cloud_agent.prompt_injections import claim_prompt
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import WorkerClaimResponse
+from cloud_agent.source_control.entitlement import (
+    RepoAccessUnavailable,
+    RepoNotAllowed,
+    require_entitled_repo,
+)
 from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP, mint_worker_token
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,

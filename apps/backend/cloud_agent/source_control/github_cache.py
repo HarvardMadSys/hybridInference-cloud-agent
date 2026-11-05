@@ -11,7 +11,9 @@ from cloud_agent.logging_utils import get_logger
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-logger = get_logger(__name__)
+#: Keeps the name it had before the move into ``source_control/``: the cache's
+#: sweep records are selected by that logger name.
+logger = get_logger("cloud_agent.github_cache")
 REPOSITORY_CACHE_SIZE = 1024
 
 

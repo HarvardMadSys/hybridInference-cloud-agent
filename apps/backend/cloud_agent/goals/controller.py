@@ -24,7 +24,6 @@ import logging
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from cloud_agent.application.pending_messages import settle_queue
-from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.goals.decision import GoalAction, GoalContext, decide
 from cloud_agent.goals.models import (
     GOAL_REPORT_RUNTIMES,
@@ -40,10 +39,15 @@ from cloud_agent.owner_access import (
     AgentAccessUnavailable,
     owner_may_use_agent,
 )
-from cloud_agent.source_control_runtime import SourceControlUnavailable
+from cloud_agent.source_control.entitlement import (
+    RepoAccessUnavailable,
+    RepoNotAllowed,
+    require_entitled_repo,
+)
+from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
-    from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.source_control.source_control_runtime import GitHubAppSource
 
 if TYPE_CHECKING:
     from cloud_agent.application.pending_messages import QueueStorage

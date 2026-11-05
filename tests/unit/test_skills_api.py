@@ -180,7 +180,7 @@ def test_github_confirm_refuses_content_changed_since_preview(api, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_private_import_checks_entitlement_before_minting_credentials(monkeypatch):
-    from cloud_agent.entitlement import RepoNotAllowed
+    from cloud_agent.source_control.entitlement import RepoNotAllowed
 
     token_for = AsyncMock(return_value="scoped-token")
     credentials = SimpleNamespace(token_for=token_for)

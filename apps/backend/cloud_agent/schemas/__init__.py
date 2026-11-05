@@ -7,7 +7,6 @@ workspace access, integrations, and administrative settings. Domain modules
 import each other directly, keeping their dependencies explicit and acyclic.
 """
 
-from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.goals.models import GoalView
 from cloud_agent.schemas._host_reports import (
     HOST_CAPABILITY_MAX_CHARS,
@@ -321,6 +320,7 @@ from cloud_agent.schemas.workspace import (
     AgentWorkspaceResponse,
     AgentWorkspaceWriteRequest,
 )
+from cloud_agent.source_control.entitlement import REPO_PATTERN
 
 __all__ = [
     "BASE_REF_METADATA_KEY",

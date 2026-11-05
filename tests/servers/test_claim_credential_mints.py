@@ -18,7 +18,7 @@ from tests.support.owners import connection_claim
 
 from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.application.claim_credentials import mint_clone_token
-from cloud_agent.github_app import AppNotInstalled
+from cloud_agent.source_control.github_app import AppNotInstalled
 
 pytestmark = pytest.mark.asyncio
 

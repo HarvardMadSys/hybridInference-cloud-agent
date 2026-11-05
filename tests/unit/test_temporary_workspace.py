@@ -244,7 +244,7 @@ async def test_a_temporary_workspace_refreshes_its_runtime_variables(monkeypatch
 
 
 async def test_a_repository_workspace_still_rechecks_its_repository(monkeypatch) -> None:
-    from cloud_agent.entitlement import RepoNotAllowed
+    from cloud_agent.source_control.entitlement import RepoNotAllowed
 
     async def refuse(*_args: Any, **_kwargs: Any) -> None:
         raise RepoNotAllowed("withdrawn")

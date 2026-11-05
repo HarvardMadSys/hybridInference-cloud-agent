@@ -2284,7 +2284,7 @@ class _WorkspaceContentsApp:
         self.calls: list[tuple[str, str, str]] = []
 
     async def repository_contents(self, repo: str, *, path: str, ref: str) -> Any:
-        from cloud_agent.github_app import GitHubAppError
+        from cloud_agent.source_control.github_app import GitHubAppError
 
         self.calls.append((repo, path, ref))
         if path not in self.contents:
@@ -5758,7 +5758,7 @@ async def test_an_uninstalled_app_hands_the_job_over_without_a_credential(
     message the owner can act on — which retrying would not improve.
     """
     from cloud_agent.api.deps import get_agent_app_credentials
-    from cloud_agent.github_app import AppNotInstalled
+    from cloud_agent.source_control.github_app import AppNotInstalled
 
     class UninstalledApp:
         async def token_for(self, repo: str, **kwargs: Any) -> str:

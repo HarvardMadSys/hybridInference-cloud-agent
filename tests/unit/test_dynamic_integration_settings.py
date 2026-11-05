@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from cloud_agent import github_app, source_control
 from cloud_agent.settings import number_setting
+from cloud_agent.source_control import github_app, source_control
 
 
 async def test_provider_timeouts_update_existing_credentials_and_keep_explicit_overrides(

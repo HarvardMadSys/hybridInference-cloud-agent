@@ -27,9 +27,9 @@ from cloud_agent.application.turn_claim import (
 )
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.execution import FAILED, RUNNING
-from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed
 from cloud_agent.environments import EnvironmentAccessRevoked
 from cloud_agent.owner_access import AGENT_ACCESS_WITHDRAWN, AgentAccessUnavailable
+from cloud_agent.source_control.entitlement import RepoAccessUnavailable, RepoNotAllowed
 from cloud_agent_shared.runtime_catalog import runtimes_supporting_mcp
 
 _FENCE = {"job_id": "ajob_1", "attempt_id": 7, "lease_generation": 3}

@@ -60,7 +60,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/accounts/`, `application/owner_termination.py` | The account system: sign-in, sessions, the waiting list, the account directory, retired-configuration refusal, and stopping a revoked account's work ([guide](docs/developer/local-accounts.md)) |
 | `apps/backend/cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
 | `apps/backend/cloud_agent/mcp/runtime.py` | Process-local MCP host, fenced session maintenance, and shutdown |
-| `apps/backend/cloud_agent/github_relay_policy.py`, `api/github_relay.py`, `source_control.py` | The GitHub relay and its policy, and the GitHub/GitLab credentials behind them |
+| `apps/backend/cloud_agent/source_control/` (`github_relay_policy.py`, `source_control.py`), `api/github_relay.py` | The GitHub relay and its policy, and the GitHub/GitLab credentials behind them |
 | `apps/backend/cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
 | `apps/backend/cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
 | `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |

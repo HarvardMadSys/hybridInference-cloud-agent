@@ -1,7 +1,7 @@
 """A user's own GitHub token, kept usable: decrypted, and renewed before it lapses.
 
 Which repositories a user may work on is asked of GitHub *as that user* (see
-:mod:`cloud_agent.entitlement`), so every entitlement check needs a token that
+:mod:`cloud_agent.source_control.entitlement`), so every entitlement check needs a token that
 still works — including the ones the GitHub relay and the goal controller make
 hours after the user last looked at the page.
 
@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.github_app import UserAuthorizationRevoked
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
 if TYPE_CHECKING:
     from cloud_agent.ports import SourceControlRepository

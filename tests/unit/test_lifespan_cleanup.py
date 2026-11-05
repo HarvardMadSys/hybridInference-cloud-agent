@@ -23,7 +23,7 @@ from cloud_agent.app import lifespan
 from cloud_agent.bootstrap import lifespan as lifespan_module
 from cloud_agent.measurement.measurement_writer import MeasurementWriter, reset_writer
 from cloud_agent.settings import reset_settings
-from cloud_agent.source_control_runtime import SourceControlRuntime
+from cloud_agent.source_control.source_control_runtime import SourceControlRuntime
 
 _EXPECTED_SHUTDOWN_TASKS = (
     "settings_task",
@@ -402,7 +402,7 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         ),
         "synchronize_settings": ("cloud_agent.settings.synchronize_settings", _boom(stage)),
         "source_control": (
-            "cloud_agent.source_control_runtime.SourceControlRuntime.from_env",
+            "cloud_agent.source_control.source_control_runtime.SourceControlRuntime.from_env",
             _boom(stage),
         ),
         "compute_runtime": ("cloud_agent.bootstrap.compute.build_compute_runtime", _boom(stage)),

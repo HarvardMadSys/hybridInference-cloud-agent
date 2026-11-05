@@ -1545,7 +1545,7 @@ async def test_an_unloaded_github_app_leaves_the_goal_waiting_on_its_rows(
     becomes the next round once the App loads.
     """
     from cloud_agent.goals.controller import consume_wakeup, continue_after_finish, run_goal_wakeups
-    from cloud_agent.source_control_runtime import SourceControlUnavailable
+    from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 
     class RecoveringApp:
         loaded = False
@@ -2072,8 +2072,8 @@ async def test_repository_lookup_outages_do_not_exhaust_real_goal_wakeups(
     """Temporary access-service failures stay pending until the provider recovers."""
     from unittest.mock import AsyncMock
 
-    from cloud_agent.entitlement import RepoAccessUnavailable
     from cloud_agent.goals.controller import run_goal_wakeups
+    from cloud_agent.source_control.entitlement import RepoAccessUnavailable
 
     job, first, _ = await _live_goal_job(store)
     await _finish(pool, first)

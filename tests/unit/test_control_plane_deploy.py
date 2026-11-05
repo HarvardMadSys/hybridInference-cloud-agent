@@ -64,7 +64,7 @@ def test_missing_migrated_secrets_allow_setup_without_using_a_public_default(
 ) -> None:
     """Setup can start with empty imports; credential use still fails closed."""
     from cloud_agent import settings, tokens
-    from cloud_agent.source_control import SourceControlCipher, SourceControlError
+    from cloud_agent.source_control.source_control import SourceControlCipher, SourceControlError
 
     assert control_plane_env[variable] == "${" + variable + ":-}"
     monkeypatch.delenv(variable, raising=False)

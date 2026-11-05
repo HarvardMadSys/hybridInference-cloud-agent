@@ -44,7 +44,7 @@ from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory,
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.settings import integer_setting
-from cloud_agent.source_control_runtime import SourceControlUnavailable
+from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
 from cloud_agent.workers.attempts import reap_expired_attempts

@@ -1295,7 +1295,7 @@ class PostgresEnvironmentRepository:
 
     async def _environment_redactor(self, user_id: str, binding_id: str) -> SecretRedactor:
         from cloud_agent.settings import setting_env
-        from cloud_agent.source_control import ENV_ENCRYPTION_KEY
+        from cloud_agent.source_control.source_control import ENV_ENCRYPTION_KEY
 
         epoch = hashlib.sha256((setting_env(ENV_ENCRYPTION_KEY, "") or "").encode()).hexdigest()
         async with self._pool.acquire() as conn:

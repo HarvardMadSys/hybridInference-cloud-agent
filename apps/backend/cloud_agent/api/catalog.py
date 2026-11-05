@@ -17,7 +17,6 @@ from cloud_agent.api._project_filter import TemporaryFilter, require_single_proj
 from cloud_agent.api.deps import get_storage, require_store
 from cloud_agent.application.residency import close_released_residencies
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
-from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentConversation,
@@ -39,6 +38,7 @@ from cloud_agent.schemas import (
     AgentSessionState,
     AgentThreadArchiveResponse,
 )
+from cloud_agent.source_control.entitlement import REPO_PATTERN
 
 if TYPE_CHECKING:
     from cloud_agent.ports import ConversationCommands, ConversationQueries, HostPoolRepository

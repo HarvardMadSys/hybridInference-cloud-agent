@@ -20,7 +20,6 @@ from cloud_agent.api.deps import (
     require_store,
 )
 from cloud_agent.api.worker import verify_claiming_host
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import (
     EnvironmentConflict,
     EnvironmentForbidden,
@@ -28,6 +27,7 @@ from cloud_agent.environments import (
 )
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import REPO_PATTERN
+from cloud_agent.source_control.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     MAX_IMPORT_BYTES,

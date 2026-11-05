@@ -24,8 +24,8 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from cloud_agent.api._parameters import refuse_unstorable_parameters
 from cloud_agent.api._sensitive_routes import no_store
 from cloud_agent.api.errors import install_domain_errors
-from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
+from cloud_agent.source_control.entitlement import RepoAccessUnavailable
 from cloud_agent_shared.storable_text import encodable_json
 
 logger = get_logger(__name__)
