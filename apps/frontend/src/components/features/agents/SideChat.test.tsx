@@ -682,8 +682,11 @@ describe('Side Chat review regressions', () => {
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
     fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
-    // A connection turn runs at its provider's default: there is no reasoning control.
-    expect(screen.queryByRole('button', { name: 'Side chat reasoning' })).not.toBeInTheDocument();
+    // This connection declares no levels for model-b: Auto is all that is offered, and said so.
+    expect(screen.getByRole('button', { name: 'Side chat reasoning' })).toHaveAccessibleDescription(
+      'Auto',
+    );
+    expect(screen.getByText('Auto only')).toBeVisible();
     await act(async () => {
       resolve(copied);
     });

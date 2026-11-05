@@ -561,6 +561,7 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_COMPAT_UPSTREAM_KEY",
             "AGENT_COMPAT_MODEL",
             "AGENT_COMPAT_TOKEN",
+            "AGENT_COMPAT_REASONING_EFFORT",
             "AGENT_LIVE_SESSION_ID",
             "AGENT_LIVE_WORKDIR",
             "AGENT_MCP_SERVERS",

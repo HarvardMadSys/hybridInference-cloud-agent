@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -1520,3 +1521,36 @@ def test_codex_trajectory_keeps_native_identity_and_structured_streams(tmp_path)
     assert "usage_id" not in call.payload
     assert call.payload["id"] == "c"
     assert turn.wait().final_output == "Done"
+
+
+@pytest.mark.parametrize("effort", [None, "high"])
+def test_a_translated_claude_spawn_binds_its_helper_to_the_turns_level(tmp_path, effort):
+    """The template is built at Auto; the spawn tells the helper the turn's level, or nothing."""
+    from cloud_agent_host.runtimes import MessagesViaChatUrl
+
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    context = replace(context, model_base_url=MessagesViaChatUrl("https://chat.example/v1"))
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
+    process.feed = _turn_lines(_ANSWER, _RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort=effort)).wait()
+
+    ((argv, env),) = spawned
+    assert env["AGENT_COMPAT_CLIENT"] == "anthropic_messages"
+    if effort is None:
+        assert "AGENT_COMPAT_REASONING_EFFORT" not in env
+        assert "--effort" not in argv
+    else:
+        assert env["AGENT_COMPAT_REASONING_EFFORT"] == "high"
+        assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_a_direct_claude_spawn_carries_no_helper_level(tmp_path):
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
+    process.feed = _turn_lines(_ANSWER, _RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort="max")).wait()
+    ((argv, env),) = spawned
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert not any(name.startswith("AGENT_COMPAT_") for name in env)

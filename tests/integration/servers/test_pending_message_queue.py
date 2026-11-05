@@ -1879,15 +1879,15 @@ async def test_each_message_runs_with_its_own_model(api: Api):
     assert (b_turn["task_prompt"], b_turn["model"]) == ("B back on the default", "glm-5.1")
 
 
-async def test_a_message_naming_an_effort_on_a_connection_is_refused(api: Api):
-    """A connection turn runs at its provider's default; an effort is refused, not dropped."""
+async def test_a_message_naming_an_undeclared_level_is_refused(api: Api):
+    """Nothing declares glm-5.1's levels: a level is refused, not dropped; Auto runs."""
     job = await api.create()
     running = await api.start(job)
     refused = await api.send(
         job["thread_id"], "think hard", model="glm-5.1", reasoning_effort="max"
     )
     assert refused.status_code == 400, refused.text
-    assert refused.json()["detail"]["error"]["reason"] == "effort_unsupported"
+    assert refused.json()["detail"]["error"]["reason"] == "effort_unknown"
     await api.finish(running)
     assert len(await api.turns(job["thread_id"])) == 1
 

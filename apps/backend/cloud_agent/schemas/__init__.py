@@ -97,6 +97,7 @@ from cloud_agent.schemas.audit import (
 from cloud_agent.schemas.config import (
     AgentConfigResponse,
     ModelConnectionOption,
+    ModelEffortOffer,
 )
 from cloud_agent.schemas.conversations import (
     AgentConversation,
@@ -487,6 +488,7 @@ __all__ = [
     "McpConnectionSummary",
     "McpIntegrationResponse",
     "ModelConnectionOption",
+    "ModelEffortOffer",
     "OAuthConnectRequest",
     "OkResponse",
     "OwnJoinRequestListResponse",

@@ -115,9 +115,17 @@ async def _prepare_model(
     is refused while its author is looking rather than failing later. A turn
     with no connection at all (one following a turn from before connections
     were the only source) is refused: there is nothing else to run it on.
+
+    The effort is checked as the turn will run it: the one sent, or the
+    parent's when omitted (inherited, as the model is), or Auto after
+    ``"auto"``. An inherited level the new model does not offer is refused
+    with the levels it does, never dropped or replaced.
     """
     reset_effort = reasoning_effort == RESET_REASONING_EFFORT
     requested_effort = None if reset_effort else reasoning_effort
+    effective_effort = (
+        None if reset_effort else (requested_effort or parent.get("reasoning_effort"))
+    )
     connection_id = model_connection_id if model else parent.get("model_connection_id")
     if not connection_id:
         raise model_connection_required()
@@ -127,9 +135,9 @@ async def _prepare_model(
         connection_id=str(connection_id),
         runtime=parent["runtime"],
         model=model or parent["model"],
-        reasoning_effort=requested_effort,
+        reasoning_effort=effective_effort,
     )
-    return model, None, reset_effort
+    return model, requested_effort, reset_effort
 
 
 async def prepare_follow_up(

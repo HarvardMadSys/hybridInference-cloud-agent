@@ -3008,7 +3008,7 @@ async def test_create_without_a_connection_is_a_verdict_not_an_outage(client: As
     assert response.json()["detail"]["error"]["type"] == "model_connection_required"
 
 
-async def test_create_refuses_an_effort_on_a_connection(client: AsyncClient):
+async def test_create_refuses_a_level_its_provider_has_not_declared(client: AsyncClient):
     response = await client.post(
         "/v1/agent/jobs",
         json=on_connection(
@@ -3016,7 +3016,7 @@ async def test_create_refuses_an_effort_on_a_connection(client: AsyncClient):
         ),
     )
     assert response.status_code == 400
-    assert response.json()["detail"]["error"]["reason"] == "effort_unsupported"
+    assert response.json()["detail"]["error"]["reason"] == "effort_unknown"
 
 
 async def test_follow_up_model_switch_gets_the_same_fail_fast(

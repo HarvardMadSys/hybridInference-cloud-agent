@@ -14,6 +14,13 @@ key or Base URL) runs on nothing. Codex and Claude Code reach a model whose
 only verified API is Chat Completions through the member's compatibility
 helper; that path is derived here, never stored. There is no manual
 declaration of APIs.
+
+**Which reasoning levels a turn may ask for is per model too, and only
+declared.** A turn on a connection runs at Auto (no level: the CLI's and the
+provider's own default) unless it names a level the provider's listing
+declared for the API its plan finally calls, which the runtime's CLI can put
+on the wire (``domain.model_efforts``). A level is never renamed, rounded or
+dropped on the way: anything else is refused with what *is* offered.
 """
 
 from __future__ import annotations
@@ -22,6 +29,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+from cloud_agent.domain.model_efforts import (
+    EFFORT_SUPPORTED,
+    EFFORT_UNKNOWN,
+    EffortOffer,
+    effort_offer,
+)
 from cloud_agent_shared.model_connections import (
     CONNECTION_ID,
     MAX_BASE_URL_CHARS,
@@ -44,6 +57,8 @@ UnusableReason = Literal[
     "model_unverified",
     "protocol_unsupported",
     "effort_unsupported",
+    "effort_unknown",
+    "effort_level_unsupported",
     "changed",
     "feature_disabled",
     "no_connection",
@@ -66,7 +81,16 @@ UNUSABLE_MESSAGES: dict[str, str] = {
         "or choose another agent or model."
     ),
     "effort_unsupported": (
-        "Reasoning effort cannot be set for a model connection; leave it on Auto."
+        "This model's provider declares no reasoning level this agent can send. "
+        "Leave reasoning on Auto."
+    ),
+    "effort_unknown": (
+        "This model's provider has not declared which reasoning levels it accepts, so only "
+        "Auto can run. Refresh its reasoning levels in Settings, or leave reasoning on Auto."
+    ),
+    "effort_level_unsupported": (
+        "That reasoning level is not one this model's provider declares for this agent. "
+        "Choose an offered level, or Auto."
     ),
     "feature_disabled": (
         "This deployment has not turned on model connections. Contact the deployment administrator."
@@ -97,10 +121,17 @@ class ModelConnectionAccessEnded(Exception):
 class ModelConnectionUnusable(Exception):
     """A turn cannot run on the connection it names, for a reason its owner can act on."""
 
-    def __init__(self, reason: UnusableReason) -> None:
-        """Carry the reason; the message is the owner-facing sentence for it."""
-        super().__init__(UNUSABLE_MESSAGES[reason])
+    def __init__(self, reason: UnusableReason, *, offered: list[str] | None = None) -> None:
+        """Carry the reason; the message is the owner-facing sentence for it.
+
+        ``offered`` is, for an effort refusal, the levels that would run.
+        """
+        message = UNUSABLE_MESSAGES[reason]
+        if offered:
+            message = f"{message} Offered: Auto, {', '.join(offered)}."
+        super().__init__(message)
         self.reason: UnusableReason = reason
+        self.offered: list[str] = list(offered or [])
 
 
 def clean_name(value: str) -> str:
@@ -263,8 +294,25 @@ def require_usable(
     if plan is None:
         raise ModelConnectionUnusable("protocol_unsupported")
     if reasoning_effort is not None:
-        raise ModelConnectionUnusable("effort_unsupported")
+        _require_offered(model_effort_offer(connection, model, runtime), reasoning_effort)
     return plan
+
+
+def model_effort_offer(connection: dict[str, Any], model: str, runtime: str) -> EffortOffer | None:
+    """What ``runtime`` may run ``model`` at on ``connection``; ``None`` when it cannot run it."""
+    plan = model_paths(connection, model).get(runtime)
+    if plan is None:
+        return None
+    return effort_offer(current_check(connection, model), runtime=runtime, plan=plan)
+
+
+def _require_offered(offer: EffortOffer | None, level: str) -> None:
+    if offer is None or offer.status == EFFORT_UNKNOWN:
+        raise ModelConnectionUnusable("effort_unknown")
+    if offer.status != EFFORT_SUPPORTED:
+        raise ModelConnectionUnusable("effort_unsupported")
+    if level not in offer.levels:
+        raise ModelConnectionUnusable("effort_level_unsupported", offered=offer.levels)
 
 
 __all__ = [
@@ -284,6 +332,7 @@ __all__ = [
     "clean_name",
     "current_check",
     "is_connection_id",
+    "model_effort_offer",
     "model_paths",
     "require_usable",
     "supported_protocols",

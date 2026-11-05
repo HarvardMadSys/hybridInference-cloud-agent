@@ -16,8 +16,13 @@ Three kinds of field are knowingly not forwarded, and documented as such:
   ``redacted_thinking`` blocks): encrypted or signed for the provider that
   produced it, with no Chat Completions field to carry it;
 - generation hints with no Chat equivalent (``thinking``,
-  ``context_management``, ``output_config``, ``reasoning``, ``include``) --
-  an owner connection runs at effort Auto;
+  ``context_management``, ``output_config``, ``reasoning``, ``include``).
+  The one exception is the reasoning level: the client's own
+  (``output_config.effort``, ``reasoning.effort``) is never forwarded, since
+  Claude Code sends ``high`` whether or not anyone chose it. Instead the level
+  the *turn* chose -- bound at launch, already checked against what the
+  upstream declares -- goes out as ``reasoning_effort`` on every request, and
+  a turn at Auto sends none, exactly as before;
 - client bookkeeping (``metadata``, ``client_metadata``, ``prompt_cache_key``,
   ``store``), which identifies the client device and is not the provider's.
 
@@ -161,7 +166,16 @@ def check_responses(body: dict[str, Any], model: str) -> None:
     )
 
 
-def responses_chat_request(body: dict[str, Any], model: str) -> Prepared:
+def _apply_effort(params: dict[str, Any], reasoning_effort: str) -> None:
+    """The turn's level, or none at Auto; never the client's own."""
+    params.pop("reasoning_effort", None)
+    if reasoning_effort:
+        params["reasoning_effort"] = reasoning_effort
+
+
+def responses_chat_request(
+    body: dict[str, Any], model: str, reasoning_effort: str = ""
+) -> Prepared:
     """The Chat Completions request for a gated Responses request, and its tool names.
 
     Namespaced function tools, and history calls to them, are flattened first;
@@ -179,7 +193,7 @@ def responses_chat_request(body: dict[str, Any], model: str) -> Prepared:
         body.get("input"), instructions=instructions if isinstance(instructions, str) else None
     )
     params, _dropped = responses_request_to_chat_params(body)
-    params.pop("reasoning_effort", None)
+    _apply_effort(params, reasoning_effort)
     if isinstance(body.get("parallel_tool_calls"), bool) and params.get("tools"):
         params["parallel_tool_calls"] = body["parallel_tool_calls"]
     chat = _chat_body(model, move_tool_images(merge_leading_system_messages(messages)), params)
@@ -273,13 +287,13 @@ def check_messages(body: dict[str, Any], model: str) -> None:
             _check_message_blocks(message.get("content"))
 
 
-def messages_chat_request(body: dict[str, Any], model: str) -> Prepared:
+def messages_chat_request(body: dict[str, Any], model: str, reasoning_effort: str = "") -> Prepared:
     """The Chat Completions request for a gated Anthropic Messages request."""
     check_messages(body, model)
     messages, params = anthropic_request_to_openai(body)
     # ``user`` would carry the client's device identifier to the provider.
     params.pop("user", None)
-    params.pop("reasoning_effort", None)
+    _apply_effort(params, reasoning_effort)
     choice = body.get("tool_choice")
     if isinstance(choice, dict) and choice.get("type") == "none":
         params["tool_choice"] = "none"
@@ -312,13 +326,16 @@ def _chat_body(
     return body
 
 
-def prepare(client: str, body: Any, model: str) -> Prepared:
-    """Gate ``body`` from ``client`` and build its Chat Completions request."""
+def prepare(client: str, body: Any, model: str, reasoning_effort: str = "") -> Prepared:
+    """Gate ``body`` from ``client`` and build its Chat Completions request.
+
+    ``reasoning_effort`` is the turn's level, empty at Auto.
+    """
     _require(isinstance(body, dict), "The request body must be a JSON object.")
     if client == RESPONSES:
-        return responses_chat_request(body, model)
+        return responses_chat_request(body, model, reasoning_effort)
     if client == ANTHROPIC_MESSAGES:
-        return messages_chat_request(body, model)
+        return messages_chat_request(body, model, reasoning_effort)
     raise ValueError(f"unknown client protocol {client!r}")
 
 

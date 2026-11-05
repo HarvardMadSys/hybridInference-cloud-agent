@@ -136,8 +136,8 @@ activation after the host publishes readiness in section 4.
 - [ ] Create a task on its intended base branch with a small verifiable change,
       such as adding a `CONTRIBUTING.md` containing a specified sentence.
 - [ ] Observe `queued` then a host claim. Record job/attempt/host identifiers.
-      The turn names its model and connection; no reasoning-effort control is
-      offered for it.
+      The turn names its model and connection. The reasoning control offers
+      Auto, plus the levels the provider declares for the model, if any.
 - [ ] Confirm events stream to the browser and at least one model/tool call
       succeeds, and that the run's usage footer shows reported tokens and says
       the provider bills it.

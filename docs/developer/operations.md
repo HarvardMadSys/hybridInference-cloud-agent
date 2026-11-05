@@ -4152,14 +4152,33 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   derived from the stored facts, never stored. A saved model always has
   facts and at least one agent; one without current facts (a backstop that
   should not occur) runs on nothing, and the composer does not offer it.
-  A turn on a connection runs at its provider's default reasoning effort: a
-  task or message naming an effort is refused (`model_connection_unusable`,
-  reason `effort_unsupported`), the composer offers no effort control, and
-  nothing is stored for it.
   A pairing a model cannot serve is refused when the task or message is
   submitted, and again at every claim and residency; nothing falls back to
   another connection, model or API, and there is no trial and error
   at inference time.
+- **Reasoning levels come from the provider's declaration.** Beside every
+  verification, and when the owner chooses **Refresh reasoning levels** on a
+  saved connection (one hourly check), the control plane reads the provider's
+  two model listings once, under the same address rules: `GET <Base URL>/models`
+  with the bearer key, read for each model's `reasoning.supported_efforts`
+  (OpenRouter's and the HybridInference gateway's field), and
+  `GET /v1/models?limit=1000` at the Anthropic base with `x-api-key`, read for
+  `capabilities.effort` (the Anthropic Models API's, also answered by the
+  gateway). That is at most two requests per read and no inference. Per model
+  and API it stores `supported` with the levels, `unsupported` (declared: none)
+  or `unknown` (the listing failed, does not list the model, or declares
+  nothing or something malformed); unknown is never read as unsupported, and
+  nothing is inferred from a model's name or from a request being accepted. An
+  agent is offered the declared levels of the API its plan finally calls (Chat
+  Completions on a translated plan) that its pinned CLI can send, and Auto.
+  Auto adds nothing to the launch, so a turn at Auto sends what it always did.
+  A chosen level is stored with the turn, inherited by follow-ups, queued
+  messages, goal rounds and Fork like the model, and checked again at every
+  submission, claim and residency; a level the model does not offer is
+  refused with the offered ones (`effort_level_unsupported`), never renamed or
+  dropped. On a translated plan the helper sends the turn's level as
+  `reasoning_effort` on every Chat request; the CLI's own effort field, which
+  Claude Code fills with `high` even at Auto, is never forwarded.
 - **Verify before saving.** Creating a connection, and an edit that changes
   its key or Base URL or adds models, verifies inside the saving request
   before anything is written: every model the connection would list for a

@@ -35,8 +35,19 @@ ENV_UPSTREAM_KEY = "AGENT_COMPAT_UPSTREAM_KEY"
 ENV_MODEL = "AGENT_COMPAT_MODEL"
 #: The token this member's CLI must present, issued with the claim.
 ENV_TOKEN = "AGENT_COMPAT_TOKEN"
+#: The reasoning level the turn chose, validated by the control plane against
+#: what the upstream declares; absent or empty is Auto. A changed level starts
+#: a new member process, and with it a new helper.
+ENV_REASONING_EFFORT = "AGENT_COMPAT_REASONING_EFFORT"
 #: Every variable the launcher consumes; none reaches the CLI.
-LAUNCH_ENV = (ENV_CLIENT, ENV_UPSTREAM_URL, ENV_UPSTREAM_KEY, ENV_MODEL, ENV_TOKEN)
+LAUNCH_ENV = (
+    ENV_CLIENT,
+    ENV_UPSTREAM_URL,
+    ENV_UPSTREAM_KEY,
+    ENV_MODEL,
+    ENV_TOKEN,
+    ENV_REASONING_EFFORT,
+)
 
 __all__ = [
     "ANTHROPIC_MESSAGES",
@@ -44,6 +55,7 @@ __all__ = [
     "CLIENTS",
     "ENV_CLIENT",
     "ENV_MODEL",
+    "ENV_REASONING_EFFORT",
     "ENV_TOKEN",
     "ENV_UPSTREAM_KEY",
     "ENV_UPSTREAM_URL",

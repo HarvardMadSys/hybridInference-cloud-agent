@@ -16,7 +16,8 @@ import { ThreadHistoryButton } from './ThreadHistoryButton';
 import { codeReviewFixPrompt } from './codeReview';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { describeConversationTurns } from './conversationTurnNavigation';
-import { highestEffort, offeredEfforts } from './effort';
+import { useOfferedEffort } from './effort';
+import { EffortPicker } from './EffortPicker';
 import { choiceLabel, isModelUnavailable, turnChoice, turnModelPicker } from './modelSource';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
@@ -171,15 +172,16 @@ function SideChatContent({
   }, [current]);
 
   const runtime = current?.runtime ?? sourceJob.runtime;
-  const efforts = useMemo(
-    () => offeredEfforts(config, runtime, model.model, model.connectionId),
-    [config, runtime, model],
+  // Auto, or a level this model's provider declares; one it does not offer is
+  // put back on Auto visibly, never swapped for another level.
+  const effortChoice = useOfferedEffort(
+    config,
+    runtime,
+    model.model,
+    model.connectionId,
+    effort,
+    setEffort,
   );
-  useEffect(() => {
-    if (config && !efforts.includes(effort)) {
-      setEffort(highestEffort(efforts));
-    }
-  }, [config, effort, efforts]);
   const inheritedTurn = current ?? sourceJob;
   const picker = turnModelPicker(config, runtime, model, setModel, t, turnChoice(inheritedTurn));
   const modelUnavailable = isModelUnavailable(config, runtime, model);
@@ -512,13 +514,15 @@ function SideChatContent({
                         picker.onChange(value);
                       }}
                     />
-                    <Picker
+                    <EffortPicker
+                      compact={false}
                       label={t('sideChat.effort')}
                       value={effort}
-                      options={efforts}
+                      offer={effortChoice.offer}
+                      dropped={effortChoice.dropped}
                       onChange={(value) => {
                         pickedEffort.current = true;
-                        setEffort(value);
+                        effortChoice.choose(value);
                       }}
                     />
                   </>

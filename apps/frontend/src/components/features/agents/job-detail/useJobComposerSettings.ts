@@ -4,7 +4,7 @@ import { useT } from '@/components/providers';
 import { type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
 import { useEffect, useMemo, useState } from 'react';
 import type { InheritedModel } from '../ConversationComposer';
-import { highestEffort, offeredEfforts } from '../effort';
+import { effortFits, effortOffer } from '../effort';
 import {
   choiceLabel,
   isModelUnavailable,
@@ -81,18 +81,19 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
 
   // Against the model this turn would run — the switched-to one, or the
   // inherited one — because a pair offered last turn need not be offered now.
-  const efforts = useMemo(
-    () => offeredEfforts(config, job.runtime, choice.model, choice.connectionId),
+  const offer = useMemo(
+    () => effortOffer(config, job.runtime, choice.model, choice.connectionId),
     [config, job.runtime, choice.model, choice.connectionId],
   );
-  // The chosen level leads, then the inherited one; a turn that inherited
-  // nothing, or one whose switched-to model does not offer that level, falls to
-  // the deepest the new pair has. Only once the config has arrived. Before that
-  // the offered set is empty because nothing is *known*, not because nothing is
-  // offered — and acting on it would wipe the inherited level a moment before
-  // the answer lands.
+  // The chosen level leads, then the inherited one. One the model this turn
+  // would run does not offer is shown and sent as Auto (`"auto"`, since the
+  // parent's would otherwise be inherited) and named in `effortDropped`; never
+  // replaced by another level. Only once the config has arrived: before that
+  // nothing is *known*, and acting on it would wipe the inherited level a
+  // moment before the answer lands.
   const wantedEffort = chosenEffort ?? inherited.reasoningEffort ?? '';
-  const effort = !config || efforts.includes(wantedEffort) ? wantedEffort : highestEffort(efforts);
+  const fits = !config || effortFits(offer, wantedEffort);
+  const effort = fits ? wantedEffort : '';
 
   return {
     config,
@@ -105,8 +106,9 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
     inheritedUnavailable: choiceUnavailable,
     choice,
     effort,
+    effortDropped: fits ? '' : wantedEffort,
     setChosenEffort,
     modelPicker: modelPickerProps,
-    efforts,
+    effortOffer: offer,
   };
 }

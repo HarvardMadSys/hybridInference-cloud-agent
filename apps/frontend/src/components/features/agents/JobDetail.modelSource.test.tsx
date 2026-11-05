@@ -181,12 +181,18 @@ describe('follow-up model sources', () => {
     render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
     await waitFor(() => expect(getAgentConfig).toHaveBeenCalled());
     chooseModel('shared · My provider');
+    // Shown, not silently changed: the new model offers no `high`.
+    expect(
+      await screen.findByText('high is not offered for this model; reasoning is back on Auto.'),
+    ).toBeVisible();
     await send('Use my key');
+    // The parent's level would be inherited; Auto is sent to clear it.
     await waitFor(() =>
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Use my key',
         model: 'shared',
         model_connection_id: CONNECTION,
+        reasoning_effort: 'auto',
       }),
     );
   });
@@ -278,4 +284,58 @@ it('gives setup guidance when no connection is left', async () => {
   render(<JobDetail job={makeJob({ modelConnectionId: CONNECTION })} />);
   await screen.findByRole('link', { name: 'Set up a model connection' });
   expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeDisabled();
+});
+
+describe('follow-up reasoning levels', () => {
+  /** Other provider's `shared` declares high and max for Codex. */
+  const [mine, other] = CONFIG.model_connections!;
+  const declaredOther = {
+    ...other,
+    model_efforts: {
+      shared: { codex: { status: 'supported' as const, levels: ['high', 'max'], reason: '' } },
+    },
+  };
+  const DECLARED: AgentConfigApi = { ...CONFIG, model_connections: [mine, declaredOther] };
+
+  function chooseLevel(name: string) {
+    fireEvent.click(screen.getByLabelText('Reasoning for this turn'));
+    fireEvent.click(screen.getByRole('option', { name }));
+  }
+
+  beforeEach(() => {
+    vi.mocked(getAgentConfig).mockResolvedValue(DECLARED);
+  });
+
+  it('keeps the inherited level and sends nothing for it', async () => {
+    render(<JobDetail job={makeJob({ reasoningEffort: 'max' })} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText('Reasoning for this turn')).toHaveAccessibleDescription('max'),
+    );
+    await send('Again');
+    await waitFor(() => expect(sentBody()).toEqual({ prompt: 'Again' }));
+  });
+
+  it('sends a changed level, and "auto" to go back to the provider default', async () => {
+    render(<JobDetail job={makeJob({ reasoningEffort: 'max' })} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText('Reasoning for this turn')).toHaveAccessibleDescription('max'),
+    );
+    chooseLevel('Auto');
+    await send('Default please');
+    await waitFor(() =>
+      expect(sentBody()).toEqual({ prompt: 'Default please', reasoning_effort: 'auto' }),
+    );
+  });
+
+  it('sends a newly chosen level', async () => {
+    render(<JobDetail job={makeJob()} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText('Reasoning for this turn')).toHaveAccessibleDescription('Auto'),
+    );
+    chooseLevel('high');
+    await send('Think harder');
+    await waitFor(() =>
+      expect(sentBody()).toEqual({ prompt: 'Think harder', reasoning_effort: 'high' }),
+    );
+  });
 });

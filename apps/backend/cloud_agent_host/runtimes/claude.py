@@ -21,6 +21,7 @@ from .base import (
     RuntimeConnectionUnsupportedError,
     RuntimeMCPConfig,
     compat_cli_credential,
+    compat_effort_env,
     compat_launch,
 )
 from .events import (
@@ -249,7 +250,14 @@ class ClaudeCodeRuntime(AgentRuntime):
             env["CLAUDE_CONFIG_DIR"] = config_dir
         if isinstance(model_base_url, MessagesViaChatUrl):
             # The model is pinned later through ``--model``; the helper locks to it.
-            return compat_launch(argv, env, model_base_url, credential, model=model)
+            return compat_launch(
+                argv,
+                env,
+                model_base_url,
+                credential,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         return argv, env
 
     @staticmethod
@@ -646,6 +654,25 @@ class ClaudeCodeRuntime(AgentRuntime):
     #: A level declared here that the CLI does not know would therefore run at
     #: a depth nobody chose while reporting the one they did.
     EFFORT_LEVELS = CLAUDE_CODE.reasoning_efforts
+
+    @staticmethod
+    def bind_live_env(
+        env: dict[str, str], *, model: str, reasoning_effort: str | None
+    ) -> dict[str, str]:
+        """The resident launch template's environment, bound to its first turn.
+
+        The template is built with ``model=""`` and at Auto. Delegated requests
+        are bound to the residency's model too, and behind the compatibility
+        helper -- which never forwards the CLI's own effort field -- the helper
+        is told the turn's level (``compat_effort_env``).
+        """
+        bound = {
+            **env,
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_SMALL_FAST_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+        }
+        return compat_effort_env(bound, reasoning_effort)
 
     def effort_args(self, effort: str | None) -> list[str]:
         """Express effort as ``--effort <level>``."""

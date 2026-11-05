@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createAgentJob, listRepoBranches } from '@/lib/api/agents';
 import type {
   AgentConfigApi,
@@ -21,7 +21,8 @@ import {
 } from './githubReturn';
 import { useComposerConfig } from './useComposerConfig';
 import { ModelConnectionNotice } from './ModelConnectionNotice';
-import { highestEffort, offeredEfforts } from './effort';
+import { useOfferedEffort } from './effort';
+import { EffortPicker } from './EffortPicker';
 import { useT } from '@/components/providers';
 import { useAuth } from '@/components/providers/AuthProvider';
 import { useComposerDraft } from './useComposerDraft';
@@ -313,22 +314,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     githubUnavailable,
   );
 
-  // The offered efforts follow the (runtime, model) pair, so switching either
-  // can empty the set or drop the current choice out of it.
-  const efforts = useMemo(
-    () => offeredEfforts(config, runtime, model, connectionId),
-    [config, runtime, model, connectionId],
-  );
-  useEffect(() => {
-    // Only once the config has arrived: before that the offered set is empty
-    // because nothing is *known*, not because nothing is offered.
-    if (!config) return;
-    // Deepest by default, and reset to it whenever the pair changes under a
-    // selection it no longer offers. Falling back rather than submitting a
-    // level the new pair does not have: the backend would refuse it, and the
-    // picker would have shown a value it could not deliver.
-    if (!efforts.includes(effort)) setEffort(highestEffort(efforts));
-  }, [config, efforts, effort]);
+  // Auto, or a level the (runtime, model) pair's provider declares; a switch
+  // to a pair without the chosen level puts it back on Auto, visibly.
+  const effortChoice = useOfferedEffort(config, runtime, model, connectionId, effort, setEffort);
 
   // Branches follow the selected repository, so they reload when it changes —
   // and are dropped at once, so the previous repository's branch can never be
@@ -831,12 +819,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               placeholder={t('composer.chooseModelPlaceholder')}
               triggerRef={modelControl.attach}
             />
-            <Picker
-              compact
+            <EffortPicker
               label={t('composer.reasoning')}
               value={effort}
-              options={efforts}
-              onChange={setEffort}
+              offer={effortChoice.offer}
+              dropped={effortChoice.dropped}
+              onChange={effortChoice.choose}
             />
             <button
               type="button"
