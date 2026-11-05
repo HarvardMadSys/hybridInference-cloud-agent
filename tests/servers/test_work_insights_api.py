@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, create_autospec
 
 import httpx
 import pytest
@@ -21,7 +21,7 @@ def app(monkeypatch):
     use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(work_insights.router)
-    repository = AsyncMock()
+    repository = create_autospec(work_insights.RecentRequests, instance=True)
     repository.recent_requests.return_value = ["Fix the login crash in the React frontend"]
     gateway = AsyncMock()
     gateway.agent_access.side_effect = lambda owner: {

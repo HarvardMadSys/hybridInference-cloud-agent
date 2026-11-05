@@ -39,8 +39,6 @@ from cloud_agent.ports.ledger import LedgerRepository
 from cloud_agent.ports.mcp import McpConnectionRepository
 from cloud_agent.ports.mcp_catalog import McpCatalogRepository
 from cloud_agent.ports.model_connections import ModelConnectionRepository
-from cloud_agent.ports.model_preferences import ModelPreferenceRepository
-from cloud_agent.ports.notification_maintenance import NotificationMaintenanceRepository
 from cloud_agent.ports.operation_measurements import (
     MeasurementWriteResult,
     OperationMeasurements,
@@ -59,7 +57,6 @@ from cloud_agent.ports.team_admin import TeamAdminQueries
 from cloud_agent.ports.teams import TeamRepository
 from cloud_agent.ports.user_profile import UserProfileRepository
 from cloud_agent.ports.web_search import WebSearchAdmission, WebSearchRepository
-from cloud_agent.ports.work_insights import WorkInsightsRepository
 
 __all__ = [
     "AgentMemoryRepository",
@@ -92,8 +89,6 @@ __all__ = [
     "McpConnectionRepository",
     "MeasurementWriteResult",
     "ModelConnectionRepository",
-    "ModelPreferenceRepository",
-    "NotificationMaintenanceRepository",
     "OperationMeasurements",
     "OwnerUsageQueries",
     "OwnerWorkTermination",
@@ -111,5 +106,4 @@ __all__ = [
     "UserProfileRepository",
     "WebSearchAdmission",
     "WebSearchRepository",
-    "WorkInsightsRepository",
 ]

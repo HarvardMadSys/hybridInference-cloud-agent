@@ -94,6 +94,9 @@ Outside `storage/`, the assembly is the only storage module a caller imports.
 A port imports only `domain/`, `schemas/`, `cloud_agent_shared`, other ports and
 libraries, because its caller and its implementation both depend on whatever it
 names: a type a new port needs moves to `domain/` or `schemas/` first.
+Do not add a port that only repeats its repository's methods: the assembly then
+names the repository class, and each caller declares the narrow Protocol it
+uses, as `api/config.py` does for model preferences.
 Application flows may use the existing FastAPI exception contracts; moving
 files does not imply those interfaces have become framework-independent.
 

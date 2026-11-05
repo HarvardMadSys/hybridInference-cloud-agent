@@ -43,7 +43,6 @@ if TYPE_CHECKING:
         ConversationQueries,
         McpConnectionRepository,
         ModelConnectionRepository,
-        ModelPreferenceRepository,
         SourceControlRepository as SourceControlPort,
     )
 
@@ -56,6 +55,14 @@ router = APIRouter(prefix="/v1/agent")
 logger = get_logger("cloud_agent.api.routes")
 
 
+class ModelPreferenceReader(Protocol):
+    """Where an owner's newest turn ran, which a new task starts on."""
+
+    async def get_model_preference(self, user_id: str) -> ModelPreferenceView:
+        """The owner's newest turn's model and connection; empty when there is none."""
+        ...
+
+
 class _ConfigStorage(Protocol):
     """The capabilities the config endpoint reaches for."""
 
@@ -63,7 +70,7 @@ class _ConfigStorage(Protocol):
     conversation_queries: ConversationQueries
     mcp: McpConnectionRepository
     model_connections: ModelConnectionRepository
-    model_preferences: ModelPreferenceRepository
+    model_preferences: ModelPreferenceReader
     source_control: SourceControlPort
 
 

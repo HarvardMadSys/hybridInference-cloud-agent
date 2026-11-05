@@ -28,8 +28,14 @@ REPOSITORIES_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "storage" / 
 ADMIN_REPOSITORIES_DIR = REPOSITORIES_DIR / "admin"
 ADMIN_PORTS = PORTS_DIR / "admin_queries.py"
 
-#: Nothing is left unclaimed.
-UNPORTED: set[str] = set()
+#: Repository methods with no port, because the port only mirrored its
+#: repository (structural-refactor spec, section 7.3). The assembly names the
+#: repository class, and each caller declares the narrow Protocol it uses.
+UNPORTED: set[str] = {
+    "get_model_preference",
+    "prune_notification_changes",
+    "recent_requests",
+}
 
 
 def _method_names(path: Path, *, protocols: bool = False) -> set[str]:

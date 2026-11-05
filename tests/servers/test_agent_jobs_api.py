@@ -36,6 +36,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.narrow_fakes import newest_turn_preferences
 from tests.support.owners import (
     CONNECTION_ID,
     CONNECTION_MODELS,
@@ -391,6 +392,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, NoAccounts, AllCapabiliti
         self.thread_input_seqs: dict[str, int] = {}
         self.goal_wakeups = FakeGoalWakeups(self)
         self.goals = FakeGoals(self)
+        self.model_preferences = newest_turn_preferences(self.jobs)
         self.turn_telemetry: dict[str, dict[str, Any]] = {}
         self.turn_summaries: dict[int, dict[str, Any]] = {}
         self.attempt_telemetry: dict[str, list[dict[str, Any]]] = {}
@@ -424,16 +426,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, NoAccounts, AllCapabiliti
         self._next_connection = 1
         self._next_event_id = 1
         self._next_job = 1
-
-    async def get_model_preference(self, user_id: str) -> ModelPreferenceView:
-        """The newest owned turn's model and connection, as the repository derives them."""
-        jobs = [job for job in self.jobs.values() if job.get("user_id") == user_id]
-        if not jobs:
-            return ModelPreferenceView()
-        newest = max(jobs, key=lambda job: job["id"])
-        return ModelPreferenceView(
-            last_model=newest["model"], last_model_connection_id=newest.get("model_connection_id")
-        )
 
     # -- MCP connections --
     #
@@ -3266,7 +3258,7 @@ async def test_config_reads_independent_sources_concurrently(
     monkeypatch.setattr(config_api, "repos_for_user", repositories)
     monkeypatch.setattr(store, "list_model_connections", model_connections)
     monkeypatch.setattr(store, "list_mcp_connections", connections)
-    monkeypatch.setattr(store, "get_model_preference", preference)
+    monkeypatch.setattr(store.model_preferences.get_model_preference, "side_effect", preference)
     monkeypatch.setattr(store, "get_github_account", account)
     request = asyncio.create_task(client.get("/v1/agent/config"))
     try:
