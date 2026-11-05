@@ -14,7 +14,14 @@ REPOSITORY_PACKAGE = "cloud_agent.storage.repositories"
 ADMIN_REPOSITORIES = REPOSITORIES / "admin"
 
 
-def _forbidden_peer_imports(source: str, *, own_package: str | None = None) -> list[str]:
+#: The account repository predates packages: ``accounts.py`` composes the
+#: mixins of the flat ``account_*`` modules, which are one repository with it.
+FLAT_MIXIN_FAMILIES = {"accounts.py": f"{REPOSITORY_PACKAGE}.account_"}
+
+
+def _forbidden_peer_imports(
+    source: str, *, own_package: str | None = None, family: str | None = None
+) -> list[str]:
     """Concrete classes and private names are implementation coupling.
 
     A capability split into a package of mixins (``sandbox/``) composes its
@@ -22,7 +29,13 @@ def _forbidden_peer_imports(source: str, *, own_package: str | None = None) -> l
     """
     found = []
     for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.ImportFrom) or node.module is None:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level > 1:
+            # A relative import that leaves its own package reaches a peer.
+            found.extend(f"{'.' * node.level}{node.module or ''}:{n.name}" for n in node.names)
+            continue
+        if node.module is None:
             continue
         if not (
             node.module == REPOSITORY_PACKAGE or node.module.startswith(f"{REPOSITORY_PACKAGE}.")
@@ -32,10 +45,14 @@ def _forbidden_peer_imports(source: str, *, own_package: str | None = None) -> l
             node.module == own_package or node.module.startswith(f"{own_package}.")
         ):
             continue
+        if family is not None and node.module.startswith(family):
+            continue
         found.extend(
             name.name
             for name in node.names
-            if name.name.startswith("Postgres") or name.name.startswith("_")
+            if name.name.startswith(("Postgres", "_"))
+            # A split repository's building blocks are concrete classes too.
+            or name.name.endswith(("Mixin", "Base"))
         )
     return found
 
@@ -51,7 +68,9 @@ def test_repositories_do_not_import_peer_implementations_or_private_names() -> N
         package = path.parent.relative_to(REPOSITORIES).parts
         own_package = ".".join((REPOSITORY_PACKAGE, *package)) if package else None
         forbidden = _forbidden_peer_imports(
-            path.read_text(encoding="utf-8"), own_package=own_package
+            path.read_text(encoding="utf-8"),
+            own_package=own_package,
+            family=FLAT_MIXIN_FAMILIES.get(path.name) if not package else None,
         )
         if forbidden:
             offenders.append(f"{path.relative_to(REPO_ROOT)}: {forbidden}")

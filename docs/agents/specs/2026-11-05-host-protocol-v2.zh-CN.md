@@ -13,7 +13,7 @@
 - **协议版本是一个整数，靠 host 心跳协商。** `WorkerClaimRequest` 是 `extra="forbid"`（`schemas/workers.py:91`），老控制面会以 422 拒绝新字段。所以新 host 只有在心跳响应里看到控制面支持 v2 之后，才在 claim 里带版本号。
 - **`MemberFence` 只统一形状，不改每个路由要校验哪些分量。** 唯一的语义收紧是给 residency 请求加上 sandbox 和 activation 的代数，单独列为一步，并作为待决问题。
 - **凭据封装先做一件不改协议的事。** residency 下发的两个占位凭据（`amr.`、`agh.`）在启动面里已经声明为要脱敏（`cloud_agent_host/launch/mcp_relay.py:43`、`github_relay.py:92`），但没有接进 runner 的脱敏器（`cloud_agent_host/launch/facet.py:58–63`，`turn_child.py:151–152` 只从 claim 取值）。先把这一处接上。线上封装是第二步，要不要做，等第一步完成后再评审。
-- **能力匹配挪进 claim 的 SQL，准入一项都不挪。** claim 已经按 `metadata.requires` 匹配 attestation（`storage/repositories/attempt_commands.py:289`），缺的是环境、SSH 和模型连接这几项能力没有算进去。
+- **能力匹配挪进 claim 的 SQL，准入一项都不挪。** claim 已经按 `metadata.requires` 匹配 attestation（`storage/repositories/attempt_commands/claims.py:253`），缺的是环境、SSH 和模型连接这几项能力没有算进去。
 - **心跳里成员的三个代数和 `resident_state` 必须保留。** 控制面只读每个成员的 `thread_id`、三个代数和 `resident_state`，其余十个字段可以停发。
 - **命令队列只装"做不成也没有别的路径兜底"的意图。** 停止和 residency 丢失已经是电平触发的：每次心跳都按数据库状态重新计算并回显，天然幂等。真正没有兜底的是 SSH 访问的撤销：现在是尽力推送，失败就只能等下一轮（`application/ssh_servers.py:441–457`）。所以第一个迁进队列的是 SSH 访问，不是 residency 丢失。
 
@@ -320,7 +320,7 @@ class DeliveredCredential(BaseModel):
 
 ### 7.1 现状
 
-- claim 的 SQL 已经要求 `COALESCE(j.metadata->'requires', '[]') <@ 本次 attestation 的能力`（`storage/repositories/attempt_commands.py:289`）。但现在唯一写 `requires` 的是 goal 轮次的 `GOAL_REPORT_PROTOCOL`（`storage/repositories/conversation_commands.py:56–61`）。
+- claim 的 SQL 已经要求 `COALESCE(j.metadata->'requires', '[]') <@ 本次 attestation 的能力`（`storage/repositories/attempt_commands/claims.py:253`）。但现在唯一写 `requires` 的是 goal 轮次的 `GOAL_REPORT_PROTOCOL`（`storage/repositories/conversation_commands.py:56–61`）。
 - 环境、环境推理名、SSH、模型连接这几项能力，是 claim 之后在 `application/turn_claim.py` 里检查的（`:467–469`、`:523`、`:556`）。不满足就 `release_claim(retry_after_seconds=30)`（`:97`、`:270`、`:344`）。
 
 ### 7.2 改动
@@ -400,7 +400,7 @@ class DeliveredCredential(BaseModel):
 
 ### 8.6 不在范围内
 
-不改 reconcile 的语义；不删任何代数；不改 checkpoint 里的成员清单（`storage/repositories/sandbox.py:2565`），那是另一份数据。
+不改 reconcile 的语义；不删任何代数；不改 checkpoint 里的成员清单（`storage/repositories/sandbox/checkpoints.py:121`），那是另一份数据。
 
 ## 9. 10.4 控制面到 host 的命令队列
 

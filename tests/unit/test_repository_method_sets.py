@@ -191,3 +191,27 @@ def test_the_environment_repository_keeps_its_methods() -> None:
         "update_environment_run",
         "workspace_environment_view",
     }
+
+
+def _owners(cls: type) -> dict[str, list[str]]:
+    """Each method name, and every class in the MRO whose body defines it."""
+    owners: dict[str, list[str]] = {}
+    for klass in cls.__mro__:
+        if klass is object:
+            continue
+        for name, value in vars(klass).items():
+            if isinstance(value, FunctionType | staticmethod | classmethod):
+                owners.setdefault(name, []).append(klass.__qualname__)
+    return owners
+
+
+def test_no_method_is_defined_by_two_classes_of_one_repository() -> None:
+    """Two mixins defining one name would let the MRO pick which body runs."""
+    for cls in (
+        PostgresHostPoolRepository,
+        PostgresAttemptCommands,
+        PostgresMcpConnectionRepository,
+        PostgresEnvironmentRepository,
+    ):
+        twice = {name: where for name, where in _owners(cls).items() if len(where) > 1}
+        assert not twice, f"{cls.__name__}: defined more than once: {twice}"
