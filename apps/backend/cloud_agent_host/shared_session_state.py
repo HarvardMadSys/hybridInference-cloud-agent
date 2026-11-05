@@ -18,14 +18,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Final
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
     RetainedChatLost,
 )
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.group_lifecycle import GroupLifecycle, Operation
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,

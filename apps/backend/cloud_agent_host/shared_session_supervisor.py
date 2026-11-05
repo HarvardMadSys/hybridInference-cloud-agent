@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cloud_agent_host.archive.sandbox_checkpoints import CheckpointRestore
-    from cloud_agent_host.chat_sandbox import (
+    from cloud_agent_host.container.chat_sandbox import (
         ChatSandboxManager,
         ChatSandboxSpec,
         RetainedChatBackend,

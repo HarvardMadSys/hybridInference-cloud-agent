@@ -33,12 +33,13 @@ from cloud_agent_host import (
     measurement_sender,
     runner,
     runner_stop,
-    sandbox,
     shared_live_attempt,
     turn_child,
     turn_launch,
     turn_stream,
 )
+from cloud_agent_host.container import sandbox
+from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.enrollment import HostIdentity
 from cloud_agent_host.host_runtime import (
     HOST_CONCURRENCY_CAPABILITY,
@@ -47,7 +48,6 @@ from cloud_agent_host.host_runtime import (
     LAUNCH_UNCERTAIN,
     LaunchResult,
 )
-from cloud_agent_host.sandbox import ProcessBackend
 from cloud_agent_shared import shared_protocol
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 from cloud_agent_shared.shared_protocol import (
@@ -263,7 +263,7 @@ def test_the_deployment_canary_always_runs_the_full_probe(monkeypatch, raw):
     import io
     import os
 
-    from cloud_agent_host.sandbox import ContainerBackend
+    from cloud_agent_host.container.sandbox import ContainerBackend
 
     read_fd, write_fd = os.pipe()
     backend = ContainerBackend(image="sandbox", runtime="io.containerd.kata.v2")
@@ -461,7 +461,7 @@ def _qualifications(answers: list[Any], events: list[str]) -> Any:
 
 
 def _qualified_backend(monkeypatch, events: list[str]):
-    from cloud_agent_host.sandbox import ContainerBackend
+    from cloud_agent_host.container.sandbox import ContainerBackend
 
     backend = ContainerBackend(image="sandbox")
     monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
@@ -508,7 +508,7 @@ def test_a_menu_too_long_to_report_keeps_what_this_host_was_told_to_hold(service
 
 
 def test_runtime_qualification_failure_pauses_claims_until_recovered(service, monkeypatch):
-    from cloud_agent_host.sandbox import SandboxError
+    from cloud_agent_host.container.sandbox import SandboxError
 
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
@@ -553,7 +553,7 @@ def test_a_persisting_qualification_failure_is_reported_once(service, monkeypatc
     A traceback and a forced heartbeat on every poll buried the first report
     under copies of itself, for as long as the runtime stayed broken.
     """
-    from cloud_agent_host.sandbox import SandboxError
+    from cloud_agent_host.container.sandbox import SandboxError
 
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
@@ -1355,8 +1355,8 @@ def test_a_turn_process_declines_when_its_backend_is_not_usable(monkeypatch, emp
     import io
     import os
 
+    from cloud_agent_host.container.sandbox import SandboxError
     from cloud_agent_host.host_runtime import encode_turn
-    from cloud_agent_host.sandbox import SandboxError
 
     read_fd, write_fd = os.pipe()
     payload = {
@@ -1926,8 +1926,8 @@ def test_a_declining_child_does_not_emit_or_refund_the_parent_selection(monkeypa
     import io
     import os
 
+    from cloud_agent_host.container.sandbox import SandboxError
     from cloud_agent_host.host_runtime import encode_turn
-    from cloud_agent_host.sandbox import SandboxError
     from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch, max_operations=1)

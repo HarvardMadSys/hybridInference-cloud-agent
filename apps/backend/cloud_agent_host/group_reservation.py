@@ -14,22 +14,22 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.local_settings import (
     _sandbox_resource_setting,
     local_shared_resident_capacity,
 )
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.shared_protocol import FORK_HELPER, PLATFORM_MCP_SERVER_PREFIX
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from cloud_agent_host.container.sandbox import SandboxBackend
     from cloud_agent_host.control_plane_client import ControlPlane
-    from cloud_agent_host.sandbox import SandboxBackend
 
 # Log records keep the name they had while all of this was runner.py.
 logger = get_logger("cloud_agent_host.runner")

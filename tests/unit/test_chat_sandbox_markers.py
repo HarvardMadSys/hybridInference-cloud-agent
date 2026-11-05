@@ -18,10 +18,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host import chat_sandbox_markers as markers
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container import chat_sandbox_markers as markers
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_shared.environment_snapshots import SETUP_MARKER_NAME
 
 if TYPE_CHECKING:

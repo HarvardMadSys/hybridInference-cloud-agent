@@ -12,8 +12,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection, ChatSandboxStatus
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.chat_sandbox_models import ChatSandboxInspection, ChatSandboxStatus
+from cloud_agent_host.container.sandbox import SandboxError
 
 if TYPE_CHECKING:
     import builtins

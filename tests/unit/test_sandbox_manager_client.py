@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,

@@ -43,7 +43,7 @@ from cloud_agent_host.archive.sandbox_archives import (
     safe_archive_error_type,
 )
 from cloud_agent_host.archive.sandbox_initial_uploads import InitialUploadSpool, InitialUploadWorker
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
         SandboxCheckpointReceipt,
     )
     from cloud_agent_host.archive.sandbox_initial_uploads import SpooledInitialUpload
-    from cloud_agent_host.chat_sandbox import (
+    from cloud_agent_host.container.chat_sandbox import (
         ChatSandboxInspection,
         ChatSandboxManager,
         ChatSandboxSpec,

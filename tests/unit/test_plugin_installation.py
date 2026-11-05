@@ -17,13 +17,13 @@ from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
 from cloud_agent_host.bounded_output import text_chunks
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
 )
-from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.member_setup.plugins import run_plugin_command
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig

@@ -1,7 +1,7 @@
 """Retained container identities, ownership labels, inspected state, and lifecycle errors.
 
 The value objects here contain no Docker commands or process state. Execution
-and network reconciliation remain in :mod:`cloud_agent_host.chat_sandbox`,
+and network reconciliation remain in :mod:`cloud_agent_host.container.chat_sandbox`,
 which reexports these names for existing callers.
 """
 

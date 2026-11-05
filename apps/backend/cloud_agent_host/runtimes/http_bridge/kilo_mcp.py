@@ -5,12 +5,12 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_exec import install_once
+from cloud_agent_host.container.chat_sandbox_exec import install_once
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.member_setup.tree_copy import has_root_marker, staged_tree
-from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 KILO_MCP_PATCH_SHA256 = "1ea8a24628c39800cce5e592bd272cc8bb358f2b8ea07f92f2b96beef8bb2657"
 #: The one Kilo version whose MCP isolation patch was reviewed. A literal on

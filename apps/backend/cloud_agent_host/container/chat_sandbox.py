@@ -12,7 +12,7 @@ The control-plane and runner integration is intentionally layered on top of
 this class.  Keeping Docker identity checks here means every caller gets the
 same fencing and no-mount guarantees instead of rebuilding security-sensitive
 argv in several services. Container identity, labels and lifecycle value objects
-live in :mod:`cloud_agent_host.chat_sandbox_models`.
+live in :mod:`cloud_agent_host.container.chat_sandbox_models`.
 """
 
 from __future__ import annotations
@@ -39,14 +39,20 @@ import time
 import tty
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host import chat_sandbox_markers as markers, chat_sandbox_writers as writers
 from cloud_agent_host.archive.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
-from cloud_agent_host.chat_sandbox_exec import network_proof, spawn_target
-from cloud_agent_host.chat_sandbox_export import pump_archive_export, raise_archive_export_failure
-from cloud_agent_host.chat_sandbox_images import require_create_image
-from cloud_agent_host.chat_sandbox_inspect import container_inspection, inspect_many
-from cloud_agent_host.chat_sandbox_markers import (
+from cloud_agent_host.container import (
+    chat_sandbox_markers as markers,
+    chat_sandbox_writers as writers,
+)
+from cloud_agent_host.container.chat_sandbox_exec import network_proof, spawn_target
+from cloud_agent_host.container.chat_sandbox_export import (
+    pump_archive_export,
+    raise_archive_export_failure,
+)
+from cloud_agent_host.container.chat_sandbox_images import require_create_image
+from cloud_agent_host.container.chat_sandbox_inspect import container_inspection, inspect_many
+from cloud_agent_host.container.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_MAX_BYTES,
     FINAL_ARCHIVE_MARKER_NAME,
     FINAL_ARCHIVE_MARKER_PATH,
@@ -54,7 +60,7 @@ from cloud_agent_host.chat_sandbox_markers import (
     INITIAL_ARCHIVE_MARKER_NAME,
     SETUP_MARKER_MAX_BYTES,
 )
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     ACTIVATION_TMPFS as ACTIVATION_TMPFS,
     CHAT_CHECKPOINT_LABEL as CHAT_CHECKPOINT_LABEL,
     CHAT_CONTAINER_PREFIX as CHAT_CONTAINER_PREFIX,
@@ -93,9 +99,20 @@ from cloud_agent_host.chat_sandbox_models import (
     SandboxActionFacts as SandboxActionFacts,
     SandboxRestoreFailed as SandboxRestoreFailed,
 )
+from cloud_agent_host.container.exact_container import ExactContainer
+from cloud_agent_host.container.guest_root_exec import GuestRootExec
+from cloud_agent_host.container.sandbox import (
+    KATA_RUNTIME,
+    ContainerBackend,
+    DownloadsRead,
+    SandboxBackend,
+    SandboxError,
+    SandboxProcess,
+    SandboxSpec,
+    TerminalProcess,
+)
+from cloud_agent_host.container.stream_input import interactive_input, require_nonempty_rewindable
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
-from cloud_agent_host.exact_container import ExactContainer
-from cloud_agent_host.guest_root_exec import GuestRootExec
 from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_host.member_setup.member_preparation import (
     TOOL_HOOKS_SCRIPT,
@@ -134,17 +151,6 @@ from cloud_agent_host.observe.tool_windows import (
     TOOL_MARK_FILE,
     ToolMarkReader,
 )
-from cloud_agent_host.sandbox import (
-    KATA_RUNTIME,
-    ContainerBackend,
-    DownloadsRead,
-    SandboxBackend,
-    SandboxError,
-    SandboxProcess,
-    SandboxSpec,
-    TerminalProcess,
-)
-from cloud_agent_host.stream_input import interactive_input, require_nonempty_rewindable
 from cloud_agent_shared.environment import (
     DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
     DOCKER_CLIENT_PREFIXES as _DOCKER_CLIENT_ENV_PREFIXES,
@@ -223,7 +229,7 @@ SHARED_WORKSPACE_PERMISSIONS_SCRIPT = (
 #: This module is a library boundary: it reports what it observed and
 #: leaves the decision to the caller, so a warning here is the only
 #: record an operator gets of a partially capable guest.
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("cloud_agent_host.chat_sandbox")
 
 
 def claude_member_config_dir(slot_id: int, thread_id: str) -> str:

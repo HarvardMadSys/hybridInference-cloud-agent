@@ -627,7 +627,10 @@ def test_an_unnamed_read_or_copy_fails_outside_its_exceptions() -> None:
     assert unexplained_reads(_reads(dynamic)) != []
     copy = "import os, subprocess\ndef f():\n    subprocess.run(['x'], env=dict(os.environ))\n"
     assert unexplained_reads(_reads(copy)) != []
-    assert unexplained_reads(_reads(copy, "apps/backend/cloud_agent_host/docker_engine.py")) != []
+    assert (
+        unexplained_reads(_reads(copy, "apps/backend/cloud_agent_host/container/docker_engine.py"))
+        != []
+    )
 
 
 @dataclass(frozen=True)

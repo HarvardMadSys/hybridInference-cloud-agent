@@ -23,10 +23,10 @@ from tests.support.owners import connection_access
 
 from cloud_agent_host import group_reservation, shared_live_attempt, turn_child, turn_stream
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.observe.member_resources import CheckpointSchedule
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_shared import shared_protocol
 
 _JOB = ClaimedJob(

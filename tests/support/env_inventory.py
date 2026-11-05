@@ -909,16 +909,18 @@ ENVIRONMENT_COPIES: dict[tuple[str, str], str] = {
     ("apps/backend/cloud_agent/providers/compute/ssh.py", "OpenSshTransport.run"): (
         "the ssh client, minus SSH_AUTH_SOCK so no agent is forwarded"
     ),
-    ("apps/backend/cloud_agent_host/chat_sandbox.py", "ChatSandboxManager.exec_client_env"): (
-        "the Docker CLI's own configuration; sandbox values are added only by name"
-    ),
-    ("apps/backend/cloud_agent_host/chat_sandbox.py", "ChatSandboxManager.export_archive"): (
-        "docker cp, configured by the host's Docker client variables"
-    ),
-    ("apps/backend/cloud_agent_host/exact_container.py", "ExactContainer.run_bytes"): (
+    (
+        "apps/backend/cloud_agent_host/container/chat_sandbox.py",
+        "ChatSandboxManager.exec_client_env",
+    ): ("the Docker CLI's own configuration; sandbox values are added only by name"),
+    (
+        "apps/backend/cloud_agent_host/container/chat_sandbox.py",
+        "ChatSandboxManager.export_archive",
+    ): ("docker cp, configured by the host's Docker client variables"),
+    ("apps/backend/cloud_agent_host/container/exact_container.py", "ExactContainer.run_bytes"): (
         "a Docker CLI call, configured by the host's Docker client variables"
     ),
-    ("apps/backend/cloud_agent_host/docker_engine.py", "run_docker"): (
+    ("apps/backend/cloud_agent_host/container/docker_engine.py", "run_docker"): (
         "a Docker CLI call, configured by the host's Docker client variables"
     ),
     ("apps/backend/cloud_agent_host/runtime_probe.py", "_context.spawn"): (

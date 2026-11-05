@@ -18,12 +18,13 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from cloud_agent_host.archive.archive_failure_diagnostics import (
     _safe_error_type,
 )
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_UID_BASE,
     ChatSandboxSpec,
     RetainedChatLost,
     SandboxActionFacts,
 )
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
 from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.observe.guest_observer import (
@@ -32,7 +33,6 @@ from cloud_agent_host.observe.guest_observer import (
     GuestObserverCursor,
 )
 from cloud_agent_host.resident_probe import probe_refusal_message
-from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,

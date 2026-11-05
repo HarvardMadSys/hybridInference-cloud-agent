@@ -27,9 +27,9 @@ from cloud_agent_host import (
     local_settings,
     turn_child,
 )
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.runtime_downloads import RuntimeDownloads
 from cloud_agent_host.runtime_settings import RuntimeSettings
-from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     LATE_IMPORT_KEYS,

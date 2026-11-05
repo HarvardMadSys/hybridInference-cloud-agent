@@ -1605,12 +1605,12 @@ class StartupSandbox:
     """The Docker plumbing one real retained chat container needs."""
 
     def __init__(self) -> None:
-        from cloud_agent_host.chat_sandbox import (
+        from cloud_agent_host.container.chat_sandbox import (
             ChatSandboxManager,
             ChatSandboxSpec,
             RetainedChatBackend,
         )
-        from cloud_agent_host.sandbox import ContainerBackend
+        from cloud_agent_host.container.sandbox import ContainerBackend
         from cloud_agent_shared.egress import network_from_env
 
         self.network = network_from_env(
@@ -1681,7 +1681,7 @@ class StartupSandbox:
 
     def down(self) -> None:
         """Remove the container, the relays, every network and the host rules."""
-        from cloud_agent_host.chat_sandbox import CHAT_NAMESPACE_LABEL
+        from cloud_agent_host.container.chat_sandbox import CHAT_NAMESPACE_LABEL
 
         _docker("rm", "-f", self.container_name, check=False)
         _docker("rm", "-f", BENCH_MCP, check=False)

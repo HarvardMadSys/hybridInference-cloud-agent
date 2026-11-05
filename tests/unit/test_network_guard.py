@@ -797,7 +797,7 @@ def test_an_activations_read_back_past_the_minute_takes_the_full_check(
 def test_the_managers_host_rule_check_reads_the_kernel_every_time() -> None:
     from types import SimpleNamespace
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
 
     nft = FakeNft()
     guard = _guard(nft)

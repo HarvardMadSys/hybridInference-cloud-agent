@@ -1,7 +1,7 @@
 """What a retained chat's network proof keeps, and the checks a spawn and an install make.
 
 Which container a bounded command execs into, and when it is inspected first,
-is :class:`cloud_agent_host.exact_container.ExactContainer`'s. A spawn is
+is :class:`cloud_agent_host.container.exact_container.ExactContainer`'s. A spawn is
 inspected first (:func:`spawn_target`), since its refusal would surface only
 when it exits.
 
@@ -17,18 +17,21 @@ import functools
 import time
 from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 
-from cloud_agent_host.chat_sandbox_models import ChatSandboxStatus, RetainedChatLost
-from cloud_agent_host.exact_container import NOT_RUNNING
+from cloud_agent_host.container.chat_sandbox_models import ChatSandboxStatus, RetainedChatLost
+from cloud_agent_host.container.exact_container import NOT_RUNNING
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.github_relay_trust import ensure_github_relay_trust
 from cloud_agent_host.member_setup.install_locks import install_lock
-from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection, ChatSandboxSpec
-    from cloud_agent_host.exact_container import ExactContainer
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox_models import (
+        ChatSandboxInspection,
+        ChatSandboxSpec,
+    )
+    from cloud_agent_host.container.exact_container import ExactContainer
 
 Proved = TypeVar("Proved")
 ProofArgs = ParamSpec("ProofArgs")
@@ -111,7 +114,7 @@ def install_once(
     finds it in place or puts it there, raising otherwise. Once it has, in
     the container ``spec``'s last start or network proof verified, it is not
     run there again
-    (:meth:`~cloud_agent_host.exact_container.ExactContainer.note_helper`).
+    (:meth:`~cloud_agent_host.container.exact_container.ExactContainer.note_helper`).
     The check comes before the lock, so a launch whose file is known in place
     does not queue behind a runtime or MCP install into the same container.
     """

@@ -1,6 +1,6 @@
 """The sandbox manager's own Kata guest-root exec, kept off the exact-container surface.
 
-:class:`~cloud_agent_host.exact_container.ExactContainer` is handed to every
+:class:`~cloud_agent_host.container.exact_container.ExactContainer` is handed to every
 module that reaches a chat's container; running a helper as guest root is not
 one of its operations. :class:`GuestRootExec` gives it to the sandbox manager
 alone, privately, built on the exact container's public identity gate. The
@@ -13,13 +13,13 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, SandboxError
 
 if TYPE_CHECKING:
     import subprocess
 
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
-    from cloud_agent_host.exact_container import ExactContainer
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.exact_container import ExactContainer
 
 #: Writes the guest's relay block in ``/etc/hosts`` and its one resolver in
 #: ``/etc/resolv.conf``, each only while root-owned and protected.

@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_NETWORK_GENERATION_LABEL,
     CHAT_NETWORK_LABEL,
     CHAT_NETWORK_SANDBOX_ID_LABEL,
     CHAT_NETWORK_SERVICES_LABEL,
 )
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.sandbox import SandboxError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
 
 
 def owned_bridge_endpoints(

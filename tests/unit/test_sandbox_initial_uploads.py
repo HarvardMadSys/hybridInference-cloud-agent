@@ -36,9 +36,9 @@ from cloud_agent_host.archive.sandbox_initial_uploads import (
     InitialUploadWorker,
     SpooledInitialUpload,
 )
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatBackend
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, RetainedChatBackend
+from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.group_archive_policy import ServiceArchivePolicy
-from cloud_agent_host.sandbox import ProcessBackend
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_shared.errors import SandboxError
 

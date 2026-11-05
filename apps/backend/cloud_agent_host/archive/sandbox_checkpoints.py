@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cloud_agent_host.archive.sandbox_archive_s3 import SandboxArchiveReceipt
-    from cloud_agent_host.chat_sandbox import ChatSandboxInspection, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxInspection, ChatSandboxSpec
     from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 

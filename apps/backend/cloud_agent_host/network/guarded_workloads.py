@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_CPU_LIMIT_LABEL,
     CHAT_DISK_LIMIT_LABEL,
     CHAT_GENERATION_LABEL,
@@ -30,7 +30,7 @@ from cloud_agent_shared.errors import SandboxError
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
 
 logger = logging.getLogger("cloud_agent_host.shared_session_supervisor")
 

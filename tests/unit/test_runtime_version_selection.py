@@ -24,12 +24,12 @@ from tests.support.owners import connection_access
 from cloud_agent.domain.runtimes import resolve_runtime_version
 from cloud_agent.schemas import WorkerClaimAttestation, WorkerClaimResponse
 from cloud_agent_host.claimed_job import ClaimedJob
-from cloud_agent_host.host_capabilities import claim_attestation as _claim_attestation
-from cloud_agent_host.sandbox import (
+from cloud_agent_host.container.sandbox import (
     ContainerBackend,
     _labelled,
     _split_menu,
 )
+from cloud_agent_host.host_capabilities import claim_attestation as _claim_attestation
 from cloud_agent_host.shared_live_attempt import runtime_version_unavailable
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef, snapshot_object_key

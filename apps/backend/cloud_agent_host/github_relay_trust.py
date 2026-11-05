@@ -28,7 +28,7 @@ from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 logger = logging.getLogger(__name__)
 

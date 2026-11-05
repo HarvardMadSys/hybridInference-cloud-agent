@@ -18,8 +18,8 @@ from urllib.parse import urlsplit
 import httpx
 
 from cloud_agent_host.archive.sandbox_deletion_diagnostics import log_discard_refusal
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.upload_import import forget_deleted_container_uploads
 

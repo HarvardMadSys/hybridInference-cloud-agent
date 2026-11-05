@@ -18,13 +18,13 @@ from cloud_agent_host.archive.archive_failure_diagnostics import (
     _record_archive_failure_diagnostics,
     _safe_error_type,
 )
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxSpec,
     RetainedChatBackend,
     RetainedChatLost,
 )
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.group_lifecycle import Operation
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,

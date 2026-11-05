@@ -756,6 +756,8 @@ check_shared_live_stack() {
       attest_rc=0
       # A runner image from before the host service split holds the probe in
       # cloud_agent_host.runner; the fallback keeps `check` working against it.
+      # One from before the host package split keeps the sandbox module at
+      # cloud_agent_host.sandbox, not in cloud_agent_host.container.
       docker exec "$id" python -c '
 try:
     from cloud_agent_host.host_capabilities import _shared_live_host_capabilities as capabilities
@@ -763,7 +765,12 @@ except ModuleNotFoundError as missing:  # COMPAT(remove-after=2026-12-31): every
     if missing.name != "cloud_agent_host.host_capabilities":
         raise
     from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities
-from cloud_agent_host.sandbox import build_backend_from_env
+try:
+    from cloud_agent_host.container.sandbox import build_backend_from_env
+except ModuleNotFoundError as missing:  # COMPAT(remove-after=2026-12-31): every runner image ships cloud_agent_host.container
+    if missing.name != "cloud_agent_host.container":
+        raise
+    from cloud_agent_host.sandbox import build_backend_from_env
 backend = build_backend_from_env()
 backend.preflight()
 print(",".join(capabilities(backend, backend.version_stamp())))' \

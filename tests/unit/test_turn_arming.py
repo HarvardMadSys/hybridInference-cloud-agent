@@ -14,8 +14,8 @@ from tests.unit.test_shared_session_supervisor import (
     _TransportFactory,
 )
 
-from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
-from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
+from cloud_agent_host.container.chat_sandbox_models import MEMBER_UID_BASE
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.session_lifecycle import SessionLeaseLost
 from cloud_agent_host.turn_arming import run_beside
 

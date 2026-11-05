@@ -17,6 +17,12 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host import incident_relay
 from cloud_agent_host.claimed_job import ClaimedJob, ClaimUnreachable, WorkWaitUnsupported
+from cloud_agent_host.container.sandbox import (
+    ContainerBackend,
+    SandboxBackend,
+    SandboxError,
+    build_backend_from_env,
+)
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
 from cloud_agent_host.host_capabilities import (
     _advertised_host_capabilities,
@@ -66,12 +72,6 @@ from cloud_agent_host.runtime_downloads import (
 )
 from cloud_agent_host.runtime_qualification import HostQualification
 from cloud_agent_host.runtime_settings import RuntimeSettings, SandboxArchiveRuntimeSettings
-from cloud_agent_host.sandbox import (
-    ContainerBackend,
-    SandboxBackend,
-    SandboxError,
-    build_backend_from_env,
-)
 from cloud_agent_host.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,

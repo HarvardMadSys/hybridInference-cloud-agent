@@ -12,8 +12,8 @@ import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.atomic_file import atomic_replace_bytes
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.enrollment import credential_path
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.setup import run_setup
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cloud_agent_host.chat_sandbox import RetainedChatBackend
+    from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
     from cloud_agent_host.setup import SetupResult
     from cloud_agent_shared.environment import BoundEnvironment
 

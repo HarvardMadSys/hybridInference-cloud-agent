@@ -18,13 +18,13 @@ from tests.unit.test_sandbox_restore import _inspection
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
 from cloud_agent_host.archive.sandbox_checkpoints import CheckpointArchiveInvalid
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_ENVIRONMENT_SNAPSHOT_LABEL,
     ENVIRONMENT_TEST_LABEL,
     ChatSandboxManager,
 )
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.environment import (
     BoundEnvironment,

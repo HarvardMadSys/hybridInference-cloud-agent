@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Query
 
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.manager_api.context import shared_manifest, shared_spec, supervisor_error
 from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI resolves the request models.
@@ -24,7 +25,6 @@ from cloud_agent_host.manager_api.models import (  # noqa: TC001 — FastAPI res
 )
 from cloud_agent_host.manager_api.routing import route
 from cloud_agent_host.resident_launch_config import resident_launch
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.sandbox_manager_wire import member_manifest
 
 if TYPE_CHECKING:

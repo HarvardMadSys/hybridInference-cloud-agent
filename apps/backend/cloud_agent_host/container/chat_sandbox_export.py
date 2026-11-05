@@ -6,7 +6,7 @@ import os
 import time
 from typing import IO, TYPE_CHECKING, NoReturn
 
-from cloud_agent_host.chat_sandbox_models import ArchiveExportTooLarge
+from cloud_agent_host.container.chat_sandbox_models import ArchiveExportTooLarge
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:

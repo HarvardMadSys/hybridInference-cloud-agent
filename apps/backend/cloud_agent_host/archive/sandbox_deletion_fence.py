@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
 
 if TYPE_CHECKING:
     import threading
     from collections.abc import Callable, Mapping
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
 
 
 def prove_admin_deletion_target_absent(

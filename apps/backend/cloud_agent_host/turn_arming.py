@@ -26,18 +26,18 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
+from cloud_agent_host.container.chat_sandbox_models import MEMBER_UID_BASE
+from cloud_agent_host.container.sandbox import KATA_RUNTIME
 from cloud_agent_host.observe.guest_observer import GuestObserverCursor
 from cloud_agent_host.observe.member_resources import MemberWindowSampler
 from cloud_agent_host.observe.member_window_census import MemberWindow, window_boot_id
-from cloud_agent_host.sandbox import KATA_RUNTIME
 from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
     from cloud_agent_host.observe.member_resources import MemberWindowHandle
     from cloud_agent_host.observe.tool_windows import ToolMarkReader
 

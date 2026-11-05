@@ -18,18 +18,18 @@ from typing import TYPE_CHECKING
 from cloud_agent_host.archive.archive_failure_diagnostics import (
     _archive_failure_diagnostic,
 )
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_SHARED_LABEL,
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
     RetainedChatLost,
 )
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.network.guarded_workloads import (
     sandbox_spec_from_inspection,
 )
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
 )

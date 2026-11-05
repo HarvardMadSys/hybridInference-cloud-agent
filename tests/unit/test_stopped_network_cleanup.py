@@ -39,9 +39,9 @@ from tests.unit.test_chat_group_network import (
 )
 from tests.unit.test_shared_session_supervisor import _Manager, _spec as _shared_spec
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatLost
-from cloud_agent_host.chat_sandbox_models import CHAT_GENERATION_LABEL
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, RetainedChatLost
+from cloud_agent_host.container.chat_sandbox_models import CHAT_GENERATION_LABEL
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy
 
 SANDBOX = "sandbox-container"

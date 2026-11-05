@@ -16,8 +16,8 @@ from cloud_agent_host import (
     shared_live_attempt,
     source_preparation,
 )
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 
 _RESTORE = {

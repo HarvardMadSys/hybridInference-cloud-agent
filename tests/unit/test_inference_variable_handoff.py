@@ -16,7 +16,7 @@ from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SandboxManagerClient as ControlPlaneClient,
     SandboxManagerError as ControlPlaneError,
 )
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,

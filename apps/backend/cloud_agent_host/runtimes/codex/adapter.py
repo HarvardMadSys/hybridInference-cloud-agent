@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from cloud_agent_host.sandbox import RUNTIME_BIN_ROOT
+from cloud_agent_host.container.sandbox import RUNTIME_BIN_ROOT
 from cloud_agent_shared.runtime_catalog import CODEX
 from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_SERVER_NAME
 

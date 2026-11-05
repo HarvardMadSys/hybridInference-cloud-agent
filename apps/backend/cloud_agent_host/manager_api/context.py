@@ -17,10 +17,14 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import Header, HTTPException
 
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec, RetainedChatLost, SandboxRestoreFailed
+from cloud_agent_host.container.chat_sandbox import (
+    ChatSandboxSpec,
+    RetainedChatLost,
+    SandboxRestoreFailed,
+)
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.operation_call import closed
 from cloud_agent_host.retained_workspace import RetainedWorkspaceError
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_state import SharedMemberManifest
 
@@ -30,7 +34,7 @@ if TYPE_CHECKING:
 
     from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
     from cloud_agent_host.archive.sandbox_archives import SandboxArchiveService
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatBackend
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, RetainedChatBackend
     from cloud_agent_host.environment_preparation import EnvironmentPreparation
     from cloud_agent_host.manager_api.calls import _CommandSlots, _EndpointLifecycleCalls
     from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest

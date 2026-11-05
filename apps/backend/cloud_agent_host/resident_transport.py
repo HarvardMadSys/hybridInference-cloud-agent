@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_WORKDIR,
     MEMBER_TMPFS_ROOT,
@@ -24,6 +24,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
 )
+from cloud_agent_host.container.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_host.drivers import (
     DialectRuntime,
     DriverError,
@@ -55,7 +56,6 @@ from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.http_bridge import member as http_member
 from cloud_agent_host.runtimes.live import get_driver, member_launch
-from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 
 if TYPE_CHECKING:

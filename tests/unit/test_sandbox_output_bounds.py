@@ -16,15 +16,16 @@ import tracemalloc
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod, source_preparation
+from cloud_agent_host import source_preparation
 from cloud_agent_host.bounded_output import OUTPUT_CHUNK_BYTES, STDERR_TAIL_BYTES
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container import chat_sandbox as chat_sandbox_mod
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.sandbox import (
+from cloud_agent_host.container.sandbox import (
     ContainerBackend,
     ProcessBackend,
     SandboxSpec,

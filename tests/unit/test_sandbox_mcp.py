@@ -28,8 +28,9 @@ from cloud_agent.mcp.models import (
 from cloud_agent.mcp.registry import ResolvedConnection
 from cloud_agent.schemas.workers import WorkerClaimResponse
 from cloud_agent_host import sandbox_mcp
-from cloud_agent_host.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
 from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig, resident_launch
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
@@ -38,7 +39,6 @@ from cloud_agent_host.resident_transport import (
 )
 from cloud_agent_host.runtimes.base import AgentRuntime, RuntimeMCPConfig
 from cloud_agent_host.runtimes.codex.adapter import CodexRuntime
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.sandbox_mcp import (
     SANDBOX_MCP_URL,
     SandboxMcpServer,

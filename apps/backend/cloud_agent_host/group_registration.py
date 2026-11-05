@@ -14,15 +14,15 @@ from typing import TYPE_CHECKING
 
 from cloud_agent_host.archive.sandbox_checkpoints import CheckpointArchiveInvalid, CheckpointRestore
 from cloud_agent_host.archive.sandbox_deletion_fence import prove_admin_deletion_target_absent
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
     RetainedChatLost,
     SandboxActionFacts,
     SandboxRestoreFailed,
 )
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.group_lifecycle import Operation
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,

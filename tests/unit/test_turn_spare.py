@@ -31,6 +31,7 @@ from tests.unit.test_runner_host_service import (
 )
 
 from cloud_agent_host import host_service, runner, runner_stop, turn_child, turn_launch
+from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.host_runtime import (
     LAUNCH_NOT_STARTED,
     LAUNCH_STARTED,
@@ -38,7 +39,6 @@ from cloud_agent_host.host_runtime import (
     LaunchResult,
     encode_turn,
 )
-from cloud_agent_host.sandbox import ProcessBackend
 
 #: This host's configuration, which every child's command line carries.
 _CONFIG: dict[str, Any] = {

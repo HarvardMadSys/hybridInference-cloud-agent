@@ -23,15 +23,16 @@ import pytest
 from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_REAPER_TARGET,
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
 )
-from cloud_agent_host.chat_sandbox_inspect import container_inspection
-from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.member_setup.member_preparation import (
     RUNNER,
@@ -43,7 +44,6 @@ from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTranspor
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.pi import member as pi_member
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.sandbox_browser import LAUNCHER
 from cloud_agent_host.sandbox_mcp import GATEWAY
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable

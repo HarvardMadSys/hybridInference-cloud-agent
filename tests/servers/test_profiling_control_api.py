@@ -825,7 +825,7 @@ def test_a_stopped_deployment_hands_the_host_no_run() -> None:
 def test_the_sandbox_manager_applies_a_policy_and_refuses_a_lower_revision() -> None:
     """Reordered pushes cannot undo a Stop, and a repeat is idempotent."""
     from cloud_agent_host import sandbox_manager_profiling_policy
-    from cloud_agent_host.sandbox import ProcessBackend
+    from cloud_agent_host.container.sandbox import ProcessBackend
     from cloud_agent_host.sandbox_manager import create_app
 
     monkeypatch_token = "sandbox-manager-token"

@@ -25,16 +25,16 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
-from cloud_agent_host.drivers import LaunchContext, TurnInput
-from cloud_agent_host.runtimes.events import MESSAGE, RAW
-from cloud_agent_host.runtimes.live import get_driver
-from cloud_agent_host.sandbox import (
+from cloud_agent_host.container.chat_sandbox_models import MEMBER_UID_BASE
+from cloud_agent_host.container.sandbox import (
     SANDBOX_GID,
     SANDBOX_PATH,
     _PopenProcess,
     runtime_bin_dir,
 )
+from cloud_agent_host.drivers import LaunchContext, TurnInput
+from cloud_agent_host.runtimes.events import MESSAGE, RAW
+from cloud_agent_host.runtimes.live import get_driver
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import reports_version
 

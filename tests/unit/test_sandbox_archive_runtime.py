@@ -14,8 +14,8 @@ from cloud_agent_host.archive import sandbox_archive_runtime as archive_runtime
 from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.archive.sandbox_archive_s3 import SandboxArchiveReceipt
 from cloud_agent_host.archive.sandbox_archives import CaptureGate, SandboxInitialArchiveMarker
-from cloud_agent_host.chat_sandbox_markers import FINAL_ARCHIVE_MARKER_MAX_BYTES
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.chat_sandbox_markers import FINAL_ARCHIVE_MARKER_MAX_BYTES
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:

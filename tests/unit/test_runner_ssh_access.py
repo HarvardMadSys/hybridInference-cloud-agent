@@ -17,9 +17,9 @@ from tests.support.ssh_keys import host_key, private_key
 
 from cloud_agent_host import claimed_job, group_reservation, shared_live_attempt
 from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_shared import shared_protocol
 from cloud_agent_shared.ssh_access import SshAccess, SshMemberAccess, SshServerAccess
 

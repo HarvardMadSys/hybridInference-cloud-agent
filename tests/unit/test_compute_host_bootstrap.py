@@ -33,7 +33,7 @@ from cloud_agent.providers.compute.host_bootstrap import (
     _REQUIRED_ENV,
     SshHostBootstrap,
 )
-from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL
+from cloud_agent_host.container.chat_sandbox_models import CHAT_NAMESPACE_LABEL
 from cloud_agent_host.runtime_images import (
     NAMESPACE_LABEL,
     RUNTIME_LABEL,
@@ -804,7 +804,7 @@ def _discarded(
         ArchiveIdentity,
         SandboxDeletionBackupService,
     )
-    from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
     from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 

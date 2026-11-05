@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.member_setup import tree_copy
 from cloud_agent_host.runtime_images import SOURCE_LABEL, WORK_LABEL
 from cloud_agent_host.runtimes.http_bridge.kilo_mcp import (
@@ -14,7 +15,6 @@ from cloud_agent_host.runtimes.http_bridge.kilo_mcp import (
     KILO_MCP_VERSION,
     ensure_kilo_runtime,
 )
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_RUNTIME_PINS
 
 NAMESPACE = "freeinference-cloud-agent-sandbox-staging"

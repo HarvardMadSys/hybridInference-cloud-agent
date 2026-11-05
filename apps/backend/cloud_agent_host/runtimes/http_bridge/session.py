@@ -31,7 +31,7 @@ from cloud_agent_host.runtimes.http_bridge.parts import (
 from cloud_agent_host.stream_deltas import StreamDelta
 
 if TYPE_CHECKING:
-    from cloud_agent_host.sandbox import SandboxProcess
+    from cloud_agent_host.container.sandbox import SandboxProcess
 
 
 def _http_agent_error_text(error: Any) -> str:

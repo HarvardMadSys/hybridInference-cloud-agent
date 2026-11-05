@@ -76,7 +76,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_SANDBOX_ID_LABEL,
     CHAT_SANDBOX_LABEL,

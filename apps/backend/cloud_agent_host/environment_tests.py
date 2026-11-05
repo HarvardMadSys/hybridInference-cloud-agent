@@ -10,8 +10,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
-from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
+from cloud_agent_host.container.chat_sandbox import (
+    ChatSandboxManager,
+    ChatSandboxSpec,
+    RetainedChatBackend,
+)
+from cloud_agent_host.container.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
 from cloud_agent_host.environment_preparation import (
     RUNNING_PROGRESS_INTERVAL_S,
     EnvironmentPreparation,
@@ -428,7 +432,7 @@ def _save_snapshot(
 
 def _delete_retired_snapshots(client: httpx.Client) -> None:
     """Delete retired snapshots' stored objects, and drop retired images held here."""
-    from cloud_agent_host.sandbox import SandboxError
+    from cloud_agent_host.container.sandbox import SandboxError
     from cloud_agent_host.sandbox_manager_client import (
         SandboxManagerError,
         sandbox_manager_from_env,

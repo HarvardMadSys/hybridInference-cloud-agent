@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from cloud_agent_host.member_setup.plugins import member_installer, run_plugin_command
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 
 _CLAUDE_INSTALL_SCRIPT = member_installer(

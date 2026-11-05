@@ -24,9 +24,9 @@ import hashlib
 import re
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.chat_sandbox_models import RetainedChatLost, SandboxRestoreFailed
+from cloud_agent_host.container.chat_sandbox_models import RetainedChatLost, SandboxRestoreFailed
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost, StaleStartFence
 
 if TYPE_CHECKING:

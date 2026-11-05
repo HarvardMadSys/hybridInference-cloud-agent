@@ -12,11 +12,11 @@ import math
 import secrets
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     RetainedChatBackend,
 )
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.group_lifecycle import Operation
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
 )

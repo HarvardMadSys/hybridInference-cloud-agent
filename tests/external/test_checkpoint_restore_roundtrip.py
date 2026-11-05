@@ -30,9 +30,9 @@ from cloud_agent_host.archive.sandbox_checkpoints import (
     SandboxCheckpointStore,
     checkpoint_image_reference,
 )
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
-from cloud_agent_host.chat_sandbox_models import CHAT_CHECKPOINT_LABEL
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox_models import CHAT_CHECKPOINT_LABEL
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 pytestmark = pytest.mark.external

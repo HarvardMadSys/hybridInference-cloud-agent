@@ -28,7 +28,7 @@ from cloud_agent_host.runtimes.base import COMPAT_LAUNCHER
 from cloud_agent_shared.protocol_compat import ENV_TOKEN
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 #: What a translated member's argv starts with: the image's own interpreter,
 #: isolated from the environment and the working directory, running the helper.

@@ -34,7 +34,7 @@ from tests.unit.test_shared_session_supervisor import (
     time,
 )
 
-from cloud_agent_host.sandbox import TerminalProcess
+from cloud_agent_host.container.sandbox import TerminalProcess
 from cloud_agent_host.terminal_session import _TerminalSession
 
 if TYPE_CHECKING:

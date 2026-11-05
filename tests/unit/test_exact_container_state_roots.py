@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import CHAT_STATE_DIR, CHAT_WORKDIR, ChatSandboxManager
-from cloud_agent_host.exact_container import ExactContainer
+from cloud_agent_host.container.chat_sandbox import CHAT_STATE_DIR, CHAT_WORKDIR, ChatSandboxManager
+from cloud_agent_host.container.exact_container import ExactContainer
 
 
 def test_no_state_roots_is_refused() -> None:

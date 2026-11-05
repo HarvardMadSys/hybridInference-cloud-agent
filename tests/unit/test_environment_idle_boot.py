@@ -16,7 +16,7 @@ from tests.unit.test_shared_session_supervisor import (
     _spec,
 )
 
-from cloud_agent_host.chat_sandbox import RetainedChatLost
+from cloud_agent_host.container.chat_sandbox import RetainedChatLost
 from cloud_agent_host.environment_preparation import EnvironmentPreparation, runs_no_script
 from cloud_agent_host.session_lifecycle import SessionLeaseLost
 from cloud_agent_shared.environment import BoundEnvironment

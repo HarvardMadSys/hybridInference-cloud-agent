@@ -19,7 +19,7 @@ from cloud_agent_shared.errors import SandboxError
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 
 def has_root_marker(

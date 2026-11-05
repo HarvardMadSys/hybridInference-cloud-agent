@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container import chat_sandbox
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_PROBE_LABEL,
     GUEST_OBSERVER_PROBE_ATTEMPTS,
     MEMBER_REAPER_TARGET,
@@ -21,9 +21,9 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.observe.guest_observer import GUEST_OBSERVER_BINARY
 from cloud_agent_host.observe.tool_windows import ToolMark
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_shared.egress import network_from_env
 
 
@@ -155,7 +155,7 @@ def test_kata_exec_delivers_eof_and_preserves_input_and_literal_arguments(monkey
             os.close(read_fd)
             os.close(write_fd)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", docker_exec)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", docker_exec)
     result = manager.exec_capture(
         spec,
         [
@@ -363,7 +363,8 @@ def test_backend_refuses_claim_readiness_when_observer_probe_fails(monkeypatch):
     backend = _manager().backend
     backend._kernel_probe["guest_kernel"] = "previous-guest-kernel"
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox.subprocess.run", lambda *a, **kw: SimpleNamespace(returncode=0)
+        "cloud_agent_host.container.sandbox.subprocess.run",
+        lambda *a, **kw: SimpleNamespace(returncode=0),
     )
 
     def refuse(self):

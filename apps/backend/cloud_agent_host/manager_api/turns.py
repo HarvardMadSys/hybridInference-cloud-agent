@@ -13,6 +13,7 @@ from fastapi.concurrency import iterate_in_threadpool
 from fastapi.responses import StreamingResponse  # noqa: TC002 — FastAPI resolves it.
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.manager_api.calls import _EndingStreamingResponse
@@ -30,7 +31,6 @@ from cloud_agent_host.observe.guest_observer import (
 )
 from cloud_agent_host.observe.resources import shared_member_resource_rollup
 from cloud_agent_host.observe.tool_windows import ToolWindowTracker, attribute, tool_time_ms
-from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Generator, Iterator

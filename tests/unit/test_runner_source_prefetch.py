@@ -32,9 +32,9 @@ from cloud_agent_host import (
     shared_live_attempt,
     source_preparation,
 )
-from cloud_agent_host.chat_sandbox import CHAT_WORKDIR
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 from cloud_agent_host.setup import SetupResult
 from cloud_agent_host.source_preparation import WorktreeError

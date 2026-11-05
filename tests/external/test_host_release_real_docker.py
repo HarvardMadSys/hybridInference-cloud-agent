@@ -49,12 +49,12 @@ from cloud_agent.ports.external.compute_provider import (
 )
 from cloud_agent.ports.external.host_bootstrap import BootstrapIntent, DeploymentProfile
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.member_setup.tree_copy import staged_tree
 from cloud_agent_host.runtime_downloads import RuntimeDownloads
 from cloud_agent_host.runtime_images import NAMESPACE_LABEL, WORK_LABEL
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

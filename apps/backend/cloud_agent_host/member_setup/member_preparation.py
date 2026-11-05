@@ -35,13 +35,13 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, SandboxError
 
 if TYPE_CHECKING:
     import subprocess
     from collections.abc import Callable, Sequence
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 #: Reads its steps as JSON on stdin and writes each one's exit status (``null``
 #: for a step that outlived its timeout) and stderr as a line of JSON on stdout

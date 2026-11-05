@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_PROBE_LABEL,
     CHAT_SANDBOX_LABEL,
@@ -21,7 +21,7 @@ from cloud_agent_host.chat_sandbox_models import (
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
     from cloud_agent_host.network.chat_sandbox_network import ChatNetworkContainers
 
 #: The records keep the supervisor's logger name, where this renewal began.

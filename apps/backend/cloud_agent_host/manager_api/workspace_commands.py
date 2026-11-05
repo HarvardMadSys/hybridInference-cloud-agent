@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.container.sandbox import SandboxError, SandboxSpec
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.sandbox import SandboxError, SandboxSpec
 from cloud_agent_host.workspace_git import (
     run_git as _workspace_git,
     run_git_metadata as _workspace_git_metadata,
@@ -22,7 +22,7 @@ from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, defau
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from cloud_agent_host.sandbox import SandboxBackend, SandboxProcess
+    from cloud_agent_host.container.sandbox import SandboxBackend, SandboxProcess
 
 # The sandbox manager's own logger: its command events keep their name.
 logger = get_logger("cloud_agent_host.sandbox_manager")

@@ -20,18 +20,19 @@ from cloud_agent_host.attempt_lease import (
     _retry_control_receipt,
     _retry_lifecycle_receipt,
 )
-from cloud_agent_host.chat_sandbox import (
-    CHAT_UPLOADS_DIR,
-    CHAT_WORKDIR,
-    ChatSandboxSpec,
-    RetainedChatBackend,
-)
 from cloud_agent_host.claimed_job import (
     ClaimedJob,
     LeaseLost,
     model_connection_launch,
     require_residency_connection,
 )
+from cloud_agent_host.container.chat_sandbox import (
+    CHAT_UPLOADS_DIR,
+    CHAT_WORKDIR,
+    ChatSandboxSpec,
+    RetainedChatBackend,
+)
+from cloud_agent_host.container.sandbox import SandboxBackend, SandboxError
 from cloud_agent_host.control_plane_client import ControlPlane, _log_control_failure
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.github_relay_env import residency_github_launch
@@ -50,7 +51,6 @@ from cloud_agent_host.observe.resources import shared_member_resource_rollup
 from cloud_agent_host.resident_probe import probe_live_resident
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import AgentRuntime, NormalizedEvent
-from cloud_agent_host.sandbox import SandboxBackend, SandboxError
 from cloud_agent_host.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,

@@ -10,8 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import runtime_images, sandbox as sandbox_mod
-from cloud_agent_host.sandbox import (
+from cloud_agent_host import runtime_images
+from cloud_agent_host.container import sandbox as sandbox_mod
+from cloud_agent_host.container.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
     ProcessBackend,
@@ -217,7 +218,8 @@ def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_imag
         return "guest-kernel"
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.ChatSandboxManager.probe_guest_observer", observer_probe
+        "cloud_agent_host.container.chat_sandbox.ChatSandboxManager.probe_guest_observer",
+        observer_probe,
     )
     calls: list[list[str]] = []
     monkeypatch.setattr(sandbox_mod.os, "uname", lambda: SimpleNamespace(release="host-kernel"))
@@ -262,7 +264,7 @@ def test_combined_preflight_never_attests_missing_or_shared_kernel(monkeypatch, 
         lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout="27.0\n", stderr=""),
     )
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.ChatSandboxManager.probe_guest_observer",
+        "cloud_agent_host.container.chat_sandbox.ChatSandboxManager.probe_guest_observer",
         lambda self: guest_kernel,
     )
     backend = ContainerBackend(image="img:1", runtime=KATA_RUNTIME)
@@ -538,7 +540,7 @@ def test_version_stamp_reads_runtime_digest_and_baked_versions(monkeypatch):
         calls.append(argv)
         return SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr="")
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.sandbox.subprocess.run", fake_run)
     backend = ContainerBackend(image="img:1", runtime="io.containerd.kata.v2")
 
     stamp = backend.version_stamp()
@@ -571,7 +573,7 @@ def test_version_stamp_offers_downloaded_versions_after_the_images_own(monkeypat
             )
         return SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr="")
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.sandbox.subprocess.run", fake_run)
     backend = ContainerBackend(image="img:1")
 
     stamp = backend.version_stamp()
@@ -609,7 +611,7 @@ def _holding(monkeypatch, versions, *, in_use=(), menu_label=None):
             returncode=0, stdout=_inspect_json(Config={"Labels": labels}), stderr=""
         )
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.sandbox.subprocess.run", fake_run)
     return calls
 
 
@@ -731,7 +733,7 @@ def test_a_stamp_that_skips_downloads_does_not_repeat_the_left_off_warning(monke
 def test_version_stamp_attests_runc_with_an_empty_string(monkeypatch):
     """No VM runtime is a positive statement, not a missing one."""
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox.subprocess.run",
+        "cloud_agent_host.container.sandbox.subprocess.run",
         lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr=""),
     )
     backend = ContainerBackend(image="img:1")
@@ -742,7 +744,7 @@ def test_version_stamp_attests_runc_with_an_empty_string(monkeypatch):
 def test_version_stamp_falls_back_to_the_local_image_id(monkeypatch):
     """A built-but-never-pushed image still pins what ran."""
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox.subprocess.run",
+        "cloud_agent_host.container.sandbox.subprocess.run",
         lambda argv, **kwargs: SimpleNamespace(
             returncode=0, stdout=_inspect_json(RepoDigests=[]), stderr=""
         ),
@@ -762,7 +764,7 @@ def test_version_stamp_degrades_without_failing_the_heartbeat(monkeypatch, failu
     def fail(argv, **kwargs):
         raise failure
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fail)
+    monkeypatch.setattr("cloud_agent_host.container.sandbox.subprocess.run", fail)
     backend = ContainerBackend(image="img:1", runtime="io.containerd.kata.v2")
 
     stamp = backend.version_stamp()

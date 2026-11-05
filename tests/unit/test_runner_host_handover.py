@@ -57,7 +57,7 @@ def test_a_child_with_the_hosts_verdict_checks_only_the_network(monkeypatch, ver
     import io
     import os
 
-    from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+    from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 
     events = []
     read_fd, write_fd = os.pipe()
@@ -133,7 +133,7 @@ def _child_docker(monkeypatch, kernel=None) -> list[list[str]]:
     """
     from types import SimpleNamespace
 
-    from cloud_agent_host import sandbox as sandbox_mod
+    from cloud_agent_host.container import sandbox as sandbox_mod
 
     calls: list[list[str]] = []
 
@@ -206,7 +206,7 @@ def test_a_child_declines_a_turn_without_a_sound_verification_of_the_rules(
     Only a child that declines hands its turn back unspent. One that accepted
     and then found the rules unverified would strand the turn behind its lease.
     """
-    from cloud_agent_host.sandbox import ContainerBackend
+    from cloud_agent_host.container.sandbox import ContainerBackend
 
     backend = ContainerBackend(image="sandbox", sandbox_network=_NETWORK)
     calls = _child_docker(monkeypatch)
@@ -237,8 +237,8 @@ def test_a_child_slow_to_start_checks_the_rules_itself_rather_than_decline(
     """
     from tests.unit.test_network_guard import FakeNft
 
+    from cloud_agent_host.container.sandbox import ContainerBackend
     from cloud_agent_host.network.network_guard import GUARD_RECHECK_S
-    from cloud_agent_host.sandbox import ContainerBackend
 
     backend = ContainerBackend(image="sandbox", sandbox_network=_NETWORK)
     kernel = FakeNft()
@@ -288,7 +288,7 @@ def test_a_child_with_a_recent_verification_accepts_without_a_helper_container(
     before it accepts, where they used to run six and five. A runc child's
     preflight asks Docker once both whether it answers and its versions.
     """
-    from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend
+    from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend
 
     backend = ContainerBackend(
         image="sandbox",
@@ -427,7 +427,7 @@ def test_only_this_host_can_hand_a_child_its_verification_of_the_rules(monkeypat
 
 def test_the_host_hands_each_turn_the_guard_its_startup_check_verified(service, monkeypatch):
     """One guard for the life of the service, so its verification is renewed, not remade."""
-    from cloud_agent_host.sandbox import ContainerBackend
+    from cloud_agent_host.container.sandbox import ContainerBackend
 
     events: list[str] = []
     backend = ContainerBackend(image="sandbox", sandbox_network=_NETWORK)

@@ -14,9 +14,9 @@ import pytest
 from tests.external.test_host_release_real_docker import BASE, Node, node, node_image
 from tests.support.archive_policy import hooked_supervisor
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL, ChatSandboxSpec
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_models import CHAT_NAMESPACE_LABEL, ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_shared.egress import network_from_env
 
 pytestmark = pytest.mark.external

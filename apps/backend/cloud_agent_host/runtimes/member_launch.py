@@ -20,7 +20,7 @@ from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.platform_instructions import platform_instructions
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_host.launch.facet import PrepareContext
     from cloud_agent_host.launch.runtime import RuntimeFacet
     from cloud_agent_host.member_setup.member_preparation import MemberPreparation

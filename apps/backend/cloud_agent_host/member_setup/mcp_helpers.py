@@ -11,9 +11,9 @@ from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_host.member_setup.trusted_files import install_trusted_file
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection
-    from cloud_agent_host.exact_container import ExactContainer
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxInspection
+    from cloud_agent_host.container.exact_container import ExactContainer
 
 _HELPERS = {
     "pi": ("pi-freeinference", "pi-mcp-bridge.ts"),
