@@ -754,8 +754,17 @@ check_shared_live_stack() {
     [[ -n "$first_id" ]] || first_id="$id"
     (
       attest_rc=0
-      docker exec "$id" python -c \
-        'from cloud_agent_host.host_capabilities import _shared_live_host_capabilities as capabilities; from cloud_agent_host.sandbox import build_backend_from_env; backend = build_backend_from_env(); backend.preflight(); print(",".join(capabilities(backend, backend.version_stamp())))' \
+      # A runner image from before the host service split holds the probe in
+      # cloud_agent_host.runner; the fallback keeps `check` working against it.
+      docker exec "$id" python -c '
+try:
+    from cloud_agent_host.host_capabilities import _shared_live_host_capabilities as capabilities
+except ImportError:  # COMPAT(remove-after=2026-12-31): every runner image ships host_capabilities
+    from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities
+from cloud_agent_host.sandbox import build_backend_from_env
+backend = build_backend_from_env()
+backend.preflight()
+print(",".join(capabilities(backend, backend.version_stamp())))' \
         >"${ATTEST_DIR}/${id}.capability" 2>"${ATTEST_DIR}/${id}.stderr" || attest_rc=$?
       printf '%s' "${attest_rc}" >"${ATTEST_DIR}/${id}.status"
     ) &
