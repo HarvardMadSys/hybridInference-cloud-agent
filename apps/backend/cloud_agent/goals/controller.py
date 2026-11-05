@@ -23,6 +23,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from cloud_agent.application.owner_access import (
+    AGENT_ACCESS_WITHDRAWN,
+    AgentAccessUnavailable,
+    owner_may_use_agent,
+)
 from cloud_agent.application.pending_messages import settle_queue
 from cloud_agent.domain.goals import GoalAction, GoalReport, GoalReportParse
 from cloud_agent.goals.decision import GoalContext, decide
@@ -34,11 +39,6 @@ from cloud_agent.goals.models import (
 )
 from cloud_agent.goals.prompts import render_repair_prompt, render_round_prompt
 from cloud_agent.goals.retry_policy import capped_backoff, is_exhausted, wakeup_backoff
-from cloud_agent.owner_access import (
-    AGENT_ACCESS_WITHDRAWN,
-    AgentAccessUnavailable,
-    owner_may_use_agent,
-)
 from cloud_agent.source_control.entitlement import (
     RepoAccessUnavailable,
     RepoNotAllowed,

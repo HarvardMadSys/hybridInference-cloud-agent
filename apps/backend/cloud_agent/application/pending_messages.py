@@ -21,14 +21,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent.application.follow_ups import PreparedFollowUp, prepare_follow_up
-from cloud_agent.domain.errors import Refused, Unavailable
-from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
-from cloud_agent.logging_utils import get_logger
-from cloud_agent.owner_access import (
+from cloud_agent.application.owner_access import (
     AGENT_ACCESS_WITHDRAWN,
     AgentAccessUnavailable,
     owner_may_use_agent,
 )
+from cloud_agent.domain.errors import Refused, Unavailable
+from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:

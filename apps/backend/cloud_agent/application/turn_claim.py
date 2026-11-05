@@ -31,6 +31,12 @@ import httpx
 
 from cloud_agent.application.claim_credentials import mint_clone_token
 from cloud_agent.application.model_connections import claim_model_connection
+from cloud_agent.application.owner_access import (
+    AGENT_ACCESS_WITHDRAWN,
+    AgentAccessUnavailable,
+    owner_may_use_agent,
+)
+from cloud_agent.application.prompt_injections import claim_prompt
 from cloud_agent.application.sandbox_incidents import sandbox_notes
 from cloud_agent.application.ssh_servers import build_ssh_access, servers_for_thread, ssh_key_cipher
 from cloud_agent.crypto.credential_cipher import CredentialCipherError
@@ -46,12 +52,6 @@ from cloud_agent.mcp.registry import resolve_for_thread
 from cloud_agent.mcp.sandbox_servers import split_bindings
 from cloud_agent.memory import memory_tool
 from cloud_agent.memory.agent_memory import claim_agent_memories
-from cloud_agent.owner_access import (
-    AGENT_ACCESS_WITHDRAWN,
-    AgentAccessUnavailable,
-    owner_may_use_agent,
-)
-from cloud_agent.prompt_injections import claim_prompt
 from cloud_agent.providers import web_search
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import WorkerClaimResponse

@@ -25,8 +25,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from cloud_agent.accounts.agent_access import AgentAccessDecision
 from cloud_agent.accounts.directory import OwnerDirectoryError
-from cloud_agent.agent_access import AgentAccessDecision
 
 #: What the owner reads when the answer is no. The same sentence the request
 #: path gives for the same decision, so a held message, a failed turn and a

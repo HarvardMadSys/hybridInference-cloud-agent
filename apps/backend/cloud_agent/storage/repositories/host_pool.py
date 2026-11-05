@@ -25,7 +25,6 @@ from cloud_agent.domain.host_pool import (
 )
 from cloud_agent.domain.runtimes import KIND_SELECTION, KIND_UPDATE
 from cloud_agent.domain.sandbox_group import DeletionState, GroupState
-from cloud_agent.host_settings_import import plan_settings_import
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.sandbox_archive.sandbox_archive_credentials import (
@@ -71,6 +70,7 @@ from cloud_agent.storage._sql.runner_policy import (
     heartbeat_policy,
 )
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent.storage.host_settings_import import plan_settings_import
 from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
 from cloud_agent_shared.host_settings import (
     reported_values,

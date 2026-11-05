@@ -9,7 +9,7 @@ only what the call's input named.
 
 from __future__ import annotations
 
-from cloud_agent.command_executions import (
+from cloud_agent.context.command_executions import (
     MAX_COMMAND_CHARS,
     MAX_OUTPUT_PREVIEW,
     runtime_command_tools,

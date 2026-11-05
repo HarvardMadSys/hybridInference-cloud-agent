@@ -27,13 +27,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_storage
 from cloud_agent.api.errors import typed_error
+from cloud_agent.application.runtime_upgrades import configured_registry_url
 from cloud_agent.application.sandbox_incidents import record_heartbeat_incidents
 from cloud_agent.domain.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
 )
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
-from cloud_agent.runtime_upgrades import configured_registry_url
 from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
     probe_error_for_host,

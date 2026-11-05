@@ -22,8 +22,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cloud_agent.accounts import tokens
+from cloud_agent.accounts.agent_access import AgentAccessDecision
 from cloud_agent.accounts.directory import OwnerDirectoryError
-from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.application.model_connections import model_connection_cipher
 from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.accounts import AccountRecord

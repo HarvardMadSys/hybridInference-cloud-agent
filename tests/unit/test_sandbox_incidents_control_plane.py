@@ -19,6 +19,7 @@ from tests.unit.test_host_pool_api import (  # noqa: F401 - shared pytest fixtur
     client,
 )
 
+from cloud_agent.application.prompt_injections import claim_prompt
 from cloud_agent.application.sandbox_incidents import (
     BROWSER_NOTE,
     SandboxNotes,
@@ -26,7 +27,6 @@ from cloud_agent.application.sandbox_incidents import (
     record_heartbeat_incidents,
     sandbox_notes,
 )
-from cloud_agent.prompt_injections import claim_prompt
 from cloud_agent.schemas.hosts import RetainedSandboxBeat
 from cloud_agent_shared.sandbox_incidents import parse_incidents
 from cloud_agent_shared.shared_protocol import SANDBOX_BROWSER_CAPABILITY

@@ -369,7 +369,6 @@ async def lifespan(  # noqa: PLR0915 complexity baseline, #771
 
     from cloud_agent.accounts.config import refuse_retired_configuration
     from cloud_agent.application.profiling_control import ProfilingControlService
-    from cloud_agent.capacity_history import prune_host_capacity_history
     from cloud_agent.deployment.operational_health import monitor_queue
     from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.mcp.runtime import close_host, maintain_host_sessions
@@ -382,6 +381,7 @@ async def lifespan(  # noqa: PLR0915 complexity baseline, #771
         synchronize_settings,
     )
     from cloud_agent.storage.assembly import Storage
+    from cloud_agent.workers.capacity_history import prune_host_capacity_history
     from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
 
     # Before the database is touched at all: a deployment still configured for

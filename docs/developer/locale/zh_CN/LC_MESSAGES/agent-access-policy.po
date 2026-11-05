@@ -171,8 +171,8 @@ msgstr "`ADMIN_TOKEN` 独立授权基础设施管理和恢复设置页面，即�
 #: ../developer/agent-access-policy.md:57
 msgid ""
 "The implementation is in "
-"[`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py), "
+"[`accounts/agent_access.py`](../../apps/backend/cloud_agent/accounts/agent_access.py), "
 "[`accounts/directory.py`](../../apps/backend/cloud_agent/accounts/directory.py),"
 " [`deps.py`](../../apps/backend/cloud_agent/api/deps.py) and "
 "[`session.py`](../../apps/backend/cloud_agent/api/session.py)."
-msgstr "实现位于 [`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py)、[`accounts/directory.py`](../../apps/backend/cloud_agent/accounts/directory.py)、[`deps.py`](../../apps/backend/cloud_agent/api/deps.py) 和 [`session.py`](../../apps/backend/cloud_agent/api/session.py)。"
+msgstr "实现位于 [`accounts/agent_access.py`](../../apps/backend/cloud_agent/accounts/agent_access.py)、[`accounts/directory.py`](../../apps/backend/cloud_agent/accounts/directory.py)、[`deps.py`](../../apps/backend/cloud_agent/api/deps.py) 和 [`session.py`](../../apps/backend/cloud_agent/api/session.py)。"

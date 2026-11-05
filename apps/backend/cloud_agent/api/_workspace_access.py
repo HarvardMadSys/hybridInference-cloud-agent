@@ -11,14 +11,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 from cloud_agent.api.errors import typed_error
+from cloud_agent.api.workspace_errors import (
+    _sandbox_manager_http_error,
+)
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     hydrate_shared_sandbox_manager,
     sandbox_manager_for_host,
     sandbox_manager_for_job,
-)
-from cloud_agent.workspace_errors import (
-    _sandbox_manager_http_error,
 )
 
 if TYPE_CHECKING:

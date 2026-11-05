@@ -18,7 +18,8 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
     _stamp,
 )
 
-from cloud_agent import runtime_upgrades, settings
+from cloud_agent import settings
+from cloud_agent.application import runtime_upgrades
 from cloud_agent.schemas.hosts import HostHeartbeatRequest
 from cloud_agent_host import (
     attempt_lease,

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cloud_agent.application import turn_claim
+from cloud_agent.application.owner_access import AGENT_ACCESS_WITHDRAWN, AgentAccessUnavailable
 from cloud_agent.application.turn_claim import (
     ClaimRefusal,
     claim_environment,
@@ -28,7 +29,6 @@ from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.execution import FAILED, RUNNING
 from cloud_agent.environments.environments import EnvironmentAccessRevoked
 from cloud_agent.memory import memory_tool
-from cloud_agent.owner_access import AGENT_ACCESS_WITHDRAWN, AgentAccessUnavailable
 from cloud_agent.source_control.entitlement import RepoAccessUnavailable, RepoNotAllowed
 from cloud_agent_shared.runtime_catalog import runtimes_supporting_mcp
 

@@ -31,12 +31,12 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from fastapi import Depends, Header, HTTPException, Request
 
+from cloud_agent.accounts.agent_access import AgentAccessDecision
 from cloud_agent.accounts.directory import (
     LocalDirectoryUnavailable,
     LocalOwnerDirectory,
     OwnerDirectoryError,
 )
-from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError, typed_error
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
