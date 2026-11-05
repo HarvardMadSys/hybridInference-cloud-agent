@@ -496,7 +496,7 @@ class SandboxArchiveController:
             self._final_receipts.clear()
         self._close_services([slot.service for slot in slots])
 
-    def apply(self, settings: Mapping[str, Any]) -> dict[str, object]:  # noqa: PLR0912 complexity baseline, #771
+    def apply(self, settings: Mapping[str, Any]) -> dict[str, object]:
         """Validate and atomically apply one complete DB policy revision."""
         policy = SandboxArchivePolicy.from_mapping(settings)
         # Heartbeats re-offer the complete current revision.  Resolve that
@@ -534,30 +534,9 @@ class SandboxArchiveController:
                     else ValueError("sandbox archive policy changed without a new revision")
                 )
             else:
-                error = None
-                if candidate is not None and self._started:
-                    # start() is local state only; no AWS request occurs here.
-                    try:
-                        candidate.start()
-                    except Exception as exc:
-                        close_candidate = True
-                        error = exc
-                if error is None:
-                    previous = self._current
-                    self._policy = policy
-                    self._current = (
-                        None
-                        if candidate is None
-                        else _ServiceSlot(
-                            revision=policy.revision,
-                            policy=policy,
-                            service=candidate,
-                        )
-                    )
-                    if previous is not None:
-                        previous.retired = True
-                        self._retired.add(previous)
-                        services_to_close.extend(self._closable_locked())
+                close_candidate, error = self._install_policy_locked(
+                    policy, candidate, services_to_close
+                )
 
         if close_candidate and candidate is not None:
             self._close_services([candidate])
@@ -567,6 +546,44 @@ class SandboxArchiveController:
         # A restart's committed hand-offs wait for the credentials this brings.
         self._wake_initial_uploads()
         return self.status()
+
+    def _install_policy_locked(
+        self,
+        policy: SandboxArchivePolicy,
+        candidate: _ArchiveService | None,
+        services_to_close: list[_ArchiveService],
+    ) -> tuple[bool, Exception | None]:
+        """Start ``candidate`` and make it current, retiring the previous service.
+
+        The caller holds the condition's lock and has fenced the revision.
+        Returns whether to close the candidate and the error to raise.
+        """
+        close_candidate = False
+        error: Exception | None = None
+        if candidate is not None and self._started:
+            # start() is local state only; no AWS request occurs here.
+            try:
+                candidate.start()
+            except Exception as exc:
+                close_candidate = True
+                error = exc
+        if error is None:
+            previous = self._current
+            self._policy = policy
+            self._current = (
+                None
+                if candidate is None
+                else _ServiceSlot(
+                    revision=policy.revision,
+                    policy=policy,
+                    service=candidate,
+                )
+            )
+            if previous is not None:
+                previous.retired = True
+                self._retired.add(previous)
+                services_to_close.extend(self._closable_locked())
+        return close_candidate, error
 
     def status(self) -> dict[str, object]:
         """Return policy rollout and bounded counters, never destination identity."""
