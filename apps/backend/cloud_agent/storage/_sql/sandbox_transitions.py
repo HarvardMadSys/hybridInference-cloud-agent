@@ -52,7 +52,7 @@ _STILL_CURRENT = """EXISTS (
       AND c.credential_revision = b.credential_revision
 )"""
 
-# -- repositories/sandbox.py --------------------------------------------------
+# -- repositories/sandbox/ ----------------------------------------------------
 
 #: Executed by ``set_admin_archived``.
 SET_ADMIN_ARCHIVED_GROUP_SQL = (
