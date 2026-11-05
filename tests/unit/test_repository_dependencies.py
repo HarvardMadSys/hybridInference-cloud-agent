@@ -44,7 +44,9 @@ def test_repositories_do_not_import_peer_implementations_or_private_names() -> N
     """A repository composes through narrow public transaction primitives."""
     offenders = []
     for path in sorted(REPOSITORIES.rglob("*.py")):
-        if path.name == "__init__.py" or ADMIN_REPOSITORIES in path.parents:
+        # A split repository's package __init__ may hold its class; only the
+        # repositories package's own __init__ is a plain index.
+        if path == REPOSITORIES / "__init__.py" or ADMIN_REPOSITORIES in path.parents:
             continue
         package = path.parent.relative_to(REPOSITORIES).parts
         own_package = ".".join((REPOSITORY_PACKAGE, *package)) if package else None
