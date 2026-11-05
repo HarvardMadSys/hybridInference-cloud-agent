@@ -116,7 +116,7 @@ def _cell(value: Any) -> Any:
     return value
 
 
-class AdminDatabaseQueries:
+class PostgresAdminDatabaseQueries:
     """One reviewed browser capability over the existing connection pool."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

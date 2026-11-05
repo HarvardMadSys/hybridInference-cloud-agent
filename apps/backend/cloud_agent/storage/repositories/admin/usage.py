@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.ports.admin_queries import UsageQueryTooLarge, UsageQueryUnavailable
 from cloud_agent.storage._sql.attempt_rollups import (
     partition_attempt_rollups,
     refresh_attempt_rollups,
@@ -121,20 +122,12 @@ _ATTEMPT_ROLLUPS_SQL = """
 """
 
 
-class UsageQueryTooLarge(Exception):
-    """The selection exceeds a published bound and is refused as a whole."""
-
-
-class UsageQueryUnavailable(Exception):
-    """The selection could not be read within its bounds."""
-
-
 #: The smallest batch a batched read shrinks to before refusing: a hundred
 #: runs over the attempt budget is a pathological history, not a large one.
 MIN_BATCH_RUNS = 100
 
 
-class AdminUsageQueries:
+class PostgresAdminUsageQueries:
     """Read-only aggregates over the Agent database's existing pool."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

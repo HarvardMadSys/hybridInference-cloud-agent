@@ -42,7 +42,7 @@ from cloud_agent.sandbox_manager.sandbox_manager_routing import (
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SandboxRepository
-    from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
+    from cloud_agent.ports.admin_queries import AdminSandboxQueries
 
 
 logger = get_logger(__name__)

@@ -18,11 +18,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.storage.admin_conversation_queries import AdminConversationQueries
-from cloud_agent.storage.admin_database_queries import AdminDatabaseQueries
-from cloud_agent.storage.admin_queries import AdminRunQueries
-from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
-from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
     PostgresAgentMemoryRepository,
     PostgresAttachmentRepository,
@@ -68,6 +63,13 @@ from cloud_agent.storage.repositories import (
     PostgresWebSearchRepository,
     PostgresWorkInsightsRepository,
 )
+from cloud_agent.storage.repositories.admin.conversations import (
+    PostgresAdminConversationQueries,
+)
+from cloud_agent.storage.repositories.admin.database import PostgresAdminDatabaseQueries
+from cloud_agent.storage.repositories.admin.runs import PostgresAdminRunQueries
+from cloud_agent.storage.repositories.admin.sandboxes import PostgresAdminSandboxQueries
+from cloud_agent.storage.repositories.admin.usage import PostgresAdminUsageQueries
 from cloud_agent.storage.repositories.environment_snapshots import (
     PostgresEnvironmentSnapshotRepository,
 )
@@ -119,6 +121,13 @@ if TYPE_CHECKING:
         UserProfileRepository,
         WebSearchRepository,
         WorkInsightsRepository,
+    )
+    from cloud_agent.ports.admin_queries import (
+        AdminConversationQueries,
+        AdminDatabaseQueries,
+        AdminRunQueries,
+        AdminSandboxQueries,
+        AdminUsageQueries,
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
@@ -187,13 +196,12 @@ class Storage:
     def _admin_read_models(self, pool: asyncpg.Pool) -> None:
         """The admin read models.
 
-        Still concrete: they are bounded projections for one console, not a
-        capability any other caller asks for, and they have no port yet. Named
-        here so that the routes which need them stop reaching into another
-        object's pool to build one.
+        Bounded projections for one console, behind the ports in
+        :mod:`cloud_agent.ports.admin_queries`. Named here so that the routes
+        which need them stop reaching into another object's pool to build one.
         """
-        self.admin_conversations = AdminConversationQueries(pool)
-        self.admin_database = AdminDatabaseQueries(pool)
-        self.admin_runs = AdminRunQueries(pool)
-        self.admin_sandboxes = AdminSandboxQueries(pool)
-        self.admin_usage = AdminUsageQueries(pool)
+        self.admin_conversations: AdminConversationQueries = PostgresAdminConversationQueries(pool)
+        self.admin_database: AdminDatabaseQueries = PostgresAdminDatabaseQueries(pool)
+        self.admin_runs: AdminRunQueries = PostgresAdminRunQueries(pool)
+        self.admin_sandboxes: AdminSandboxQueries = PostgresAdminSandboxQueries(pool)
+        self.admin_usage: AdminUsageQueries = PostgresAdminUsageQueries(pool)

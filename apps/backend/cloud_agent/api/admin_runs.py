@@ -31,7 +31,7 @@ from cloud_agent.usage.turn_report import summarize_job_usage
 from cloud_agent_shared.turn_resources import summarize_turn_resources
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.admin_queries import AdminRunQueries
+    from cloud_agent.ports.admin_queries import AdminRunQueries
 
 logger = get_logger(__name__)
 

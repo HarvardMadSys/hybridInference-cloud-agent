@@ -12,6 +12,7 @@ from cloud_agent.admin_conversations import (
     AdminConversationList,
     ConversationCursor,
     ConversationTurnsCursor,
+    turns_scope,
 )
 from cloud_agent.admin_observability import (
     RunFilters,
@@ -20,10 +21,9 @@ from cloud_agent.admin_observability import (
     resolve_run_window,
 )
 from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
-from cloud_agent.storage.admin_conversation_queries import turns_scope
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.admin_conversation_queries import AdminConversationQueries
+    from cloud_agent.ports.admin_queries import AdminConversationQueries
 
 
 class _Storage(Protocol):
