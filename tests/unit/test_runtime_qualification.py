@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host import runtime_qualification as qualification
-from cloud_agent_host.network_guard import GUARD_RENEW_S, VERIFICATION_KEY
+from cloud_agent_host.network.network_guard import GUARD_RENEW_S, VERIFICATION_KEY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend, SandboxError
 
 

@@ -1,6 +1,6 @@
 """The long-lived host-rule helper: one ``docker run`` that takes a guard's steps in turn.
 
-Every step of :class:`~cloud_agent_host.network_guard.HostNetworkGuard` used to
+Every step of :class:`~cloud_agent_host.network.network_guard.HostNetworkGuard` used to
 start a helper container of its own, and starting one costs far more than the
 ``nft`` calls it makes: about 264 ms on runc, against milliseconds. The
 sandbox manager's sweep starts one every five seconds while groups run, and a

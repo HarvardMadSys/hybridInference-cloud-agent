@@ -40,14 +40,15 @@ from tests.unit.test_network_guard import (
     _update,
 )
 
-from cloud_agent_host import host_service, network_guard, network_guard_helper
-from cloud_agent_host.network_guard import (
+from cloud_agent_host import host_service
+from cloud_agent_host.network import network_guard, network_guard_helper
+from cloud_agent_host.network.network_guard import (
     _NFT_BATCH,
     _NFT_SERVE,
     HostNetworkGuard,
     NetworkGuardError,
 )
-from cloud_agent_host.network_guard_helper import LongLivedHelper, serve_program
+from cloud_agent_host.network.network_guard_helper import LongLivedHelper, serve_program
 from cloud_agent_shared.egress import render_ruleset
 
 if TYPE_CHECKING:
@@ -316,8 +317,8 @@ def test_a_helper_left_behind_is_stopped_when_its_object_is_collected(tmp_path) 
 #: must be reaped before the interpreter exits, not left to the parent.
 _GUARD_PROCESS = """\
 import json, subprocess, sys, time
-from cloud_agent_host.network_guard import _NFT_BATCH
-from cloud_agent_host.network_guard_helper import LongLivedHelper, serve_program
+from cloud_agent_host.network.network_guard import _NFT_BATCH
+from cloud_agent_host.network.network_guard_helper import LongLivedHelper, serve_program
 
 program = serve_program(_NFT_BATCH, idle_s=600)
 

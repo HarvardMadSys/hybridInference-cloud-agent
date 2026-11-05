@@ -435,7 +435,7 @@ def test_a_turns_child_checks_the_network_on_its_hosts_verification_of_the_rules
     the child took it, leaves it nothing to rely on, so its check makes a
     fresh one, as every other caller's does.
     """
-    from cloud_agent_host.network_guard import VERIFICATION_KEY, NetworkGuardError
+    from cloud_agent_host.network.network_guard import VERIFICATION_KEY, NetworkGuardError
 
     calls, ensured = _network_preflight(monkeypatch)
     handed: list[object] = []

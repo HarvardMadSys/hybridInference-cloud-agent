@@ -109,7 +109,7 @@ class GuestRootExec:
         """Write the guest's relay hosts and its one resolver, as Kata guest root.
 
         The group network's one guest-root operation
-        (:class:`~cloud_agent_host.chat_sandbox_network.ChatNetworkContainers`),
+        (:class:`~cloud_agent_host.network.chat_sandbox_network.ChatNetworkContainers`),
         running only this module's own script.
         """
         argv = ["python3", "-I", "-c", _GUEST_NETWORK_SCRIPT, json.dumps(addresses), resolver]

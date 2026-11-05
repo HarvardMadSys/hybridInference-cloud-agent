@@ -25,7 +25,7 @@ import uuid
 from typing import Any
 
 from cloud_agent_host.host_runtime import LAUNCH_BACKOFF_CAP_S, LAUNCH_BACKOFF_S
-from cloud_agent_host.network_guard import GUARD_RENEW_S, VERIFICATION_KEY
+from cloud_agent_host.network.network_guard import GUARD_RENEW_S, VERIFICATION_KEY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxBackend
 from cloud_agent_shared.errors import SandboxError
 
