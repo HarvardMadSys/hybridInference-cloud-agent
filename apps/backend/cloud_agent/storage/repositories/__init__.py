@@ -51,7 +51,7 @@ from cloud_agent.storage.repositories.profiling_control import (
     PostgresProfilingControlRepository,
 )
 from cloud_agent.storage.repositories.residency import PostgresResidencyRepository
-from cloud_agent.storage.repositories.sandbox import PostgresSandboxRepository
+from cloud_agent.storage.repositories.sandbox.repository import PostgresSandboxRepository
 from cloud_agent.storage.repositories.sandbox_incidents import PostgresSandboxIncidentRepository
 from cloud_agent.storage.repositories.session_fork import PostgresSessionForkRepository
 from cloud_agent.storage.repositories.settings import PostgresSettingsRepository
