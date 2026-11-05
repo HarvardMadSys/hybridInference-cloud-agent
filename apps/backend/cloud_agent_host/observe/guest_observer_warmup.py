@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager
     from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("cloud_agent_host.guest_observer_warmup")
 
 
 def warm_guest_observer(

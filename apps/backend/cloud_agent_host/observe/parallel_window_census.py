@@ -8,7 +8,7 @@ sampled at once: one after another, every concurrent turn on the host would
 stretch the advertised census period of all the others.
 
 Which censuses are due is each window's own answer
-(:meth:`cloud_agent_host.member_window_census.MemberWindow.census_due`); this
+(:meth:`cloud_agent_host.observe.member_window_census.MemberWindow.census_due`); this
 module only takes them.
 """
 
@@ -17,7 +17,7 @@ from __future__ import annotations
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 
-from cloud_agent_host.member_resources import MemberWindowHandle, MemberWindowSampler
+from cloud_agent_host.observe.member_resources import MemberWindowHandle, MemberWindowSampler
 
 #: One window the census loop is about to sample, as it leaves the
 #: supervisor's lock: the handle, its sampler and the census number. Named

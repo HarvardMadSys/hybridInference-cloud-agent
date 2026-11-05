@@ -29,6 +29,7 @@ from cloud_agent_host.drivers import (
     user_message_event,
 )
 from cloud_agent_host.harness_event import LINE, HarnessEvent
+from cloud_agent_host.observe.tool_windows import TOOL_MARK_FILE, hook_settings
 from cloud_agent_host.runtimes import (
     ERROR,
     ClaudeCodeRuntime,
@@ -39,7 +40,6 @@ from cloud_agent_host.runtimes.claude.background import (
     is_task_notification,
 )
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
-from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
     INPUT_TURN_ENDED,

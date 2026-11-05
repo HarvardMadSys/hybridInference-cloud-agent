@@ -45,7 +45,6 @@ from cloud_agent_host.group_archive_policy import (
     NullArchivePolicy,
     ServiceArchivePolicy,
 )
-from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.manager_api import archives as archives_mod, workspaces as workspaces_mod
 from cloud_agent_host.manager_api.models import SharedIdleStopRequest, SharedTurnRequest
 from cloud_agent_host.manager_api.terminal_manager import (
@@ -55,6 +54,8 @@ from cloud_agent_host.manager_api.terminal_manager import (
 from cloud_agent_host.manager_api.terminals import _terminal_sse_frame
 from cloud_agent_host.manager_api.workspace_commands import _run_git, _run_sandbox
 from cloud_agent_host.member_sessions import SharedTurnTelemetry
+from cloud_agent_host.observe.guest_observer import GuestObservation, GuestProcess
+from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
 from cloud_agent_host.sandbox import (
@@ -76,7 +77,6 @@ from cloud_agent_host.terminal_session import (
     _TerminalLimits,
     _TerminalSession,
 )
-from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 
 
@@ -3268,7 +3268,7 @@ def test_build_turn_resources_adopts_late_announced_guest_marks_and_logs_them(ca
     the guest pair is adopted, its process is attributed on the guest clock,
     and the log carries the lag for a reviewer to check per call."""
     from cloud_agent_host.manager_api.turns import build_turn_resources
-    from cloud_agent_host.tool_windows import ToolWindowTracker
+    from cloud_agent_host.observe.tool_windows import ToolWindowTracker
 
     tracker = ToolWindowTracker()
     tracker.observe("tool_use", {"id": "toolu_late", "name": "Read"}, mono=100.050)

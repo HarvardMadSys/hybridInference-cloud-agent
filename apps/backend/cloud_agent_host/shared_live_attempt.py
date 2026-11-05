@@ -46,9 +46,9 @@ from cloud_agent_host.local_settings import _chat_idle_timeout_s
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
 from cloud_agent_host.measurement_sender import _enqueue_delivery
+from cloud_agent_host.observe.resources import shared_member_resource_rollup
 from cloud_agent_host.resident_probe import probe_live_resident
 from cloud_agent_host.resident_transport import ResidentLaunch
-from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.runtimes import AgentRuntime, NormalizedEvent
 from cloud_agent_host.sandbox import SandboxBackend, SandboxError
 from cloud_agent_host.sandbox_manager_client import (

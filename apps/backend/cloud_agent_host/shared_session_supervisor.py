@@ -39,13 +39,13 @@ from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
 from cloud_agent_host.group_reconciliation import GroupReconciler
 from cloud_agent_host.group_registration import GroupRegistration
 from cloud_agent_host.initial_archive_capture import InitialArchiveCapture
-from cloud_agent_host.member_resources import (
-    MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
-    RUNNING_CHECKPOINT_INTERVAL_S,
-)
 from cloud_agent_host.member_sessions import MemberSessions
 from cloud_agent_host.member_window_sampler import WindowSampler
 from cloud_agent_host.native_session_fork import ForkService, NativeForker
+from cloud_agent_host.observe.member_resources import (
+    MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
+    RUNNING_CHECKPOINT_INTERVAL_S,
+)
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransportFactory,

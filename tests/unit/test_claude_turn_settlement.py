@@ -36,8 +36,8 @@ from cloud_agent_host.drivers import (
     TurnInput,
     TurnResult,
 )
-from cloud_agent_host.guest_observer import GuestObservation
 from cloud_agent_host.member_sessions import SharedTurnTelemetry
+from cloud_agent_host.observe.guest_observer import GuestObservation
 from cloud_agent_host.resident_transport import ResidentTurn
 from cloud_agent_host.runtimes import EMPTY_RUNTIME_MCP_CONFIG, ClaudeCodeRuntime
 from cloud_agent_host.runtimes.claude import background as claude_background

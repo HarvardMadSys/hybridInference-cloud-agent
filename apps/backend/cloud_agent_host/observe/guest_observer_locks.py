@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from cloud_agent_host.guest_observer import GuestObserverCursor
+    from cloud_agent_host.observe.guest_observer import GuestObserverCursor
 
 
 @dataclass

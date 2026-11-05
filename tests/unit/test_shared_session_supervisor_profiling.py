@@ -20,8 +20,8 @@ from tests.unit.test_shared_session_supervisor import (
     time,
 )
 
+from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_host.sandbox import KATA_RUNTIME
-from cloud_agent_host.tool_windows import ToolMark
 
 
 def test_shared_claude_turn_fences_and_returns_exact_tool_marks():

@@ -108,7 +108,11 @@ from cloud_agent_host.chat_sandbox_network import (
 )
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.exact_container import ExactContainer
-from cloud_agent_host.guest_observer import (
+from cloud_agent_host.guest_root_exec import GuestRootExec
+from cloud_agent_host.install_locks import install_lock
+from cloud_agent_host.member_preparation import TOOL_HOOKS_SCRIPT, MemberStep, run_member_steps
+from cloud_agent_host.network_guard import GUARD_RECHECK_S
+from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_EVENTS,
     GUEST_OBSERVER_ROOT,
@@ -119,12 +123,13 @@ from cloud_agent_host.guest_observer import (
     GuestObserverRuntimeError,
     GuestObserverSnapshot,
 )
-from cloud_agent_host.guest_observer_locks import GuestObserverLocks
-from cloud_agent_host.guest_observer_scripts import WINDOW_DELTA_SCRIPT
-from cloud_agent_host.guest_root_exec import GuestRootExec
-from cloud_agent_host.install_locks import install_lock
-from cloud_agent_host.member_preparation import TOOL_HOOKS_SCRIPT, MemberStep, run_member_steps
-from cloud_agent_host.network_guard import GUARD_RECHECK_S
+from cloud_agent_host.observe.guest_observer_locks import GuestObserverLocks
+from cloud_agent_host.observe.guest_observer_scripts import WINDOW_DELTA_SCRIPT
+from cloud_agent_host.observe.tool_windows import (
+    MAX_TOOL_MARK_BYTES,
+    TOOL_MARK_FILE,
+    ToolMarkReader,
+)
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -136,7 +141,6 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.stream_input import interactive_input, require_nonempty_rewindable
-from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 from cloud_agent_shared.environment import (
     DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
     DOCKER_CLIENT_PREFIXES as _DOCKER_CLIENT_ENV_PREFIXES,
@@ -2604,7 +2608,7 @@ class ChatSandboxManager(GuestRootExec):
         and the observer accepts a window request only from it. Nothing here
         composes a command from job input: ``argv`` comes from the fixed
         ``sample``/``register``/``close`` verbs inside
-        :class:`~cloud_agent_host.member_resources.MemberWindowSampler`, and
+        :class:`~cloud_agent_host.observe.member_resources.MemberWindowSampler`, and
         the container is the same label-verified sandbox the turn is already
         running in.
         """
@@ -2659,7 +2663,7 @@ class ChatSandboxManager(GuestRootExec):
 
     def warm_guest_observer(self, spec: ChatSandboxSpec, container_id: str) -> None:
         """Start a just-proven Kata guest's observer before its first prompt needs it."""
-        from cloud_agent_host.guest_observer_warmup import warm_guest_observer
+        from cloud_agent_host.observe.guest_observer_warmup import warm_guest_observer
 
         warm_guest_observer(self, spec, container_id)
 

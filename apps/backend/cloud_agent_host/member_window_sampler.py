@@ -12,17 +12,17 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.parallel_window_census import take_censuses
+from cloud_agent_host.observe.parallel_window_census import take_censuses
 
 if TYPE_CHECKING:
     import builtins
 
     from cloud_agent_host.drivers import DialectRuntime
-    from cloud_agent_host.guest_observer import (
+    from cloud_agent_host.observe.guest_observer import (
         GuestObserverCursor,
     )
-    from cloud_agent_host.member_window_census import MemberWindow
-    from cloud_agent_host.parallel_window_census import DueCensus
+    from cloud_agent_host.observe.member_window_census import MemberWindow
+    from cloud_agent_host.observe.parallel_window_census import DueCensus
     from cloud_agent_host.resident_transport import (
         ResidentTurn,
     )

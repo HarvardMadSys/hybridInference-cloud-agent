@@ -25,12 +25,12 @@ from cloud_agent_host.chat_sandbox_models import (
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.guest_observer import (
+from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GuestObserverCursor,
     GuestObserverRuntimeError,
 )
-from cloud_agent_host.guest_observer_warmup import warm_guest_observer
+from cloud_agent_host.observe.guest_observer_warmup import warm_guest_observer
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend
 
 if TYPE_CHECKING:

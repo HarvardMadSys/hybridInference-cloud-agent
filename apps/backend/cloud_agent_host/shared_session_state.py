@@ -37,15 +37,15 @@ if TYPE_CHECKING:
 
     from cloud_agent_host.drivers import DialectRuntime, PendingInput
     from cloud_agent_host.group_archive_policy import GroupArchivePolicy
-    from cloud_agent_host.guest_observer import (
+    from cloud_agent_host.observe.guest_observer import (
         GuestObserverCursor,
     )
-    from cloud_agent_host.member_window_census import MemberWindow
+    from cloud_agent_host.observe.member_window_census import MemberWindow
+    from cloud_agent_host.observe.tool_windows import ToolMarkReader
     from cloud_agent_host.resident_transport import (
         ResidentTransport,
         ResidentTurn,
     )
-    from cloud_agent_host.tool_windows import ToolMarkReader
     from cloud_agent_shared.sandbox_manager_wire import ContextStatus, ResidentState
 
 

@@ -51,7 +51,7 @@ from cloud_agent_host.chat_sandbox_markers import (
     INITIAL_ARCHIVE_MARKER_ROOT,
 )
 from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
-from cloud_agent_host.guest_observer import (
+from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
     GUEST_OBSERVER_VERSION,

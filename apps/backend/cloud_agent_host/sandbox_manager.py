@@ -66,9 +66,9 @@ from cloud_agent_host.manager_api.terminal_manager import (
 from cloud_agent_host.manager_api.terminals import TerminalRoutes
 from cloud_agent_host.manager_api.turns import TurnRoutes
 from cloud_agent_host.manager_api.workspaces import WorkspaceRoutes
+from cloud_agent_host.observe.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.sandbox import ContainerBackend, build_backend_from_env
 from cloud_agent_host.sandbox_incident_routes import install_incident_routes, sandbox_incidents_for
-from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import DEFAULT_CHAT_IDLE_TIMEOUT_S
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_host.terminal_session import _TerminalLimits
