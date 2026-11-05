@@ -82,6 +82,27 @@ def _repository_files() -> list[Path]:
     return files
 
 
+def _repository_packages() -> list[Path]:
+    """Repositories split into a package of mixins, one module per concern."""
+    return sorted(
+        path
+        for path in REPOSITORIES_DIR.iterdir()
+        if path.is_dir() and path != ADMIN_REPOSITORIES_DIR and (path / "__init__.py").is_file()
+    )
+
+
+def _package_method_names(package: Path) -> set[str]:
+    """The method inventory of a repository package: its class and every mixin."""
+    return {
+        node.name
+        for path in sorted(package.glob("*.py"))
+        for class_node in ast.parse(path.read_text()).body
+        if isinstance(class_node, ast.ClassDef)
+        for node in class_node.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 def _implementations() -> set[str]:
     """Every method a port can be satisfied by.
 
@@ -90,8 +111,10 @@ def _implementations() -> set[str]:
     against by accident.
     """
     found: set[str] = set()
-    for path in _repository_files():
-        for name in _method_names(path):
+    inventories = [_method_names(path) for path in _repository_files()]
+    inventories += [_package_method_names(path) for path in _repository_packages()]
+    for names in inventories:
+        for name in names:
             assert name not in found or name == "__init__", f"{name}: two repositories define it"
             found.add(name)
     return found

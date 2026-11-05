@@ -12,8 +12,12 @@ REPOSITORIES = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "storage" / "rep
 REPOSITORY_PACKAGE = "cloud_agent.storage.repositories"
 
 
-def _forbidden_peer_imports(source: str) -> list[str]:
-    """Concrete classes and private names are implementation coupling."""
+def _forbidden_peer_imports(source: str, own: str | None = None) -> list[str]:
+    """Concrete classes and private names are implementation coupling.
+
+    ``own`` is the repository package a split repository's module belongs to:
+    its mixins and shared helpers are one repository, not peers.
+    """
     found = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.ImportFrom) or node.module is None:
@@ -21,6 +25,8 @@ def _forbidden_peer_imports(source: str) -> list[str]:
         if not (
             node.module == REPOSITORY_PACKAGE or node.module.startswith(f"{REPOSITORY_PACKAGE}.")
         ):
+            continue
+        if own is not None and (node.module == own or node.module.startswith(f"{own}.")):
             continue
         found.extend(
             name.name
@@ -39,6 +45,14 @@ def test_repositories_do_not_import_peer_implementations_or_private_names() -> N
         forbidden = _forbidden_peer_imports(path.read_text(encoding="utf-8"))
         if forbidden:
             offenders.append(f"{path.relative_to(REPO_ROOT)}: {forbidden}")
+    for package in sorted(REPOSITORIES.glob("*/__init__.py")):
+        if package.parent.name == "admin":
+            continue
+        own = f"{REPOSITORY_PACKAGE}.{package.parent.name}"
+        for path in sorted(package.parent.glob("*.py")):
+            forbidden = _forbidden_peer_imports(path.read_text(encoding="utf-8"), own)
+            if forbidden:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {forbidden}")
     assert not offenders, f"repository implementation dependencies: {offenders}"
 
 

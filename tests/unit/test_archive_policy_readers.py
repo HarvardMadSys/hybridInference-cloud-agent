@@ -288,7 +288,7 @@ PARSES = {
     # Opens a stored key before it parses: every reader's way in.
     "sandbox_archive/sandbox_archive_credentials.py:stored_archive_policy",
     # The administrator's request, which holds the key as they typed it.
-    "storage/repositories/host_pool.py:PostgresHostPoolRepository.set_sandbox_archive_settings",
+    "storage/repositories/host_pool/settings.py:SettingsMixin.set_sandbox_archive_settings",
 }
 
 
