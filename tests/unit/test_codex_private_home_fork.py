@@ -357,3 +357,76 @@ def test_codex_rebase_failure_leaves_preparing_journal_for_idempotent_recovery(m
     assert lifecycle == ["fork", "close", "close"]
     assert clone_attempts == 2
     assert [entry["state"] for entry in writes] == ["preparing", "ready"]
+
+
+def _codex_fork_homes(root: Path):
+    """A source Codex home with one indexed rollout, and the child launch to fork into."""
+    root.mkdir(exist_ok=True)
+    _private_state_root(root)
+    manager = _LocalMemberShell(root)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0), runtime_id="codex"
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
+    )
+    factory._prepare_member_state(_spec(), source_launch, factory._member_state_dir(source_launch))
+    source = manager.local(factory._member_state_dir(source_launch))
+    (source / "sessions").mkdir()
+    (source / "sessions/rollout.jsonl").write_text("source rollout\n")
+    index = sqlite3.connect(source / "state_5.sqlite")
+    index.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
+    index.execute(
+        "INSERT INTO threads (id, rollout_path) VALUES (?, ?)",
+        ("native-source", str(source / "sessions/rollout.jsonl")),
+    )
+    index.commit()
+    index.close()
+    child = manager.local(factory._member_state_dir(target_launch))
+    return factory, source_launch, target_launch, child
+
+
+def _child_rollout_path(child: Path) -> str:
+    index = sqlite3.connect(f"file:{child / 'state_5.sqlite'}?mode=ro", uri=True)
+    try:
+        return index.execute(
+            "SELECT rollout_path FROM threads WHERE id = 'native-source'"
+        ).fetchone()[0]
+    finally:
+        index.close()
+
+
+def test_codex_rollout_rebase_matches_the_home_path_codex_was_given(tmp_path: Path):
+    # Codex records rollouts under the CODEX_HOME string it was started with.
+    # When that string runs through a symlink, its rows must still be rebased:
+    # a prefix taken from the resolved home would match none of them.
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    factory, source_launch, target_launch, child = _codex_fork_homes(linked_root)
+
+    factory._clone_private_member_state(_spec(), source_launch, target_launch)
+
+    rebased = _child_rollout_path(child)
+    assert rebased == str(child / "sessions/rollout.jsonl")
+    assert Path(rebased).read_text() == "source rollout\n"
+
+
+def test_codex_rollout_rebase_ignores_the_member_python_environment(
+    tmp_path: Path, monkeypatch
+):
+    # The containment check is Python the child UID runs. Code on PYTHONPATH,
+    # which would shadow the standard library, must not replace it.
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    marker = tmp_path / "planted-ran"
+    (planted / "sqlite3.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+    monkeypatch.setenv("PYTHONPATH", str(planted))
+    factory, source_launch, target_launch, child = _codex_fork_homes(tmp_path / "root")
+
+    factory._clone_private_member_state(_spec(), source_launch, target_launch)
+
+    assert not marker.exists()
+    assert _child_rollout_path(child) == str(child / "sessions/rollout.jsonl")
