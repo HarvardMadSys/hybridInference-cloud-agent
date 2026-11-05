@@ -1731,7 +1731,9 @@ class _Capture:
         self.calls: list[dict[str, Any]] = []
         self.error = error
 
-    def capture(self, spec, inspection, members, *, upload, max_bytes, deadline) -> Any:
+    def capture(
+        self, spec, inspection, members, *, upload, max_bytes, deadline, start_seq=None
+    ) -> Any:
         self.calls.append(
             {
                 "sandbox_id": spec.sandbox_id,

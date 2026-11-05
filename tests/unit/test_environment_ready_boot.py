@@ -139,7 +139,6 @@ def _fall_through_cases():
     def archive_completion(manager, supervisor, lease):
         group = supervisor._members["athr_source"]
         group.start_archive_completion_pending = True
-        supervisor._started_archive_hook = lambda *_args: None
         return _ready(), lease.token
 
     def container_lost(manager, supervisor, lease):

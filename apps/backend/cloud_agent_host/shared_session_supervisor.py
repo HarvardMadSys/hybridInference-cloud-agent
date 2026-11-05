@@ -36,6 +36,7 @@ from cloud_agent_host.chat_sandbox import (
 from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
 from cloud_agent_host.environment_preparation import prepared_in, runs_no_script
 from cloud_agent_host.environment_ready_boot import ready_boot
+from cloud_agent_host.group_archive_policy import GroupArchivePolicy, NullArchivePolicy
 from cloud_agent_host.guarded_workloads import (
     GuardedWorkload,
     exact_stop_unguarded,
@@ -397,18 +398,6 @@ NativeForker = Callable[
     [ChatSandboxSpec, ResidentTransport[DialectRuntime], str, ResidentLaunch, int],
     str,
 ]
-StoppedArchiveHook = Callable[
-    [ChatSandboxSpec, ChatSandboxInspection, tuple[SharedMemberManifest, ...]],
-    object,
-]
-StoppedArchivePrepareHook = Callable[
-    [ChatSandboxSpec, ChatSandboxInspection],
-    None,
-]
-ArchiveInspectionHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], None]
-CheckpointRestoreHook = Callable[[str, CheckpointRestore], str]
-EnvironmentSnapshotHook = Callable[[EnvironmentSnapshotRef], str]
-MarkerlessFinalPrepareHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], bool]
 
 #: How long a message sent into a turn that has not started here is kept for
 #: it. Long past any sandbox preparation; a turn that never starts leaves its
@@ -446,13 +435,7 @@ class SharedChatSessionSupervisor:
         native_forker: NativeForker | None = None,
         checkpoint_interval_s: float = RUNNING_CHECKPOINT_INTERVAL_S,
         window_sample_interval_s: float = MEMBER_WINDOW_SAMPLE_INTERVAL_MS / 1000,
-        stopped_archive_prepare_hook: StoppedArchivePrepareHook | None = None,
-        stopped_archive_invalidate_hook: ArchiveInspectionHook | None = None,
-        starting_archive_prepare_hook: ArchiveInspectionHook | None = None,
-        started_archive_hook: ArchiveInspectionHook | None = None,
-        markerless_final_prepare_hook: MarkerlessFinalPrepareHook | None = None,
-        stopped_archive_hook: StoppedArchiveHook | None = None,
-        checkpoint_restore_hook: CheckpointRestoreHook | None = None,
+        archive_policy: GroupArchivePolicy | None = None,
     ) -> None:
         if idle_timeout_s <= 0 or sweep_interval_s <= 0:
             raise ValueError("shared sandbox timeout values must be positive")
@@ -469,28 +452,13 @@ class SharedChatSessionSupervisor:
         self._clock = clock
         self._transport_factory = transport_factory or ResidentTransportFactory(manager)
         self._native_forker = native_forker or self._transport_factory.fork_native
-        # Called only after Docker has cleanly stopped the exact generation,
-        # while a lifecycle barrier still blocks concurrent workspace writes.
-        # It is synchronous so success means the durable final object exists;
-        # failure remains pending and prevents the group from restarting.
-        self._stopped_archive_prepare_hook = stopped_archive_prepare_hook
-        self._stopped_archive_invalidate_hook = stopped_archive_invalidate_hook
-        self._starting_archive_prepare_hook = starting_archive_prepare_hook
-        self._started_archive_hook = started_archive_hook
-        self._markerless_final_prepare_hook = markerless_final_prepare_hook
-        self._stopped_archive_hook = stopped_archive_hook
-        #: Turns a moved group's checkpoint into a local image name. Without
-        #: it this sandbox manager refuses to recreate any moved group.
-        self.checkpoint_restore_hook = checkpoint_restore_hook
-        #: The fence of the last checkpoint this host kept of a container, for
-        #: a group found again after a restart; the sandbox manager wires in
-        #: its checkpoint store. Its stop is sealed, as if this host saw it.
-        self.checkpoint_seq_for: Callable[[ChatSandboxSpec, ChatSandboxInspection], int | None] = (
-            lambda _spec, _inspection: None
-        )
-        #: Turns an installation snapshot into a local image name. Without it a
-        #: new group is always created from the sandbox image.
-        self.environment_snapshot_hook: EnvironmentSnapshotHook | None = None
+        # The final archive runs only after Docker has cleanly stopped the
+        # exact generation, while a lifecycle barrier still blocks concurrent
+        # workspace writes. It is synchronous so success means the durable
+        # final object exists; failure remains pending and prevents the group
+        # from restarting. The policy is fixed for the supervisor's lifetime.
+        self._archive = archive_policy if archive_policy is not None else NullArchivePolicy()
+        self._archives_finals = self._archive.archives_finals
         self._groups: dict[str, _Group] = {}
         self._members: dict[str, _Group] = {}
         #: Sandboxes a registration is creating or adopting outside the lock.
@@ -524,89 +492,10 @@ class SharedChatSessionSupervisor:
         with self._lock:
             self._idle_timeout_s = idle_timeout_s
 
-    def configure_stopped_archive_hook(self, hook: StoppedArchiveHook) -> None:
-        """Bind the durable final-archive hook before lifecycle admission.
-
-        ``create_app`` also accepts an injected supervisor, so constructor
-        wiring alone cannot prove that clean stops reach the archive service.
-        Permit one pre-start binding, accept an idempotent verification of the
-        same callback, and reject every live or conflicting reconfiguration.
-        """
-        if not callable(hook):
-            raise TypeError("shared sandbox stopped archive hook must be callable")
-        with self._lock:
-            current = self._stopped_archive_hook
-            if current is not None:
-                if current != hook:
-                    raise ValueError("shared sandbox stopped archive hook is already configured")
-                return
-            if self._thread is not None or self._groups:
-                raise ValueError(
-                    "shared sandbox stopped archive hook must be configured before start"
-                )
-            self._stopped_archive_hook = hook
-
-    def configure_stopped_archive_prepare_hook(
-        self,
-        hook: StoppedArchivePrepareHook,
-    ) -> None:
-        """Bind the durable pre-stop policy fence before lifecycle admission."""
-        if not callable(hook):
-            raise TypeError("shared sandbox stopped archive prepare hook must be callable")
-        with self._lock:
-            current = self._stopped_archive_prepare_hook
-            if current is not None:
-                if current != hook:
-                    raise ValueError(
-                        "shared sandbox stopped archive prepare hook is already configured"
-                    )
-                return
-            if self._thread is not None or self._groups:
-                raise ValueError(
-                    "shared sandbox stopped archive prepare hook must be configured before start"
-                )
-            self._stopped_archive_prepare_hook = hook
-
-    def configure_archive_transition_hooks(
-        self,
-        *,
-        invalidate_final: ArchiveInspectionHook,
-        prepare_start: ArchiveInspectionHook,
-        complete_start: ArchiveInspectionHook,
-        prepare_markerless_final: MarkerlessFinalPrepareHook,
-    ) -> None:
-        """Bind marker transitions that bracket start and failed native flush."""
-        hooks = (
-            invalidate_final,
-            prepare_start,
-            complete_start,
-            prepare_markerless_final,
-        )
-        if not all(callable(hook) for hook in hooks):
-            raise TypeError("shared sandbox archive transition hooks must be callable")
-        with self._lock:
-            current = (
-                self._stopped_archive_invalidate_hook,
-                self._starting_archive_prepare_hook,
-                self._started_archive_hook,
-                self._markerless_final_prepare_hook,
-            )
-            if any(hook is not None for hook in current):
-                if current != hooks:
-                    raise ValueError(
-                        "shared sandbox archive transition hooks are already configured"
-                    )
-                return
-            if self._thread is not None or self._groups:
-                raise ValueError(
-                    "shared sandbox archive transition hooks must be configured before start"
-                )
-            (
-                self._stopped_archive_invalidate_hook,
-                self._starting_archive_prepare_hook,
-                self._started_archive_hook,
-                self._markerless_final_prepare_hook,
-            ) = hooks
+    @property
+    def archive_policy(self) -> GroupArchivePolicy:
+        """The archive policy this supervisor was constructed with."""
+        return self._archive
 
     def _prepare_markerless_final(
         self,
@@ -619,11 +508,10 @@ class SharedChatSessionSupervisor:
         conservative quarantine behavior.  The dynamic controller writes the
         disabled-policy marker atomically before returning ``True``.
         """
-        hook = self._markerless_final_prepare_hook
-        if self._stopped_archive_hook is None or hook is None:
+        if not self._archives_finals:
             return False
         try:
-            return hook(spec, inspection)
+            return self._archive.markerless_final(spec, inspection)
         except Exception:
             logger.exception(
                 "markerless sandbox policy fence could not be prepared",
@@ -962,7 +850,7 @@ class SharedChatSessionSupervisor:
             raise SandboxError("refusing to archive a running shared sandbox as stopped")
         with self._lock:
             self._accept_inspection_locked(group, inspection)
-            if self._stopped_archive_hook is None:
+            if not self._archives_finals:
                 group.stop_archive_pending = False
                 group.stop_archive_blocked = False
                 group.stop_archive_members = None
@@ -972,8 +860,9 @@ class SharedChatSessionSupervisor:
                 return inspection
             group.stop_archive_pending = True
             group.stop_archive_members = members
+            start_seq = self.start_seq_for(group.spec.sandbox_id)
         with logged_stopped_archive_failure("final_archive", group.spec, inspection.container_id):
-            self._stopped_archive_hook(group.spec, inspection, members)
+            self._archive.stopped(group.spec, inspection, members, start_seq=start_seq)
         # The owned bridge is the durable marker that a stopped container has
         # not completed its final archive. Release it only after the upload
         # returned successfully, using the same exact-container fence as the
@@ -1003,28 +892,27 @@ class SharedChatSessionSupervisor:
             return
         inspection = self._require_current_inspection(group)
         if inspection.running:
-            if self._stopped_archive_prepare_hook is not None:
-                try:
-                    self._stopped_archive_prepare_hook(group.spec, inspection)
-                except Exception:
-                    if not persist:
-                        # Network fail-stop phase one cannot leave a group
-                        # running merely because its prepared marker is no
-                        # longer usable. Skip this lifecycle's final archive:
-                        # this group must never upload unproven history.
-                        with self._lock:
-                            group.stop_archive_blocked = True
-                            group.stop_archive_pending = True
-                            group.stop_archive_members = members
-                        self._stop_blocked_group(group, inspection)
-                        with self._lock:
-                            if not group.stop_archive_blocked:
-                                return
-                    raise
+            try:
+                self._archive.prepare_final(group.spec, inspection)
+            except Exception:
+                if not persist:
+                    # Network fail-stop phase one cannot leave a group
+                    # running merely because its prepared marker is no
+                    # longer usable. Skip this lifecycle's final archive:
+                    # this group must never upload unproven history.
+                    with self._lock:
+                        group.stop_archive_blocked = True
+                        group.stop_archive_pending = True
+                        group.stop_archive_members = members
+                    self._stop_blocked_group(group, inspection)
+                    with self._lock:
+                        if not group.stop_archive_blocked:
+                            return
+                raise
             inspection = self._manager.stop(
                 group.spec,
                 expected_container_id=inspection.container_id,
-                release_networks=self._stopped_archive_hook is None,
+                release_networks=not self._archives_finals,
             )
             with self._lock:
                 self._accept_inspection_locked(group, inspection)
@@ -1056,32 +944,29 @@ class SharedChatSessionSupervisor:
         """
         current = inspection or self._require_current_inspection(group)
         marker_persisted = False
-        if self._stopped_archive_invalidate_hook is not None:
-            try:
-                self._stopped_archive_invalidate_hook(group.spec, current)
-                marker_persisted = True
-            except Exception:
-                logger.exception(
-                    "blocked sandbox marker retry failed",
-                    extra={
-                        "event": "sandbox_archive_block_marker_retry_failed",
-                        "sandbox_id": group.spec.sandbox_id,
-                        "generation": group.spec.generation,
-                    },
-                )
+        try:
+            marker_persisted = self._archive.invalidate_final(group.spec, current)
+        except Exception:
+            logger.exception(
+                "blocked sandbox marker retry failed",
+                extra={
+                    "event": "sandbox_archive_block_marker_retry_failed",
+                    "sandbox_id": group.spec.sandbox_id,
+                    "generation": group.spec.generation,
+                },
+            )
         if current.running:
             # Without archive hooks there is no retry marker to keep.
             current = self._manager.stop(
                 group.spec,
                 expected_container_id=current.container_id,
-                release_networks=self._stopped_archive_hook is None,
+                release_networks=not self._archives_finals,
             )
             with self._lock:
                 self._accept_inspection_locked(group, current)
-        if not marker_persisted and self._stopped_archive_invalidate_hook is not None:
+        if not marker_persisted:
             try:
-                self._stopped_archive_invalidate_hook(group.spec, current)
-                marker_persisted = True
+                marker_persisted = self._archive.invalidate_final(group.spec, current)
             except Exception:
                 logger.exception(
                     "stopped sandbox block marker retry failed",
@@ -1091,7 +976,7 @@ class SharedChatSessionSupervisor:
                         "generation": group.spec.generation,
                     },
                 )
-        if not marker_persisted and self._stopped_archive_hook is not None:
+        if not marker_persisted and self._archives_finals:
             return current
         with self._lock:
             members = group.stop_archive_members or self._archive_members_locked(group)
@@ -1172,9 +1057,8 @@ class SharedChatSessionSupervisor:
             if start_seq is not _SAME_RUN:
                 with self._lock:
                     self._begin_run_locked(group, start_seq)
-            if self._starting_archive_prepare_hook is None:
+            if not self._archive.prepare_start(group.spec, current):
                 return
-            self._starting_archive_prepare_hook(group.spec, current)
             with self._lock:
                 self._accept_inspection_locked(group, current)
                 group.start_archive_completion_pending = True
@@ -1186,17 +1070,13 @@ class SharedChatSessionSupervisor:
             if completion_pending:
                 current = self._require_current_inspection(group)
                 if current.running:
-                    if self._started_archive_hook is None:
-                        raise SandboxError(
-                            "shared workspace start archive completion hook is unavailable"
-                        )
                     # ``start_archive_completion_pending`` is set only after
                     # ``manager.start`` returned a fully network-verified
                     # running container and the durable marker completion hook
                     # failed. Retry that idempotent completion in place. A cold
                     # stop here would introduce a markerless crash window after
                     # the completion hook had already cleared the marker.
-                    self._started_archive_hook(group.spec, current)
+                    self._archive.started(group.spec, current)
                     with self._lock:
                         self._accept_inspection_locked(group, current)
                         group.start_archive_completion_pending = False
@@ -1207,7 +1087,7 @@ class SharedChatSessionSupervisor:
                 facts=facts,
                 observer=observer,
                 expected_container_id=expected_container_id,
-                defer_network_release_on_fail_stop=(self._stopped_archive_hook is not None),
+                defer_network_release_on_fail_stop=self._archives_finals,
                 before_stopped_start=prepare_stopped_start,
             )
         except StaleStartFence:
@@ -1233,26 +1113,22 @@ class SharedChatSessionSupervisor:
             # the same fail-stop archive path; if stopping itself fails, the
             # pending barrier remains for reconcile/shutdown to retry.
             with self._lock:
-                group.stop_archive_pending = self._stopped_archive_hook is not None
-                group.stop_archive_members = (
-                    members if self._stopped_archive_hook is not None else None
-                )
+                group.stop_archive_pending = self._archives_finals
+                group.stop_archive_members = members if self._archives_finals else None
             uncertain = self._require_current_inspection(group)
             if uncertain.running:
                 uncertain = self._manager.stop(
                     group.spec,
                     expected_container_id=expected_container_id,
-                    release_networks=self._stopped_archive_hook is None,
+                    release_networks=not self._archives_finals,
                 )
             self._persist_stopped_archive(group, uncertain, members)
             raise
         else:
             with self._lock:
                 completion_pending = group.start_archive_completion_pending
-            if (
-                start_fence_prepared or completion_pending
-            ) and self._started_archive_hook is not None:
-                self._started_archive_hook(group.spec, inspection)
+            if start_fence_prepared or completion_pending:
+                self._archive.started(group.spec, inspection)
             with self._lock:
                 self._accept_inspection_locked(group, inspection)
                 if start_fence_prepared or completion_pending:
@@ -1303,7 +1179,7 @@ class SharedChatSessionSupervisor:
                     group = _Group(
                         spec=spec,
                         inspection=inspection,
-                        sealed_seq=self.checkpoint_seq_for(spec, inspection),
+                        sealed_seq=self._archive.checkpoint_seq(spec, inspection),
                     )
                     origin = _Member(thread_id=spec.thread_id, resident_slot_id=0)
                     group.members[origin.thread_id] = origin
@@ -1433,7 +1309,7 @@ class SharedChatSessionSupervisor:
                     ):
                         marker_present = marker_prepared
                     unknown_unflushed = (
-                        self._stopped_archive_hook is not None
+                        self._archives_finals
                         and not marker_present
                         and inspection.status is not ChatSandboxStatus.CREATED
                         and (inspection.running or owned_bridge in inspection.networks)
@@ -1445,14 +1321,14 @@ class SharedChatSessionSupervisor:
                         group.stop_archive_members = members
                         group.stopping = inspection.running
                         blocked = True
-                        if inspection.running and self._stopped_archive_invalidate_hook is not None:
+                        if inspection.running:
                             invalidate_unknown = True
                     else:
                         # With a marker, its original policy and phase are
                         # authoritative even if an external actor removed the
                         # bridge. Without archive hooks, retain legacy cleanup.
                         finalize = marker_present or (
-                            self._stopped_archive_hook is None
+                            not self._archives_finals
                             and (inspection.running or owned_bridge in inspection.networks)
                         )
                     if finalize:
@@ -1486,7 +1362,7 @@ class SharedChatSessionSupervisor:
                         ):
                             marker_present = marker_prepared
                         unknown_unflushed = (
-                            self._stopped_archive_hook is not None
+                            self._archives_finals
                             and not marker_present
                             and inspection.status is not ChatSandboxStatus.CREATED
                             and (inspection.running or owned_bridge in inspection.networks)
@@ -1499,10 +1375,7 @@ class SharedChatSessionSupervisor:
                             group.orphan_finalization_pending = False
                             group.stopping = inspection.running
                             blocked = True
-                            if (
-                                inspection.running
-                                and self._stopped_archive_invalidate_hook is not None
-                            ):
+                            if inspection.running:
                                 invalidate_unknown = True
                         elif marker_present:
                             group.stopping = True
@@ -1555,7 +1428,7 @@ class SharedChatSessionSupervisor:
                         marker_present = marker_payload is not None
                         if not marker_present:
                             marker_present = marker_prepared
-                        if not marker_present and self._stopped_archive_hook is not None:
+                        if not marker_present and self._archives_finals:
                             group.stop_archive_pending = True
                             group.stop_archive_blocked = True
                             group.stop_archive_members = members
@@ -1594,8 +1467,7 @@ class SharedChatSessionSupervisor:
 
         if invalidate_unknown:
             try:
-                assert self._stopped_archive_invalidate_hook is not None
-                self._stopped_archive_invalidate_hook(spec, inspection)
+                self._archive.invalidate_final(spec, inspection)
             except Exception:
                 logger.exception(
                     "unknown running orphan block marker could not be persisted",
@@ -1633,12 +1505,12 @@ class SharedChatSessionSupervisor:
                 if retry:
                     self._retry_stopped_archive(group)
                 else:
-                    if inspection.running and self._stopped_archive_prepare_hook is not None:
-                        self._stopped_archive_prepare_hook(spec, inspection)
+                    if inspection.running:
+                        self._archive.prepare_final(spec, inspection)
                     inspection = self._manager.stop(
                         spec,
                         expected_container_id=inspection.container_id,
-                        release_networks=self._stopped_archive_hook is None,
+                        release_networks=not self._archives_finals,
                     )
                     inspection = self._persist_stopped_archive(group, inspection, members)
                     with self._lock:
@@ -1675,7 +1547,7 @@ class SharedChatSessionSupervisor:
                 # receiving their own lifecycle and network-guard work.
                 with self._lock:
                     group.orphan_finalization_pending = True
-                    group.orphan_marker_unreadable = self._stopped_archive_hook is not None
+                    group.orphan_marker_unreadable = self._archives_finals
                 if inspection.running:
                     try:
                         inspection = self._manager.stop(
@@ -1810,7 +1682,7 @@ class SharedChatSessionSupervisor:
                     spec=spec,
                     inspection=created,
                     environment_snapshot_failure=snapshot_failure,
-                    sealed_seq=self.checkpoint_seq_for(spec, created),
+                    sealed_seq=self._archive.checkpoint_seq(spec, created),
                 )
                 self._groups[spec.sandbox_id] = group
             return self._install_manifest_locked(
@@ -1838,12 +1710,11 @@ class SharedChatSessionSupervisor:
         loaded is removed here. Any host may claim the next try, and nothing
         would tell this one that the group lives elsewhere.
         """
-        hook = self.checkpoint_restore_hook
-        if hook is None:
+        if not self._archive.restores_checkpoints:
             raise SandboxRestoreFailed("this sandbox manager cannot restore checkpoints")
         try:
             self._manager.remove_superseded(spec, keep_checkpoint=restore.checkpoint_id)
-            image = hook(spec.sandbox_id, restore)
+            image = self._archive.restore_checkpoint(spec.sandbox_id, restore)
             return self._manager.create(
                 spec,
                 image=image,
@@ -1888,11 +1759,10 @@ class SharedChatSessionSupervisor:
         returned reason tells the control plane whether the snapshot itself is
         at fault (``invalid``) or only could not be used here (``unavailable``).
         """
-        hook = self.environment_snapshot_hook
         failure = "unavailable"
-        if hook is not None:
-            try:
-                image = hook(snapshot)
+        try:
+            image = self._archive.environment_snapshot(snapshot)
+            if image is not None:
                 return (
                     self._manager.create(
                         spec,
@@ -1903,18 +1773,18 @@ class SharedChatSessionSupervisor:
                     ),
                     None,
                 )
-            except CheckpointArchiveInvalid:
-                failure = "invalid"
-            except Exception as exc:
-                logger.warning(
-                    "environment snapshot unavailable; creating from the sandbox image",
-                    extra={
-                        "event": "environment_snapshot_unavailable",
-                        "sandbox_id": spec.sandbox_id,
-                        "snapshot_id": snapshot.snapshot_id,
-                        "error_type": type(exc).__name__,
-                    },
-                )
+        except CheckpointArchiveInvalid:
+            failure = "invalid"
+        except Exception as exc:
+            logger.warning(
+                "environment snapshot unavailable; creating from the sandbox image",
+                extra={
+                    "event": "environment_snapshot_unavailable",
+                    "sandbox_id": spec.sandbox_id,
+                    "snapshot_id": snapshot.snapshot_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
         return self._manager.create(spec, facts=facts, observer=observer), failure
 
     def _forget_superseded_locked(self, group: _Group) -> _Group | None:
@@ -4128,7 +3998,7 @@ class SharedChatSessionSupervisor:
             self._accept_inspection_locked(group, current)
             read_marker = (
                 not current.running
-                and self._stopped_archive_hook is not None
+                and self._archives_finals
                 and not group.stop_archive_blocked
                 and not group.stop_archive_pending
             )
@@ -4159,7 +4029,7 @@ class SharedChatSessionSupervisor:
             quarantine_unreadable = current.running and group.orphan_marker_unreadable
             if (
                 not current.running
-                and self._stopped_archive_hook is not None
+                and self._archives_finals
                 and not blocked
                 and not group.stop_archive_pending
             ):
@@ -4194,11 +4064,9 @@ class SharedChatSessionSupervisor:
                     group.stop_archive_members = self._archive_members_locked(group)
                     retry_pending = True
             if retry_pending and not group.stop_archive_pending and not quarantine_unreadable:
-                group.stop_archive_pending = self._stopped_archive_hook is not None
+                group.stop_archive_pending = self._archives_finals
                 group.stop_archive_members = (
-                    self._archive_members_locked(group)
-                    if self._stopped_archive_hook is not None
-                    else None
+                    self._archive_members_locked(group) if self._archives_finals else None
                 )
                 retry_pending = group.stop_archive_pending
             if quarantine_unreadable or blocked:
@@ -4318,11 +4186,9 @@ class SharedChatSessionSupervisor:
                 # archived. Record the skip, exact-stop, and finish without
                 # upload; the next resume relies on the ordinary native checks.
                 with self._lock:
-                    group.stop_archive_pending = self._stopped_archive_hook is not None
+                    group.stop_archive_pending = self._archives_finals
                     group.stop_archive_blocked = True
-                    group.stop_archive_members = (
-                        archive_members if self._stopped_archive_hook is not None else None
-                    )
+                    group.stop_archive_members = archive_members if self._archives_finals else None
                 inspection = self._stop_blocked_group(group, current)
                 with self._lock:
                     skip_persisted = not group.stop_archive_blocked
@@ -4337,34 +4203,33 @@ class SharedChatSessionSupervisor:
                     release_networks=True,
                 )
             else:
-                if self._stopped_archive_hook is not None:
+                if self._archives_finals:
                     with self._lock:
                         group.stop_archive_pending = True
                         group.stop_archive_members = archive_members
-                if self._stopped_archive_prepare_hook is not None:
-                    try:
-                        self._stopped_archive_prepare_hook(group.spec, current)
-                    except Exception:
-                        if not defer_archive:
-                            raise
-                        # Network proof is already lost. Archive preparation
-                        # failure cannot leave this group running while later
-                        # groups wait. Skip this lifecycle's final archive and
-                        # finish the exact stop without upload.
-                        with self._lock:
-                            group.stop_archive_pending = True
-                            group.stop_archive_blocked = True
-                            group.stop_archive_members = archive_members
-                        inspection = self._stop_blocked_group(group, current)
-                        with self._lock:
-                            skip_persisted = not group.stop_archive_blocked
-                        if not skip_persisted:
-                            raise
+                try:
+                    self._archive.prepare_final(group.spec, current)
+                except Exception:
+                    if not defer_archive:
+                        raise
+                    # Network proof is already lost. Archive preparation
+                    # failure cannot leave this group running while later
+                    # groups wait. Skip this lifecycle's final archive and
+                    # finish the exact stop without upload.
+                    with self._lock:
+                        group.stop_archive_pending = True
+                        group.stop_archive_blocked = True
+                        group.stop_archive_members = archive_members
+                    inspection = self._stop_blocked_group(group, current)
+                    with self._lock:
+                        skip_persisted = not group.stop_archive_blocked
+                    if not skip_persisted:
+                        raise
                 if inspection is None:
                     inspection = self._manager.stop(
                         group.spec,
                         expected_container_id=expected_container_id,
-                        release_networks=self._stopped_archive_hook is None,
+                        release_networks=not self._archives_finals,
                     )
                     # This is synchronous and fail-closed. A failed upload remains
                     # pinned to the same policy revision and leaves the stopped
@@ -4986,7 +4851,7 @@ class SharedChatSessionSupervisor:
         return exact_stop_unguarded(
             self._manager,
             workload,
-            release_networks=workload.environment_run or self._stopped_archive_hook is None,
+            release_networks=workload.environment_run or not self._archives_finals,
         )
 
     def guard_network(self) -> builtins.list[SharedSessionDescriptor]:

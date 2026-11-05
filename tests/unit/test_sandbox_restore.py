@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_sandbox_checkpoints import BASE, NEW, _digest, _Image
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
@@ -661,7 +662,7 @@ def test_a_moved_group_is_recreated_from_the_image_its_checkpoint_loads():
         hooked.append((sandbox_id, checkpoint.checkpoint_id))
         return _REFERENCE
 
-    supervisor = SharedChatSessionSupervisor(manager, checkpoint_restore_hook=restore)
+    supervisor = hooked_supervisor(manager, restore_checkpoint=restore)
 
     supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
 
@@ -678,7 +679,7 @@ def test_a_failed_restore_says_so_without_losing_the_chat():
     def broken(_sandbox_id: str, _checkpoint: CheckpointRestore) -> str:
         raise SandboxCheckpointError("checkpoint blob does not match its digest")
 
-    supervisor = SharedChatSessionSupervisor(manager, checkpoint_restore_hook=broken)
+    supervisor = hooked_supervisor(manager, restore_checkpoint=broken)
 
     with pytest.raises(SandboxRestoreFailed, match="does not match its digest"):
         supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
@@ -701,7 +702,7 @@ def test_a_failed_restore_leaves_no_checkpoint_image_behind(failing):
             raise SandboxCheckpointError("sandbox checkpoint could not be loaded")
         return _REFERENCE
 
-    supervisor = SharedChatSessionSupervisor(manager, checkpoint_restore_hook=load)
+    supervisor = hooked_supervisor(manager, restore_checkpoint=load)
 
     if failing is None:
         supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
@@ -723,8 +724,8 @@ def test_a_restore_refused_once_created_leaves_neither_container_nor_image(monke
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)
     monkeypatch.setattr(manager, "_run", daemon.run)
-    supervisor = SharedChatSessionSupervisor(
-        manager, checkpoint_restore_hook=lambda _sandbox_id, _checkpoint: _REFERENCE
+    supervisor = hooked_supervisor(
+        manager, restore_checkpoint=lambda _sandbox_id, _checkpoint: _REFERENCE
     )
 
     with pytest.raises(SandboxRestoreFailed, match="forbidden volume mount"):

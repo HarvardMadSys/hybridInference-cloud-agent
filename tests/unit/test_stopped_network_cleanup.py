@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_chat_group_network import (
     _NAMESPACE,
     FakeDocker,
@@ -42,7 +43,6 @@ from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatLost
 from cloud_agent_host.chat_sandbox_models import CHAT_GENERATION_LABEL
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
 SANDBOX = "sandbox-container"
 
@@ -433,7 +433,7 @@ def _supervised(monkeypatch, *, archive=None):
         if archive is not None:
             archive()
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=completed_final)
+    supervisor = hooked_supervisor(manager, stopped=completed_final)
     return supervisor, docker, spec, name, old_id, finals
 
 

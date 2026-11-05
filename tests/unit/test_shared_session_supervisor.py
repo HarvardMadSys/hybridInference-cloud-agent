@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from tests.support.archive_policy import hooked_supervisor
 from tests.support.owners import launch_connection
 
 from cloud_agent_host.chat_sandbox import (
@@ -653,12 +654,12 @@ def test_sandbox_manager_reconcile_blocks_an_unmarked_running_orphan_before_acce
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     archived: list[tuple] = []
     markerless_checks: list[bool] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        markerless_final_prepare_hook=lambda _spec, inspection: (
+        markerless_final=lambda _spec, inspection: (
             markerless_checks.append(inspection.running) or False
         ),
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
 
     descriptors = supervisor.reconcile()
@@ -783,14 +784,14 @@ def test_reconcile_finishes_a_markerless_orphan_without_upload(
         _enabled_archive_policy() if enabled else SandboxArchivePolicy(enabled=False, revision=1)
     )
     controller.apply(policy.as_dict())
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=controller.prepare_final,
-        stopped_archive_invalidate_hook=controller.invalidate_final,
-        starting_archive_prepare_hook=controller.prepare_start,
-        started_archive_hook=controller.complete_start,
-        markerless_final_prepare_hook=controller.prepare_markerless_final,
-        stopped_archive_hook=controller.queue_final,
+        prepare_final=controller.prepare_final,
+        invalidate_final=controller.invalidate_final,
+        prepare_start=controller.prepare_start,
+        started=controller.complete_start,
+        markerless_final=controller.prepare_markerless_final,
+        stopped=controller.queue_final,
     )
 
     descriptors = supervisor.reconcile()
@@ -832,9 +833,9 @@ def test_reconcile_does_not_finalize_a_registered_never_started_container() -> N
         status=ChatSandboxStatus.CREATED,
     )
     archive_calls: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archive_calls.append(args),
+        stopped=lambda *args: archive_calls.append(args),
     )
     supervisor.register_manifest(spec, _members())
 
@@ -875,9 +876,9 @@ def test_unreadable_orphan_marker_isolated_while_healthy_groups_reconcile() -> N
         status=ChatSandboxStatus.CREATED,
     )
     archived: list[str] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+        stopped=lambda spec, *_args: archived.append(spec.sandbox_id),
     )
 
     descriptors = supervisor.reconcile()
@@ -925,10 +926,10 @@ def test_unreadable_running_orphan_stop_failure_cannot_become_a_clean_archive() 
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     prepared: list[str] = []
     archived: list[str] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda spec, _inspection: prepared.append(spec.sandbox_id),
-        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+        prepare_final=lambda spec, _inspection: prepared.append(spec.sandbox_id),
+        stopped=lambda spec, *_args: archived.append(spec.sandbox_id),
     )
 
     descriptors = supervisor.reconcile()
@@ -981,11 +982,7 @@ def test_malformed_orphan_marker_isolated_while_healthy_groups_reconcile() -> No
         archive_attempts.append(spec.sandbox_id)
         raise SandboxError("invalid sandbox final archive marker")
 
-    supervisor = SharedChatSessionSupervisor(
-        manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=archive,
-    )
+    supervisor = hooked_supervisor(manager, prepare_final=prepare, stopped=archive)
 
     descriptors = supervisor.reconcile()
     retried = supervisor.reconcile()
@@ -1029,10 +1026,10 @@ def test_durably_blocked_orphan_stop_failure_isolated_from_healthy_groups() -> N
         if spec.sandbox_id == bad.sandbox_id:
             raise SandboxArchiveBlocked("durable marker forbids final archive")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+        prepare_final=prepare,
+        stopped=lambda spec, *_args: archived.append(spec.sandbox_id),
     )
 
     descriptors = supervisor.reconcile()
@@ -1073,7 +1070,7 @@ def test_committed_retry_clears_a_transient_unreadable_marker_fence() -> None:
     def archive(*_args) -> None:
         manager.marker = None
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     supervisor.reconcile()
     manager.fail_marker = False
 
@@ -1102,9 +1099,9 @@ def test_created_cleanup_clears_a_transient_unreadable_marker_fence() -> None:
         manager._inspection(spec, running=False),
         status=ChatSandboxStatus.CREATED,
     )
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *_args: pytest.fail("CREATED sandbox must not upload"),
+        stopped=lambda *_args: pytest.fail("CREATED sandbox must not upload"),
     )
     supervisor.register_manifest(
         spec,
@@ -1131,9 +1128,9 @@ def test_explicit_stop_cleans_up_a_registered_never_started_container_without_ar
         status=ChatSandboxStatus.CREATED,
     )
     archive_calls: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archive_calls.append(args),
+        stopped=lambda *args: archive_calls.append(args),
     )
     supervisor.register_manifest(spec, _members())
 
@@ -1264,11 +1261,7 @@ def test_lost_archive_restart_replay_does_not_reopen_or_repeat_destructive_work(
         final_uploads.append(members)
         manager.final_marker = b"uploaded-final-receipt"
 
-    supervisor = SharedChatSessionSupervisor(
-        manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=archive,
-    )
+    supervisor = hooked_supervisor(manager, prepare_final=prepare, stopped=archive)
     supervisor.register_manifest(spec, [lost_member], expected_container_id="container-shared")
     issued_stop = {
         "thread_id": "athr_source",
@@ -1293,11 +1286,7 @@ def test_lost_archive_restart_replay_does_not_reopen_or_repeat_destructive_work(
     # The broker died after Docker stop and final upload, before the control
     # plane received its stopped observation. A replacement probes the durable
     # upload marker and completes cleanup without another Docker stop/upload.
-    replacement = SharedChatSessionSupervisor(
-        manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=archive,
-    )
+    replacement = hooked_supervisor(manager, prepare_final=prepare, stopped=archive)
     descriptors = replacement.reconcile()
     assert len(descriptors) == 1 and descriptors[0].running is False
     replacement.register_manifest(spec, [lost_member], expected_container_id="container-shared")
@@ -1342,9 +1331,9 @@ def test_restart_reconcile_does_not_rearchive_an_already_released_stopped_group(
         networks=released_networks,
     )
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
 
     descriptors = supervisor.reconcile()
@@ -1366,7 +1355,7 @@ def test_blocking_reconcile_archive_does_not_hold_global_lock_for_other_group_st
             archived_entered.set()
             assert allow_archive.wait(timeout=_HELD_S)
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     supervisor.register_manifest(_spec(), _members())
     manager.items[other.container_name] = manager._inspection(other, running=True)
     manager.read_running_final_archive_marker = (  # type: ignore[method-assign]
@@ -2054,9 +2043,9 @@ def test_status_marks_a_same_name_running_replacement_lost_without_adopting_it()
 def test_reconcile_refuses_an_externally_stopped_replacement_without_archiving_it():
     manager = _Manager()
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
     supervisor.register_manifest(_spec(), _members())
     original = manager.items[_spec().container_name]
@@ -2187,9 +2176,9 @@ def test_status_blocks_an_externally_stopped_group_without_a_final_marker():
     spec = _spec()
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
     supervisor.register_manifest(
         spec,
@@ -2220,14 +2209,14 @@ def test_externally_stopped_group_under_enabled_archives_skips_and_continues():
     )
     controller.start()
     controller.apply(_enabled_archive_policy().as_dict())
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=controller.prepare_final,
-        stopped_archive_invalidate_hook=controller.invalidate_final,
-        starting_archive_prepare_hook=controller.prepare_start,
-        started_archive_hook=controller.complete_start,
-        markerless_final_prepare_hook=controller.prepare_markerless_final,
-        stopped_archive_hook=controller.queue_final,
+        prepare_final=controller.prepare_final,
+        invalidate_final=controller.invalidate_final,
+        prepare_start=controller.prepare_start,
+        started=controller.complete_start,
+        markerless_final=controller.prepare_markerless_final,
+        stopped=controller.queue_final,
     )
     supervisor.register_manifest(spec, _members(), expected_container_id="container-shared")
     manager.items[spec.container_name] = manager._inspection(spec, running=False)
@@ -2272,9 +2261,9 @@ def test_acquire_starts_a_settled_context_on_its_group():
 
 def _running_group(*, stopped_archive_hook=None) -> tuple[_Manager, SharedChatSessionSupervisor]:
     manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=stopped_archive_hook,
+        stopped=stopped_archive_hook,
     )
     supervisor.register_manifest(_spec(), _members())
     supervisor.acquire(
@@ -2374,9 +2363,9 @@ def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing
 
     manager = FailStoppedStartManager()
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
     supervisor.register_manifest(_spec(), _members())
 
@@ -4307,12 +4296,12 @@ def _archive_shutdown_group(
         assert manager.network.network_for(_spec) in inspection.networks
         events.append("archive")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
         transport_factory=factory,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_invalidate_hook=invalidate,
-        stopped_archive_hook=archive,
+        prepare_final=prepare,
+        invalidate_final=invalidate,
+        stopped=archive,
     )
     supervisor.register_manifest(_spec(), _members())
     lease = supervisor.acquire(
@@ -4473,7 +4462,7 @@ def test_network_guard_stops_every_group_before_the_first_final_upload_completes
             assert release_first_upload.wait(timeout=2)
         archived.append(spec.sandbox_id)
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     supervisor.register_manifest(
         first,
         _members(),
@@ -4536,10 +4525,10 @@ def test_network_guard_stages_a_running_pending_group_before_its_upload() -> Non
             assert release_first_upload.wait(timeout=2)
         archived.append(spec.sandbox_id)
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=archive,
+        prepare_final=lambda *_args: None,
+        stopped=archive,
     )
     supervisor.register_manifest(
         first,
@@ -4623,11 +4612,11 @@ def test_network_guard_prepare_failure_exact_stops_and_skips_the_upload() -> Non
         # The controller reads the skipped marker and uploads nothing.
         events.append("archive:skipped")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_invalidate_hook=invalidate,
-        stopped_archive_hook=archive,
+        prepare_final=prepare,
+        invalidate_final=invalidate,
+        stopped=archive,
     )
     supervisor.register_manifest(
         spec,
@@ -4681,12 +4670,12 @@ def test_restart_reconcile_stops_a_blocked_running_orphan_without_archiving() ->
     spec = _spec()
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     archive_calls: list[object] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: (_ for _ in ()).throw(
+        prepare_final=lambda *_args: (_ for _ in ()).throw(
             SandboxArchiveBlocked("native flush failure")
         ),
-        stopped_archive_hook=lambda *args: archive_calls.append(args),
+        stopped=lambda *args: archive_calls.append(args),
     )
 
     descriptors = supervisor.reconcile()
@@ -4779,12 +4768,12 @@ def test_durable_flush_skip_survives_stop_failure_and_replacement_controller() -
     first_controller.start()
     first_controller.apply(policy)
     factory = _TransportFactory()
-    first = SharedChatSessionSupervisor(
+    first = hooked_supervisor(
         manager,
         transport_factory=factory,
-        stopped_archive_prepare_hook=first_controller.prepare_final,
-        stopped_archive_invalidate_hook=first_controller.invalidate_final,
-        stopped_archive_hook=first_controller.queue_final,
+        prepare_final=first_controller.prepare_final,
+        invalidate_final=first_controller.invalidate_final,
+        stopped=first_controller.queue_final,
     )
     first.register_manifest(_spec(), _members())
     lease = first.acquire(
@@ -4824,11 +4813,11 @@ def test_durable_flush_skip_survives_stop_failure_and_replacement_controller() -
     replacement_controller = controller()
     replacement_controller.start()
     replacement_controller.apply(policy)
-    replacement = SharedChatSessionSupervisor(
+    replacement = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=replacement_controller.prepare_final,
-        stopped_archive_invalidate_hook=replacement_controller.invalidate_final,
-        stopped_archive_hook=replacement_controller.queue_final,
+        prepare_final=replacement_controller.prepare_final,
+        invalidate_final=replacement_controller.invalidate_final,
+        stopped=replacement_controller.queue_final,
     )
 
     descriptors = replacement.reconcile()
@@ -4929,10 +4918,10 @@ def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fen
     controller = SandboxArchiveController(manager, namespace="pool-east")
     controller.start()
     controller.apply(SandboxArchivePolicy(enabled=False, revision=1).as_dict())
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=controller.prepare_start,
-        started_archive_hook=controller.complete_start,
+        prepare_start=controller.prepare_start,
+        started=controller.complete_start,
     )
     try:
         cold = supervisor.acquire(
@@ -5002,10 +4991,10 @@ def test_archive_start_fence_runs_only_for_a_stopped_to_running_transition() -> 
     )
     controller.start()
     controller.apply(SandboxArchivePolicy(enabled=False, revision=1).as_dict())
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=controller.prepare_start,
-        started_archive_hook=controller.complete_start,
+        prepare_start=controller.prepare_start,
+        started=controller.complete_start,
     )
     supervisor.register_manifest(_spec(), _members())
     manager.stop(_spec(), release_networks=False)
@@ -5055,10 +5044,10 @@ def test_failed_start_marker_completion_is_retried_in_place_before_workspace_wor
         if completions == 1:
             raise RuntimeError("marker clear failed")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=prepare,
-        started_archive_hook=complete,
+        prepare_start=prepare,
+        started=complete,
     )
     supervisor.register_manifest(_spec(), _members())
     manager.stop(_spec(), release_networks=False)

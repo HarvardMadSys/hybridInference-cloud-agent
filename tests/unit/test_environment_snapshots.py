@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.support.archive_policy import archive_hooks
 from tests.unit.test_repository_environments import _Backend
 from tests.unit.test_sandbox_restore import _inspection
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
@@ -181,8 +182,9 @@ class _SnapshotManager(_Manager):
 )
 def test_a_new_group_falls_back_to_the_image_whatever_the_snapshot_does(hook, failure, image):
     manager = _SnapshotManager()
-    supervisor = SharedChatSessionSupervisor(manager)
-    supervisor.environment_snapshot_hook = hook
+    supervisor = SharedChatSessionSupervisor(
+        manager, archive_policy=archive_hooks(environment_snapshot=hook)
+    )
 
     supervisor.register_manifest(_spec(), _members(), environment_snapshot=_ref())
 

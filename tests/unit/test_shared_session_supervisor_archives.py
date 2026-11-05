@@ -6,6 +6,7 @@ cases independently schedulable without extracting their fixture machinery.
 
 from __future__ import annotations
 
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_shared_session_supervisor import (
     ChatSandboxInspection,
     ChatSandboxSpec,
@@ -142,10 +143,10 @@ def test_failed_marked_initial_archive_stops_and_completes_the_final_archive() -
     manager = _Manager()
     prepared: list[bool] = []
     archived: list[tuple[bool, tuple[str, ...]]] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
-        stopped_archive_hook=lambda _spec, inspection, _members: archived.append(
+        prepare_final=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped=lambda _spec, inspection, _members: archived.append(
             (inspection.running, inspection.networks)
         ),
     )
@@ -197,10 +198,10 @@ def test_failed_marked_initial_archive_waits_for_concurrent_guard_stop() -> None
             return super().stop(spec, **kwargs)
 
     manager = BlockingStopManager()
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=lambda *_args: None,
+        prepare_final=lambda *_args: None,
+        stopped=lambda *_args: None,
     )
     fresh_members = [
         SharedMemberManifest(
@@ -319,10 +320,10 @@ def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws(
     def archive(*_args) -> None:
         raise final_failure
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
-        stopped_archive_hook=archive,
+        prepare_final=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped=archive,
     )
     lease = supervisor.acquire(
         _spec(),
@@ -396,10 +397,10 @@ def test_failed_initial_preservation_stop_releases_barrier_after_exact_retry() -
 
     manager = StopFailureManager()
     archive_calls: list[object] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=lambda *args: archive_calls.append(args),
+        prepare_final=lambda *_args: None,
+        stopped=lambda *args: archive_calls.append(args),
     )
     fresh_members = [
         SharedMemberManifest(
@@ -473,10 +474,10 @@ def test_failed_initial_archive_before_marker_thaws_without_stopping() -> None:
     manager = _Manager()
     prepared: list[bool] = []
     archived: list[object] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
-        stopped_archive_hook=lambda *args: archived.append(args),
+        prepare_final=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped=lambda *args: archived.append(args),
     )
     lease = supervisor.acquire(
         _spec(),
@@ -520,12 +521,12 @@ def test_failed_start_marker_completion_is_retried_by_same_mutation_entrypoint(
         if completions == 1:
             raise RuntimeError("marker clear failed")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=lambda _spec, inspection: (
+        prepare_start=lambda _spec, inspection: (
             None if not inspection.running else pytest.fail("start fence requires stopped state")
         ),
-        started_archive_hook=complete,
+        started=complete,
     )
     supervisor.register_manifest(_spec(), _members())
     manager.stop(_spec(), release_networks=False)
@@ -558,10 +559,10 @@ def test_pending_final_archive_retries_after_external_bridge_removal() -> None:
         if archive_calls == 1:
             raise RuntimeError("upload response lost")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=archive,
+        prepare_final=lambda *_args: None,
+        stopped=archive,
     )
     supervisor.register_manifest(_spec(), _members())
 
@@ -605,7 +606,7 @@ def test_direct_orphan_archive_retry_clears_the_admission_fence() -> None:
         if archive_calls == 1:
             raise RuntimeError("upload failed")
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
 
     descriptors = supervisor.reconcile()
 
@@ -652,12 +653,12 @@ def test_ambiguous_post_start_failure_remains_pending_until_exact_stop_retry() -
 
     manager = UncertainStartManager()
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=lambda *_args: None,
-        started_archive_hook=lambda *_args: None,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        prepare_start=lambda *_args: None,
+        started=lambda *_args: None,
+        prepare_final=lambda *_args: None,
+        stopped=lambda *args: archived.append(args),
     )
     supervisor.register_manifest(_spec(), _members())
     manager.items[_spec().container_name] = manager._inspection(_spec(), running=False)
@@ -694,9 +695,9 @@ def test_ambiguous_post_start_failure_remains_pending_until_exact_stop_retry() -
 def test_external_stopped_group_with_missing_final_marker_keeps_its_bridge() -> None:
     manager = _Manager()
     spec = _spec()
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *_args: (_ for _ in ()).throw(
+        stopped=lambda *_args: (_ for _ in ()).throw(
             SandboxError("final archive marker is missing")
         ),
     )

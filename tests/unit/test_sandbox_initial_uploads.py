@@ -30,6 +30,7 @@ from cloud_agent_host import (
     sandbox_initial_uploads as uploads_mod,
 )
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatBackend
+from cloud_agent_host.group_archive_policy import ServiceArchivePolicy
 from cloud_agent_host.sandbox import ProcessBackend
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archives import SandboxArchiveService
@@ -645,13 +646,13 @@ class _RecordingArchive:
 @pytest.mark.parametrize(("asked", "deferred"), [({"defer_upload": True}, True), ({}, False)])
 async def test_the_route_defers_only_when_the_runner_asks(asked, deferred) -> None:
     """An older runner omits the field and keeps waiting for the upload."""
-    supervisor = _SharedSupervisor()
+    archive = _RecordingArchive()
+    supervisor = _SharedSupervisor(archive_policy=ServiceArchivePolicy(archive))  # type: ignore[arg-type]
 
     def capture_initial_archive(_thread_id, _token, *, capture, **_kwargs):
         return capture(None, None, ())
 
     supervisor.capture_initial_archive = capture_initial_archive  # type: ignore[attr-defined]
-    archive = _RecordingArchive()
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
         token="sandbox-manager-secret",

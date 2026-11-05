@@ -15,8 +15,10 @@ import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_sandbox_discard_diagnostics import (
     _CONTAINER,
     _as_json,
@@ -31,8 +33,10 @@ from cloud_agent_host.chat_sandbox_models import RetainedChatLost
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_deletion_backup import SandboxDeletionBackupService
 from cloud_agent_host.session_lifecycle import SessionBusy
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.logging_utils import JsonLogFormatter
+
+if TYPE_CHECKING:
+    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
 _FINAL = "sandbox_final_archive_failed"
 _RELEASE = "sandbox_final_network_release_failed"
@@ -75,9 +79,7 @@ def _group(archive) -> tuple[_ReleasingDocker, SharedChatSessionSupervisor]:
     docker.items[spec.container_name] = replace(
         docker._inspection(spec, running=True), container_id=_CONTAINER
     )
-    supervisor = SharedChatSessionSupervisor(
-        docker, stopped_archive_prepare_hook=lambda *_args: None, stopped_archive_hook=archive
-    )
+    supervisor = hooked_supervisor(docker, prepare_final=lambda *_args: None, stopped=archive)
     supervisor.register_manifest(spec, _members(), expected_container_id=_CONTAINER)
     return docker, supervisor
 

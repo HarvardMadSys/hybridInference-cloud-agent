@@ -12,11 +12,11 @@ import subprocess
 
 import pytest
 from tests.external.test_host_release_real_docker import BASE, Node, node, node_image
+from tests.support.archive_policy import hooked_supervisor
 
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
 from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL, ChatSandboxSpec
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.egress import network_from_env
 
 pytestmark = pytest.mark.external
@@ -122,9 +122,7 @@ def test_repeated_listing_finishes_once_and_allows_discard(node: Node, monkeypat
     monkeypatch.setattr(manager.network, "prune_orphan_networks", lambda *_args: None)
     # The completed-checkpoint hook is a no-op; Docker and recovery are real.
     # A stale name must not keep reacquiring lifecycle reservations on listing.
-    supervisor = SharedChatSessionSupervisor(
-        manager, stopped_archive_hook=lambda *_args: archived.append(container_id)
-    )
+    supervisor = hooked_supervisor(manager, stopped=lambda *_args: archived.append(container_id))
     for _ in range(3):
         supervisor.reconcile()
     assert archived == [container_id]

@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.support.archive_policy import archive_hooks
 from tests.unit.test_sandbox_deletion_backup import _Manager as _ArchivingDocker
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
@@ -71,7 +72,7 @@ def _running_group(**hooks: Any) -> tuple[_Docker, SharedChatSessionSupervisor]:
     docker.items[spec.container_name] = replace(
         docker._inspection(spec, running=True), container_id=_CONTAINER
     )
-    supervisor = SharedChatSessionSupervisor(docker, **hooks)
+    supervisor = SharedChatSessionSupervisor(docker, archive_policy=archive_hooks(**hooks))
     supervisor.register_manifest(spec, _members(), expected_container_id=_CONTAINER)
     return docker, supervisor
 
@@ -98,8 +99,8 @@ def test_a_pending_final_archive_is_named_in_both_log_formats(tmp_path, caplog):
         raise SandboxError("synthetic upload failure")
 
     docker, supervisor = _running_group(
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=fail_upload,
+        prepare_final=lambda *_args: None,
+        stopped=fail_upload,
     )
     with pytest.raises(SandboxError, match="synthetic upload failure"):
         supervisor.stop_if_idle("athr_source", generation=1)
