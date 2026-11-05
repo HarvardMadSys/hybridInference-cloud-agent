@@ -163,7 +163,7 @@ class SseDecoder:
             events.append(self._dispatch())
         return events
 
-    def _consume_line(self, line: bytes) -> SseEvent | None:  # noqa: PLR0912 complexity baseline, #771
+    def _consume_line(self, line: bytes) -> SseEvent | None:
         """Apply one line, returning an event when the line completes one."""
         if len(line) > _MAX_LINE_BYTES:
             raise SseError("this stream has a line longer than the relay will buffer")
@@ -192,20 +192,24 @@ class SseDecoder:
                     self._id = _text(value)
                     self._id_bytes = len(value)
             case b"retry":
-                # SSE requires ASCII decimal digits, which is all ``bytes.isdigit``
-                # accepts. A decoded ``str.isdigit`` would also accept characters
-                # such as superscript two that int rejects.
-                if value.isdigit():
-                    if len(value) > _MAX_RETRY_DIGITS:
-                        raise SseError("this stream has a retry delay beyond the relay limit")
-                    delay = int(value)
-                    if delay > _MAX_RETRY_MS:
-                        raise SseError("this stream has a retry delay beyond the relay limit")
-                    self._retry = delay
+                self._apply_retry(value)
             case _:
                 # Unknown fields are ignored by design.
                 return None
         return None
+
+    def _apply_retry(self, value: bytes) -> None:
+        """Adopt a ``retry`` field's delay, refusing one beyond the relay limit."""
+        # SSE requires ASCII decimal digits, which is all ``bytes.isdigit``
+        # accepts. A decoded ``str.isdigit`` would also accept characters
+        # such as superscript two that int rejects.
+        if value.isdigit():
+            if len(value) > _MAX_RETRY_DIGITS:
+                raise SseError("this stream has a retry delay beyond the relay limit")
+            delay = int(value)
+            if delay > _MAX_RETRY_MS:
+                raise SseError("this stream has a retry delay beyond the relay limit")
+            self._retry = delay
 
     def _check_event_size(
         self,
