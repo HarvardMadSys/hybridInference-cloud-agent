@@ -10,7 +10,7 @@ import {
   type AgentThreadApi,
   type AgentThreadEventApi,
 } from '@/lib/api/agents';
-import { toDisplayJob } from './adapt';
+import { toDisplayJob } from './adapt/jobAdapter';
 import { JobDetail } from './JobDetail';
 import { buildTrajectorySteps } from './trajectory/trajectorySteps';
 

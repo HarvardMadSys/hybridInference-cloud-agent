@@ -33,7 +33,6 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: '',
     runtime: 'claude-code',
     model: 'qwen-test',
-    timeoutLabel: '',
     sandbox: '',
     attempts: [{ no: 1, status: 'finished' }],
     events: [],

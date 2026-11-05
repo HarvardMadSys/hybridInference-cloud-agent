@@ -230,6 +230,12 @@
       }
     },
     {
+      "files": ["src/components/features/agents/adapt/jobAdapter.ts"],
+      "rules": {
+        "complexity": ["error", 39]
+      }
+    },
+    {
       "files": [
         "src/components/features/agents/goal/GoalBar.tsx",
         "src/components/features/agents/mcp/McpConnectionsSection.tsx"
@@ -335,7 +341,7 @@
       }
     },
     {
-      "files": ["src/components/features/agents/adapt.ts"],
+      "files": ["src/components/features/agents/adapt/events.ts"],
       "rules": {
         "complexity": ["error", 80]
       }
@@ -481,17 +487,6 @@
           "error",
           {
             "max": 1127
-          }
-        ]
-      }
-    },
-    {
-      "files": ["src/components/features/agents/adapt.ts"],
-      "rules": {
-        "max-lines": [
-          "error",
-          {
-            "max": 1531
           }
         ]
       }

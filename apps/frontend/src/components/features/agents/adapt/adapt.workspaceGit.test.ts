@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
 
-import { createDisplayJobAdapter } from './adapt';
+import { createDisplayJobAdapter } from './jobAdapter';
 
 const JOB: AgentJobApi = {
   id: 'ajob_1',

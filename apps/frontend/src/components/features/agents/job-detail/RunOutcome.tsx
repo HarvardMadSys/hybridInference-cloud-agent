@@ -4,7 +4,7 @@ import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { WorkspaceDownloadButton } from '../workspace/TemporaryWorkspace';
 import { useT } from '@/components/providers';
 import Link from 'next/link';
-import { siteMisconfiguredReason } from '../adapt';
+import { siteMisconfiguredReason } from '../adapt/jobState';
 import { hasLostContext, ownerRunNote } from '../conversationJob';
 import type { AgentJob } from '../types';
 

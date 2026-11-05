@@ -1,5 +1,5 @@
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
-import { toDiffFileDetails } from '../adapt';
+import { toDiffFileDetails } from '../adapt/diff';
 import type { AgentJobState, DiffLine } from '../types';
 
 /** A file from a recorded native diff, never the shared workspace's live Git view. */

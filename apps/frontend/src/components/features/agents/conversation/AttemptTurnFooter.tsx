@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 
 import { getAgentAttemptTelemetry, type AgentAttemptTelemetryApi } from '@/lib/api/agents';
 
-import { toAttemptTelemetry } from '../adapt';
+import { toAttemptTelemetry } from '../adapt/resources';
 import { TurnFooter } from './TurnFooter';
 import type { AgentJob } from '../types';
 

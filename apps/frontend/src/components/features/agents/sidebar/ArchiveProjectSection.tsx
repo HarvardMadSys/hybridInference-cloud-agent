@@ -9,7 +9,7 @@ import {
   type AgentSessionListOptions,
 } from '@/lib/api/agents';
 import { ArchiveAutoLoad } from './ArchiveAutoLoad';
-import { toDisplayState } from '../adapt';
+import { toDisplayState } from '../adapt/jobState';
 import { projectLabel, projectTitle } from './conversations';
 import { CONVERSATION_STATE_KEYS, toConversationState } from './conversationState';
 import { ARCHIVE_FOCUS, ArchiveIcon, ArchiveProjectMenu } from './ArchiveControls';

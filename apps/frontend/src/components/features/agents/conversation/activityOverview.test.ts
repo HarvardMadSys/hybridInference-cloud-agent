@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildActivityOverview, hasActivityOverview } from './activityOverview';
-import { EMPTY_TOOL_OUTPUT } from '../adapt';
+import { EMPTY_TOOL_OUTPUT } from '../adapt/events';
 import type { AgentEvent } from '../types';
 
 type ToolUseEvent = Extract<AgentEvent, { kind: 'tool_use' }>;

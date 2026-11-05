@@ -15,7 +15,7 @@ import { NativeQuestionPrompt } from '../conversation/NativeQuestionPrompt';
 import { PendingMessageQueue } from '../composer/PendingMessageQueue';
 import { Picker } from '../composer/Picker';
 import { ThreadStatsBar } from '../conversation/ThreadStatsBar';
-import { ownerFailureMessage } from '../adapt';
+import { ownerFailureMessage } from '../adapt/jobState';
 import { AttachmentStrip } from '../attachments/AttachmentStrip';
 import type { useAttachments } from '../attachments/useAttachments';
 import { isSteerChord } from '../composer/composerKeys';

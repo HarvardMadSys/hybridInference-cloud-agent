@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { listAgentConversations, type AgentConversationApi } from '@/lib/api/agents';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged } from '../agentPush';
-import { toDisplayJob } from '../adapt';
+import { toDisplayJob } from '../adapt/jobAdapter';
 import type { ConversationRow } from './conversations';
 import type { ConversationReader } from './sidebarReadQueue';
 

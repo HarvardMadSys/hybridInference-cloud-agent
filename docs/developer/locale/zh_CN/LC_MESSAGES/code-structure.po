@@ -750,6 +750,16 @@ msgid "Folder"
 msgstr "目录"
 
 #: ../developer/code-structure.md
+msgid "`adapt/`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid ""
+"The Job and Thread API-shape adapters, and the event, diff, resource and "
+"job-state readers they share"
+msgstr "Job 和 Thread 两种 API 形状的 adapter，以及它们共用的事件、diff、资源和任务状态读取函数"
+
+#: ../developer/code-structure.md
 msgid "`conversation/`"
 msgstr ""
 
@@ -791,14 +801,14 @@ msgstr ""
 msgid "Trajectory view, step inspector, and the protocol and step projections"
 msgstr "轨迹视图、步骤检查器，以及协议和步骤的投影"
 
-#: ../developer/code-structure.md:225
+#: ../developer/code-structure.md:226
 msgid ""
 "Feature areas such as `context/`, `environment/`, `goal/`, `mcp/` and "
 "`skills/` follow the same rule. The top level keeps what several folders "
-"share: the API-shape adapters, `types.ts`, the job and conversation "
-"records, the read and push providers, and the job page. Tests sit next to"
-" the module they test."
-msgstr "`context/`、`environment/`、`goal/`、`mcp/` 和 `skills/` 这些功能区也照此组织。顶层只放几个目录共用的东西：按 API 形状划分的 adapter、`types.ts`、任务和对话记录、读取和推送 provider，以及任务页面。测试和被测模块放在一起。"
+"share: `types.ts`, the job and conversation records, the read and push "
+"providers, and the job page. Tests sit next to the module they test."
+msgstr ""
+"`context/`、`environment/`、`goal/`、`mcp/` 和 `skills/` 这些功能区也照此组织。顶层只放几个目录共用的东西：`types.ts`、任务和对话记录、读取和推送 provider，以及任务页面。测试和被测模块放在一起。"
 
 #: ../developer/code-structure.md:209
 msgid ""

@@ -32,7 +32,7 @@ import {
   submitThreadMessage,
   type PendingMessageApi,
 } from '@/lib/api/pendingMessages';
-import { toDisplayJob } from '../adapt';
+import { toDisplayJob } from '../adapt/jobAdapter';
 import { codeReviewFixPrompt } from './codeReview';
 import { sideChatKeys } from './sideChatStorage';
 import { SideChat } from './SideChat';

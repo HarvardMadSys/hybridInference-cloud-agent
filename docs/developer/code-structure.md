@@ -220,6 +220,7 @@ Inside `components/features/agents/`, each concern has its own folder:
 
 | Folder | Responsibility |
 |---|---|
+| `adapt/` | The Job and Thread API-shape adapters, and the event, diff, resource and job-state readers they share |
 | `conversation/` | Transcript, turns, tool activity, turn navigation and the side chat |
 | `composer/` | Message input, the new-task composer, model and repository pickers, queued messages |
 | `sidebar/` | Conversation list, folders, search, archive and getting started |
@@ -227,9 +228,9 @@ Inside `components/features/agents/`, each concern has its own folder:
 | `trajectory/` | Trajectory view, step inspector, and the protocol and step projections |
 
 Feature areas such as `context/`, `environment/`, `goal/`, `mcp/` and `skills/`
-follow the same rule. The top level keeps what several folders share: the
-API-shape adapters, `types.ts`, the job and conversation records, the read and
-push providers, and the job page. Tests sit next to the module they test.
+follow the same rule. The top level keeps what several folders share:
+`types.ts`, the job and conversation records, the read and push providers, and
+the job page. Tests sit next to the module they test.
 
 `components/features/agents/JobDetail.tsx` composes the job page. Its extracted
 implementation lives under `job-detail/`:

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { AgentJobEventApi } from '@/lib/api/agents';
 
-import { toDisplayEvent } from './adapt';
+import { toDisplayEvent } from './events';
 
 function event(id: number, payload: Record<string, unknown>): AgentJobEventApi {
   return { id, attempt_id: 1, seq: id, event_type: 'usage', payload, created_at: null };

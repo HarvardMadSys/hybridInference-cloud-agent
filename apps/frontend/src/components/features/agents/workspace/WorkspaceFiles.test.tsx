@@ -8,7 +8,7 @@ import { getAgentJobFiles, type AgentJobFileApi, type AgentJobFilesApi } from '@
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { APIError } from '@/lib/utils/errors';
-import { toDiffFileDetails, toDiffFiles } from '../adapt';
+import { toDiffFileDetails, toDiffFiles } from '../adapt/diff';
 import type { AgentJob } from '../types';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
@@ -23,7 +23,6 @@ const JOB: AgentJob = {
   branch: 'agent/ajob_workspace',
   runtime: 'claude-code',
   model: 'model',
-  timeoutLabel: '',
   sandbox: '',
   attempts: [],
   events: [],

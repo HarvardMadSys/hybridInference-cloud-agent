@@ -39,7 +39,7 @@ import {
 import { formatDuration } from '../conversation/TurnFooter';
 import type { AgentJob } from '../types';
 import { isOlderUsage, onAgentRecordsChanged } from '../agentPush';
-import { isRepositoryTooLarge, ownerFailureMessage } from '../adapt';
+import { isRepositoryTooLarge, ownerFailureMessage } from '../adapt/jobState';
 import { hasLostContext, ownerRunNote } from '../conversationJob';
 
 import type { RunTab } from './trajectoryInspectorTabs';

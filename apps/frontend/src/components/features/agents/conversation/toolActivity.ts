@@ -1,5 +1,5 @@
 // Read task and delegation arguments without deriving outcomes from tool success.
-import { EMPTY_TOOL_OUTPUT } from '../adapt';
+import { EMPTY_TOOL_OUTPUT } from '../adapt/events';
 
 export interface ActivityTask {
   id?: string;

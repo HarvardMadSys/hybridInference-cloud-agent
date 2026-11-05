@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentJobApi, AgentThreadApi, AgentThreadEventApi } from '@/lib/api/agents';
-import { createDisplayJobAdapter, toDisplayJob } from './adapt';
+import { createDisplayJobAdapter, toDisplayJob } from './jobAdapter';
 
 function fixture(turns = 3, eventsPerTurn = 3) {
   const jobs: AgentJobApi[] = Array.from({ length: turns }, (_, index) => ({
