@@ -23,7 +23,6 @@ from cloud_agent_host.chat_sandbox import (
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
-    claude_member_config_dir,
 )
 from cloud_agent_host.drivers import (
     DialectRuntime,
@@ -47,20 +46,11 @@ from cloud_agent_host.member_homes import (
     member_state_dir,
 )
 from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
-from cloud_agent_host.other_plugins import install_other_runtime_plugins
-from cloud_agent_host.platform_instructions import (
-    claude_attribution,
-    platform_instructions,
-    with_platform_instructions,
-)
-from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
-from cloud_agent_host.runtimes.codex.plugins import install_codex_plugins
 from cloud_agent_host.runtimes.http_bridge import member as http_member
-from cloud_agent_host.runtimes.http_bridge.kilo_mcp import KILO_MCP_VERSION
-from cloud_agent_host.runtimes.live import get_driver
+from cloud_agent_host.runtimes.live import get_driver, member_launch
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 
@@ -380,33 +370,9 @@ class ResidentTransportFactory:
         if launch.plugins:
             # Every installer finds its slot reaped and its home prepared.
             preparation.run()
-        if runtime_id == "claude-code" and launch.plugins:
-            install_claude_plugins(
-                self._manager,
-                spec,
-                launch.plugins,
-                config_dir=claude_member_config_dir(launch.slot_id, launch.thread_id),
-                env=context.base_env,
-                slot_id=launch.slot_id,
-            )
-        elif runtime_id == "codex" and launch.plugins:
-            install_codex_plugins(
-                self._manager,
-                spec,
-                launch.plugins,
-                state_dir=state_dir,
-                env=context.base_env,
-                slot_id=launch.slot_id,
-            )
-        elif runtime_id in {"pi", "opencode", "kilo"} and launch.plugins:
             context.base_env.update(
-                install_other_runtime_plugins(
-                    self._manager,
-                    spec,
-                    runtime_id=runtime_id,
-                    plugins=launch.plugins,
-                    env=context.base_env,
-                    slot_id=launch.slot_id,
+                member_launch(runtime_id).install_plugins(
+                    self._manager, spec, launch, state_dir=state_dir, env=context.base_env
                 )
             )
         if launch.native_session_id:
@@ -436,7 +402,8 @@ class ResidentTransportFactory:
         preparation = MemberPreparation(
             self._manager, spec, user_uid=uid, user_gid=self._manager.backend.gid
         )
-        reaped = launch.runtime_id == "claude-code" or bool(launch.plugins)
+        steps = member_launch(launch.runtime_id)
+        reaped = steps.reaps_before_preparation or bool(launch.plugins)
         if reaped:
             # A failed Fork can release a reserved slot. Reap that slot before
             # preparing its next member's launch state, so an old same-UID
@@ -448,9 +415,8 @@ class ResidentTransportFactory:
                 user_gid=self._manager.backend.gid,
                 batch=preparation,
             )
-        if launch.runtime_id == "claude-code":
-            claude_member.prepare_member_state(self._manager, spec, launch, preparation)
-        elif launch.runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
+        steps.prepare_member(self._manager, spec, launch, preparation)
+        if launch.runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
             self._prepare_member_state(spec, launch, state_dir, preparation)
         return preparation, reaped
 
@@ -467,11 +433,7 @@ class ResidentTransportFactory:
         """
         runtime_id = launch.runtime_id
         step = MemberStep(
-            (
-                codex_member.member_state_argv(self._manager, launch, state_dir)
-                if runtime_id == "codex"
-                else http_member.member_state_argv(self._manager, launch, state_dir)
-            ),
+            member_launch(runtime_id).member_state_argv(self._manager, launch, state_dir),
             timeout_s=120,
             failure=lambda stderr: DriverError(
                 f"{runtime_id} member state could not be prepared: "
@@ -558,37 +520,15 @@ class ResidentTransportFactory:
                 )
 
     def _prepare_runtime_helpers(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
-        """Run each facet's trusted step, and the runtime's own, before the first spawn.
+        """Run each facet's trusted step before the first spawn.
 
         In :data:`~cloud_agent_host.launch.facets.PREPARE_ORDER`: the browser
-        service, sandbox MCP admission, the runtime's helpers, then the
-        compatibility helper.
+        service, sandbox MCP admission, the runtime's helpers (its CLI
+        package's), then the compatibility helper.
         """
         context = PrepareContext(self._manager, spec, launch.slot_id)
         for kind in PREPARE_ORDER:
-            if kind is None:
-                self._install_runtime_helpers(spec, launch)
-            else:
-                launch.facet(kind).prepare(context)
-
-    def _install_runtime_helpers(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
-        """Install the selected runtime and its trusted adapters."""
-        runtime_id = launch.runtime_id
-        # HTTP dialects always use the trusted live bridge, and pi its
-        # wrapper and MCP bridge, including turns without MCP. Refresh
-        # them from the host when resuming a retained container so new
-        # native-question commands, and an older image's wrappers'
-        # replacements, arrive without replacing its session state.
-        if launch.runtime_version:
-            # A version an admin updated to after the image was built
-            # is copied in the first time; one the image has is not.
-            self._manager.ensure_downloaded_runtime(spec, runtime_id, launch.runtime_version)
-        if launch.mcp_server_ids or runtime_id in {"pi", "opencode", "kilo"}:
-            self._manager.ensure_mcp_helpers(spec, runtime_id)
-        if runtime_id == "kilo":
-            self._manager.ensure_kilo_mcp_runtime(spec, launch.runtime_version or KILO_MCP_VERSION)
-        if runtime_id == "codex" and launch.mcp_server_ids:
-            self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
+            launch.facet(kind).prepare(context)
 
     def _member_env(self, launch: ResidentLaunch) -> tuple[dict[str, str], str]:
         """The environment one member's CLI starts with, and its inference script.
@@ -648,7 +588,8 @@ class ResidentTransportFactory:
             )
         activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
         base_env, inference_script = self._member_env(launch)
-        instructions = platform_instructions(launch)
+        steps = member_launch(runtime_id)
+        instructions = steps.platform_instructions(launch)
 
         reaped = False
 
@@ -681,7 +622,7 @@ class ResidentTransportFactory:
                 self._prepare_runtime_helpers(spec, launch)
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
-            argv, env = with_platform_instructions(runtime_id, argv, env, instructions)
+            argv, env = steps.with_platform_instructions(argv, env, instructions)
             return self._manager.spawn(
                 spec,
                 argv,
@@ -718,19 +659,14 @@ class ResidentTransportFactory:
             state_dir=CHAT_STATE_DIR,
             session_state_dir=state_dir or CHAT_STATE_DIR,
             activation_dir=activation_dir,
-            # Claude's own commit attribution names the platform's co-author.
             install_tool_hooks=lambda update: self._manager.install_tool_hooks(
                 spec,
-                {**update, **claude_attribution(launch)},
+                {**update, **steps.tool_hook_settings(launch)},
                 slot_id=launch.slot_id,
                 thread_id=launch.thread_id,
                 batch=preparation,
             ),
-            claude_config_dir=(
-                claude_member_config_dir(launch.slot_id, launch.thread_id)
-                if runtime_id == "claude-code"
-                else None
-            ),
+            claude_config_dir=steps.config_dir(launch),
         )
 
     def fork_native(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771

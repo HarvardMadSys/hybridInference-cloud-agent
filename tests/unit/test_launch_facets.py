@@ -23,6 +23,7 @@ from cloud_agent_host.launch.facets import PREPARE_ORDER
 from cloud_agent_host.launch.github_relay import GitHubRelayFacet
 from cloud_agent_host.launch.inference import InferenceFacet
 from cloud_agent_host.launch.mcp_relay import McpRelayFacet
+from cloud_agent_host.launch.runtime import RuntimeFacet
 from cloud_agent_host.launch.sandbox_mcp import SandboxMcpFacet
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransport
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
@@ -229,7 +230,7 @@ def test_every_pair_of_launches_names_what_the_hand_list_named_in_its_order():
 
 
 def test_the_trusted_steps_run_gateway_admission_before_the_runtime_and_its_helper():
-    assert (BrowserFacet, SandboxMcpFacet, None, InferenceFacet) == PREPARE_ORDER
+    assert (BrowserFacet, SandboxMcpFacet, RuntimeFacet, InferenceFacet) == PREPARE_ORDER
 
 
 def test_each_facet_names_the_secrets_it_brings_into_the_sandbox():

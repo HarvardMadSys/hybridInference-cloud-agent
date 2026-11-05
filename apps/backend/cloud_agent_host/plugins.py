@@ -1,8 +1,13 @@
-"""Install explicitly selected CLI plugins inside private sandbox members."""
+"""Run explicitly selected CLI plugins' installers inside private sandbox members.
+
+The bounded runner and the locked installer preamble every CLI's installer
+shares: Claude's (:mod:`cloud_agent_host.runtimes.claude.plugins`), Codex's
+(:mod:`cloud_agent_host.runtimes.codex.plugins`), and the npm installer pi,
+OpenCode and Kilo share (:mod:`cloud_agent_host.other_plugins`).
+"""
 
 from __future__ import annotations
 
-import json
 import queue
 import secrets
 import textwrap
@@ -151,59 +156,8 @@ def member_installer(*, directory: str, receipt: str, locked: str) -> str:
     return preamble.replace("@RECEIPT@", receipt) + textwrap.indent(locked, "    ")
 
 
-_CLAUDE_INSTALL_SCRIPT = member_installer(
-    directory="plugin config",
-    receipt="plugin receipt",
-    locked="""\
-marker = config / '.freeinference-plugins.json'
-if read_json(marker) == plugins:
-    raise SystemExit(0)
-marketplaces = set()
-for plugin in plugins:
-    source = plugin['marketplace']
-    if source not in marketplaces:
-        subprocess.run(['claude', 'plugin', 'marketplace', 'add', source], check=True)
-        marketplaces.add(source)
-    subprocess.run(['claude', 'plugin', 'install', plugin['plugin'],
-                    '--scope', 'user'], check=True)
-write_json(marker, plugins)
-""",
-)
-
-
-def install_claude_plugins(
-    manager: ChatSandboxManager,
-    spec: ChatSandboxSpec,
-    plugins: tuple[dict[str, str], ...],
-    *,
-    config_dir: str,
-    env: dict[str, str],
-    slot_id: int,
-) -> None:
-    """Install Claude plugins once per successful private member selection."""
-    if not plugins:
-        return
-    install_env = {
-        **env,
-        "CLAUDE_CONFIG_DIR": config_dir,
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "DISABLE_TELEMETRY": "1",
-        "DISABLE_AUTOUPDATER": "1",
-        "DISABLE_ERROR_REPORTING": "1",
-        "CI": "1",
-    }
-    run_plugin_command(
-        manager,
-        spec,
-        ["python3", "-I", "-c", _CLAUDE_INSTALL_SCRIPT, config_dir, json.dumps(plugins)],
-        env=install_env,
-        slot_id=slot_id,
-    )
-
-
 __all__ = [
     "PLUGIN_INSTALL_TIMEOUT_S",
-    "install_claude_plugins",
     "member_installer",
     "run_plugin_command",
 ]

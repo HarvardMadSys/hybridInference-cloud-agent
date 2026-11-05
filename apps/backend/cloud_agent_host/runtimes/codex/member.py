@@ -1,16 +1,17 @@
-"""A Codex member's private home, and recovery of a native Fork from its rollouts.
+"""A Codex member's private home, its launch steps, and recovery of a native Fork.
 
 What the transport factory (:mod:`cloud_agent_host.resident_transport`) asks
 of Codex alone: the member script that creates its home from the image's
-bootstrap config, and the bounded rollout inventory that finds a Fork child
-whose ``thread/fork`` response was lost. The factory passes the sandbox
-manager it holds explicitly.
+bootstrap config, the steps :data:`LAUNCH` adds to a member's launch (its MCP
+relay policy, plugins and developer instructions), and the bounded rollout
+inventory that finds a Fork child whose ``thread/fork`` response was lost. The
+factory passes the sandbox manager it holds explicitly.
 """
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from cloud_agent_host.chat_sandbox import CHAT_STATE_DIR, MEMBER_UID_BASE
 from cloud_agent_host.drivers import DriverError
@@ -19,10 +20,64 @@ from cloud_agent_host.member_homes import (
     legacy_member_state_dir,
     member_state_dir,
 )
+from cloud_agent_host.runtimes.codex.plugins import install_codex_plugins
+from cloud_agent_host.runtimes.member_launch import MemberLaunch
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.launch.facet import PrepareContext
+    from cloud_agent_host.launch.runtime import RuntimeFacet
     from cloud_agent_host.resident_transport import ResidentLaunch
+
+
+class CodexMember(MemberLaunch):
+    """Codex's steps: its private home, MCP relay policy, plugins and instructions."""
+
+    @override
+    def member_state_argv(
+        self, manager: ChatSandboxManager, launch: ResidentLaunch, state_dir: str
+    ) -> tuple[str, ...]:
+        return member_state_argv(manager, launch, state_dir)
+
+    @override
+    def install_helpers(self, context: PrepareContext, runtime: RuntimeFacet) -> None:
+        super().install_helpers(context, runtime)
+        if runtime.mcp_server_ids:
+            context.manager.ensure_codex_mcp_policy(context.spec, runtime.mcp_base_url)
+
+    @override
+    def install_plugins(
+        self,
+        manager: ChatSandboxManager,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        *,
+        state_dir: str,
+        env: dict[str, str],
+    ) -> dict[str, str]:
+        install_codex_plugins(
+            manager,
+            spec,
+            launch.plugins,
+            state_dir=state_dir,
+            env=env,
+            slot_id=launch.slot_id,
+        )
+        return {}
+
+    @override
+    def place_instructions(
+        self, argv: list[str], env: dict[str, str], instructions: str
+    ) -> tuple[list[str], dict[str, str]]:
+        """The ``developer_instructions`` key, as a ``-c`` override before ``app-server``.
+
+        A JSON string is a TOML basic string.
+        """
+        if "app-server" not in argv:
+            return argv, env
+        at = argv.index("app-server")
+        option = ["-c", f"developer_instructions={json.dumps(instructions)}"]
+        return [*argv[:at], *option, *argv[at:]], env
 
 
 def member_state_argv(
@@ -173,3 +228,7 @@ def journal_baseline(journal: dict[str, object]) -> set[str]:
     if len(set(value)) != len(value):
         raise DriverError("Codex native fork journal recovery baseline is not canonical")
     return set(value)
+
+
+#: Codex's steps in a member's launch.
+LAUNCH = CodexMember()

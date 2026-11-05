@@ -41,6 +41,8 @@ from cloud_agent_host.member_preparation import (
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.runtimes.claude import member as claude_member
+from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.pi import member as pi_member
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.sandbox_browser import LAUNCHER
 from cloud_agent_host.sandbox_mcp import GATEWAY
@@ -558,12 +560,12 @@ def test_plugin_installers_find_their_slot_reaped_and_home_prepared(
         guest.events.append(("install", None, None))
         return {}
 
-    for installer in (
-        "install_claude_plugins",
-        "install_codex_plugins",
-        "install_other_runtime_plugins",
+    for module, installer in (
+        (claude_member, "install_claude_plugins"),
+        (codex_member, "install_codex_plugins"),
+        (pi_member, "install_other_runtime_plugins"),
     ):
-        monkeypatch.setattr(resident_transport, installer, install)
+        monkeypatch.setattr(module, installer, install)
     plugins = (
         ({"plugin": "@owner/plugin@1.2.3"},)
         if runtime_id == "pi"

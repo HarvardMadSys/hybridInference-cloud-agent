@@ -25,10 +25,14 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.plugins import install_claude_plugins, run_plugin_command
+from cloud_agent_host.plugins import run_plugin_command
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.runtimes.claude import member as claude_member
+from cloud_agent_host.runtimes.claude.plugins import install_claude_plugins
+from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.http_bridge import member as http_member
+from cloud_agent_host.runtimes.pi import member as pi_member
 from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
 
 if TYPE_CHECKING:
@@ -287,7 +291,7 @@ def test_installation_precedes_the_first_private_claude_launch(monkeypatch, fail
         events.append("launch")
         return SimpleNamespace(ensure_started=lambda **_kw: None, process_alive=lambda: True)
 
-    monkeypatch.setattr(resident_transport, "install_claude_plugins", install)
+    monkeypatch.setattr(claude_member, "install_claude_plugins", install)
     monkeypatch.setattr(
         resident_transport, "get_driver", lambda _r: SimpleNamespace(launch_live=launch_live)
     )
@@ -332,8 +336,9 @@ def test_other_runtime_installers_receive_private_env_before_launch(monkeypatch,
             assert context.base_env["AGENT_PLUGIN_PATHS"] == '["/private/plugin"]'
         return SimpleNamespace(ensure_started=lambda **_kw: None, process_alive=lambda: True)
 
-    monkeypatch.setattr(resident_transport, "install_codex_plugins", install)
-    monkeypatch.setattr(resident_transport, "install_other_runtime_plugins", install)
+    monkeypatch.setattr(codex_member, "install_codex_plugins", install)
+    monkeypatch.setattr(pi_member, "install_other_runtime_plugins", install)
+    monkeypatch.setattr(http_member, "install_other_runtime_plugins", install)
     monkeypatch.setattr(
         resident_transport,
         "get_driver",

@@ -569,17 +569,25 @@ msgid "Partial-reply preview batching"
 msgstr "把部分回复攒成批次做预览"
 
 #: ../developer/code-structure.md
+msgid "`member_launch.py`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid "The steps one CLI adds to a member's launch, with a CLI-free default"
+msgstr "某种 CLI 给成员启动加上的步骤，以及不针对任何 CLI 的默认实现"
+
+#: ../developer/code-structure.md
 msgid "`claude/`"
 msgstr ""
 
 #: ../developer/code-structure.md
 msgid ""
 "Claude Code: its launch and event parsing (`adapter`), live session "
-"(`session`), background tasks (`background`), and member config and native "
-"Fork (`member`)"
+"(`session`), background tasks (`background`), plugins (`plugins`), and "
+"member config, launch steps and native Fork (`member`)"
 msgstr ""
 "Claude "
-"Code：它的启动方式和事件解析（`adapter`）、常驻会话（`session`）、后台任务（`background`），以及成员配置和原生 "
+"Code：它的启动方式和事件解析（`adapter`）、常驻会话（`session`）、后台任务（`background`）、插件（`plugins`），以及成员配置、启动步骤和原生 "
 "Fork（`member`）"
 
 #: ../developer/code-structure.md
@@ -589,11 +597,12 @@ msgstr ""
 #: ../developer/code-structure.md
 msgid ""
 "Codex: its app-server launch (`adapter`), notification readings "
-"(`app_server`), live session (`session`), MCP relay policy (`mcp`), plugins "
-"(`plugins`), and member home and Fork recovery (`member`)"
+"(`app_server`), live session (`session`), MCP relay policy (`mcp`), "
+"plugins (`plugins`), and member home, launch steps and Fork recovery "
+"(`member`)"
 msgstr ""
 "Codex：app-server 的启动方式（`adapter`）、通知的读取（`app_server`）、常驻会话（`session`）、MCP "
-"中继策略（`mcp`）、插件（`plugins`），以及成员主目录和 Fork 恢复（`member`）"
+"中继策略（`mcp`）、插件（`plugins`），以及成员主目录、启动步骤和 Fork 恢复（`member`）"
 
 #: ../developer/code-structure.md
 msgid "`pi/`"
@@ -601,9 +610,9 @@ msgstr ""
 
 #: ../developer/code-structure.md
 msgid ""
-"pi: its launch and event parsing (`adapter`), and live session with its "
-"native Fork (`session`)"
-msgstr "pi：它的启动方式和事件解析（`adapter`），以及常驻会话和它的原生 Fork（`session`）"
+"pi: its launch and event parsing (`adapter`), live session with its "
+"native Fork (`session`), and launch steps (`member`)"
+msgstr "pi：它的启动方式和事件解析（`adapter`）、常驻会话和它的原生 Fork（`session`），以及启动步骤（`member`）"
 
 #: ../developer/code-structure.md
 msgid "`http_bridge/`"
@@ -614,11 +623,11 @@ msgid ""
 "OpenCode and Kilo: the launch they share (`adapter`), each CLI's name, "
 "wrapper binary and catalog entry (`opencode`, `kilo`), the bridge's records "
 "and live session (`parts`, `session`), Kilo's MCP runtime (`kilo_mcp`), and "
-"member home and server locks (`member`)"
+"member home, launch steps and server locks (`member`)"
 msgstr ""
 "OpenCode 和 "
 "Kilo：两者共用的启动方式（`adapter`），各自的名称、包装脚本名和运行时目录条目（`opencode`、`kilo`），桥接的记录和常驻会话（`parts`、`session`），Kilo"
-" 的 MCP 运行时（`kilo_mcp`），以及成员主目录和服务器锁（`member`）"
+" 的 MCP 运行时（`kilo_mcp`），以及成员主目录、启动步骤和服务器锁（`member`）"
 
 #: ../developer/code-structure.md
 msgid "`registry.py`"
@@ -633,20 +642,27 @@ msgid "`live.py`"
 msgstr ""
 
 #: ../developer/code-structure.md
-msgid "Each CLI's live session class, and the driver that opens it"
-msgstr "每种 CLI 的常驻会话类，以及打开它的驱动"
+msgid ""
+"Each CLI's live session class, the driver that opens it, and its launch "
+"steps"
+msgstr "每种 CLI 的常驻会话类、打开它的驱动，以及它的启动步骤"
 
 #: ../developer/code-structure.md:165
 msgid ""
 "`drivers.py` keeps the generic Driver, Session and Turn contract and the "
 "base classes the sessions share. `resident_transport.py` opens member "
-"processes and journals native Forks; it calls a CLI's `member` module for "
-"that CLI's own steps. `member_homes.py` holds the private provider homes "
-"that Codex, OpenCode and Kilo members use."
+"processes and journals native Forks. It does not branch on the CLI to "
+"launch one: each CLI's `member` module defines that CLI's launch steps "
+"(its member config or private home, trusted helpers, plugin installer, "
+"where platform instructions go, and Claude's commit attribution), and the "
+"factory calls them. Native Fork still branches on the CLI there. "
+"`member_homes.py` holds the private provider homes that Codex, OpenCode "
+"and Kilo members use."
 msgstr ""
 "`drivers.py` 只保留通用的 Driver、Session、Turn "
-"契约，以及各会话共用的基类。`resident_transport.py` 负责启动成员进程、为原生 Fork 记日志；某种 CLI "
-"自己的步骤，它交给那个 CLI 的 `member` 模块去做。`member_homes.py` 管 Codex、OpenCode 和 Kilo "
+"契约，以及各会话共用的基类。`resident_transport.py` 负责启动成员进程、为原生 Fork 记日志。启动成员时它不按 CLI "
+"分支：每种 CLI 的 `member` 模块定义这种 CLI 自己的启动步骤（成员配置或私有主目录、可信辅助程序、插件安装、平台说明放在哪里，以及 "
+"Claude 的提交署名），由它来调用。原生 Fork 在这里仍按 CLI 分支。`member_homes.py` 管 Codex、OpenCode 和 Kilo "
 "成员各自私有的服务商主目录。"
 
 #: ../developer/code-structure.md:171
