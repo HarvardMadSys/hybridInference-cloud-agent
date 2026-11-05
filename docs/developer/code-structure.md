@@ -161,17 +161,21 @@ package per CLI:
 | `base.py` | Adapter contracts, capabilities, MCP configuration, and runtime errors |
 | `events.py` | Normalized event vocabulary and bounded payload helpers |
 | `preview.py` | Partial-reply preview batching |
-| `claude/` | Claude Code: its launch and event parsing (`adapter`), live session (`session`), background tasks (`background`), and member config and native Fork (`member`) |
-| `codex/` | Codex: its app-server launch (`adapter`), notification readings (`app_server`), live session (`session`), MCP relay policy (`mcp`), plugins (`plugins`), and member home and Fork recovery (`member`) |
-| `pi/` | pi: its launch and event parsing (`adapter`), and live session with its native Fork (`session`) |
-| `http_bridge/` | OpenCode and Kilo: the launch they share (`adapter`), each CLI's name, wrapper binary and catalog entry (`opencode`, `kilo`), the bridge's records and live session (`parts`, `session`), Kilo's MCP runtime (`kilo_mcp`), and member home and server locks (`member`) |
+| `member_launch.py` | The steps one CLI adds to a member's launch, with a CLI-free default |
+| `claude/` | Claude Code: its launch and event parsing (`adapter`), live session (`session`), background tasks (`background`), plugins (`plugins`), and member config, launch steps and native Fork (`member`) |
+| `codex/` | Codex: its app-server launch (`adapter`), notification readings (`app_server`), live session (`session`), MCP relay policy (`mcp`), plugins (`plugins`), and member home, launch steps and Fork recovery (`member`) |
+| `pi/` | pi: its launch and event parsing (`adapter`), live session with its native Fork (`session`), and launch steps (`member`) |
+| `http_bridge/` | OpenCode and Kilo: the launch they share (`adapter`), each CLI's name, wrapper binary and catalog entry (`opencode`, `kilo`), the bridge's records and live session (`parts`, `session`), Kilo's MCP runtime (`kilo_mcp`), and member home, launch steps and server locks (`member`) |
 | `registry.py` | Adapter lookup and construction |
-| `live.py` | Each CLI's live session class, and the driver that opens it |
+| `live.py` | Each CLI's live session class, the driver that opens it, and its launch steps |
 
 `drivers.py` keeps the generic Driver, Session and Turn contract and the base
 classes the sessions share. `resident_transport.py` opens member processes and
-journals native Forks; it calls a CLI's `member` module for that CLI's own
-steps. `member_homes.py` holds the private provider homes that Codex, OpenCode
+journals native Forks. It does not branch on the CLI to launch one: each
+CLI's `member` module defines that CLI's launch steps (its member config or
+private home, trusted helpers, plugin installer, where platform instructions
+go, and Claude's commit attribution), and the factory calls them. Native Fork
+still branches on the CLI there. `member_homes.py` holds the private provider homes that Codex, OpenCode
 and Kilo members use.
 
 Existing callers use `cloud_agent_host.runtimes`; the package explicitly

@@ -5,15 +5,16 @@ Each CLI's knowledge lives in one package: ``claude``, ``codex``, ``pi``, and
 ``adapter`` builds the CLI's resident live process (Claude's and pi's also
 normalize the events it writes); its ``session`` speaks the CLI's live
 protocol over :mod:`cloud_agent_host.drivers`; its ``member`` prepares a
-member's private state and native Fork; MCP and plugin configuration sit beside
-them. ``base`` defines adapter and MCP contracts, ``events`` bounds normalized
-payloads, and ``preview`` batches partial replies. ``registry`` creates one
-adapter per run, and ``live`` maps each CLI to its session. Shared discovery
+member's private state and native Fork and defines the CLI's launch steps
+(``member_launch``); MCP and plugin configuration sit beside them. ``base``
+defines adapter and MCP contracts, ``events`` bounds normalized payloads, and
+``preview`` batches partial replies. ``registry`` creates one adapter per run,
+and ``live`` maps each CLI to its session and launch steps. Shared discovery
 metadata lives in :mod:`cloud_agent_shared.runtime_catalog` so the control
 plane can advertise capabilities without loading host code.
 
-This module exports the dialect layer only. The sessions, ``live`` and the
-``member`` modules build on :mod:`cloud_agent_host.drivers`, which imports this
+This module exports the dialect layer only. The sessions, ``live``,
+``member_launch`` and the ``member`` modules build on :mod:`cloud_agent_host.drivers`, which imports this
 API, so they are imported by their own module names.
 
 The adapters preserve unrecognized output as ``raw`` events. Contract fixtures

@@ -1,15 +1,17 @@
-"""A Claude member's private config, and its native Fork.
+"""A Claude member's private config, its launch steps, and its native Fork.
 
 What the transport factory (:mod:`cloud_agent_host.resident_transport`) asks
 of Claude alone: the member-private config that links only the group's native
-project history, and the image's ``claude-session-fork`` helper that writes a
-child session at a historical turn.
+project history, the steps :data:`LAUNCH` adds to a member's launch (plugins,
+platform instructions, commit attribution), and the image's
+``claude-session-fork`` helper that writes a child session at a historical
+turn.
 """
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
@@ -18,12 +20,85 @@ from cloud_agent_host.chat_sandbox import (
     claude_member_config_dir,
 )
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
+from cloud_agent_host.member_preparation import MemberStep, run_member_steps
+from cloud_agent_host.platform_instructions import platform_instructions
+from cloud_agent_host.runtimes.claude.plugins import install_claude_plugins
+from cloud_agent_host.runtimes.member_launch import MemberLaunch, append_system_prompt
 from cloud_agent_host.sandbox import SANDBOX_PATH
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.member_preparation import MemberPreparation
     from cloud_agent_host.resident_transport import ResidentLaunch
+
+
+class ClaudeMember(MemberLaunch):
+    """Claude Code's steps: its private config, plugins, prompt and attribution."""
+
+    reaps_before_preparation = True
+
+    @override
+    def prepare_member(
+        self,
+        manager: ChatSandboxManager,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        batch: MemberPreparation,
+    ) -> None:
+        prepare_member_state(manager, spec, launch, batch)
+
+    @override
+    def install_plugins(
+        self,
+        manager: ChatSandboxManager,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        *,
+        state_dir: str,
+        env: dict[str, str],
+    ) -> dict[str, str]:
+        install_claude_plugins(
+            manager,
+            spec,
+            launch.plugins,
+            config_dir=claude_member_config_dir(launch.slot_id, launch.thread_id),
+            env=env,
+            slot_id=launch.slot_id,
+        )
+        return {}
+
+    @override
+    def platform_instructions(self, launch: ResidentLaunch) -> str:
+        # Claude Code adds the trailer itself (``claude_attribution``); asked
+        # to as well, it would write it twice.
+        return platform_instructions(launch, coauthor_trailer=False)
+
+    @override
+    def place_instructions(
+        self, argv: list[str], env: dict[str, str], instructions: str
+    ) -> tuple[list[str], dict[str, str]]:
+        return append_system_prompt(argv, env, instructions)
+
+    @override
+    def tool_hook_settings(self, launch: ResidentLaunch) -> dict[str, dict[str, str]]:
+        # Claude's own commit attribution names the platform's co-author.
+        return claude_attribution(launch)
+
+    @override
+    def config_dir(self, launch: ResidentLaunch) -> str | None:
+        return claude_member_config_dir(launch.slot_id, launch.thread_id)
+
+
+def claude_attribution(launch: ResidentLaunch) -> dict[str, dict[str, str]]:
+    """Claude Code's own attribution settings, naming the platform's co-author.
+
+    Claude Code adds its attribution to the commits and pull requests it
+    writes; here the co-author is the deployment's, and the pull request
+    description carries none. Empty without a co-author: Claude's defaults stand.
+    """
+    if not launch.git_coauthor:
+        return {}
+    return {"attribution": {"commit": f"Co-Authored-By: {launch.git_coauthor}", "pr": ""}}
 
 
 def prepare_member_state(
@@ -133,3 +208,7 @@ def fork_session(
     if not isinstance(receipt, dict) or receipt.get("source_session_id") != source_id:
         raise DriverError("Claude native fork returned the wrong source session")
     return str(receipt.get("session_id") or "")
+
+
+#: Claude Code's steps in a member's launch.
+LAUNCH = ClaudeMember()

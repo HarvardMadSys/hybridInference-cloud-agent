@@ -8,8 +8,8 @@ launch's own identity fields and its slot
 **Preparation order** is :data:`PREPARE_ORDER`. The browser service comes
 first, for every runtime. Sandbox MCP admission follows, and starts the
 gateway before the slot's runner, as the sandbox MCP design requires. The
-runtime's own helpers (``None`` in the table) depend on the CLI, so the
-transport factory installs them; the compatibility helper comes last.
+runtime's own helpers (:class:`RuntimeFacet`) depend on the CLI, so its
+package installs them; the compatibility helper comes last.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from cloud_agent_host.launch.github_relay import GitHubRelayFacet
 from cloud_agent_host.launch.inference import InferenceFacet
 from cloud_agent_host.launch.mcp_relay import McpRelayFacet
 from cloud_agent_host.launch.plugins import PluginsFacet
+from cloud_agent_host.launch.runtime import RuntimeFacet
 from cloud_agent_host.launch.sandbox_mcp import SandboxMcpFacet
 
 if TYPE_CHECKING:
@@ -29,11 +30,10 @@ if TYPE_CHECKING:
     from cloud_agent_host.resident_transport import ResidentLaunch
 
 #: The trusted steps before a member's first spawn, in the order they run.
-#: ``None`` is the runtime's own helpers, which the transport factory installs.
-PREPARE_ORDER: tuple[type[LaunchFacet] | None, ...] = (
+PREPARE_ORDER: tuple[type[LaunchFacet], ...] = (
     BrowserFacet,
     SandboxMcpFacet,
-    None,
+    RuntimeFacet,
     InferenceFacet,
 )
 
@@ -71,6 +71,12 @@ def launch_facets(launch: ResidentLaunch) -> tuple[LaunchFacet, ...]:
         ),
         EnvironmentFacet(environment=launch.environment, slot_id=launch.slot_id),
         BrowserFacet(),
+        RuntimeFacet(
+            runtime_id=launch.runtime_id,
+            runtime_version=launch.runtime_version,
+            mcp_server_ids=launch.mcp_server_ids,
+            mcp_base_url=launch.mcp_base_url,
+        ),
     )
 
 
