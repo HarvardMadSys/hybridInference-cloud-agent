@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from cloud_agent.accounts.config import RETIRED_GATEWAY_VARIABLES
 from cloud_agent.app import lifespan
 from cloud_agent.bootstrap import lifespan as lifespan_module
-from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
+from cloud_agent.measurement.measurement_writer import MeasurementWriter, reset_writer
 from cloud_agent.settings import reset_settings
 from cloud_agent.source_control_runtime import SourceControlRuntime
 
@@ -284,7 +284,7 @@ def _prepare(
             events.append("reset_writer")
         real_reset_writer(writer)
 
-    monkeypatch.setattr("cloud_agent.measurement_writer.reset_writer", spy_reset_writer)
+    monkeypatch.setattr("cloud_agent.measurement.measurement_writer.reset_writer", spy_reset_writer)
 
     real_shutdown = MeasurementWriter.shutdown
 
@@ -461,7 +461,10 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "listen": ("cloud_agent.bootstrap.lifespan.listen", _boom(stage)),
         "mcp_maintenance": ("cloud_agent.mcp.runtime.maintain_host_sessions", _boom(stage)),
         "mcp_decision_signal": ("cloud_agent.bootstrap.lifespan.McpDecisionSignal", _boom(stage)),
-        "measurement_writer": ("cloud_agent.measurement_writer.MeasurementWriter", _boom(stage)),
+        "measurement_writer": (
+            "cloud_agent.measurement.measurement_writer.MeasurementWriter",
+            _boom(stage),
+        ),
     }
     target, replacement = injections[stage]
     monkeypatch.setattr(target, replacement)

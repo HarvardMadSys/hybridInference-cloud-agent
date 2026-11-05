@@ -181,7 +181,8 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     operation_profiling.reset_cache()
     operation_profiling.reset_policy()
 
-    from cloud_agent import operation_measurement, sandbox_manager_routing
+    from cloud_agent import sandbox_manager_routing
+    from cloud_agent.measurement import operation_measurement
     from cloud_agent_host import runner as runner_mod
 
     operation_measurement.reset()
@@ -265,7 +266,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
         await asyncio.wait_for(sandbox_manager_task, timeout=10)
         server.should_exit = True
         await asyncio.wait_for(task, timeout=10)
-        from cloud_agent import measurement_writer
+        from cloud_agent.measurement import measurement_writer
 
         measurement_writer.reset_writer(None)
         await _reset(pool)
@@ -535,7 +536,10 @@ async def test_a_measurement_open_when_the_switch_flips_still_lands(
     from tests.integration.servers.test_measurement_acceptance_db import _await_row
 
     from cloud_agent.api._operation_measurements import record_measurement
-    from cloud_agent.operation_measurement import operation as measured_operation, root_scope
+    from cloud_agent.measurement.operation_measurement import (
+        operation as measured_operation,
+        root_scope,
+    )
 
     chain = control_chain
     job = await chain.store.conversation_queries.get_job(chain.job_id)

@@ -26,9 +26,9 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
-from cloud_agent import measurement_writer
 from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.measurement import measurement_writer
 
 logger = get_logger(__name__)
 

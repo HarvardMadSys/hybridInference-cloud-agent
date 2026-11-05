@@ -24,7 +24,6 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
-from cloud_agent import measurement_writer
 from cloud_agent.api._local_auth import terminal_open_fence
 from cloud_agent.api._operation_measurements import (
     FILE_READ_STAGE,
@@ -51,7 +50,8 @@ from cloud_agent.api.deps import get_agent_app_credentials, get_storage, require
 from cloud_agent.api.threads import _SSE_HEADERS
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.operation_measurement import (
+from cloud_agent.measurement import measurement_writer
+from cloud_agent.measurement.operation_measurement import (
     FILE_CANDIDATES,
     FILES_LIST,
     ROUTE_FILES,

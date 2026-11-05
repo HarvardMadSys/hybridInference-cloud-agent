@@ -58,8 +58,8 @@ from cloud_agent.goals.report import (
 )
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.measurement_ingest import Owner
-from cloud_agent.measurement_persistence import persist_measurement
+from cloud_agent.measurement.measurement_ingest import Owner
+from cloud_agent.measurement.measurement_persistence import persist_measurement
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import (
     ENV_SANDBOX_MANAGER_TOKEN,

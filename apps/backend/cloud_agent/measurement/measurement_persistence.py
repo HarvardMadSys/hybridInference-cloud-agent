@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.measurement_ingest import (
+from cloud_agent.measurement.measurement_ingest import (
     MeasurementRejected,
     require_record_matches_its_experiment,
     validate_measurement,
@@ -30,7 +30,7 @@ from cloud_agent_shared.operation_profiling import manifest_for_run as _manifest
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from cloud_agent.measurement_ingest import Owner
+    from cloud_agent.measurement.measurement_ingest import Owner
     from cloud_agent.ports.operation_measurements import (
         MeasurementWriteResult,
         OperationMeasurements,
