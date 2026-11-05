@@ -19,6 +19,7 @@ from cloud_agent.capacity_protocol import (
     history_point_write_from_block,
 )
 from cloud_agent.domain.runtimes import KIND_SELECTION, KIND_UPDATE
+from cloud_agent.domain.sandbox_group import DeletionState, GroupState
 from cloud_agent.execution_profiles import KATA_RUNTIME
 from cloud_agent.host_pool import (
     HOST_DISABLED,
@@ -1264,10 +1265,10 @@ class PostgresHostPoolRepository:
                 """
             )
             owner_rows = await conn.fetch(
-                """
+                f"""
                 SELECT DISTINCT host
                 FROM agent_sandboxes
-                WHERE state <> 'lost'
+                WHERE state <> {GroupState.LOST.sql}
                 """
             )
         active = None if policy is None else policy["active_host"]
@@ -1334,7 +1335,7 @@ class PostgresHostPoolRepository:
                 SELECT {HOST_COLUMNS}, {HOST_CAPACITY_COLUMNS}, n.allocation_id,
                        (am.allocation_id IS NOT NULL) AS autoscaler_owned,
                        (SELECT COUNT(*) FROM agent_sandboxes g
-                        WHERE g.host=h.host AND g.deletion_state<>'deleted')
+                        WHERE g.host=h.host AND g.deletion_state<>{DeletionState.DELETED.sql})
                            AS retained_groups
                 FROM agent_runner_hosts h
                 LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -1501,7 +1502,7 @@ class PostgresHostPoolRepository:
                 f"""
                 WITH waiting AS (
                     SELECT g.host AS owner, t.execution_profile,
-                           COALESCE(g.state = 'cold', FALSE) AS cold,
+                           COALESCE(g.state = {GroupState.COLD.sql}, FALSE) AS cold,
                            g.container_id IS NULL AS uncontained,
                            COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
                     FROM agent_jobs j

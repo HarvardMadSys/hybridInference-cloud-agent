@@ -25,6 +25,7 @@ from cloud_agent.domain.execution import (
 )
 from cloud_agent.domain.pending_messages import QUEUE_PAUSED_STOPPED
 from cloud_agent.domain.runtimes import resolve_runtime_version
+from cloud_agent.domain.sandbox_group import GroupState
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
     ExecutionProfile,
@@ -314,7 +315,8 @@ class PostgresAttemptCommands:
                             AND s.context_status <> 'lost'
                             AND s.native_state <> 'lost'
                             AND s.state IN (
-                                'provisioning', 'starting', 'running', 'stopped'
+                                {GroupState.PROVISIONING.sql}, {GroupState.STARTING.sql},
+                                {GroupState.RUNNING.sql}, {GroupState.STOPPED.sql}
                             )
                             AND s.shared_live
                         )
@@ -328,7 +330,7 @@ class PostgresAttemptCommands:
                             -- stable name. A failed restore has no container
                             -- and may be retried where it ran, after the wait
                             -- that follows each failed try.
-                            s.state = 'cold'
+                            s.state = {GroupState.COLD.sql}
                             AND (s.container_id IS NULL OR s.host IS DISTINCT FROM $2)
                             AND $7::boolean
                             AND $6::boolean
@@ -350,7 +352,7 @@ class PostgresAttemptCommands:
                             -- host may take it, and the claim below hands it
                             -- over and rehomes it. Until then it stays, so a
                             -- Host that returns continues with it.
-                            s.state = 'stopped'
+                            s.state = {GroupState.STOPPED.sql}
                             AND s.host IS DISTINCT FROM $2
                             AND $7::boolean
                             AND $6::boolean
@@ -395,8 +397,9 @@ class PostgresAttemptCommands:
                 # is locked for the rehome below, so of two siblings claiming
                 # it only the first moves it.
                 claimable = await conn.fetchval(
-                    "SELECT (state IN ('provisioning', 'starting', 'running', 'stopped') "
-                    "OR ($2 AND state = 'cold' AND restore_checkpoint_id IS NOT NULL AND "
+                    f"SELECT (state IN ({GroupState.PROVISIONING.sql}, {GroupState.STARTING.sql}, "
+                    f"{GroupState.RUNNING.sql}, {GroupState.STOPPED.sql}) "
+                    f"OR ($2 AND state = {GroupState.COLD.sql} AND restore_checkpoint_id IS NOT NULL AND "
                     f"{restore_claim_due('restore_attempts', 'last_activity_at')})) "
                     "AND stop_requested_at IS NULL "
                     f"AND deletion_state NOT IN {DELETED_GROUP_STATES_SQL} "
@@ -469,12 +472,12 @@ class PostgresAttemptCommands:
                 # source. Anything the previous host still holds names the old
                 # generation and is refused from here on.
                 await conn.execute(
-                    """
+                    f"""
                     UPDATE agent_sandboxes
-                    SET state = 'restoring', host = $2, generation = generation + 1,
+                    SET state = {GroupState.RESTORING.sql}, host = $2, generation = generation + 1,
                         container_id = NULL, restore_attempts = restore_attempts + 1,
                         idle_deadline = NULL, last_error = NULL, updated_at = NOW()
-                    WHERE id = $1 AND state = 'cold'
+                    WHERE id = $1 AND state = {GroupState.COLD.sql}
                     """,
                     thread_sandbox["sandbox_id"],
                     host,
@@ -1019,11 +1022,11 @@ class PostgresAttemptCommands:
                             f"""
                             UPDATE agent_sandboxes g
                             SET state = CASE
-                                    WHEN $3 AND g.container_id IS NULL THEN 'lost'
-                                    WHEN $2 THEN 'running'
-                                    WHEN g.active_operation_count > 0 OR {member_turn_running("g")} THEN 'running'
-                                    WHEN {group_has_live_peer("g", excluding="$4")} THEN 'running'
-                                    ELSE 'stopping'
+                                    WHEN $3 AND g.container_id IS NULL THEN {GroupState.LOST.sql}
+                                    WHEN $2 THEN {GroupState.RUNNING.sql}
+                                    WHEN g.active_operation_count > 0 OR {member_turn_running("g")} THEN {GroupState.RUNNING.sql}
+                                    WHEN {group_has_live_peer("g", excluding="$4")} THEN {GroupState.RUNNING.sql}
+                                    ELSE {GroupState.STOPPING.sql}
                                 END,
                                 last_activity_at = NOW(),
                                 idle_deadline = CASE
@@ -1753,10 +1756,10 @@ class PostgresAttemptCommands:
                     f"""
                     UPDATE agent_sandboxes g
                     SET state = CASE
-                            WHEN g.container_id IS NULL THEN 'lost'
-                            WHEN g.active_operation_count > 0 OR {member_turn_running("g")} THEN 'running'
-                            WHEN {group_has_live_peer("g")} THEN 'running'
-                            ELSE 'stopping'
+                            WHEN g.container_id IS NULL THEN {GroupState.LOST.sql}
+                            WHEN g.active_operation_count > 0 OR {member_turn_running("g")} THEN {GroupState.RUNNING.sql}
+                            WHEN {group_has_live_peer("g")} THEN {GroupState.RUNNING.sql}
+                            ELSE {GroupState.STOPPING.sql}
                         END,
                         last_activity_at = NOW(),
                         idle_deadline = CASE

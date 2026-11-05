@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.admin_observability import encode_cursor
+from cloud_agent.domain.sandbox_group import DeletionState, GroupState, sql_list
 from cloud_agent.owner_usage import (
     ACTIVE_STATES,
     CONTAINER_CURSOR_SCOPE,
@@ -39,9 +40,9 @@ if TYPE_CHECKING:
 #: and holding at least one chat they have not deleted. A chat belongs to the
 #: container its membership names; an origin chat without a membership row
 #: belongs to the container it started.
-_VISIBLE = """
+_VISIBLE = f"""
     g.user_id = $1
-    AND g.deletion_state <> 'deleted'
+    AND g.deletion_state <> {DeletionState.DELETED.sql}
     AND (
         EXISTS (
             SELECT 1
@@ -73,7 +74,8 @@ _COUNTS_SQL = f"""
 _RUNNING_SQL = f"""
     SELECT g.resource_snapshot, g.resource_sampled_at
     FROM agent_sandboxes g
-    WHERE {_VISIBLE} AND g.state = 'running' AND g.deletion_state NOT IN ('pending', 'archived')
+    WHERE {_VISIBLE} AND g.state = {GroupState.RUNNING.sql}
+      AND g.deletion_state NOT IN {sql_list(DeletionState.PENDING, DeletionState.ARCHIVED)}
     LIMIT {MAX_SUMMED_CONTAINERS}
 """
 
