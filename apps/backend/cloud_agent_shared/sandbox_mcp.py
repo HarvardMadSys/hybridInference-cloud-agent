@@ -24,9 +24,11 @@ alone (``cloud_agent_host.sandbox_mcp``).
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from cloud_agent_shared.secret_redaction import MASKED
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -76,7 +78,7 @@ class SandboxMcpServer(BaseModel):
     env: dict[str, str] = Field(default_factory=dict, max_length=MAX_SANDBOX_MCP_ENV)
     #: The values of ``env``'s ``secret://NAME`` entries. Never in a repr, and
     #: never in the gateway's admission.
-    secret_env: dict[str, str] = Field(
+    secret_env: Annotated[dict[str, str], MASKED] = Field(
         default_factory=dict, max_length=MAX_SANDBOX_MCP_ENV, repr=False
     )
 
@@ -126,6 +128,10 @@ class SandboxMcpServer(BaseModel):
             "args": list(self.args),
             "env": dict(sorted(self.env.items())),
         }
+
+    def secrets(self) -> dict[str, str]:
+        """This server's own keys by name, for the output redactor."""
+        return {f"sandbox-mcp:{self.alias}:{name}": value for name, value in self.secret_env.items()}
 
     def runner_secrets(self, environment: Mapping[str, str]) -> dict[str, str]:
         """The values only the slot's runner gets: its keys, and referenced environment.

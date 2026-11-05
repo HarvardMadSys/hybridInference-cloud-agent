@@ -94,7 +94,8 @@ class ClaimedJob:
     # rather than directly.
     mcp_bindings: list[str] = field(default_factory=list)
     # MCP servers the user chose to run inside the sandbox, with their launch
-    # (cloud_agent_shared.sandbox_mcp). No secret: those stay remote.
+    # (cloud_agent_shared.sandbox_mcp). Their own keys ride in ``secret_env``
+    # for the slot's runner, and are masked like every marked claim field.
     sandbox_mcp_servers: tuple[SandboxMcpServer, ...] = ()
     # The CLI version the control plane stamped on this attempt, resolved from
     # the thread's pin, the deployment's selection, or this host's default.

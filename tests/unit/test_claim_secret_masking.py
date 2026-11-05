@@ -93,6 +93,15 @@ _FULL = replace(
     model_connection=_TRANSLATED,
     sandbox_mcp_servers=(SandboxMcpServer(alias="docs", command="npx", args=("pkg",)),),
 )
+#: :data:`_FULL` with a program's own key as well, which the old hand list missed.
+_PROGRAM = SandboxMcpServer(
+    alias="search",
+    command="npx",
+    args=("pkg@1.2.3",),
+    env={"API_KEY": "secret://API_KEY", "REGION": "eu"},
+    secret_env={"API_KEY": "program-sealed-api-key-value"},
+)
+_WITH_PROGRAM_KEY = replace(_FULL, sandbox_mcp_servers=(*_FULL.sandbox_mcp_servers, _PROGRAM))
 
 
 def _hand_assembled(job: ClaimedJob) -> dict[str, str]:
@@ -165,22 +174,24 @@ def test_the_marked_fields_are_the_claims_sandbox_credentials():
         (SshServerAccess, "private_key"),
         (ModelConnectionAccess, "api_key"),
         (ModelConnectionAccess, "local_token"),
+        (SandboxMcpServer, "secret_env"),
     }
 
 
 def test_a_marked_field_never_shows_in_a_repr():
     for model, name in _marked_fields():
         assert model.model_fields[name].repr is False, (model.__name__, name)
-    shown = repr(_FULL) + repr(_ENVIRONMENT) + repr(_SSH) + repr(_TRANSLATED)
-    for _, _, secret in _claim_values(_FULL):
+    shown = repr(_WITH_PROGRAM_KEY) + repr(_ENVIRONMENT) + repr(_SSH) + repr(_TRANSLATED)
+    shown += repr(_PROGRAM)
+    for _, _, secret in _claim_values(_WITH_PROGRAM_KEY):
         assert secret not in shown
 
 
 def test_every_marked_value_in_a_claim_is_masked():
-    found = list(_claim_values(_FULL))
+    found = list(_claim_values(_WITH_PROGRAM_KEY))
     # The representative claim fills every marked field, so none passes unseen.
     assert {(model, name) for model, name, _ in found} == _marked_fields()
-    masked = set(claim_secret_values(_FULL).values())
+    masked = set(claim_secret_values(_WITH_PROGRAM_KEY).values())
     missing = [(model.__name__, name) for model, name, secret in found if secret not in masked]
     assert missing == []
 
@@ -222,3 +233,15 @@ def test_runner_only_tokens_and_plain_variables_stay_unmasked():
         "eu-west-1-plain",
     ):
         assert value not in masked
+
+
+def test_a_programs_own_key_is_masked_under_its_server():
+    """#1104 decrypts a program's sealed keys into the claim; output must not show them."""
+    values = claim_secret_values(_WITH_PROGRAM_KEY)
+    assert values["sandbox-mcp:search:API_KEY"] == "program-sealed-api-key-value"
+    assert list(values)[: len(claim_secret_values(_FULL))] == list(claim_secret_values(_FULL))
+    redacted = SecretRedactor(values).text("key=program-sealed-api-key-value")
+    assert redacted == "key=[secret:sandbox-mcp:search:API_KEY]"
+    # A plain env value and a secret:// reference are configuration, not secrets.
+    assert "eu" not in values.values() and "secret://API_KEY" not in values.values()
+
