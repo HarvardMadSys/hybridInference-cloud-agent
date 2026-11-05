@@ -1,6 +1,6 @@
 """One conversation's context, assembled from its attempts' stored profiles.
 
-:mod:`cloud_agent.context_profile` reduces each attempt; this module puts a
+:mod:`cloud_agent.context.context_profile` reduces each attempt; this module puts a
 conversation's attempts in order and answers the questions the Context view
 asks: how large the context was at each request, how it grew between turns,
 when the CLI compacted it, which changes were largest, and what the stored
@@ -17,23 +17,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.context_dashboard import (  # Pydantic resolves the models.
+from cloud_agent.context.context_dashboard import (  # Pydantic resolves the models.
     CategoryCarry,
     SessionTokens,
     session_tokens,
     step_durations,
 )
-from cloud_agent.context_events import (  # Pydantic resolves the models.
+from cloud_agent.context.context_events import (  # Pydantic resolves the models.
     ContextEvent,
     EventCapability,
     assemble_context_events,
     event_capabilities,
 )
-from cloud_agent.context_profile import (
+from cloud_agent.context.context_profile import (
     POINT_FIELDS,
     profile_is_current,
 )
-from cloud_agent.context_running import POINT_CATEGORIES
+from cloud_agent.context.context_running import POINT_CATEGORIES
 
 #: Request points one conversation's view returns. A longer conversation keeps
 #: its latest points and says how many earlier ones it left out; its peak,
@@ -220,7 +220,7 @@ class ThreadContextView(BaseModel):
     largest_changes: list[ContextChange]
     coverage: ContextCoverage
     #: Injections, compactions, prunes, model switches and mode changes, in
-    #: conversation order (``cloud_agent.context_events``), with every kind's
+    #: conversation order (``cloud_agent.context.context_events``), with every kind's
     #: count, what was left out of the list, and what each runtime can show.
     #: The order of every point's ``categories``.
     category_keys: list[str] = Field(default_factory=lambda: list(POINT_CATEGORIES))

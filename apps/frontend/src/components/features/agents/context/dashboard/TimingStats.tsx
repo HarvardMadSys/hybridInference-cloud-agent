@@ -4,7 +4,7 @@
 // time in the centre and a strip of the time in order. Layout adapted from
 // bowenliang123/dsh-context `statsTiming.tsx` and `timingStrip.tsx`
 // (Apache-2.0, commit 32982aa6aa2c70fbda6b81281de98a72ea625001). The numbers
-// come from `GET …/thread/context/timing` (see `cloud_agent.context_timing`):
+// come from `GET …/thread/context/timing` (see `cloud_agent.context.context_timing`):
 // TTFT and generation as the Gateway measured them, Claude Code's streamed
 // block times inside generation, tool windows from the event ledger, and the
 // rest of each execution as "not attributed". A split that was not measured is

@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
-from cloud_agent.context_running import (
+from cloud_agent.context.context_running import (
     POINT_CATEGORIES,
     RunningContent,
     RunningTiming,
@@ -306,7 +306,7 @@ class ContextProfileAccumulator:
         self._blocks = {"reasoning": [0, 0], "text": [0, 0], "toolarg": [0, 0]}
         #: The main agent's last call was ``Skill``: injected text is its body.
         self._after_skill = False
-        #: Context events found so far (see ``cloud_agent.context_events``).
+        #: Context events found so far (see ``cloud_agent.context.context_events``).
         self._events: list[dict[str, Any]] = []
         self._events_seen = 0
         #: The CLI's own context snapshots of this attempt, without entries.
@@ -837,7 +837,7 @@ class ContextProfileAccumulator:
                 },
                 "truncated": self.truncated,
             },
-            # What the next turn starts from (``cloud_agent.context_dashboard``).
+            # What the next turn starts from (``cloud_agent.context.context_dashboard``).
             "content_tail": {
                 "categories": dict(zip(POINT_CATEGORIES, self._running.local, strict=True)),
                 "compacted": self._running.compacted,

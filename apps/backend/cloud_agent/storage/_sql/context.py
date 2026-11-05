@@ -5,7 +5,7 @@ characters of conversation content an event holds, never the content itself.
 This projection is computed in Postgres so a tool result that carried a whole
 file moves as its length. Raw protocol rows are passed on only when they are
 one of the few kinds that carry context evidence (see
-:mod:`cloud_agent.context_profile`); every other raw row moves as nothing.
+:mod:`cloud_agent.context.context_profile`); every other raw row moves as nothing.
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ jsonb_strip_nulls(jsonb_build_object(
     'text_chars', CASE WHEN e.event_type = 'lifecycle'
                        THEN length({_COUNTED_TEXT_SQL.strip()}) END,
     'truncated', {_TRUNCATED_SQL.strip()},
-    -- Context events (cloud_agent.context_events): what the platform wrapped
+    -- Context events (cloud_agent.context.context_events): what the platform wrapped
     -- the prompt in at claim, what the CLI injected or pruned, the mode it
     -- started in, and the plan-mode tools. Sizes and names, never content.
     'context_injections', CASE WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'started'
@@ -155,7 +155,7 @@ jsonb_strip_nulls(jsonb_build_object(
     'tool_name', CASE WHEN e.event_type = 'tool_use'
                            AND e.payload->>'name' IN ('EnterPlanMode', 'ExitPlanMode', 'Skill')
                       THEN e.payload->'name' END,
-    -- Timing (cloud_agent.context_running): a call's id and its result's
+    -- Timing (cloud_agent.context.context_running): a call's id and its result's
     -- reference pair them; a Claude block's streaming duration on the host.
     'tool_id', CASE e.event_type WHEN 'tool_use' THEN e.payload->'id'
                                  WHEN 'tool_result' THEN e.payload->'tool_use_id' END,

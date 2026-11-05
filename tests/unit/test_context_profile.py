@@ -10,13 +10,13 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from cloud_agent.context_profile import (
+from cloud_agent.context.context_profile import (
     CONTEXT_PROFILE_VERSION,
     MAX_ATTEMPT_POINTS,
     ContextProfileAccumulator,
     estimate_tokens,
 )
-from cloud_agent.context_view import assemble_thread_context
+from cloud_agent.context.context_view import assemble_thread_context
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
 

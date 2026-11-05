@@ -5,7 +5,7 @@ commit 32982aa6aa2c70fbda6b81281de98a72ea625001): a request is drawn as the
 stacked items it carries, keyed so two requests can be compared item by
 item. There every item is one the Harness assembled. Here the items are the
 stored content the reconstruction assigns to the request (the selection of
-:func:`cloud_agent.context_request.walk_composition`, by the same helpers,
+:func:`cloud_agent.context.context_request.walk_composition`, by the same helpers,
 without building a composition entry per item): turn prompts and
 stored events, each a recorded estimate, keyed by the stored event's id (a
 prompt by its turn). CLI system prompts and tool schemas are not items.
@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.context_request import RequestScope, event_category, row_reason, row_tokens
+from cloud_agent.context.context_request import RequestScope, event_category, row_reason, row_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from cloud_agent.context_request import LocatedRequest
+    from cloud_agent.context.context_request import LocatedRequest
 
 #: Requests one DNA read covers.
 MAX_DNA_REQUESTS = 60

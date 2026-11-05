@@ -16,7 +16,7 @@ Five kinds, each only where a record says so (design record, section 7.2):
   another permission mode than the previous one.
 
 Everything is read from the attempt profiles the Context view already reads
-(:mod:`cloud_agent.context_profile`), so this costs no read of its own. Sizes
+(:mod:`cloud_agent.context.context_profile`), so this costs no read of its own. Sizes
 are only shown where they are recorded: a CLI's compaction sizes as the CLI's,
 character counts as estimates. A token rise or drop on its own is never an
 event, and a clipped stored preview is not a prune.
@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.context_profile import profile_is_current
+from cloud_agent.context.context_profile import profile_is_current
 
 EventKind = Literal["injection", "compaction", "prune", "model_switch", "mode"]
 EVENT_KINDS: tuple[EventKind, ...] = ("injection", "compaction", "prune", "model_switch", "mode")
