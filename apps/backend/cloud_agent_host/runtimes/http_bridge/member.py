@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, override
 
 from cloud_agent_host.chat_sandbox import MEMBER_UID_BASE
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.member_homes import (
+from cloud_agent_host.member_setup.member_homes import (
     PRIVATE_MEMBER_HOME_PROLOGUE,
     legacy_member_state_dir,
     member_state_dir,
 )
-from cloud_agent_host.other_plugins import install_other_runtime_plugins
+from cloud_agent_host.member_setup.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.runtimes.http_bridge.kilo_mcp import KILO_MCP_VERSION
 from cloud_agent_host.runtimes.member_launch import MemberLaunch
 

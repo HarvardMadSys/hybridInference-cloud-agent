@@ -109,8 +109,12 @@ from cloud_agent_host.chat_sandbox_network import (
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.exact_container import ExactContainer
 from cloud_agent_host.guest_root_exec import GuestRootExec
-from cloud_agent_host.install_locks import install_lock
-from cloud_agent_host.member_preparation import TOOL_HOOKS_SCRIPT, MemberStep, run_member_steps
+from cloud_agent_host.member_setup.install_locks import install_lock
+from cloud_agent_host.member_setup.member_preparation import (
+    TOOL_HOOKS_SCRIPT,
+    MemberStep,
+    run_member_steps,
+)
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_BINARY,
@@ -156,7 +160,7 @@ if TYPE_CHECKING:
 
     from _typeshed import SupportsWrite
 
-    from cloud_agent_host.member_preparation import MemberPreparation
+    from cloud_agent_host.member_setup.member_preparation import MemberPreparation
 
 #: A probe older than this was abandoned; the next namespace probe removes it.
 PROBE_ABANDONED_AFTER_S = 3600
@@ -1565,13 +1569,13 @@ class ChatSandboxManager(GuestRootExec):
 
     def ensure_downloaded_runtime(self, spec: ChatSandboxSpec, runtime: str, version: str) -> None:
         """Copy a version downloaded after the image was built into this chat."""
-        from cloud_agent_host.runtime_install import ensure_downloaded_runtime_once
+        from cloud_agent_host.member_setup.runtime_install import ensure_downloaded_runtime_once
 
         ensure_downloaded_runtime_once(self, spec, runtime, version)
 
     def ensure_mcp_helpers(self, spec: ChatSandboxSpec, runtime: str) -> None:
         """Keep existing conversations on the same adapters as new conversations."""
-        from cloud_agent_host.mcp_helpers import install_mcp_helpers_once
+        from cloud_agent_host.member_setup.mcp_helpers import install_mcp_helpers_once
 
         install_mcp_helpers_once(self, spec, runtime)
 

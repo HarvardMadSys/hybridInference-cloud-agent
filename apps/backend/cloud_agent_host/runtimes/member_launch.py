@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_host.launch.facet import PrepareContext
     from cloud_agent_host.launch.runtime import RuntimeFacet
-    from cloud_agent_host.member_preparation import MemberPreparation
+    from cloud_agent_host.member_setup.member_preparation import MemberPreparation
     from cloud_agent_host.resident_transport import ResidentLaunch
 
 

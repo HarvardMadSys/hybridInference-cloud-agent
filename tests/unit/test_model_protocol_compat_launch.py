@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host.claimed_job import ClaimedJob, claim_secret_values
-from cloud_agent_host.compat_helper import (
+from cloud_agent_host.member_setup.compat_helper import (
     HELPER_PATH,
     LAUNCHER,
     compat_token_env,

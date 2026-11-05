@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
 
-from cloud_agent_host.compat_helper import compat_token_env, install_compat_helper
 from cloud_agent_host.launch.facet import LaunchFacet
+from cloud_agent_host.member_setup.compat_helper import compat_token_env, install_compat_helper
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

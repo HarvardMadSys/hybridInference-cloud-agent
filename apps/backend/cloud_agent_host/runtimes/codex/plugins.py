@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.plugins import member_installer, run_plugin_command
+from cloud_agent_host.member_setup.plugins import member_installer, run_plugin_command
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec

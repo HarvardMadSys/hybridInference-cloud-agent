@@ -25,13 +25,13 @@ import secrets
 from typing import TYPE_CHECKING
 
 from cloud_agent_host.chat_sandbox_exec import install_once
+from cloud_agent_host.member_setup.tree_copy import has_root_marker, staged_tree
 from cloud_agent_host.runtime_images import (
     discover,
     image_id,
     short_id,
 )
 from cloud_agent_host.sandbox import runtime_bin_dir
-from cloud_agent_host.tree_copy import has_root_marker, staged_tree
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 

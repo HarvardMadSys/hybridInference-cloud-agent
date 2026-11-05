@@ -26,7 +26,7 @@ from cloud_agent_host.chat_sandbox import (
 from cloud_agent_host.chat_sandbox_inspect import container_inspection
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.control_plane_client import ControlPlane
-from cloud_agent_host.install_locks import install_lock
+from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_shared import shared_protocol
