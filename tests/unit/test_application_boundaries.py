@@ -68,6 +68,27 @@ def test_domain_and_ports_do_not_import_storage_or_http_frameworks(layer: str) -
     assert not offenders, f"{layer} imports an adapter or framework: {offenders}"
 
 
+#: How many modules sit directly in ``cloud_agent/``, ``__init__`` aside. The top
+#: level keeps the listeners (``app``), settings (``settings``,
+#: ``setting_definition``), ``logging_utils`` and ``tokens``; every other module
+#: belongs to a layer or a feature package. ``task_titles`` is the one still
+#: flat: its only caller is a repository and it reads a setting at call time.
+#: The count only goes down: lower it when a module leaves the top level.
+TOP_LEVEL_MODULES = 6
+
+
+def test_the_top_level_only_shrinks() -> None:
+    """A new control-plane module goes into a layer or a feature package."""
+    modules = sorted(path.stem for path in CONTROL.glob("*.py") if path.name != "__init__.py")
+    assert len(modules) <= TOP_LEVEL_MODULES, (
+        f"a new module directly in cloud_agent/ ({len(modules)} > {TOP_LEVEL_MODULES}); "
+        f"put it in a layer or a feature package: {modules}"
+    )
+    assert len(modules) == TOP_LEVEL_MODULES, (
+        f"the top level shrank to {len(modules)}; lower TOP_LEVEL_MODULES to match: {modules}"
+    )
+
+
 #: What a port may name besides the standard library and third-party packages:
 #: vocabulary, wire models, shared contracts and other ports.
 PORT_DEPENDENCIES = (
