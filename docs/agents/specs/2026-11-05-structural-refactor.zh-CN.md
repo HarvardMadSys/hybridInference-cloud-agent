@@ -834,7 +834,7 @@ class DeliveredCredential(BaseModel):
 
 ### 13.2 先写设计、评审后再排期
 
-下面这些不在本文里给出实现设计。每一项都要先写 spec，评审通过后才排期。
+下面这些不在本文里给出实现设计。每一项都要先写 spec，评审通过后才排期。A2 的 spec 是 [group 生命周期状态](2026-11-05-group-lifecycle-state.zh-CN.md)，10.0 和 E 的其余各项合在 [host 协议 v2](2026-11-05-host-protocol-v2.zh-CN.md) 里。
 
 - **10.0 混合版本测试**：是 E 里所有改动的前提。它本身不改协议，可以先做。
 - **A2**：换掉 host group 状态的底层表示（5.1）。
