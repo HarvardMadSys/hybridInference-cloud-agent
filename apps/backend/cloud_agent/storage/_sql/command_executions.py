@@ -130,7 +130,7 @@ CALLS_SQL = f"""
 """
 
 #: Claude Code records a native tool's structured outcome outside the content
-#: block (``runtimes/claude.py::_from_user``): a background launch names its
+#: block (``runtimes/claude/adapter.py::_from_user``): a background launch names its
 #: shell id, an exit, or an interrupted run. Only these small scalars are
 #: projected — never the whole object, whose stdout/stderr can be megabytes and
 #: whose truncation would produce invalid JSON and lose the exit status.

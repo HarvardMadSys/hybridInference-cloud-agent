@@ -759,7 +759,9 @@ check_shared_live_stack() {
       docker exec "$id" python -c '
 try:
     from cloud_agent_host.host_capabilities import _shared_live_host_capabilities as capabilities
-except ImportError:  # COMPAT(remove-after=2026-12-31): every runner image ships host_capabilities
+except ModuleNotFoundError as missing:  # COMPAT(remove-after=2026-12-31): every runner image ships host_capabilities
+    if missing.name != "cloud_agent_host.host_capabilities":
+        raise
     from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities
 from cloud_agent_host.sandbox import build_backend_from_env
 backend = build_backend_from_env()
