@@ -31,6 +31,9 @@ from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.read_receipts import merge_read_receipts
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import lock_memberships
+from cloud_agent.storage._sql.sandbox_transitions import (
+    RELEASE_THREADS_RESIDENCIES_SQL,
+)
 from cloud_agent.storage._sql.ssh import enable_ssh_servers
 from cloud_agent.storage.repositories.environments import bind_environment
 from cloud_agent.storage.repositories.goals import new_goal_id
@@ -437,15 +440,7 @@ class PostgresConversationCommands:
             # them: the update's plan picks its own order.
             await lock_memberships(conn, thread_ids)
             released = await conn.fetch(
-                """
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_status = 'none', residency_last_active_at = NOW()
-                FROM agent_sandboxes g
-                WHERE m.thread_id = ANY($1::text[]) AND m.residency_status <> 'none'
-                  AND g.id = m.sandbox_id
-                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
-                          COALESCE(m.residency_grant_id, '') AS grant_id
-                """,
+                RELEASE_THREADS_RESIDENCIES_SQL,
                 thread_ids,
             )
             # Uploaded bytes are removed outright, not soft-deleted with the

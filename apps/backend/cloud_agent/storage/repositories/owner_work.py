@@ -25,6 +25,9 @@ from cloud_agent.domain.sandbox_group import GroupState, sql_list
 from cloud_agent.storage._sql.goals import PAUSE_GOALS_SQL
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.sandbox import lock_memberships
+from cloud_agent.storage._sql.sandbox_transitions import (
+    RELEASE_THREADS_RESIDENCIES_SQL,
+)
 
 if TYPE_CHECKING:
     import asyncpg
@@ -99,15 +102,7 @@ class PostgresOwnerWorkRepository:
                 user_id,
             )
             released = await conn.fetch(
-                """
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_status = 'none', residency_last_active_at = NOW()
-                FROM agent_sandboxes g
-                WHERE m.thread_id = ANY($1::text[]) AND m.residency_status <> 'none'
-                  AND g.id = m.sandbox_id
-                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
-                          COALESCE(m.residency_grant_id, '') AS grant_id
-                """,
+                RELEASE_THREADS_RESIDENCIES_SQL,
                 thread_ids,
             )
             groups = await conn.fetch(_OWNED_LIVE_GROUPS_SQL, user_id)
