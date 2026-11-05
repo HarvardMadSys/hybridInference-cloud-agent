@@ -2771,6 +2771,78 @@ msgstr ""
 "slots/<slot>/<alias>.log`，以 `agent-mcp-<slot>` 身份可读。授权文件在 `/run/agent-"
 "mcp-admissions`。"
 
+#: ../developer/operations.md
+msgid "Sandbox incidents"
+msgstr "沙箱事件"
+
+#: ../developer/operations.md
+msgid ""
+"A host records what goes wrong in each retained sandbox as "
+"**incidents**, in the sandbox's event list on the admin sandbox page; "
+"the sandbox list shows the newest one within a day under the sandbox's"
+" name. The [design](../agents/specs/2026-11-04-sandbox-incidents.md) "
+"explains it."
+msgstr ""
+"host "
+"会把每个保留沙箱里出的问题记录为**事件**，写进管理后台沙箱页面的事件列表；沙箱列表会在沙箱名称下显示一天内最新的一条。[设计文档](../agents/specs/2026-11-04-sandbox-incidents.md)有详细说明。"
+
+#: ../developer/operations.md
+msgid ""
+"**What is recorded.** `out_of_memory` (Docker's `oom`: the OOM killer "
+"killed some process in the container), `container_exited` (a `die` "
+"with no `kill` before it, so nobody asked for it), `memory_high` and "
+"`pids_high` (a reading at 90% of the limit), `browser_crashed` "
+"(Chromium exited with no stop requested), and `mcp_server_failed` (a "
+"program could not start, or exited on its own; it names the chat and "
+"the server). A stop, idle stop or deletion the platform made is not an"
+" incident."
+msgstr ""
+"**记录哪些事。** `out_of_memory`（Docker 的 `oom`：OOM killer "
+"杀掉了容器里的某个进程）、`container_exited`（之前没有 `kill` 的 "
+"`die`，即没人要求停止）、`memory_high` 和 `pids_high`（某次读数达到上限的 "
+"90%）、`browser_crashed`（没人要求停止时 Chromium 退出了），以及 "
+"`mcp_server_failed`（某个程序启动不了，或自己退出了；会写明是哪个对话、哪个服务器）。平台自己做的停止、空闲停止或删除都不算事件。"
+
+#: ../developer/operations.md
+msgid ""
+"**Repeats.** The first of a kind goes out at once; repeats within the "
+"next minute become one `.repeated` row with a count. A sandbox records"
+" at most 60 rows an hour, and one `dropped` row counts the rest."
+msgstr ""
+"**重复。** 同一种事第一次发生时立即上报；之后一分钟内的重复合并成一条带计数的 `.repeated` 记录。每个沙箱每小时最多记录 "
+"60 条，其余由一条 `dropped` 记录计数。"
+
+#: ../developer/operations.md
+msgid ""
+"**What people see.** A chat shows one line in a running turn for "
+"`out_of_memory`, `container_exited` and its own `mcp_server_failed`. "
+"The agent's next prompt lists what happened since it was last told, "
+"and a chat's first prompt says the sandbox has a browser."
+msgstr ""
+"**各方看到什么。** 对于 `out_of_memory`、`container_exited` 和属于本对话的 "
+"`mcp_server_failed`，对话会在正在运行的那一轮里显示一行说明。agent "
+"的下一次提示会列出上次告知以来发生的事；对话的第一次提示会说明沙箱里有浏览器。"
+
+#: ../developer/operations.md
+msgid ""
+"**What it carries.** Kinds, times, exit codes, limits and MCP aliases "
+"only: no stderr, URL, command line or environment."
+msgstr "**记录哪些内容。** 只有类型、时间、退出码、上限和 MCP 别名：不含 stderr、URL、命令行或环境变量。"
+
+#: ../developer/operations.md
+msgid ""
+"**Where to look.** The browser service journals to "
+"`/run/agent-browser/events.jsonl`, each slot's MCP runner to "
+"`/run/agent-mcp-slots/<slot>/events.jsonl`. The sandbox manager reads "
+"them every minute and holds the rows until a heartbeat answer says "
+"`incidents: \"accepted\"`; a control plane older than this release "
+"never does, and the rows wait."
+msgstr ""
+"**去哪里看。** 浏览器服务写入 `/run/agent-browser/events.jsonl`，每个 slot 的 MCP "
+"runner 写入 `/run/agent-mcp-slots/<slot>/events.jsonl`。sandbox manager "
+"每分钟读取一次，并一直保留这些记录，直到心跳回复里出现 `incidents: "
+"\"accepted\"`；比这个版本更早的控制面从不这样回复，这些记录就会一直等待。"
+
 #: ../developer/operations.md:1241
 msgid "Before a job can run for real"
 msgstr "任务真正跑起来之前"

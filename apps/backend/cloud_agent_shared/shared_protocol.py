@@ -16,6 +16,9 @@ NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
 #: out of it. An automatic conversation-goal round may be routed only to a
 #: host that declares this; a host without it keeps running ordinary turns.
 GOAL_REPORT_CAPABILITY = "goal_report_v1"
+#: Advertised by a host whose sandbox image carries the browser service
+#: (``cloud-agent-browser``): a chat's first prompt then says the browser is there.
+SANDBOX_BROWSER_CAPABILITY = "sandbox-browser-v1"
 #: Advertised by a runner that takes its concurrency limit from the control
 #: plane's ``slots_desired`` rather than from the count it was deployed with.
 #: The admin page reads it to tell "this host will apply your number" from

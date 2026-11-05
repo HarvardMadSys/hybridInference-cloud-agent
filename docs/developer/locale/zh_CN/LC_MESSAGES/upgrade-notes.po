@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0112_thread_pull_requests`. The supported deployment scripts run "
+"`0113_sandbox_incidents`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0112_thread_pull_requests`。官方支持的部署脚本会在替换 API "
+"`0113_sandbox_incidents`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)中。"
 
@@ -493,6 +493,25 @@ msgstr "迁移"
 #: ../developer/upgrade-notes.md
 msgid "What it changes"
 msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0113_sandbox_incidents`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Makes sandbox incidents idempotent and tracks what each chat's agent was "
+"told: a unique index on `agent_sandbox_events (sandbox_id, "
+"details->>'incident_id')` for `incident.*` rows, and two tables, "
+"`agent_thread_incident_cursors` and `agent_attempt_incident_marks`. "
+"Nothing writes either table before this release, and no existing row has "
+"an `incident.*` type, so the previous release runs unchanged beside it. A "
+"downgrade drops the tables and the index; incident rows stay."
+msgstr ""
+"让沙箱事件可以安全重放，并记录每个对话的 agent 已经被告知到哪里：给 `incident.*` 类型的行在 "
+"`agent_sandbox_events (sandbox_id, details->>'incident_id')` 上加唯一索引，并新增 "
+"`agent_thread_incident_cursors` 和 `agent_attempt_incident_marks` 两张表。这个版本之前没有代码写这两张表，"
+"现有行也没有 `incident.*` 类型，所以上一个版本可以照常并行运行。降级时删除这两张表和索引；事件行保留。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0112_thread_pull_requests`"

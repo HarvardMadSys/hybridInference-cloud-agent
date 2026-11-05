@@ -87,6 +87,7 @@ from cloud_agent_host.sandbox_deletion_backup import (
     ArchiveIdentity,
     SandboxDeletionBackupService,
 )
+from cloud_agent_host.sandbox_incident_routes import install_incident_routes, sandbox_incidents_for
 from cloud_agent_host.sandbox_initial_uploads import INITIAL_UPLOAD_DIRNAME
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import (
@@ -1407,6 +1408,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     retained_manager = (
         ChatSandboxManager(sandbox) if isinstance(sandbox, ContainerBackend) else None
     )
+    incidents = sandbox_incidents_for(lambda: shared_supervisor, retained_manager)
     if sandbox_archive_service is not None and sandbox_archive_controller is not None:
         raise ValueError("sandbox archive service and controller are mutually exclusive")
     archive_service = sandbox_archive_service
@@ -1557,25 +1559,21 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         terminals_started = False
         resource_collector: SandboxResourceCollector | None = None
         try:
-            # A replacement sandbox manager cannot reattach a previous one's
-            # Docker execs. Reconciliation stops each running group it
-            # discovers for the first time, so those resident CLIs and terminal
-            # PTYs end with their container; nothing reaps them one by one.
-            # Keep startup inside the cleanup guard: a failed Docker
-            # reconciliation must not leak the terminal manager's background
-            # thread from a failed ASGI lifespan.
+            # A replacement cannot reattach its predecessor's Docker execs:
+            # reconciliation stops each running group it first discovers. Start
+            # inside the cleanup guard, so a failed one leaks no thread.
             if archive_boundary is not None:
                 archive_boundary.start()
                 archive_boundary_started = True
-            # A dynamic controller begins at UNKNOWN. Reconciliation can stop
-            # and release retained containers, so wait for the runner to
-            # deliver an explicit enabled or disabled database policy first.
+            # A dynamic controller begins at UNKNOWN, and reconciliation can stop
+            # containers: wait for the runner's explicit database policy first.
             if archive_controller is None:
                 start_shared_supervisor()
             terminals.start()
             terminals_started = True
-            resource_collector = SandboxResourceCollector()
+            resource_collector = SandboxResourceCollector(on_reading=incidents.observe_reading)
             resource_collector.start()
+            incidents.start()
             _app.state.sandbox_resource_collector = resource_collector
             yield
         finally:
@@ -1594,9 +1592,8 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                             "error_type": error_type,
                         },
                     )
-                    # Do not retain an archive/provider exception for the final
-                    # ASGI lifespan failure: raising from it would make the raw
-                    # message and its complete cause chain visible again.
+                    # Keep no provider exception for the lifespan's failure: it
+                    # would show the raw message and its cause chain again.
                     cleanup_failures.append((name, error_type))
 
             # A canceled request still owns its executor call. Drain every
@@ -1606,6 +1603,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             _app.state.sandbox_resource_collector = None
             if resource_collector is not None:
                 cleanup("resource_collector", resource_collector.close)
+            cleanup("incidents", incidents.close)
             if terminals_started:
                 cleanup("terminals", terminals.close)
             if supervisor_ready.is_set():
@@ -1714,6 +1712,8 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             or not secrets.compare_digest(expected_token.encode(), x_agent_workspace_token.encode())
         ):
             raise HTTPException(status_code=401, detail="invalid sandbox manager credential")
+
+    install_incident_routes(app, incidents, authenticate)
 
     @app.post("/profiling-policy")
     def profiling_policy(
@@ -2799,10 +2799,10 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             rows.append(origin)
         resource_collector = app.state.sandbox_resource_collector
         if resource_collector is not None and thread_id is None:
-            # The listing already proved each group's labels and exact ID.
-            # Synchronization and cache reads perform no Docker stats I/O.
-            # A partial listing must not evict unrelated collection targets.
+            # The listing proved each group's labels and exact ID; a partial
+            # one must not evict other targets. Neither does Docker I/O.
             resource_collector.sync_targets(rows)
+        incidents.annotate(rows, shared_groups, complete=thread_id is None)
         checkpoints: SandboxCheckpointStore | None = app.state.sandbox_checkpoint_store
         for row in rows:
             row["resource_usage"] = (

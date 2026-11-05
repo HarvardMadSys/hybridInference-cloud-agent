@@ -229,6 +229,8 @@ for line in sys.stdin:
     if "id" not in message or method is None:
         continue
     if method == "initialize":
+        if os.environ.get("FAKE_DIE_AT_START"):
+            sys.exit(2)
         result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
                   "serverInfo": {"name": "fake", "version": "1"}}
         if not asked:
@@ -241,6 +243,9 @@ for line in sys.stdin:
             continue
         result = {"tools": [{"name": "echo", "inputSchema": {"type": "object"}},
                             {"name": "slow", "inputSchema": {"type": "object"}}]}
+        if os.environ.get("FAKE_EXIT_AFTER_LIST"):
+            print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)
+            sys.exit(3)
     elif method == "tools/call":
         name = message["params"]["name"]
         if name == "slow":
@@ -386,6 +391,63 @@ def test_a_server_that_cannot_start_reports_an_error_not_a_hang(served):
             await runner.call_tool("missing__echo", {})
 
     asyncio.run(asyncio.wait_for(scenario(), 30))
+    # A server that could not start is journalled for the host, as a start.
+    assert [entry["phase"] for entry in _incidents(served)] == ["start"] * 2
+
+
+def _incidents(paths, slot=0):
+    """The slot's incident journal, as the host reads it."""
+    try:
+        text = Path(paths.runner_incidents(slot)).read_text()
+    except FileNotFoundError:
+        return []
+    return [json.loads(line) for line in text.splitlines()]
+
+
+def test_only_a_failure_nobody_asked_for_is_journalled(served):
+    """Codex's P2: an idle or withdrawn stop must not read as a server failing."""
+    _admit(
+        served,
+        0,
+        _server("idle", "pkg@1.0.0"),
+        _server("dies", "pkg@2.0.0", env={"FAKE_DIE_AT_START": "1"}),
+        _server("crashes", "pkg@3.0.0", env={"FAKE_EXIT_AFTER_LIST": "1"}),
+    )
+
+    async def scenario():
+        runner = gateway.Runner(served, 0, idle_s=0.01)
+        await runner.list_tools()
+        crashed = next(b for b in runner.backends.values() if b.spec.alias == "crashes")
+        for _ in range(100):
+            if any(entry["phase"] == "crashed" for entry in _incidents(served)):
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)
+        runner.retire()  # the idle server stops: asked for
+        gateway.admit(served, 0, _admission())
+        runner.retire()  # everything withdrawn: asked for
+        assert not crashed.alive and not runner.backends
+
+    asyncio.run(asyncio.wait_for(scenario(), 30))
+    entries = _incidents(served)
+    assert {(entry["alias"], entry["phase"]) for entry in entries} == {
+        ("dies", "start"),
+        ("crashes", "crashed"),
+    }
+    crash = next(entry for entry in entries if entry["phase"] == "crashed")
+    assert crash["exit_code"] == 3 and crash["kind"] == "mcp_server_failed"
+    assert [entry["seq"] for entry in entries] == list(range(1, len(entries) + 1))
+    assert len({entry["journal"] for entry in entries}) == 1
+    assert os.stat(served.runner_incidents(0)).st_mode & 0o777 == 0o640
+
+
+def test_an_incident_journal_keeps_its_newest_lines_within_its_bound(tmp_path):
+    path = str(tmp_path / "events.jsonl")
+    for _ in range(40):
+        gateway.append_incident(path, "mcp_server_failed", alias="a" * 40, pad="x" * 8000)
+    lines = [json.loads(line) for line in Path(path).read_text().splitlines()]
+    assert sum(len(json.dumps(line)) for line in lines) <= gateway.INCIDENT_JOURNAL_BYTES
+    assert lines[-1]["seq"] == 40 and lines[0]["seq"] > 1
 
 
 # -- the gateway, through real sockets ------------------------------------------------

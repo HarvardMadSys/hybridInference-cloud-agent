@@ -64,6 +64,21 @@ class AllCapabilities:
         """Legacy fixtures' sandbox groups were never handed a model connection key."""
         return []
 
+    async def record_sandbox_incidents(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        """Legacy fixtures store no sandbox incident."""
+        return []
+
+    async def notify_running_turns(self, **_kwargs: Any) -> int:
+        """Legacy fixtures have no running turn to tell of an incident."""
+        return 0
+
+    async def untold_incidents(self, **_kwargs: Any) -> dict[str, Any] | None:
+        """Legacy fixtures' sandboxes have no incident to tell."""
+        return None
+
+    async def mark_attempt_incidents(self, **_kwargs: Any) -> None:
+        """Legacy fixtures keep no told-through cursor."""
+
     async def owns_job(self, *, job_id: str, user_id: str) -> bool:
         """Ownership as a fake's full job read answers it, as the routes once asked it."""
         job = await self.get_job(job_id)  # type: ignore[attr-defined]

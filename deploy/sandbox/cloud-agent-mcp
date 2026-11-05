@@ -131,6 +131,46 @@ def _log(line: str) -> None:
     print(f"cloud-agent-mcp: {line}", file=sys.stderr, flush=True)
 
 
+#: The most an incident journal holds; its oldest lines go first.
+INCIDENT_JOURNAL_BYTES = 256 * 1024
+
+
+def append_incident(path: str, kind: str, **fields: Any) -> None:
+    """Append one incident for the host to collect; never raises.
+
+    The host reads a slot's journal as the ``agent`` group, from the last
+    ``(journal, seq)`` it holds (``cloud_agent_host.sandbox_incidents``). A
+    line carries no content: no stderr, no argument, no environment, since a
+    server's output may hold its keys. The file is replaced whole, so a reader
+    never sees half a line.
+    """
+    try:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        except FileNotFoundError:
+            lines = []
+        journal, seq = "", 0
+        for line in reversed(lines):
+            with contextlib.suppress(ValueError, TypeError, KeyError):
+                last = json.loads(line)
+                journal, seq = str(last["journal"]), int(last["seq"])
+                break
+        entry = {
+            "journal": journal or secrets.token_hex(8),
+            "seq": seq + 1,
+            "ts": time.time(),
+            "kind": kind,
+            **fields,
+        }
+        lines.append(json.dumps(entry, separators=(",", ":")))
+        while len(lines) > 1 and sum(len(line) + 1 for line in lines) > INCIDENT_JOURNAL_BYTES:
+            del lines[: max(1, len(lines) // 2)]
+        write_file(path, "\n".join(lines) + "\n", 0o640)
+    except OSError as exc:
+        _log(f"incident journal: {exc}")
+
+
 # --------------------------------------------------------------------------
 # Paths
 # --------------------------------------------------------------------------
@@ -180,6 +220,10 @@ class Paths:
 
     def server_log(self, slot: int, alias: str) -> str:
         return os.path.join(self.slot_dir(slot), f"{alias}.log")
+
+    def runner_incidents(self, slot: int) -> str:
+        """The slot's incident journal, which the host reads (``append_incident``)."""
+        return os.path.join(self.slot_dir(slot), "events.jsonl")
 
 
 def resolve_paths(environ: dict[str, str] | None = None) -> Paths:
@@ -570,6 +614,7 @@ class Backend:
                 start_new_session=True,
             )
         except OSError as exc:
+            self._failed("start", None)
             raise GatewayError(f"{self.spec.alias}: cannot start {argv[0]}: {exc}") from exc
         finally:
             os.close(log)
@@ -598,9 +643,23 @@ class Backend:
                 exc if isinstance(exc, GatewayError) else GatewayError(f"{self.spec.alias}: {exc}")
             )
             self.started.exception()  # retrieved: the caller sees it via ensure()
+            process = self.process
             self.stop()
+            if not isinstance(exc, asyncio.CancelledError):
+                self._failed("start", None if process is None else process.returncode)
             raise
         self.started.set_result(None)
+
+    def _failed(self, phase: str, exit_code: int | None) -> None:
+        """Journal a failure nobody asked for: a start that did not finish, or an exit."""
+        append_incident(
+            self.paths.runner_incidents(self.slot),
+            "mcp_server_failed",
+            alias=self.spec.alias,
+            phase=phase,
+            exit_code=exit_code if exit_code is not None and exit_code >= 0 else None,
+            signal=-exit_code if exit_code is not None and exit_code < 0 else None,
+        )
 
     async def _read(self, process: asyncio.subprocess.Process) -> None:
         assert process.stdout is not None
@@ -635,6 +694,22 @@ class Backend:
                 if not future.done():
                     future.set_exception(GatewayError(f"{self.spec.alias}: the server exited"))
             self.pending.clear()
+        # Every stop the runner asks for (idle, withdrawn, replaced, shutting
+        # down) clears ``process`` and cancels this reader first. A reader that
+        # reached the end of a started server's output with ``process`` still
+        # set saw the server exit on its own.
+        started = self.started
+        if (
+            self.process is process
+            and started is not None
+            and started.done()
+            and not started.cancelled()
+            and started.exception() is None
+        ):
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), 2)
+            _log(f"server exited: slot {self.slot} {self.spec.alias} status {process.returncode}")
+            self._failed("crashed", process.returncode)
 
     async def _write(self, message: dict[str, Any]) -> None:
         process = self.process

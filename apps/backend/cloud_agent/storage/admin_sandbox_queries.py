@@ -98,7 +98,8 @@ class AdminSandboxQueries:
                        g.resource_snapshot, g.resource_sampled_at, g.resource_received_at,
                        members.member_count, members.active_attempt_count,
                        g.created_at, g.last_activity_at, g.idle_deadline, g.updated_at,
-                       h.last_heartbeat_at AS host_last_heartbeat_at
+                       h.last_heartbeat_at AS host_last_heartbeat_at,
+                       incident.last_incident, incident.last_incident_at
                 FROM page g
                 JOIN agent_threads t ON t.id = g.origin_thread_id AND t.user_id = g.user_id
                 LEFT JOIN agent_runner_hosts h ON h.host = g.host
@@ -108,6 +109,14 @@ class AdminSandboxQueries:
                     FROM agent_thread_sandbox_memberships m
                     WHERE m.sandbox_id = g.id
                 ) members
+                LEFT JOIN LATERAL (
+                    SELECT substr(e.event_type, 10) AS last_incident, e.created_at AS last_incident_at
+                    FROM agent_sandbox_events e
+                    WHERE e.sandbox_id = g.id AND starts_with(e.event_type, 'incident.')
+                      AND e.created_at > NOW() - INTERVAL '24 hours'
+                    ORDER BY e.id DESC
+                    LIMIT 1
+                ) incident ON TRUE
                 ORDER BY g.id
                 """,
                 cursor.after_id if cursor else None,

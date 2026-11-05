@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.events import insert_event
+from cloud_agent.storage._sql.incidents import ADVANCE_INCIDENT_CURSOR_SQL
 from cloud_agent.storage._sql.ledger import NOTIFY_JOB_USAGE_SQL, carries_model_usage
 
 if TYPE_CHECKING:
@@ -48,6 +49,9 @@ async def append_attempt_events(
             await conn.execute(
                 "UPDATE agent_attempts SET terminal_ready = FALSE WHERE id = $1", attempt_id
             )
+        elif phase == "started":
+            # The prompt is in use: what it told of the sandbox's incidents is told.
+            await conn.execute(ADVANCE_INCIDENT_CURSOR_SQL, attempt_id)
         event_ids.append(
             await insert_event(
                 conn,
