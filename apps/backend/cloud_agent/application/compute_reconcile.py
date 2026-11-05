@@ -48,6 +48,7 @@ from cloud_agent.domain.compute import (
 )
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     ExtendRequest,
@@ -705,9 +706,9 @@ class ComputeReconciler:
                 extra={"operation_id": operation["id"], "reason": code},
             )
         except ValueError as exc:
-            code = str(exc)
-            if code == "operation_lease_lost":
+            if isinstance(exc, StorageConflict) and exc.code is ConflictCode.OPERATION_LEASE_LOST:
                 return
+            code = str(exc)
             if code in {"resource_identity_changed", "machine_identity_changed"} and operation.get(
                 "allocation_id"
             ):
@@ -1548,7 +1549,7 @@ class ComputeReconciler:
                 allocation_id=allocation["id"], **self._fence(operation)
             )
         except (ProviderError, ComputeSecretError, ValueError) as exc:
-            if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+            if isinstance(exc, StorageConflict) and exc.code is ConflictCode.OPERATION_LEASE_LOST:
                 raise
             # Nothing has reached the provider yet, so every failure here is
             # a definite refusal and can safely release an autoscaling slot.
@@ -2130,7 +2131,7 @@ class ComputeReconciler:
     async def _allocation(self, allocation_id: str) -> dict[str, Any]:
         row = await self.repository.get_allocation(allocation_id)
         if row is None:
-            raise ValueError("allocation_not_found")
+            raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
         return row
 
     @staticmethod
@@ -2189,7 +2190,7 @@ class ComputeReconciler:
         if not await self.repository.checkpoint_operation(
             **self._fence(operation), step=step, result=result
         ):
-            raise ValueError("operation_lease_lost")
+            raise StorageConflict(ConflictCode.OPERATION_LEASE_LOST)
         operation["step"] = step
         operation["result"] = {**operation.get("result", {}), **(result or {})}
 

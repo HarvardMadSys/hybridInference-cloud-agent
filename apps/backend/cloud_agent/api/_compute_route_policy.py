@@ -11,113 +11,157 @@ from pydantic import ValidationError
 from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import ProviderError
 
-# These storage refusals have intentionally public meaning. Other ValueErrors
-# remain server faults and never have their raw text copied into an HTTP body.
-_STORAGE_ERRORS: dict[str, tuple[int, str]] = {
-    "deployment_profile_in_use": (
+# These storage refusals have intentionally public meaning. Other conflicts and
+# every other ValueError remain server faults and never have their raw text
+# copied into an HTTP body.
+_STORAGE_ERRORS: dict[ConflictCode, tuple[int, str]] = {
+    ConflictCode.DEPLOYMENT_PROFILE_IN_USE: (
         409,
         "The deployment profile is already used by another managed resource.",
     ),
-    "deployment_profile_exists": (409, "A deployment profile with this ID already exists."),
-    "resource_already_managed": (409, "This resource already belongs to a managed allocation."),
-    "operation_not_resolvable": (409, "This operation can no longer adopt an external result."),
-    "absence_not_confirmable": (
+    ConflictCode.DEPLOYMENT_PROFILE_EXISTS: (
+        409,
+        "A deployment profile with this ID already exists.",
+    ),
+    ConflictCode.RESOURCE_ALREADY_MANAGED: (
+        409,
+        "This resource already belongs to a managed allocation.",
+    ),
+    ConflictCode.OPERATION_NOT_RESOLVABLE: (
+        409,
+        "This operation can no longer adopt an external result.",
+    ),
+    ConflictCode.ABSENCE_NOT_CONFIRMABLE: (
         409,
         "Only a manual acquisition that recorded no resource can be closed as never created.",
     ),
-    "provider_node_registered": (
+    ConflictCode.PROVIDER_NODE_REGISTERED: (
         409,
         "A node of this request registered, so a machine was created; adopt its experiment.",
     ),
-    "record_not_found": (404, "The resource no longer exists."),
-    "allocation_not_found": (404, "The allocation does not exist."),
-    "operation_not_found": (404, "The operation does not exist."),
-    "revision_conflict": (409, "The resource changed; review its current configuration."),
-    "idempotency_conflict": (409, "This request ID belongs to different parameters."),
-    "release_committed": (409, "Release is committed and can no longer be cancelled."),
-    "resource_retiring": (409, "The resource is retiring and cannot accept new dependencies."),
-    "external_operation_unresolved": (
+    ConflictCode.RECORD_NOT_FOUND: (404, "The resource no longer exists."),
+    ConflictCode.ALLOCATION_NOT_FOUND: (404, "The allocation does not exist."),
+    ConflictCode.OPERATION_NOT_FOUND: (404, "The operation does not exist."),
+    ConflictCode.REVISION_CONFLICT: (
+        409,
+        "The resource changed; review its current configuration.",
+    ),
+    ConflictCode.IDEMPOTENCY_CONFLICT: (409, "This request ID belongs to different parameters."),
+    ConflictCode.RELEASE_COMMITTED: (409, "Release is committed and can no longer be cancelled."),
+    ConflictCode.RESOURCE_RETIRING: (
+        409,
+        "The resource is retiring and cannot accept new dependencies.",
+    ),
+    ConflictCode.EXTERNAL_OPERATION_UNRESOLVED: (
         409,
         "The external operation is unresolved; reconcile its result before continuing.",
     ),
-    "operation_in_flight": (409, "The operation is running; wait for its result."),
-    "resource_release_required": (
+    ConflictCode.OPERATION_IN_FLIGHT: (409, "The operation is running; wait for its result."),
+    ConflictCode.RESOURCE_RELEASE_REQUIRED: (
         409,
         "Release cloud resources or disable attached hosts before removing this server's records.",
     ),
-    "placement_pinned": (409, "Choose another default location for new sandboxes first."),
-    "deployment_drain_active": (409, "Finish the server deployment drain before removal."),
-    "retained_groups_present": (
+    ConflictCode.PLACEMENT_PINNED: (
+        409,
+        "Choose another default location for new sandboxes first.",
+    ),
+    ConflictCode.DEPLOYMENT_DRAIN_ACTIVE: (
+        409,
+        "Finish the server deployment drain before removal.",
+    ),
+    ConflictCode.RETAINED_GROUPS_PRESENT: (
         409,
         "Delete the server's retained sandboxes and wait for cleanup before removal.",
     ),
-    "active_attempts_present": (409, "Wait for the server's active runs to finish before removal."),
-    "autoscaling_member_active": (
+    ConflictCode.ACTIVE_ATTEMPTS_PRESENT: (
+        409,
+        "Wait for the server's active runs to finish before removal.",
+    ),
+    ConflictCode.AUTOSCALING_MEMBER_ACTIVE: (
         409,
         "Release the autoscaling server before removing its records.",
     ),
-    "operation_not_cancellable": (409, "The operation cannot be cancelled in its current state."),
-    "operation_not_retryable": (409, "The operation cannot be retried in its current state."),
-    "operation_lease_lost": (409, "Another worker owns this operation."),
-    "resource_identity_changed": (409, "The resource identity changed and requires review."),
-    "host_identity_conflict": (409, "This Host identity is already bound to another resource."),
-    "invalid_operation_state": (409, "The operation state no longer allows this action."),
-    "rotation_in_progress": (409, "This server is already moving to a replacement node."),
-    "rotation_switching": (
+    ConflictCode.OPERATION_NOT_CANCELLABLE: (
+        409,
+        "The operation cannot be cancelled in its current state.",
+    ),
+    ConflictCode.OPERATION_NOT_RETRYABLE: (
+        409,
+        "The operation cannot be retried in its current state.",
+    ),
+    ConflictCode.OPERATION_LEASE_LOST: (409, "Another worker owns this operation."),
+    ConflictCode.RESOURCE_IDENTITY_CHANGED: (
+        409,
+        "The resource identity changed and requires review.",
+    ),
+    ConflictCode.HOST_IDENTITY_CONFLICT: (
+        409,
+        "This Host identity is already bound to another resource.",
+    ),
+    ConflictCode.INVALID_OPERATION_STATE: (
+        409,
+        "The operation state no longer allows this action.",
+    ),
+    ConflictCode.ROTATION_IN_PROGRESS: (
+        409,
+        "This server is already moving to a replacement node.",
+    ),
+    ConflictCode.ROTATION_SWITCHING: (
         409,
         "The old node is stopped or the Host already moved; wait for the move or its rollback.",
     ),
-    "deployment_profile_reserved": (
+    ConflictCode.DEPLOYMENT_PROFILE_RESERVED: (
         409,
         "The deployment profile is reserved for CloudLab autoscaling.",
     ),
-    "autoscaling_profile_in_use": (
+    ConflictCode.AUTOSCALING_PROFILE_IN_USE: (
         409,
         "A selected deployment profile is already used by a manual resource.",
     ),
-    "autoscaling_profile_unavailable": (
+    ConflictCode.AUTOSCALING_PROFILE_UNAVAILABLE: (
         409,
         "No reserved deployment profile is available for another host.",
     ),
-    "autoscaling_connection_unverified": (
+    ConflictCode.AUTOSCALING_CONNECTION_UNVERIFIED: (
         409,
         "Both autoscaling connections must still be verified.",
     ),
-    "autoscaling_connection_in_use": (
+    ConflictCode.AUTOSCALING_CONNECTION_IN_USE: (
         409,
         "Pause autoscaling and resolve any running acquisition before changing this connection.",
     ),
-    "autoscaling_placement_pinned": (
+    ConflictCode.AUTOSCALING_PLACEMENT_PINNED: (
         409,
         "Set host placement to Automatic before enabling or running autoscaling.",
     ),
-    "autoscaling_runtime_conflict": (
+    ConflictCode.AUTOSCALING_RUNTIME_CONFLICT: (
         409,
         "Autoscaling state changed; the controller will retry from a fresh snapshot.",
     ),
-    "autoscaling_disabled": (409, "CloudLab autoscaling is paused."),
-    "autoscaling_acquire_blocked": (
+    ConflictCode.AUTOSCALING_DISABLED: (409, "CloudLab autoscaling is paused."),
+    ConflictCode.AUTOSCALING_ACQUIRE_BLOCKED: (
         409,
         "A previous autoscaling acquisition needs administrator attention.",
     ),
-    "autoscaling_operation_in_flight": (
+    ConflictCode.AUTOSCALING_OPERATION_IN_FLIGHT: (
         409,
         "An autoscaling lifecycle operation is already in progress.",
     ),
-    "autoscaling_at_capacity": (409, "Autoscaling is already at maximum capacity."),
-    "autoscaling_scale_down_disabled": (409, "Automatic scale-down is disabled."),
-    "autoscaling_member_not_found": (404, "The autoscaling member no longer exists."),
-    "autoscaling_member_not_retirable": (
+    ConflictCode.AUTOSCALING_AT_CAPACITY: (409, "Autoscaling is already at maximum capacity."),
+    ConflictCode.AUTOSCALING_SCALE_DOWN_DISABLED: (409, "Automatic scale-down is disabled."),
+    ConflictCode.AUTOSCALING_MEMBER_NOT_FOUND: (404, "The autoscaling member no longer exists."),
+    ConflictCode.AUTOSCALING_MEMBER_NOT_RETIRABLE: (
         409,
         "The autoscaling member is not in a safe state for retirement.",
     ),
-    "autoscaling_member_not_idle": (
+    ConflictCode.AUTOSCALING_MEMBER_NOT_IDLE: (
         409,
         "The autoscaling member became busy and cannot be retired.",
     ),
-    "autoscaling_minimum_capacity": (
+    ConflictCode.AUTOSCALING_MINIMUM_CAPACITY: (
         409,
         "Retirement would reduce the pool below its configured minimum.",
     ),
@@ -131,7 +175,7 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
     )
 
 
-def compute_storage_error_message(code: str) -> str:
+def compute_storage_error_message(code: ConflictCode) -> str:
     """Return the stable public explanation for a known storage refusal."""
     return _STORAGE_ERRORS[code][1]
 
@@ -162,10 +206,10 @@ class ComputeSensitiveRoute(SensitiveRoute):
                 "credential_unavailable",
                 "The control plane cannot access this credential. Check the secret store and connection configuration.",
             )
-        if isinstance(exc, ValueError):
-            known = _STORAGE_ERRORS.get(str(exc))
+        if isinstance(exc, StorageConflict):
+            known = _STORAGE_ERRORS.get(exc.code)
             if known is not None:
-                return _error(known[0], str(exc), known[1])
+                return _error(known[0], exc.code.value, known[1])
         return None
 
 

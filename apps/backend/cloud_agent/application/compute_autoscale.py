@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.compute import fingerprint
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.schemas_compute import CloudLabDefaults
 
 if TYPE_CHECKING:
@@ -626,12 +627,10 @@ class CloudLabAutoscaler:
                 expected_generation=int(runtime["generation"]),
                 runtime=dict(updates),
             )
-        except ValueError as exc:
-            if str(exc) in {
-                "autoscaling_generation_conflict",
-                "autoscaling_runtime_conflict",
-                "generation_conflict",
-                "revision_conflict",
+        except StorageConflict as exc:
+            if exc.code in {
+                ConflictCode.AUTOSCALING_RUNTIME_CONFLICT,
+                ConflictCode.REVISION_CONFLICT,
             }:
                 return None
             raise

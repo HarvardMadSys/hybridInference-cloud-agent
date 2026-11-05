@@ -34,6 +34,7 @@ from cloud_agent.compute_config import ComputeConfiguration
 from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
 from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.host_pool import hash_secret
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import (
     NodeObservation,
     ProviderReceipt,
@@ -739,7 +740,7 @@ async def test_a_move_restarted_after_giving_up_a_candidate_releases_it_once(
         discard = await abandon(**kwargs)
         if discard is not None and not lost:
             lost.append(discard["id"])
-            raise ValueError("operation_lease_lost")
+            raise StorageConflict(ConflictCode.OPERATION_LEASE_LOST)
         return discard
 
     monkeypatch.setattr(r.repo, "abandon_candidate", abandon_then_lose_the_lease)

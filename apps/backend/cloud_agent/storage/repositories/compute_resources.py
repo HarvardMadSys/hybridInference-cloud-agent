@@ -26,6 +26,7 @@ from cloud_agent.domain.compute import (
     retirement_cancellable,
 )
 from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.storage._sql import environment_runs
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.compute_inventory import (
@@ -106,7 +107,7 @@ def _in_move_out_window(member: dict[str, Any]) -> bool:
 
 def _row(row: Any) -> dict[str, Any]:
     if row is None:
-        raise ValueError("record_not_found")
+        raise StorageConflict(ConflictCode.RECORD_NOT_FOUND)
     result = dict(row)
     for field in _JSON_FIELDS & result.keys():
         result[field] = load_json(result[field]) or {}
@@ -174,7 +175,7 @@ class PostgresComputeResourceRepository:
                 secret_ciphertext,
             )
         if row is None:
-            raise ValueError("deployment_profile_exists")
+            raise StorageConflict(ConflictCode.DEPLOYMENT_PROFILE_EXISTS)
         return _row(row)
 
     async def advance_host_release(
@@ -290,7 +291,7 @@ class PostgresComputeResourceRepository:
                 source_sha256,
             )
             if recorded is not True:
-                raise ValueError("host_release_not_recorded")
+                raise StorageConflict(ConflictCode.HOST_RELEASE_NOT_RECORDED)
 
     async def activate_automatic_profiles(
         self,
@@ -306,7 +307,7 @@ class PostgresComputeResourceRepository:
                 profile_ids,
             )
             if len(rows) != len(profile_ids):
-                raise ValueError("record_not_found")
+                raise StorageConflict(ConflictCode.RECORD_NOT_FOUND)
             for row in rows:
                 configuration = load_json(row["configuration"]) or {}
                 metadata = configuration.get("automatic_setup", {})
@@ -314,7 +315,7 @@ class PostgresComputeResourceRepository:
                     metadata.get("request_id") != request_id
                     or metadata.get("fingerprint") != request_fingerprint
                 ):
-                    raise ValueError("idempotency_conflict")
+                    raise StorageConflict(ConflictCode.IDEMPOTENCY_CONFLICT)
             await conn.execute(
                 """UPDATE agent_compute_deployment_profiles
                 SET configuration=jsonb_set(configuration,'{automatic_setup,ready}','true'::jsonb),
@@ -399,7 +400,7 @@ class PostgresComputeResourceRepository:
                    LIMIT 1""",
                 connection_id,
             ):
-                raise ValueError("autoscaling_connection_in_use")
+                raise StorageConflict(ConflictCode.AUTOSCALING_CONNECTION_IN_USE)
             if expected_revision is None:
                 row = await conn.fetchrow(
                     """INSERT INTO agent_compute_connections
@@ -430,7 +431,7 @@ class PostgresComputeResourceRepository:
                     expected_revision,
                 )
             if row is None:
-                raise ValueError("revision_conflict")
+                raise StorageConflict(ConflictCode.REVISION_CONFLICT)
             return _row(row)
 
     async def _existing_request(
@@ -443,7 +444,7 @@ class PostgresComputeResourceRepository:
             "SELECT * FROM agent_compute_operations WHERE request_id=$1", request_id
         )
         if existing is not None and existing["fingerprint"] != fingerprint:
-            raise ValueError("idempotency_conflict")
+            raise StorageConflict(ConflictCode.IDEMPOTENCY_CONFLICT)
         return _optional_row(existing)
 
     async def _insert_operation(
@@ -478,13 +479,13 @@ class PostgresComputeResourceRepository:
                WHERE deployment_profile=$1""",
             profile_id,
         ):
-            raise ValueError("deployment_profile_reserved")
+            raise StorageConflict(ConflictCode.DEPLOYMENT_PROFILE_RESERVED)
         if profile.get("id") and await conn.fetchval(
             """SELECT 1 FROM agent_compute_allocations
             WHERE deployment_profile->>'id'=$1 AND observed_state NOT IN ('terminated','absent') LIMIT 1""",
             profile["id"],
         ):
-            raise ValueError("deployment_profile_in_use")
+            raise StorageConflict(ConflictCode.DEPLOYMENT_PROFILE_IN_USE)
 
     async def create_allocation_operation(
         self,
@@ -516,7 +517,7 @@ class PostgresComputeResourceRepository:
                     reused["connection_id"] != allocation.get("connection_id")
                     or reused["desired_state"] != "present"
                 ):
-                    raise ValueError("resource_already_managed")
+                    raise StorageConflict(ConflictCode.RESOURCE_ALREADY_MANAGED)
                 if kind != "import":
                     occupied = await conn.fetchval(
                         """SELECT 1 FROM agent_runner_hosts h
@@ -526,7 +527,7 @@ class PostgresComputeResourceRepository:
                         reused["id"],
                     )
                     if occupied or load_json(reused["deployment_profile"]):
-                        raise ValueError("resource_already_managed")
+                        raise StorageConflict(ConflictCode.RESOURCE_ALREADY_MANAGED)
                     await self._check_profile_available(
                         conn, allocation.get("deployment_profile", {})
                     )
@@ -602,16 +603,16 @@ class PostgresComputeResourceRepository:
                     "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
                 )
                 if allocation is None:
-                    raise ValueError("allocation_not_found")
+                    raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
                 expected_revision = parameters.get("expected_revision")
                 if (
                     kind == "retire"
                     and expected_revision is not None
                     and allocation["revision"] != expected_revision
                 ):
-                    raise ValueError("revision_conflict")
+                    raise StorageConflict(ConflictCode.REVISION_CONFLICT)
                 if allocation["release_committed_at"] is not None and kind != "inspect":
-                    raise ValueError("release_committed")
+                    raise StorageConflict(ConflictCode.RELEASE_COMMITTED)
                 if kind == "retire":
                     existing = await self._existing_request(conn, request_id, fingerprint)
                     if existing is not None:
@@ -623,7 +624,7 @@ class PostgresComputeResourceRepository:
                            LIMIT 1""",
                         allocation_id,
                     ):
-                        raise ValueError("operation_in_flight")
+                        raise StorageConflict(ConflictCode.OPERATION_IN_FLIGHT)
             try:
                 async with conn.transaction():
                     return await self._insert_operation(
@@ -637,7 +638,7 @@ class PostgresComputeResourceRepository:
                     )
             except asyncpg.UniqueViolationError as exc:
                 if exc.constraint_name == "idx_compute_one_active_rotation":
-                    raise ValueError("rotation_in_progress") from None
+                    raise StorageConflict(ConflictCode.ROTATION_IN_PROGRESS) from None
                 raise
 
     async def get_allocation(self, allocation_id: str) -> dict[str, Any] | None:
@@ -664,9 +665,9 @@ class PostgresComputeResourceRepository:
                 "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
             )
             if row is None:
-                raise ValueError("allocation_not_found")
+                raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
             if row["revision"] != expected_revision:
-                raise ValueError("revision_conflict")
+                raise StorageConflict(ConflictCode.REVISION_CONFLICT)
             # The dispatcher locks operation rows without taking the topology
             # fence. Lock them here so a queued acquisition is either removed
             # before it is claimed, or observed running and refused.
@@ -711,7 +712,7 @@ class PostgresComputeResourceRepository:
                 )
                 for operation in related_operations
             ):
-                raise ValueError("rotation_in_progress")
+                raise StorageConflict(ConflictCode.ROTATION_IN_PROGRESS)
             if any(
                 operation["allocation_id"] != allocation_id
                 and operation["parameters"].get("source_allocation_id") == allocation_id
@@ -719,7 +720,7 @@ class PostgresComputeResourceRepository:
                 and operation["state"] not in {"succeeded", "failed", "cancelled"}
                 for operation in related_operations
             ):
-                raise ValueError("rotation_in_progress")
+                raise StorageConflict(ConflictCode.ROTATION_IN_PROGRESS)
             # Staging and abandoned-candidate release both need the source's
             # predecessor link. A successor already serving its Host may keep
             # running after the old server's historical link is cleared.
@@ -742,7 +743,7 @@ class PostgresComputeResourceRepository:
                    ) LIMIT 1""",
                 allocation_id,
             ):
-                raise ValueError("rotation_in_progress")
+                raise StorageConflict(ConflictCode.ROTATION_IN_PROGRESS)
             # Only an operation that can still act holds the records: one a
             # worker runs, one whose outcome is unknown, or one still confirming
             # a provider call, as the dispatcher and release count them. One
@@ -756,12 +757,12 @@ class PostgresComputeResourceRepository:
                 or (operation["state"] == "waiting" and operation["result"].get("external_pending"))
                 for operation in operations
             ):
-                raise ValueError("external_operation_unresolved")
+                raise StorageConflict(ConflictCode.EXTERNAL_OPERATION_UNRESOLVED)
             allocation = await self._allocation(conn, allocation_id)
             assert allocation is not None
             hosts = [host["host"] for host in allocation["hosts"]]
             if active in hosts:
-                raise ValueError("placement_pinned")
+                raise StorageConflict(ConflictCode.PLACEMENT_PINNED)
             # Attempt settlement locks its attempt before returning the host's
             # slot. Keep that order when deleting hosts and nulling audit FKs.
             attempts = await conn.fetch(
@@ -770,20 +771,20 @@ class PostgresComputeResourceRepository:
                 hosts,
             )
             if any(attempt["status"] == "running" for attempt in attempts):
-                raise ValueError("active_attempts_present")
+                raise StorageConflict(ConflictCode.ACTIVE_ATTEMPTS_PRESENT)
             host_rows = await conn.fetch(
                 "SELECT host,status,drain_fence_active FROM agent_runner_hosts "
                 "WHERE host=ANY($1::text[]) ORDER BY host FOR UPDATE",
                 hosts,
             )
             if any(host["drain_fence_active"] for host in host_rows):
-                raise ValueError("deployment_drain_active")
+                raise StorageConflict(ConflictCode.DEPLOYMENT_DRAIN_ACTIVE)
             if await conn.fetchval(
                 "SELECT 1 FROM agent_sandboxes g WHERE g.host=ANY($1::text[]) "
                 f"AND {HOST_RETAINED_GROUP} LIMIT 1",
                 hosts,
             ):
-                raise ValueError("retained_groups_present")
+                raise StorageConflict(ConflictCode.RETAINED_GROUPS_PRESENT)
             terminal = (
                 allocation["observed_state"] in {"terminated", "absent"}
                 and allocation["observed_at"] is not None
@@ -811,16 +812,16 @@ class PostgresComputeResourceRepository:
                     )
                 )
             ):
-                raise ValueError("external_operation_unresolved")
+                raise StorageConflict(ConflictCode.EXTERNAL_OPERATION_UNRESOLVED)
             local_attach = (
                 allocation["mode"] == "attach"
                 and not allocation["release_supported"]
                 and all(host["status"] == "disabled" for host in host_rows)
             )
             if not terminal and not uncreated and not local_attach:
-                raise ValueError("resource_release_required")
+                raise StorageConflict(ConflictCode.RESOURCE_RELEASE_REQUIRED)
             if allocation.get("autoscaling_owned") and not terminal:
-                raise ValueError("autoscaling_member_active")
+                raise StorageConflict(ConflictCode.AUTOSCALING_MEMBER_ACTIVE)
             await conn.execute(
                 "DELETE FROM agent_host_enroll_tokens "
                 "WHERE host=ANY($1::text[]) OR consumed_host=ANY($1::text[])",
@@ -1158,10 +1159,10 @@ class PostgresComputeResourceRepository:
                 "SELECT generation FROM agent_cloudlab_autoscaling_runtime WHERE id FOR UPDATE"
             )
             if current is None or runtime is None:
-                raise ValueError("record_not_found")
+                raise StorageConflict(ConflictCode.RECORD_NOT_FOUND)
             current = _row(current)
             if current["revision"] != expected_revision:
-                raise ValueError("revision_conflict")
+                raise StorageConflict(ConflictCode.REVISION_CONFLICT)
             pause_existing = bool(
                 current["enabled"]
                 and not policy["enabled"]
@@ -1170,11 +1171,11 @@ class PostgresComputeResourceRepository:
                 )
             )
             if not pause_existing and set(profile_snapshots) != set(selected):
-                raise ValueError("autoscaling_profile_unavailable")
+                raise StorageConflict(ConflictCode.AUTOSCALING_PROFILE_UNAVAILABLE)
             if policy["enabled"] and await conn.fetchval(
                 "SELECT active_host FROM agent_runner_policy WHERE id"
             ):
-                raise ValueError("autoscaling_placement_pinned")
+                raise StorageConflict(ConflictCode.AUTOSCALING_PLACEMENT_PINNED)
             for connection_id, provider_id in (
                 (policy.get("connection_id"), "cloudlab"),
                 (policy.get("ssh_connection_id"), "existing_ssh"),
@@ -1190,7 +1191,7 @@ class PostgresComputeResourceRepository:
                     provider_id,
                 )
                 if not valid:
-                    raise ValueError("autoscaling_connection_unverified")
+                    raise StorageConflict(ConflictCode.AUTOSCALING_CONNECTION_UNVERIFIED)
             for profile_id in selected:
                 if pause_existing:
                     break
@@ -1204,7 +1205,7 @@ class PostgresComputeResourceRepository:
                     profile_id,
                 )
                 if manual_owner:
-                    raise ValueError("autoscaling_profile_in_use")
+                    raise StorageConflict(ConflictCode.AUTOSCALING_PROFILE_IN_USE)
                 reservation = await conn.fetchrow(
                     """SELECT allocation_id
                        FROM agent_cloudlab_autoscaling_profile_reservations
@@ -1261,7 +1262,7 @@ class PostgresComputeResourceRepository:
                 requested_by,
             )
             if updated is None:
-                raise ValueError("revision_conflict")
+                raise StorageConflict(ConflictCode.REVISION_CONFLICT)
             renewal_policy = _json(policy.get("renewal_policy", {}))
             await conn.execute(
                 """UPDATE agent_compute_allocations a
@@ -1301,7 +1302,7 @@ class PostgresComputeResourceRepository:
             _json(decision),
         )
         if row is None:
-            raise ValueError("autoscaling_runtime_conflict")
+            raise StorageConflict(ConflictCode.AUTOSCALING_RUNTIME_CONFLICT)
         return self._autoscaling_runtime_view(_row(row))
 
     async def create_autoscale_allocation_operation(
@@ -1338,11 +1339,11 @@ class PostgresComputeResourceRepository:
                 "SELECT generation FROM agent_cloudlab_autoscaling_runtime WHERE id FOR UPDATE"
             )
             if policy["revision"] != expected_revision:
-                raise ValueError("revision_conflict")
+                raise StorageConflict(ConflictCode.REVISION_CONFLICT)
             if runtime_generation != expected_generation:
-                raise ValueError("autoscaling_runtime_conflict")
+                raise StorageConflict(ConflictCode.AUTOSCALING_RUNTIME_CONFLICT)
             if not policy["enabled"]:
-                raise ValueError("autoscaling_disabled")
+                raise StorageConflict(ConflictCode.AUTOSCALING_DISABLED)
             for connection_id, provider_id in (
                 (policy.get("connection_id"), "cloudlab"),
                 (policy.get("ssh_connection_id"), "existing_ssh"),
@@ -1354,7 +1355,7 @@ class PostgresComputeResourceRepository:
                     connection_id,
                     provider_id,
                 ):
-                    raise ValueError("autoscaling_connection_unverified")
+                    raise StorageConflict(ConflictCode.AUTOSCALING_CONNECTION_UNVERIFIED)
             await conn.execute(
                 """UPDATE agent_cloudlab_autoscaling_profile_reservations r
                    SET allocation_id=NULL,updated_at=NOW()
@@ -1406,15 +1407,15 @@ class PostgresComputeResourceRepository:
             )
             if blocked is not None:
                 if blocked["state"] in {"blocked", "unknown", "failed"}:
-                    raise ValueError("autoscaling_acquire_blocked")
-                raise ValueError("autoscaling_operation_in_flight")
+                    raise StorageConflict(ConflictCode.AUTOSCALING_ACQUIRE_BLOCKED)
+                raise StorageConflict(ConflictCode.AUTOSCALING_OPERATION_IN_FLIGHT)
             member_count = await conn.fetchval(
                 """SELECT count(*) FROM agent_cloudlab_autoscaling_members m
                    JOIN agent_compute_allocations a ON a.id=m.allocation_id
                    WHERE a.observed_state NOT IN ('terminated','absent')"""
             )
             if member_count >= policy["max_hosts"]:
-                raise ValueError("autoscaling_at_capacity")
+                raise StorageConflict(ConflictCode.AUTOSCALING_AT_CAPACITY)
             reservation = await conn.fetchrow(
                 """SELECT r.* FROM unnest($1::text[]) WITH ORDINALITY wanted(id,position)
                    JOIN agent_cloudlab_autoscaling_profile_reservations r
@@ -1424,7 +1425,7 @@ class PostgresComputeResourceRepository:
                 policy["deployment_profiles"],
             )
             if reservation is None:
-                raise ValueError("autoscaling_profile_unavailable")
+                raise StorageConflict(ConflictCode.AUTOSCALING_PROFILE_UNAVAILABLE)
             profile = load_json(reservation["profile_snapshot"]) or {}
             if policy.get("sandbox_storage_path") is not None:
                 profile["sandbox_storage_path"] = policy["sandbox_storage_path"]
@@ -1442,7 +1443,7 @@ class PostgresComputeResourceRepository:
             if await conn.fetchval(
                 "SELECT active_host FROM agent_runner_policy WHERE id FOR SHARE"
             ):
-                raise ValueError("autoscaling_placement_pinned")
+                raise StorageConflict(ConflictCode.AUTOSCALING_PLACEMENT_PINNED)
             await conn.execute(
                 """INSERT INTO agent_compute_allocations
                    (id,name,provider_id,connection_id,ssh_connection_id,mode,
@@ -1516,7 +1517,7 @@ class PostgresComputeResourceRepository:
                 or allocation["desired_state"] != "present"
                 or allocation["release_committed_at"] is not None
             ):
-                raise ValueError("autoscaling_member_not_retirable")
+                raise StorageConflict(ConflictCode.AUTOSCALING_MEMBER_NOT_RETIRABLE)
             for connection_id, provider_id in (
                 (allocation["connection_id"], "cloudlab"),
                 (allocation["ssh_connection_id"], "existing_ssh"),
@@ -1528,7 +1529,7 @@ class PostgresComputeResourceRepository:
                     connection_id,
                     provider_id,
                 ):
-                    raise ValueError("autoscaling_connection_unverified")
+                    raise StorageConflict(ConflictCode.AUTOSCALING_CONNECTION_UNVERIFIED)
 
     async def queue_autoscale_retire(
         self,
@@ -1562,15 +1563,15 @@ class PostgresComputeResourceRepository:
                 "SELECT generation FROM agent_cloudlab_autoscaling_runtime WHERE id FOR UPDATE"
             )
             if policy is None or policy["revision"] != expected_revision:
-                raise ValueError("revision_conflict")
+                raise StorageConflict(ConflictCode.REVISION_CONFLICT)
             if runtime_generation != expected_generation:
-                raise ValueError("autoscaling_runtime_conflict")
+                raise StorageConflict(ConflictCode.AUTOSCALING_RUNTIME_CONFLICT)
             if not policy["enabled"] or not policy["scale_down_enabled"]:
-                raise ValueError("autoscaling_scale_down_disabled")
+                raise StorageConflict(ConflictCode.AUTOSCALING_SCALE_DOWN_DISABLED)
             if await conn.fetchval(
                 "SELECT active_host FROM agent_runner_policy WHERE id FOR SHARE"
             ):
-                raise ValueError("autoscaling_placement_pinned")
+                raise StorageConflict(ConflictCode.AUTOSCALING_PLACEMENT_PINNED)
             live_members = await conn.fetchval(
                 """SELECT count(*) FROM agent_cloudlab_autoscaling_members m
                    JOIN agent_compute_allocations a ON a.id=m.allocation_id
@@ -1578,7 +1579,7 @@ class PostgresComputeResourceRepository:
                      AND a.desired_state='present'"""
             )
             if live_members <= policy["min_hosts"]:
-                raise ValueError("autoscaling_minimum_capacity")
+                raise StorageConflict(ConflictCode.AUTOSCALING_MINIMUM_CAPACITY)
             member = await conn.fetchrow(
                 """SELECT m.*,a.observed_state,a.desired_state,a.release_committed_at
                    FROM agent_cloudlab_autoscaling_members m
@@ -1587,27 +1588,27 @@ class PostgresComputeResourceRepository:
                 allocation_id,
             )
             if member is None:
-                raise ValueError("autoscaling_member_not_found")
+                raise StorageConflict(ConflictCode.AUTOSCALING_MEMBER_NOT_FOUND)
             if (
                 member["observed_state"] != "ready"
                 or member["desired_state"] != "present"
                 or member["release_committed_at"] is not None
             ):
-                raise ValueError("autoscaling_member_not_retirable")
+                raise StorageConflict(ConflictCode.AUTOSCALING_MEMBER_NOT_RETIRABLE)
             hosts = await conn.fetch(
                 f"""SELECT h.host,(h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used
                    FROM agent_compute_nodes n JOIN agent_runner_hosts h ON h.compute_node_id=n.id WHERE n.allocation_id=$1 FOR UPDATE OF h""",
                 allocation_id,
             )
             if len(hosts) != 1 or any(host["slots_used"] != 0 for host in hosts):
-                raise ValueError("autoscaling_member_not_idle")
+                raise StorageConflict(ConflictCode.AUTOSCALING_MEMBER_NOT_IDLE)
             host_names = [host["host"] for host in hosts]
             if await conn.fetchval(
                 "SELECT 1 FROM agent_sandboxes "
                 "WHERE host=ANY($1::text[]) AND deletion_state<>'deleted' LIMIT 1",
                 host_names,
             ):
-                raise ValueError("autoscaling_member_not_idle")
+                raise StorageConflict(ConflictCode.AUTOSCALING_MEMBER_NOT_IDLE)
             in_flight = await conn.fetchval(
                 """SELECT 1 FROM agent_compute_operations o
                    JOIN agent_cloudlab_autoscaling_members m
@@ -1620,7 +1621,7 @@ class PostgresComputeResourceRepository:
                    LIMIT 1"""
             )
             if in_flight:
-                raise ValueError("autoscaling_operation_in_flight")
+                raise StorageConflict(ConflictCode.AUTOSCALING_OPERATION_IN_FLIGHT)
             operation = await self._insert_operation(
                 conn,
                 request_id=request_id,
@@ -1681,7 +1682,7 @@ class PostgresComputeResourceRepository:
                 runtime.get("blocker_message"),
             )
             if row is None:
-                raise ValueError("autoscaling_runtime_conflict")
+                raise StorageConflict(ConflictCode.AUTOSCALING_RUNTIME_CONFLICT)
             return self._autoscaling_runtime_view(_row(row))
 
     async def record_observation_error(
@@ -1814,7 +1815,7 @@ class PostgresComputeResourceRepository:
                 management_mode,
             )
             if row is None:
-                raise ValueError("revision_conflict")
+                raise StorageConflict(ConflictCode.REVISION_CONFLICT)
             return _row(row)
 
     async def _fence(
@@ -1840,7 +1841,7 @@ class PostgresComputeResourceRepository:
             "SELECT lease_expires_at > clock_timestamp() FROM agent_compute_operations WHERE id=$1",
             operation_id,
         ):
-            raise ValueError("operation_lease_lost")
+            raise StorageConflict(ConflictCode.OPERATION_LEASE_LOST)
 
     async def _release_terminal_autoscaling_reservation(
         self, conn: Any, allocation_id: str
@@ -1931,13 +1932,13 @@ class PostgresComputeResourceRepository:
                 "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
             )
             if allocation is None:
-                raise ValueError("allocation_not_found")
+                raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
             current_identity = allocation["external_id"]
             if current_identity is not None and observation.get("external_id") not in (
                 None,
                 current_identity,
             ):
-                raise ValueError("resource_identity_changed")
+                raise StorageConflict(ConflictCode.RESOURCE_IDENTITY_CHANGED)
             if terminal_proof_stands(allocation, observation):
                 return _row(allocation)
             nodes = observation.get("nodes")
@@ -1954,7 +1955,7 @@ class PostgresComputeResourceRepository:
                 }
                 observed_nodes = {n["provider_node_id"]: n["instance_identity"] for n in nodes}
                 if len(observed_nodes) != len(nodes):
-                    raise ValueError("resource_identity_changed")
+                    raise StorageConflict(ConflictCode.RESOURCE_IDENTITY_CHANGED)
                 changed = any(
                     key in observed_nodes and observed_nodes[key] != identity
                     for key, identity in existing_nodes.items()
@@ -1983,7 +1984,7 @@ class PostgresComputeResourceRepository:
                         )
                     )
                 ):
-                    raise ValueError("resource_identity_changed")
+                    raise StorageConflict(ConflictCode.RESOURCE_IDENTITY_CHANGED)
                 # Node identity and the allocation's readiness/lease form one
                 # snapshot. Losing a worker between these writes rolls back
                 # everything instead of publishing fresh readiness first.
@@ -2010,7 +2011,7 @@ class PostgresComputeResourceRepository:
                 _json(observation["configuration"]) if "configuration" in observation else None,
             )
             if row is None:
-                raise ValueError("allocation_not_found")
+                raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
             if row["observed_state"] in {"terminated", "absent"}:
                 await self._release_terminal_autoscaling_reservation(conn, allocation_id)
                 if row["observed_state"] == "terminated":
@@ -2049,7 +2050,7 @@ class PostgresComputeResourceRepository:
             node.get("managed", True),
         )
         if row is None:
-            raise ValueError("resource_identity_changed")
+            raise StorageConflict(ConflictCode.RESOURCE_IDENTITY_CHANGED)
         return _row(row)
 
     async def create_node_registration(
@@ -2191,7 +2192,7 @@ class PostgresComputeResourceRepository:
                 host_key,
             )
             if updated is None:
-                raise ValueError("resource_identity_changed")
+                raise StorageConflict(ConflictCode.RESOURCE_IDENTITY_CHANGED)
 
     async def claim_operation(
         self, *, worker_id: str, lease_seconds: float = 120
@@ -2302,7 +2303,7 @@ class PostgresComputeResourceRepository:
     ) -> bool:
         """Commit a fenced result and relinquish the external-call lease."""
         if state not in {"waiting", "blocked", "succeeded", "failed", "unknown"}:
-            raise ValueError("invalid_operation_state")
+            raise StorageConflict(ConflictCode.INVALID_OPERATION_STATE)
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
             try:
@@ -2358,7 +2359,7 @@ class PostgresComputeResourceRepository:
                 node_id,
             )
             if node is None or node["desired_state"] != "present" or node["release_committed_at"]:
-                raise ValueError("resource_retiring")
+                raise StorageConflict(ConflictCode.RESOURCE_RETIRING)
             if (
                 not node["scope_complete"]
                 or node["observed_state"] not in {"ready", "active", "running"}
@@ -2366,14 +2367,14 @@ class PostgresComputeResourceRepository:
                 or not node["observation_fresh"]
                 or node["allocation_node_count"] != 1
             ):
-                raise ValueError("resource_observation_not_ready")
+                raise StorageConflict(ConflictCode.RESOURCE_OBSERVATION_NOT_READY)
             existing = await conn.fetchrow(
                 "SELECT * FROM agent_runner_hosts WHERE host=$1 FOR UPDATE", host
             )
             if existing is not None and existing["compute_node_id"] != node_id:
                 # Even an idle unbound Host may own stopped groups. Adoption is
                 # an explicit verified workflow, never a hostname collision.
-                raise ValueError("host_identity_conflict")
+                raise StorageConflict(ConflictCode.HOST_IDENTITY_CONFLICT)
             if existing is None:
                 await conn.execute(
                     "INSERT INTO agent_runner_hosts(host,status,compute_node_id) VALUES ($1,'enrolling',$2)",
@@ -2705,8 +2706,7 @@ class PostgresComputeResourceRepository:
                 allocation_id,
             )
         )
-        # A started move continues without a target, but never once its
-        # checkpoints stop.
+        # A started move continues without a target, but never once its checkpoints stop.
         return await move_out_possible(conn, hosts, need_target=not started)
 
     async def unmoved_groups(self, *, allocation_id: str) -> int:
@@ -2975,14 +2975,14 @@ class PostgresComputeResourceRepository:
                 or source["desired_state"] != "present"
                 or source["release_committed_at"] is not None
             ):
-                raise ValueError("resource_retiring")
+                raise StorageConflict(ConflictCode.RESOURCE_RETIRING)
             if not await conn.fetchval(
                 """SELECT 1 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
                 WHERE n.allocation_id=$1 AND h.host=$2""",
                 source_allocation_id,
                 allocation["slot_host"],
             ):
-                raise ValueError("host_identity_conflict")
+                raise StorageConflict(ConflictCode.HOST_IDENTITY_CONFLICT)
             await self._check_profile_available(conn, allocation.get("deployment_profile", {}))
             allocation_id = str(uuid4())
             await conn.execute(
@@ -3042,7 +3042,7 @@ class PostgresComputeResourceRepository:
                 allocation_id,
             )
             if candidate is None or candidate["predecessor_id"] != rotation:
-                raise ValueError("candidate_mismatch")
+                raise StorageConflict(ConflictCode.CANDIDATE_MISMATCH)
             existing = await self._existing_request(conn, request_id, fingerprint)
             if existing is not None:
                 return existing
@@ -3080,17 +3080,17 @@ class PostgresComputeResourceRepository:
                 "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
             )
             if candidate is None:
-                raise ValueError("allocation_not_found")
+                raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
             if candidate["release_committed_at"] is not None:
                 return {"release_committed": True, "blocked_reasons": []}
             if candidate["predecessor_id"] is None:
-                raise ValueError("not_a_candidate")
+                raise StorageConflict(ConflictCode.NOT_A_CANDIDATE)
             if await conn.fetchval(
                 """SELECT 1 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
                 WHERE n.allocation_id=$1""",
                 allocation_id,
             ):
-                raise ValueError("candidate_bound")
+                raise StorageConflict(ConflictCode.CANDIDATE_BOUND)
             if await conn.fetchval(
                 """SELECT 1 FROM agent_compute_operations
                 WHERE allocation_id=$1 AND id<>$2 AND (state IN ('running','unknown')
@@ -3177,11 +3177,11 @@ class PostgresComputeResourceRepository:
                 "SELECT compute_node_id FROM agent_runner_hosts WHERE host=$1 FOR UPDATE", host
             )
             if current is None:
-                raise ValueError("host_not_found")
+                raise StorageConflict(ConflictCode.HOST_NOT_FOUND)
             if current["compute_node_id"] == to_node_id:
                 return  # Replayed after a lost acknowledgement.
             if current["compute_node_id"] != from_node_id:
-                raise ValueError("host_identity_conflict")
+                raise StorageConflict(ConflictCode.HOST_IDENTITY_CONFLICT)
             source = await conn.fetchrow(
                 """SELECT a.id,a.predecessor_id FROM agent_compute_nodes n
                 JOIN agent_compute_allocations a ON a.id=n.allocation_id WHERE n.id=$1""",
@@ -3199,18 +3199,18 @@ class PostgresComputeResourceRepository:
                 or target["desired_state"] != "present"
                 or target["release_committed_at"] is not None
             ):
-                raise ValueError("resource_retiring")
+                raise StorageConflict(ConflictCode.RESOURCE_RETIRING)
             if (
                 target["predecessor_id"] != source["id"]
                 and source["predecessor_id"] != target["id"]
             ):
-                raise ValueError("host_identity_conflict")
+                raise StorageConflict(ConflictCode.HOST_IDENTITY_CONFLICT)
             if await conn.fetchval(
                 "SELECT 1 FROM agent_runner_hosts WHERE compute_node_id=$1 AND host<>$2",
                 to_node_id,
                 host,
             ):
-                raise ValueError("host_identity_conflict")
+                raise StorageConflict(ConflictCode.HOST_IDENTITY_CONFLICT)
             await conn.execute(
                 "UPDATE agent_runner_hosts SET compute_node_id=$2 WHERE host=$1", host, to_node_id
             )
@@ -3254,7 +3254,7 @@ class PostgresComputeResourceRepository:
     async def _retirement_impact(self, conn: Any, allocation_id: str) -> dict[str, Any]:
         allocation = await self._allocation(conn, allocation_id)
         if allocation is None:
-            raise ValueError("allocation_not_found")
+            raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
         hosts = [h["host"] for h in allocation["hosts"]]
         reasons: list[str] = []
         # A create that never received an experiment has no scope to adopt and
@@ -3364,7 +3364,7 @@ class PostgresComputeResourceRepository:
                 "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
             )
             if allocation is None:
-                raise ValueError("allocation_not_found")
+                raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
             if allocation["release_committed_at"] is not None:
                 return {"release_committed": True, "blocked_reasons": []}
             # The rows the revocation below writes, then the host rows: a
@@ -3467,9 +3467,9 @@ class PostgresComputeResourceRepository:
                 "SELECT * FROM agent_compute_operations WHERE id=$1 FOR UPDATE", operation_id
             )
             if row is None:
-                raise ValueError("operation_not_found")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_FOUND)
             if row["state"] == "running":
-                raise ValueError("operation_in_flight")
+                raise StorageConflict(ConflictCode.OPERATION_IN_FLIGHT)
             allocation = await conn.fetchrow(
                 """SELECT a.*,
                           EXISTS (
@@ -3487,11 +3487,11 @@ class PostgresComputeResourceRepository:
                 row["allocation_id"],
             )
             if allocation is not None and allocation["release_committed_at"]:
-                raise ValueError("release_committed")
+                raise StorageConflict(ConflictCode.RELEASE_COMMITTED)
             operation = _row(row)
             candidate = _row(allocation) if allocation is not None else None
             if autoscaling_retirement_needs_settlement(operation, candidate):
-                raise ValueError("operation_not_cancellable")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_CANCELLABLE)
             if autoscaling_operation_is_terminal(operation, candidate):
                 if (
                     row["kind"] == "retire"
@@ -3517,14 +3517,14 @@ class PostgresComputeResourceRepository:
                     if not await self._release_terminal_autoscaling_reservation(
                         conn, row["allocation_id"]
                     ):
-                        raise ValueError("operation_not_cancellable")
+                        raise StorageConflict(ConflictCode.OPERATION_NOT_CANCELLABLE)
                     return cancelled
-                raise ValueError("operation_not_cancellable")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_CANCELLABLE)
             if row["kind"] == "acquire":
                 if candidate is not None:
                     candidate["nodes"] = [True] if candidate.pop("has_nodes") else []
                 if not autoscaling_acquire_can_cancel(operation, candidate):
-                    raise ValueError("operation_not_cancellable")
+                    raise StorageConflict(ConflictCode.OPERATION_NOT_CANCELLABLE)
                 cancelled = _row(
                     await conn.fetchrow(
                         """UPDATE agent_compute_operations
@@ -3546,14 +3546,14 @@ class PostgresComputeResourceRepository:
                 if not await self._release_terminal_autoscaling_reservation(
                     conn, row["allocation_id"]
                 ):
-                    raise ValueError("operation_not_cancellable")
+                    raise StorageConflict(ConflictCode.OPERATION_NOT_CANCELLABLE)
                 return cancelled
             if row["kind"] == "rotate":
                 return await self._cancel_rotation(conn, row)
             if (load_json(row["result"]) or {}).get("external_pending"):
-                raise ValueError("external_operation_unresolved")
+                raise StorageConflict(ConflictCode.EXTERNAL_OPERATION_UNRESOLVED)
             if not retirement_cancellable(row["kind"], row["state"], load_json(row["result"])):
-                raise ValueError("operation_not_cancellable")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_CANCELLABLE)
             await conn.execute(
                 "DELETE FROM agent_host_admission_holds WHERE allocation_id=$1 AND purpose='retirement' AND source_id=$2",
                 row["allocation_id"],
@@ -3595,18 +3595,18 @@ class PostgresComputeResourceRepository:
     async def _cancel_rotation(self, conn: Any, row: Any) -> dict[str, Any]:
         result = load_json(row["result"]) or {}
         if row["state"] not in ("pending", "waiting", "blocked"):
-            raise ValueError("operation_not_cancellable")
+            raise StorageConflict(ConflictCode.OPERATION_NOT_CANCELLABLE)
         if result.get("source_stopping") or result.get("source_stopped") or result.get("rebound"):
             # The old node is stopped or the name has moved: only the worker's
             # own rollback can bring the Host back.
-            raise ValueError("rotation_switching")
+            raise StorageConflict(ConflictCode.ROTATION_SWITCHING)
         candidate = (result.get("candidate") or {}).get("id")
         if candidate and await conn.fetchval(
             """SELECT 1 FROM agent_compute_operations
             WHERE allocation_id=$1 AND state IN ('running','unknown') LIMIT 1""",
             candidate,
         ):
-            raise ValueError("operation_in_flight")
+            raise StorageConflict(ConflictCode.OPERATION_IN_FLIGHT)
         await conn.execute(
             "DELETE FROM agent_host_admission_holds WHERE purpose='rotation' AND source_id=$1",
             row["id"],
@@ -3657,11 +3657,11 @@ class PostgresComputeResourceRepository:
                 "SELECT * FROM agent_compute_operations WHERE id=$1 FOR UPDATE", operation_id
             )
             if operation is None:
-                raise ValueError("operation_not_found")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_FOUND)
             if operation["kind"] != "acquire" or operation["state"] != "unknown":
-                raise ValueError("operation_not_resolvable")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_RESOLVABLE)
             if (load_json(operation["result"]) or {}).get("resource_ref"):
-                raise ValueError("operation_not_resolvable")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_RESOLVABLE)
             allocation = await conn.fetchrow(
                 "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
                 operation["allocation_id"],
@@ -3671,13 +3671,13 @@ class PostgresComputeResourceRepository:
                 or allocation["external_id"] is not None
                 or allocation["release_committed_at"] is not None
             ):
-                raise ValueError("operation_not_resolvable")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_RESOLVABLE)
             if await conn.fetchval(
                 "SELECT 1 FROM agent_compute_allocations WHERE provider_id=$1 AND external_id=$2",
                 allocation["provider_id"],
                 external_id,
             ):
-                raise ValueError("resource_already_managed")
+                raise StorageConflict(ConflictCode.RESOURCE_ALREADY_MANAGED)
             await conn.execute(
                 "UPDATE agent_compute_allocations SET external_id=$2,revision=revision+1,updated_at=NOW() WHERE id=$1",
                 allocation["id"],
@@ -3713,14 +3713,14 @@ class PostgresComputeResourceRepository:
                 "SELECT * FROM agent_compute_operations WHERE id=$1 FOR UPDATE", operation_id
             )
             if operation is None:
-                raise ValueError("operation_not_found")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_FOUND)
             await conn.execute(
                 "SELECT 1 FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
                 operation["allocation_id"],
             )
             allocation = await self._allocation(conn, operation["allocation_id"])
             if not acquisition_absence_confirmable(_row(operation), allocation):
-                raise ValueError("absence_not_confirmable")
+                raise StorageConflict(ConflictCode.ABSENCE_NOT_CONFIRMABLE)
             assert allocation is not None
             # A node's first boot registers under its registration row alone,
             # without the compute fence. Taking the open rows waits for one
@@ -3736,7 +3736,7 @@ class PostgresComputeResourceRepository:
                 "WHERE allocation_id=$1 AND registered_at IS NOT NULL LIMIT 1",
                 allocation["id"],
             ):
-                raise ValueError("provider_node_registered")
+                raise StorageConflict(ConflictCode.PROVIDER_NODE_REGISTERED)
             await conn.execute(
                 """UPDATE agent_compute_allocations
                    SET desired_state='absent',observed_state='absent',
@@ -3768,9 +3768,9 @@ class PostgresComputeResourceRepository:
                 "SELECT * FROM agent_compute_operations WHERE id=$1 FOR UPDATE", operation_id
             )
             if row is None:
-                raise ValueError("operation_not_found")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_FOUND)
             if row["state"] not in ("failed", "blocked", "unknown"):
-                raise ValueError("operation_not_retryable")
+                raise StorageConflict(ConflictCode.OPERATION_NOT_RETRYABLE)
             if row["allocation_id"] is not None and row["kind"] not in {
                 "retire",
                 "inspect",
@@ -3782,7 +3782,7 @@ class PostgresComputeResourceRepository:
                     row["allocation_id"],
                 )
                 if release_committed is not None:
-                    raise ValueError("operation_not_retryable")
+                    raise StorageConflict(ConflictCode.OPERATION_NOT_RETRYABLE)
             if row["kind"] in {"acquire", "retire", "discard"} and row["allocation_id"] is not None:
                 allocation = await conn.fetchrow(
                     """SELECT a.observed_state,a.release_committed_at,
@@ -3799,7 +3799,7 @@ class PostgresComputeResourceRepository:
                         **dict(allocation),
                     }
                     if autoscaling_operation_is_terminal(_row(row), allocation_view):
-                        raise ValueError("operation_not_retryable")
+                        raise StorageConflict(ConflictCode.OPERATION_NOT_RETRYABLE)
             # Unknown retains the exact step and parameters. Worker must query
             # recover_acquire/release/extend rather than repeat the side effect.
             return _row(

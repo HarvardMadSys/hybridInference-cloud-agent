@@ -22,6 +22,7 @@ from cloud_agent.compute_config import ComputeConfiguration, ComputeSecretResolv
 from cloud_agent.compute_registry import ComputeProviderRegistry
 from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import ProviderError, SshConnection
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.providers.compute.setup_tunnels import ControlPlaneEndpoint, generate_tunnel_key
@@ -79,7 +80,7 @@ class MemoryRepository:
         if self.yield_on_insert:
             await asyncio.sleep(0)
         if profile_id in self.profiles:
-            raise ValueError("deployment_profile_exists")
+            raise StorageConflict(ConflictCode.DEPLOYMENT_PROFILE_EXISTS)
         metadata = inputs["configuration"].get("automatic_setup", {})
         if metadata and any(
             row["configuration"].get("automatic_setup", {}).get("request_id")
@@ -87,7 +88,7 @@ class MemoryRepository:
             and row["configuration"]["automatic_setup"].get("slot") == metadata["slot"]
             for row in self.profiles.values()
         ):
-            raise ValueError("deployment_profile_exists")
+            raise StorageConflict(ConflictCode.DEPLOYMENT_PROFILE_EXISTS)
         self.profiles[profile_id] = deepcopy({"id": profile_id, **inputs})
         return deepcopy(self.profiles[profile_id])
 
@@ -101,7 +102,7 @@ class MemoryRepository:
                 metadata["request_id"] != request_id
                 or metadata["fingerprint"] != request_fingerprint
             ):
-                raise ValueError("idempotency_conflict")
+                raise StorageConflict(ConflictCode.IDEMPOTENCY_CONFLICT)
         self.activation_calls += 1
         for row in rows:
             row["configuration"]["automatic_setup"]["ready"] = True
