@@ -31,6 +31,7 @@ from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
 )
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.runtime_upgrades import configured_registry_url
 from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
@@ -228,9 +229,8 @@ async def register_host(
             runner_version=body.runner_version,
             labels=dict(body.labels),
         )
-    except ValueError as exc:
-        error_type = str(exc)
-        if error_type == "enrollment_token_removed":
+    except StorageConflict as exc:
+        if exc.code is ConflictCode.ENROLLMENT_TOKEN_REMOVED:
             raise HTTPException(
                 status_code=401,
                 detail={
@@ -240,7 +240,7 @@ async def register_host(
                     }
                 },
             ) from exc
-        if error_type == "host_drain_fenced":
+        if exc.code is ConflictCode.HOST_DRAIN_FENCED:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -254,7 +254,7 @@ async def register_host(
                     }
                 },
             ) from exc
-        if error_type != "resource_retiring":
+        if exc.code is not ConflictCode.RESOURCE_RETIRING:
             raise
         raise HTTPException(
             status_code=409,

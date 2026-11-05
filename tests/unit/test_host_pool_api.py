@@ -42,6 +42,7 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.sandbox_manager import sandbox_manager_routing
 from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     ENV_SANDBOX_MANAGER_HOSTS,
@@ -183,7 +184,7 @@ class FakeHostPoolStore(AllCapabilities):
     ) -> dict[str, Any]:
         existing = self.rows.get(host)
         if existing is not None and existing["drain_fence_active"]:
-            raise ValueError("host_drain_fenced")
+            raise StorageConflict(ConflictCode.HOST_DRAIN_FENCED)
         return self.seed(
             host,
             status=HOST_ENROLLING,
@@ -810,7 +811,7 @@ async def test_removal_between_token_consumption_and_registration_refuses_enroll
         "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
     )
     token = issued.json()["enroll_token"]
-    register = AsyncMock(side_effect=ValueError("enrollment_token_removed"))
+    register = AsyncMock(side_effect=StorageConflict(ConflictCode.ENROLLMENT_TOKEN_REMOVED))
     monkeypatch.setattr(store, "register_host", register)
 
     response = await async_client.post(

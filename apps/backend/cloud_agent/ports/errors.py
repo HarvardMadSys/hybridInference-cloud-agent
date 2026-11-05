@@ -11,7 +11,7 @@ from enum import StrEnum
 
 
 class ConflictCode(StrEnum):
-    """Every refusal the compute store raises, by its stable public name."""
+    """Every refusal the compute and host-pool stores raise, by its stable public name."""
 
     ABSENCE_NOT_CONFIRMABLE = "absence_not_confirmable"
     ACTIVE_ATTEMPTS_PRESENT = "active_attempts_present"
@@ -38,7 +38,9 @@ class ConflictCode(StrEnum):
     DEPLOYMENT_PROFILE_EXISTS = "deployment_profile_exists"
     DEPLOYMENT_PROFILE_IN_USE = "deployment_profile_in_use"
     DEPLOYMENT_PROFILE_RESERVED = "deployment_profile_reserved"
+    ENROLLMENT_TOKEN_REMOVED = "enrollment_token_removed"
     EXTERNAL_OPERATION_UNRESOLVED = "external_operation_unresolved"
+    HOST_DRAIN_FENCED = "host_drain_fenced"
     HOST_IDENTITY_CONFLICT = "host_identity_conflict"
     HOST_NOT_FOUND = "host_not_found"
     HOST_RELEASE_NOT_RECORDED = "host_release_not_recorded"

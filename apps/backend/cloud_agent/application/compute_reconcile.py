@@ -708,10 +708,10 @@ class ComputeReconciler:
         except ValueError as exc:
             if isinstance(exc, StorageConflict) and exc.code is ConflictCode.OPERATION_LEASE_LOST:
                 return
-            code = str(exc)
-            if code in {"resource_identity_changed", "machine_identity_changed"} and operation.get(
-                "allocation_id"
-            ):
+            # Only the store's typed refusals have a code; a provider's identity
+            # change or missing registration URL arrives as a ProviderError above.
+            code = exc.code if isinstance(exc, StorageConflict) else None
+            if code is ConflictCode.RESOURCE_IDENTITY_CHANGED and operation.get("allocation_id"):
                 await self.repository.set_admission_hold(
                     allocation_id=operation["allocation_id"],
                     purpose="lease_deadline",
@@ -719,10 +719,7 @@ class ComputeReconciler:
                     scope="all_claims",
                     **self._fence(operation),
                 )
-            pre_submit = code in {
-                "autoscaling_connection_unverified",
-                "registration_unavailable",
-            }
+            pre_submit = code is ConflictCode.AUTOSCALING_CONNECTION_UNVERIFIED
             await self._finish(
                 operation,
                 "blocked",
@@ -736,10 +733,10 @@ class ComputeReconciler:
                     **({"external_pending": False} if pre_submit else {}),
                     "blocked_reasons": [
                         {
-                            "code": code if pre_submit else "resource_state_conflict",
+                            "code": str(code) if pre_submit else "resource_state_conflict",
                             "message": (
                                 "Revalidate autoscaling connections and retry."
-                                if code == "autoscaling_connection_unverified"
+                                if pre_submit
                                 else "Resource identity or state no longer matches this operation."
                             ),
                         }
