@@ -26,6 +26,13 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.owner_usage import measured_interval, utc_day_shares
 from cloud_agent.ports.sandbox import DeletionFailureDecision, TerminalControlRoute
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
+from cloud_agent.storage._sql.fences import (
+    LockMode,
+    attempt_and_residency_are_live,
+    attempt_lease_is_live,
+    leased_attempt_sql,
+    lock_running_attempt,
+)
 from cloud_agent.storage._sql.hosts import (
     MOVING_OUT_HOST_SQL,
     RECLAIMED_HOST_SQL,
@@ -110,28 +117,6 @@ class PostgresSandboxRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
-
-    @staticmethod
-    async def _lock_running_attempt(conn: Any, attempt_id: int, lease_generation: int) -> bool:
-        """Lock attempt identity before evaluating its wall-clock lease."""
-        return bool(
-            await conn.fetchval(
-                "SELECT id FROM agent_attempts "
-                "WHERE id = $1 AND lease_generation = $2 AND status = 'running' FOR SHARE",
-                attempt_id,
-                lease_generation,
-            )
-        )
-
-    @staticmethod
-    async def _attempt_is_live(conn: Any, attempt_id: int) -> bool:
-        """Evaluate expiry only after the caller has locked the attempt row."""
-        return bool(
-            await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            )
-        )
 
     async def set_admin_archived(
         self,
@@ -1769,25 +1754,15 @@ class PostgresSandboxRepository:
     ) -> bool:
         """Revoke readiness only for the still-live fenced attempt."""
         async with self._pool.acquire() as conn, conn.transaction():
-            locked = await conn.fetchval(
-                "SELECT id FROM agent_attempts "
-                "WHERE id = $1 AND lease_generation = $2 AND status = 'running' FOR UPDATE",
-                attempt_id,
-                lease_generation,
-            )
-            if locked is None or not await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            ):
+            if not await lock_running_attempt(
+                conn, attempt_id, lease_generation, LockMode.UPDATE
+            ) or not await attempt_lease_is_live(conn, attempt_id):
                 return False
             result = await conn.execute(
-                """
+                f"""
                 UPDATE agent_attempts
                 SET terminal_ready = FALSE
-                WHERE id = $1
-                  AND lease_generation = $2
-                  AND status = 'running'
-                  AND lease_expires_at > clock_timestamp()
+                WHERE {leased_attempt_sql("$1", "$2", alias="")}
                 """,
                 attempt_id,
                 lease_generation,
@@ -1879,10 +1854,7 @@ class PostgresSandboxRepository:
                 host,
                 thread_id,
             )
-            if earns is None or not await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            ):
+            if earns is None or not await attempt_lease_is_live(conn, attempt_id):
                 return None
             # Claiming is fenced by the worker's shared-sandbox-v1
             # attestation. Every reservation therefore creates or reuses a
@@ -1921,7 +1893,7 @@ class PostgresSandboxRepository:
     ) -> dict[str, Any] | None:
         """Confirm Docker start under both attempt and sandbox generations."""
         async with self._pool.acquire() as conn, conn.transaction():
-            if not await self._lock_running_attempt(conn, attempt_id, lease_generation):
+            if not await lock_running_attempt(conn, attempt_id, lease_generation, LockMode.SHARE):
                 return None
             locked_membership = await conn.fetchval(
                 """
@@ -1949,7 +1921,7 @@ class PostgresSandboxRepository:
                 sandbox_generation,
                 container_id,
             )
-            if locked_group is None or not await self._attempt_is_live(conn, attempt_id):
+            if locked_group is None or not await attempt_lease_is_live(conn, attempt_id):
                 return None
             shared = await conn.fetchrow(
                 f"""
@@ -1968,8 +1940,7 @@ class PostgresSandboxRepository:
                       AND m.activation_generation = $5
                       AND m.active_attempt_id = $2
                       AND (g.container_id IS NULL OR g.container_id = $6)
-                      AND a.id = $2 AND a.lease_generation = $3
-                      AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
+                      AND {leased_attempt_sql("$2", "$3")}
                       AND j.current_attempt_id = a.id AND j.thread_id = m.thread_id
                     RETURNING g.id
                 )
@@ -2026,7 +1997,7 @@ class PostgresSandboxRepository:
         residency.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            if not await self._lock_running_attempt(conn, attempt_id, lease_generation):
+            if not await lock_running_attempt(conn, attempt_id, lease_generation, LockMode.SHARE):
                 return False
             locked_membership = await conn.fetchval(
                 """
@@ -2041,15 +2012,8 @@ class PostgresSandboxRepository:
                 residency_generation,
                 attempt_id,
             )
-            if locked_membership is None or not await conn.fetchval(
-                """
-                SELECT a.lease_expires_at > clock_timestamp()
-                   AND m.residency_lease_expires_at > clock_timestamp()
-                FROM agent_attempts a, agent_thread_sandbox_memberships m
-                WHERE a.id = $1 AND m.thread_id = $2
-                """,
-                attempt_id,
-                thread_id,
+            if locked_membership is None or not await attempt_and_residency_are_live(
+                conn, attempt_id, thread_id
             ):
                 return False
             shared = await conn.fetchval(
@@ -2070,8 +2034,7 @@ class PostgresSandboxRepository:
                       m.process_generation < $7
                       OR m.resident_state IN ('starting', 'restarting', 'live')
                   )
-                  AND a.id = $2 AND a.lease_generation = $3
-                  AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
+                  AND {leased_attempt_sql("$2", "$3")}
                 RETURNING m.thread_id
                 """,
                 thread_id,
@@ -2098,7 +2061,7 @@ class PostgresSandboxRepository:
             # The new ledger FK locks its attempt too. Acquire that lock
             # before membership, matching terminal transition/reaper order,
             # and keep the live-attempt fence stable through the capture.
-            if not await self._lock_running_attempt(conn, attempt_id, lease_generation):
+            if not await lock_running_attempt(conn, attempt_id, lease_generation, LockMode.SHARE):
                 return False
             locked_membership = await conn.fetchval(
                 """
@@ -2113,19 +2076,12 @@ class PostgresSandboxRepository:
                 residency_generation,
                 attempt_id,
             )
-            if locked_membership is None or not await conn.fetchval(
-                """
-                SELECT a.lease_expires_at > clock_timestamp()
-                   AND m.residency_lease_expires_at > clock_timestamp()
-                FROM agent_attempts a, agent_thread_sandbox_memberships m
-                WHERE a.id = $1 AND m.thread_id = $2
-                """,
-                attempt_id,
-                thread_id,
+            if locked_membership is None or not await attempt_and_residency_are_live(
+                conn, attempt_id, thread_id
             ):
                 return False
             shared = await conn.fetchval(
-                """
+                f"""
                 UPDATE agent_thread_sandbox_memberships m
                 SET resident_state = CASE
                         WHEN resident_state = 'live' THEN 'live' ELSE 'starting' END,
@@ -2136,8 +2092,7 @@ class PostgresSandboxRepository:
                   AND m.residency_generation = $5 AND m.residency_status = 'hot'
                   AND m.residency_lease_expires_at > clock_timestamp()
                   AND m.active_attempt_id = $2
-                  AND a.id = $2 AND a.lease_generation = $3
-                  AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
+                  AND {leased_attempt_sql("$2", "$3")}
                 RETURNING m.thread_id
                 """,
                 thread_id,
@@ -2172,7 +2127,7 @@ class PostgresSandboxRepository:
         async with self._pool.acquire() as conn, conn.transaction():
             # Keep the same attempt -> membership order as startup capture
             # and finishing an attempt. The FK insert must not invert it.
-            if not await self._lock_running_attempt(conn, attempt_id, lease_generation):
+            if not await lock_running_attempt(conn, attempt_id, lease_generation, LockMode.SHARE):
                 return False
             locked_membership = await conn.fetchval(
                 """
@@ -2187,15 +2142,8 @@ class PostgresSandboxRepository:
                 residency_generation,
                 attempt_id,
             )
-            if locked_membership is None or not await conn.fetchval(
-                """
-                SELECT a.lease_expires_at > clock_timestamp()
-                   AND m.residency_lease_expires_at > clock_timestamp()
-                FROM agent_attempts a, agent_thread_sandbox_memberships m
-                WHERE a.id = $1 AND m.thread_id = $2
-                """,
-                attempt_id,
-                thread_id,
+            if locked_membership is None or not await attempt_and_residency_are_live(
+                conn, attempt_id, thread_id
             ):
                 return False
             # Released residency already refuses a deleted chat; the tombstone
@@ -2216,8 +2164,7 @@ class PostgresSandboxRepository:
                   AND m.residency_generation = $6 AND m.residency_status = 'hot'
                   AND m.residency_lease_expires_at > clock_timestamp()
                   AND m.active_attempt_id = $2
-                  AND a.id = $2 AND a.lease_generation = $3
-                  AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
+                  AND {leased_attempt_sql("$2", "$3")}
                   AND j.id = $7 AND j.current_attempt_id = a.id
                   AND j.thread_id = m.thread_id AND j.state = 'running'
                   AND (m.admitted_job_id IS NULL OR m.admitted_job_id = $7)
@@ -2368,7 +2315,7 @@ class PostgresSandboxRepository:
             ):
                 return None
             shared = await conn.fetchrow(
-                """
+                f"""
                 UPDATE agent_thread_sandbox_memberships m
                 SET active_attempt_id = NULL, last_settled_job_id = $7,
                     context_status = $8,
@@ -2383,9 +2330,8 @@ class PostgresSandboxRepository:
                   AND m.residency_lease_expires_at > clock_timestamp()
                   AND m.active_attempt_id = $2
                   AND m.admitted_job_id = $7
-                  AND a.id = $2 AND a.lease_generation = $3
-                  AND a.job_id = $7 AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp()
+                  AND {leased_attempt_sql("$2", "$3")}
+                  AND a.job_id = $7
                 RETURNING m.sandbox_id
                 """,
                 thread_id,
@@ -2759,9 +2705,9 @@ class PostgresSandboxRepository:
                 await conn.execute(
                     "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", thread_id
                 )
-            elif not await self._lock_running_attempt(
-                conn, attempt_id, lease_generation
-            ) or not await self._attempt_is_live(conn, attempt_id):
+            elif not await lock_running_attempt(
+                conn, attempt_id, lease_generation, LockMode.SHARE
+            ) or not await attempt_lease_is_live(conn, attempt_id):
                 # Releasing an activation as intact is its runner's word that
                 # the context is as the last turn left it, and only a live
                 # lease can give that word. Once the lease lapses the reaper
@@ -3036,7 +2982,7 @@ class PostgresSandboxRepository:
         # The membership/group locks above may have waited until after the
         # attempt lease expired.  Evaluate wall time only after those waits and
         # immediately before granting this attempt control of the member.
-        if not await self._attempt_is_live(conn, attempt_id):
+        if not await attempt_lease_is_live(conn, attempt_id):
             return None
         activation_generation = int(membership["activation_generation"])
         if not already_admitted:
