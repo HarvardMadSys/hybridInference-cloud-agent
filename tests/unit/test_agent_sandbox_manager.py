@@ -1270,8 +1270,8 @@ async def test_resource_collector_is_owned_and_cleaned_up_by_sandbox_manager_lif
         close=lambda: calls.append("close"),
     )
 
-    def factory():
-        calls.append("construct")
+    def factory(**kwargs):  # its readings feed the incident observer
+        calls.append("construct" if set(kwargs) == {"on_reading"} else f"construct {kwargs}")
         return collector
 
     monkeypatch.setattr(sandbox_manager_mod, "SandboxResourceCollector", factory)

@@ -4,6 +4,7 @@ import type { HostSettingDefinition } from '@/lib/api/admin';
 import type { AgentAdminSettings } from '@/lib/api/adminSettings';
 
 import { buildSettingsSearchItems, searchSettingsItems } from './settingsSearchIndex';
+import { accountProviderSnapshot } from './settingsTestFixtures';
 
 const snapshot: AgentAdminSettings = {
   revision: 1,
@@ -181,5 +182,42 @@ describe('settings search', () => {
       expect(item).not.toHaveProperty('secret_configured');
     }
     expect(JSON.stringify(catalog)).not.toContain('private-default-value');
+  });
+});
+
+describe('provider-aware search items', () => {
+  const keys = (items: { applicationKey?: string }[]) => items.map((item) => item.applicationKey);
+  const build = (values = {}, isSettingVisible?: (key: string) => boolean) =>
+    buildSettingsSearchItems({
+      snapshot: accountProviderSnapshot(values),
+      hostDefinitions: [],
+      runtimes: [],
+      archiveAvailable: false,
+      isSettingVisible,
+    });
+
+  it('leaves out fields that do not apply to the saved providers', () => {
+    const items = build({ 'accounts.sms_provider': 'tencent' });
+    expect(keys(items)).toContain('accounts.smtp_host');
+    for (const hidden of [
+      'accounts.tencent_ses_region',
+      'accounts.sms_provider',
+      'accounts.tencent_sms_app_id',
+      'accounts.tencent_secret_id',
+    ]) {
+      expect(keys(items)).not.toContain(hidden);
+    }
+    expect(keys(searchSettingsItems(items, 'tencent'))).toEqual([
+      'accounts.email_provider',
+      'accounts.sms_enabled',
+    ]);
+  });
+
+  it('uses the caller’s visibility, which includes unsaved drafts', () => {
+    const items = build({}, (key) => !key.startsWith('accounts.smtp_'));
+    expect(keys(searchSettingsItems(items, 'smtp'))).toEqual(['accounts.email_provider']);
+    expect(keys(searchSettingsItems(items, 'Tencent SES region'))).toEqual([
+      'accounts.tencent_ses_region',
+    ]);
   });
 });

@@ -69,6 +69,9 @@ export interface AdminSandbox {
   idle_deadline: string | null;
   updated_at: string;
   host_last_heartbeat_at: string | null;
+  /** The newest incident's kind within 24 hours; listed sandboxes only. */
+  last_incident?: string | null;
+  last_incident_at?: string | null;
 }
 
 export type AdminSandboxState =

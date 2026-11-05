@@ -60,6 +60,7 @@ def launch_facets(launch: ResidentLaunch) -> tuple[LaunchFacet, ...]:
             relay_credential=launch.mcp_credential,
             relay_url=launch.mcp_base_url,
             environment=launch.environment,
+            thread_id=launch.thread_id,
         ),
         GitHubRelayFacet(
             credential=launch.github_credential,

@@ -564,11 +564,9 @@ class SharedChatSessionSupervisor:
         current_thread = threading.current_thread()
         if any(thread is current_thread for thread in threads):
             raise RuntimeError("cannot close the supervisor from its background thread")
-        # A sweep may already be inside the synchronous final-archive hook.
-        # Its upload is bounded by the archive service's operation deadline,
-        # so wait for completion instead of abandoning a daemon thread and
-        # closing the service underneath it.  The sampler is joined for the
-        # same ownership guarantee.
+        # A sweep may be inside the synchronous final-archive hook, whose upload
+        # the archive deadline bounds: wait for it, and for the sampler, rather
+        # than close the service under a daemon thread.
         for thread in threads:
             if thread is not None:
                 thread.join()
@@ -599,10 +597,8 @@ class SharedChatSessionSupervisor:
                 member.turn_lock
                 for group in self._groups.values()
                 for member in group.members.values()
-                # An initialization may also hold this lock, but its context
-                # manager is still alive and owns the release. Only a detached
-                # admitted turn loses the normal ``complete_turn`` release
-                # path when ``close`` clears ``current_turn`` below.
+                # An initialization's context manager still owns its release;
+                # only a detached admitted turn loses ``complete_turn``'s.
                 if member.current_turn is not None and member.turn_lock.locked()
             ]
             for group in self._groups.values():
@@ -618,17 +614,13 @@ class SharedChatSessionSupervisor:
         for transport in transports:
             with contextlib.suppress(Exception):
                 transport.close()
-        # Closing a transport ends the member workload. Drain afterwards so
-        # the manager also releases its per-container active-cursor fence;
-        # otherwise restarting this supervisor object can suppress safe
-        # journal rotation for the rest of the container lifetime.
+        # Closing a transport ends the member workload. Drain afterwards, or the
+        # manager's active-cursor fence suppresses journal rotation for good.
         for spec, cursor in observations:
             with contextlib.suppress(Exception):
                 self._manager.finish_guest_observation(spec, cursor)
-        # ``close`` may be used by a supervisor restart in the same process,
-        # not only interpreter shutdown. Do not leave a detached active turn's
-        # member lock permanently acquired after its transport and observation
-        # have both been closed.
+        # A supervisor restart in this process also closes: never leave a
+        # detached turn's member lock held after its transport is gone.
         for turn_lock in turn_locks:
             with contextlib.suppress(RuntimeError):
                 turn_lock.release()
@@ -1935,6 +1927,14 @@ class SharedChatSessionSupervisor:
         """Whether this supervisor currently knows the membership alias."""
         with self._lock:
             return thread_id in self._members
+
+    def running_group(self, sandbox_id: str) -> tuple[ChatSandboxSpec, str] | None:
+        """A running group's spec and container id, for a bounded host read; else ``None``."""
+        with self._lock:
+            group = self._groups.get(sandbox_id)
+            if group is None or group.stopping or not group.inspection.running:
+                return None
+            return group.spec, group.inspection.container_id
 
     def admin_deletion_target_absent(
         self,

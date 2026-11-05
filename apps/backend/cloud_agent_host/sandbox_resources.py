@@ -60,6 +60,8 @@ class DockerResourceReading:
     counters: Sample
     memory_limit_bytes: int | None = None
     pids: int | None = None
+    #: The container's pids limit. Host-only: not part of the reported sample.
+    pids_limit: int | None = None
 
 
 def reading_from_stats(stats: dict[str, Any], *, mono: float) -> DockerResourceReading:
@@ -112,6 +114,7 @@ def reading_from_stats(stats: dict[str, Any], *, mono: float) -> DockerResourceR
         ),
         memory_limit_bytes=_counter(memory.get("limit")),
         pids=_counter(_mapping(stats.get("pids_stats")).get("current")),
+        pids_limit=_counter(_mapping(stats.get("pids_stats")).get("limit")),
     )
 
 
@@ -179,8 +182,13 @@ class SandboxResourceCollector:
         max_reads_per_cycle: int = 64,
         clock: Callable[[], float] = time.monotonic,
         client_factory: Callable[[], httpx.Client] | None = None,
+        on_reading: Callable[[str, DockerResourceReading], None] | None = None,
     ) -> None:
-        """Configure bounded worker timing; injectable clocks/clients support tests."""
+        """Configure bounded worker timing; injectable clocks/clients support tests.
+
+        ``on_reading`` sees every reading as it is taken, outside the lock, so
+        a reading near a limit is noticed at once (``sandbox_incidents``).
+        """
         if any(
             not math.isfinite(value) or value <= 0
             for value in (interval_s, read_timeout_s, cycle_budget_s)
@@ -193,6 +201,7 @@ class SandboxResourceCollector:
         self._cycle_budget_s = cycle_budget_s
         self._max_reads = max_reads_per_cycle
         self._clock = clock
+        self._on_reading = on_reading
         self._client_factory = client_factory or (
             lambda: daemon_client(timeout_s=self._read_timeout_s)
         )
@@ -296,6 +305,9 @@ class SandboxResourceCollector:
                     sample = resource_sample(reading, self._previous.get(container))
                     self._previous[container] = reading
                     self._samples[container] = (sample, reading.counters.mono)
+            if reading is not None and self._on_reading is not None:
+                with contextlib.suppress(Exception):
+                    self._on_reading(container, reading)
         return reads
 
     def _read(

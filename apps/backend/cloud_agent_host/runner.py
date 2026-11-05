@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 
 import httpx
 
+from cloud_agent_host import incident_relay
 from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.chat_sandbox import (
     CHAT_UPLOADS_DIR,
@@ -212,6 +213,7 @@ from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     PLATFORM_MCP_SERVER_PREFIX,
     PROFILING_CONTROL_CAPABILITY,
+    SANDBOX_BROWSER_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
@@ -1186,17 +1188,14 @@ def _shared_live_host_capabilities(  # noqa: PLR0912 complexity baseline, #771
     capabilities = [
         SHARED_SANDBOX_CAPABILITY,
         NATIVE_FORK_AT_ANCHOR_CAPABILITY,
-        # A live resident session is also what makes a turn's final message
-        # readable: the settle path that ends the turn is the one that reports
-        # it whole, before anything bounds it. This host therefore never
-        # advertises the goal report without the contract it rides on.
+        # A live resident session is what makes a turn's final message readable
+        # whole (the settle path reports it), so the goal report rides on it.
         GOAL_REPORT_CAPABILITY,
         # Named per runtime: the sandbox manager of this same deployment takes a
         # message into a running turn only through a driver that wires it.
         *steerable,
-        # This exact replica can accept the deployment-wide DB archive policy
-        # over its authenticated sandbox manager channel. A claim also attests the
-        # exact revision that sandbox manager confirmed.
+        # This replica takes the deployment-wide DB archive policy over its
+        # sandbox manager channel; a claim attests the revision it confirmed.
         sandbox_archive_settings.SANDBOX_ARCHIVE_CAPABILITY,
         # The same-deployment sandbox manager understands the policy's
         # checkpoint switch and reports checkpoint receipts.
@@ -1206,6 +1205,7 @@ def _shared_live_host_capabilities(  # noqa: PLR0912 complexity baseline, #771
         # ... and recreates a group another host left behind from its
         # checkpoint, so a claim may hand this replica a cold group.
         SANDBOX_RESTORE_CAPABILITY,
+        *([SANDBOX_BROWSER_CAPABILITY] if helpers.get("cloud-agent-browser") else []),
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
@@ -1328,13 +1328,13 @@ def _session_supervisor_from_env(*, timeout: float = 180) -> SessionSupervisorCl
 def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
     """Read Docker truth from the host singleton without breaking host beats.
 
-    The host heartbeat must remain a liveness signal even while the workspace
-    sandbox manager is restarting. Returning ``None`` means "not observed this beat";
-    it must never be confused with an authoritative empty list or deletion.
+    The heartbeat stays a liveness signal while the sandbox manager restarts:
+    ``None`` is "not observed this beat", never an empty list or a deletion.
     """
     client: SessionSupervisorClient | None = None
     try:
         client = _session_supervisor_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
+        incident_relay.confirm(client)
         rows = client.list()
         observations: list[dict[str, Any]] = []
         now = time.monotonic()
@@ -1349,13 +1349,11 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
             active = active or bool(row.get("workspace_suspended"))
             deadline = row.get("idle_deadline_monotonic")
             # A generation-zero RUNNING entry with no local deadline was just
-            # reconstructed after a sandbox manager restart. Its empty in-memory token
-            # set is not proof that the group has been idle: the sandbox manager may
-            # have restarted while a terminal had cleared the durable
-            # deadline. Report activity as unknown. The control plane installs
-            # one recovery deadline only when its durable deadline is also
-            # NULL; unlike reporting a fresh full timeout on every heartbeat,
-            # that window cannot be extended forever by healthy heartbeats.
+            # rebuilt after a sandbox manager restart; its empty token set does
+            # not prove idleness (a terminal may have cleared the durable
+            # deadline). Report activity as unknown: the control plane installs
+            # one recovery deadline only when its own is NULL too, so healthy
+            # heartbeats cannot extend that window forever.
             activity_known = activation_generation > 0 or active or deadline is not None
             idle_remaining = None
             if activity_known and deadline is not None:
@@ -1388,6 +1386,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     "checkpoint": (
                         row.get("checkpoint") if isinstance(row.get("checkpoint"), dict) else None
                     ),
+                    "incidents": incident_relay.carry(row),
                 }
             )
         return observations

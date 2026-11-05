@@ -66,6 +66,7 @@ from cloud_agent_host.sandbox_deletion_backup import (
     DEFAULT_ARCHIVE_STATE_DIR,
     SandboxDeletionBackupService,
 )
+from cloud_agent_host.sandbox_incident_routes import install_incident_routes, sandbox_incidents_for
 from cloud_agent_host.sandbox_initial_uploads import INITIAL_UPLOAD_DIRNAME
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import DEFAULT_CHAT_IDLE_TIMEOUT_S
@@ -225,8 +226,11 @@ def _lifespan(
                 context.supervisor_start()
             context.terminals.start()
             terminals_started = True
-            resource_collector = SandboxResourceCollector()
+            resource_collector = SandboxResourceCollector(
+                on_reading=context.incidents.observe_reading
+            )
             resource_collector.start()
+            context.incidents.start()
             app.state.sandbox_resource_collector = resource_collector
             yield
         finally:
@@ -277,6 +281,7 @@ async def _shut_down(
     app.state.sandbox_resource_collector = None
     if resource_collector is not None:
         cleanup("resource_collector", resource_collector.close)
+    cleanup("incidents", context.incidents.close)
     if terminals_started:
         cleanup("terminals", context.terminals.close)
     if context.supervisor_start.ready:
@@ -393,6 +398,7 @@ def create_app(
         environment_preparation=environment_preparation,
         settings=ManagerSettings(local_settings),
         authenticate=authenticator(expected_token),
+        incidents=sandbox_incidents_for(lambda: shared_supervisor, retained_manager),
     )
     # No schema or docs routes: they are served outside the routes' auth
     # dependency, and nothing reads them.
@@ -420,6 +426,7 @@ def create_app(
         max_sessions_per_workspace=int(applied_settings["terminal_max_sessions_per_workspace"]),
         limits=_TerminalLimits.from_settings(applied_settings),
     )
+    install_incident_routes(app, context.incidents, context.authenticate)
     for routes in (
         SettingsRoutes(context, app.state),
         SharedSessionRoutes(context, app.state),

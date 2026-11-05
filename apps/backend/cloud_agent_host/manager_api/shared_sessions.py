@@ -343,6 +343,7 @@ class SharedSessionRoutes:
             # Synchronization and cache reads perform no Docker stats I/O.
             # A partial listing must not evict unrelated collection targets.
             resource_collector.sync_targets(rows)
+        self._context.incidents.annotate(rows, shared_groups, complete=thread_id is None)
         checkpoints: SandboxCheckpointStore | None = self._state.sandbox_checkpoint_store
         for row in rows:
             row["resource_usage"] = (

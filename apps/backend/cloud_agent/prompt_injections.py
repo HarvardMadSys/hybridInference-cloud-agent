@@ -2,7 +2,9 @@
 
 A claimed turn's prompt is the owner's task wrapped, in a fixed order, in the
 platform's own context: the uploaded files' paths, durable memories, the
-selected skills, the chat's SSH servers and an active goal. Each wrapper only
+selected skills, the chat's SSH servers, what it should know about its sandbox
+(the browser at its first turn, and incidents it was not yet told of) and an
+active goal. Each wrapper only
 adds text around the prompt it is given, so what one added is exactly the
 difference it made. That difference is recorded per wrapper -- which one, how
 many items, how many characters (with the ASCII and CJK counts the token
@@ -20,6 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.agent_memory import fit_task_memories, prompt_with_agent_memories
+from cloud_agent.application.sandbox_incidents import BROWSER_NOTE, SandboxNotes
 from cloud_agent.application.ssh_servers import prompt_with_ssh_servers
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.goals.prompts import prompt_with_goal
@@ -46,9 +49,11 @@ def claim_prompt(
     ssh_servers: list[dict[str, Any]],
     goal: dict[str, Any] | None,
     plugins: list[dict[str, Any]] | None = None,
+    sandbox: SandboxNotes | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """The prompt the turn runs with, and what each platform wrapper added to it."""
     kept = fit_task_memories(memories) if memories is not None else None
+    notes = sandbox or SandboxNotes()
     steps: list[tuple[str, Callable[[str], str], int, list[str]]] = [
         (
             "attachments",
@@ -72,6 +77,18 @@ def claim_prompt(
             "ssh_servers",
             lambda prompt: prompt_with_ssh_servers(prompt, ssh_servers),
             len(ssh_servers),
+            [],
+        ),
+        (
+            "sandbox_browser",
+            lambda prompt: (BROWSER_NOTE + prompt) if notes.browser else prompt,
+            1,
+            [],
+        ),
+        (
+            "sandbox_incidents",
+            lambda prompt: notes.incidents_text() + prompt,
+            notes.untold,
             [],
         ),
         ("goal", lambda prompt: prompt_with_goal(prompt, goal), 1, []),

@@ -33,6 +33,7 @@ from cloud_agent import memory_tool, web_search
 from cloud_agent.agent_memory import claim_agent_memories
 from cloud_agent.application.claim_credentials import mint_clone_token
 from cloud_agent.application.model_connections import claim_model_connection
+from cloud_agent.application.sandbox_incidents import sandbox_notes
 from cloud_agent.application.ssh_servers import build_ssh_access, servers_for_thread, ssh_key_cipher
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentExecutionRepository
+    from cloud_agent.ports.sandbox_incidents import SandboxIncidentRepository
     from cloud_agent.schemas import WorkerClaimAttestation
     from cloud_agent_shared.environment import BoundEnvironment
     from cloud_agent_shared.model_connections import ModelConnectionAccess
@@ -122,6 +124,7 @@ class ClaimStorage(Protocol):
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
     model_connections: ModelConnectionRepository
+    sandbox_incidents: SandboxIncidentRepository
     source_control: SourceControlRepository
 
     @property
@@ -205,7 +208,7 @@ async def _hand_over(
     thread_attachment_count = await store.attachments.count_thread_attachments(
         thread_id=str(claim["thread_id"])
     )
-    task_prompt, context_injections = await _task_prompt(store, claim, ssh_state)
+    task_prompt, context_injections = await _task_prompt(store, claim, ssh_state, capabilities)
     return WorkerClaimResponse(
         thread_attachment_count=thread_attachment_count,
         turn_attachment_count=len(claim.get("attachments") or []),
@@ -590,17 +593,16 @@ async def mcp_bindings(
 
 
 async def _task_prompt(
-    store: ClaimStorage, claim: dict[str, Any], ssh_state: dict[str, Any] | None
+    store: ClaimStorage,
+    claim: dict[str, Any],
+    ssh_state: dict[str, Any] | None,
+    capabilities: Sequence[str],
 ) -> tuple[str, list[dict[str, Any]]]:
     """The task prompt the agent receives, and what each wrapper added to it.
 
-    Attachments are named inside the user task, then the skill selection
-    wraps the whole thing: the files are context for the task, and the
-    skills are guidance about how to approach it. The goal goes outermost
-    of all, and reaches human and automatic turns alike — the turn that set
-    the objective is the first one that should be working toward it. The
-    goal preamble is the same for every runtime and every turn. What each
-    wrapper added is recorded by size for the Context view (never its text).
+    Files inside the task, then memories, skills, SSH servers and the sandbox
+    notes; the goal outermost, for human and automatic turns alike. What each
+    wrapper added is recorded by size for the Context view, never text.
     """
     # Durable memories are only offered where the memory tools can be reached.
     durable_memories = (
@@ -608,6 +610,7 @@ async def _task_prompt(
         if claim["runtime"] in runtimes_supporting_mcp()
         else None
     )
+    notes = await sandbox_notes(store.sandbox_incidents, claim, capabilities)
     return claim_prompt(
         claim["task_prompt"],
         attachments=claim.get("attachments"),
@@ -616,6 +619,7 @@ async def _task_prompt(
         ssh_servers=servers_for_thread(ssh_state, str(claim["thread_id"])),
         goal=claim.get("goal"),
         plugins=claim.get("plugins") or [],
+        sandbox=notes,
     )
 
 

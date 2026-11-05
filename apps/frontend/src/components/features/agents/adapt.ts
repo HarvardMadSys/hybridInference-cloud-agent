@@ -1,4 +1,5 @@
 import { mapThreadMessage } from './threadMessage';
+import { sandboxIncidentMessage } from './sandboxIncidentNotice';
 // Adapts the agent-jobs API shape to what the UI renders.
 //
 // The UI was designed against a richer mock than the API currently returns.
@@ -297,6 +298,9 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     }
     if (phase === 'shared_tool_errors_observed') {
       return { kind: 'lifecycle', text: 'Some tools encountered errors', sourceEventId };
+    }
+    if (phase === 'sandbox_incident') {
+      return { kind: 'lifecycle', text: sandboxIncidentMessage(payload), sourceEventId };
     }
     return Object.hasOwn(LIFECYCLE_LABELS, phase)
       ? { kind: 'lifecycle', text: phase, sourceEventId }

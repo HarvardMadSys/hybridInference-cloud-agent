@@ -15,6 +15,8 @@ const SOURCES = [
   'platform_memory',
   'platform_skills',
   'platform_ssh_servers',
+  'platform_sandbox_browser',
+  'platform_sandbox_incidents',
   'platform_goal',
   'platform_plugins',
   'claude_user_line',

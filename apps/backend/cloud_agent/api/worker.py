@@ -134,6 +134,7 @@ if TYPE_CHECKING:
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentExecutionRepository
+    from cloud_agent.ports.sandbox_incidents import SandboxIncidentRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
@@ -217,6 +218,7 @@ class _WorkerStorage(Protocol):
     pending_messages: PendingMessageRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
+    sandbox_incidents: SandboxIncidentRepository
     skills: SkillRepository
     source_control: SourceControlPort
 

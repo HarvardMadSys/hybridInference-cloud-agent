@@ -10,6 +10,7 @@ import type { AdminSandboxState } from '@/lib/api/adminSandboxes';
 import { BUTTON, dateTime, ErrorNotice } from '../runs/shared';
 import type { SandboxInventorySnapshot } from './inventorySync';
 import { finiteMetric, formatBytes, formatCpu, type SandboxObservation } from './present';
+import { SandboxIncidentBadge } from './SandboxIncidentBadge';
 import { useSandboxInventory } from './useSandboxInventory';
 import {
   FleetSummary,
@@ -528,6 +529,7 @@ function SandboxRowView({
               Removed from inventory
             </span>
           )}
+          <SandboxIncidentBadge sandbox={sandbox} />
         </th>
         <td className="max-w-40 px-3 py-3 text-xs text-gray-500 dark:text-gray-400">
           <span className="block truncate font-mono" title={sandbox.user_id}>

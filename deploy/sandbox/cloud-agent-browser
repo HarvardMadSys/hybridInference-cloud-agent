@@ -130,6 +130,52 @@ class BrowserError(Exception):
     """A failure this command reports on stderr with exit status 1."""
 
 
+#: The most an incident journal holds; its oldest lines go first.
+INCIDENT_JOURNAL_BYTES = 256 * 1024
+
+
+def append_incident(path: str, kind: str, **fields: Any) -> None:
+    """Append one incident for the host to collect; never raises.
+
+    The host reads this file as the ``agent`` group, from the last
+    ``(journal, seq)`` it holds (``cloud_agent_host.sandbox_incidents``). A
+    line carries no content: no stderr, no URL. The file is replaced whole, so
+    a reader never sees half a line.
+    """
+    try:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        except FileNotFoundError:
+            lines = []
+        journal, seq = "", 0
+        for line in reversed(lines):
+            with contextlib.suppress(ValueError, TypeError, KeyError):
+                last = json.loads(line)
+                journal, seq = str(last["journal"]), int(last["seq"])
+                break
+        entry = {
+            "journal": journal or secrets.token_hex(8),
+            "seq": seq + 1,
+            "ts": time.time(),
+            "kind": kind,
+            **fields,
+        }
+        lines.append(json.dumps(entry, separators=(",", ":")))
+        while len(lines) > 1 and sum(len(line) + 1 for line in lines) > INCIDENT_JOURNAL_BYTES:
+            del lines[: max(1, len(lines) // 2)]
+        tmp = f"{path}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o640)
+        try:
+            os.fchmod(fd, 0o640)
+            os.write(fd, ("\n".join(lines) + "\n").encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"cloud-agent-browser: incident journal: {exc}", file=sys.stderr, flush=True)
+
+
 # --------------------------------------------------------------------------
 # Paths
 # --------------------------------------------------------------------------
@@ -148,6 +194,11 @@ class Paths:
     @property
     def record(self) -> str:
         return os.path.join(self.state, "daemon.json")
+
+    @property
+    def incidents(self) -> str:
+        """The incident journal the host collects (``append_incident``)."""
+        return os.path.join(self.state, "events.jsonl")
 
     @property
     def lock(self) -> str:
@@ -1103,8 +1154,18 @@ class Daemon:
             pass
         finally:
             if asyncio.current_task() is self.pump:
+                # Only an exit nobody asked for ends the pump on its own: a
+                # stop or an idle stop cancels it first.
                 self.pump = None
+                process = self.chromium
                 self._close_browser("chromium exited")
+                status = None if process is None else process.poll()
+                append_incident(
+                    self.paths.incidents,
+                    "browser_crashed",
+                    exit_code=status if status is not None and status >= 0 else None,
+                    signal=-status if status is not None and status < 0 else None,
+                )
 
     async def _launch(self) -> None:
         loop = asyncio.get_running_loop()

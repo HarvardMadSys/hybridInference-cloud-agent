@@ -51,6 +51,38 @@ export function displayValue(value: AdminSettingValue): string {
   return typeof value === 'boolean' ? (value ? 'Enabled' : 'Disabled') : String(value);
 }
 
+interface SettingOption {
+  value: string;
+  label: string;
+}
+
+// Named choices for free-text settings whose usual values are internal names.
+// The server still accepts any value (a registered email provider, say), so a
+// saved value outside this list stays selectable instead of being replaced.
+const NAMED_OPTIONS = new Map<string, SettingOption[]>([
+  [
+    'accounts.email_provider',
+    [
+      { value: 'smtp', label: 'SMTP' },
+      { value: 'tencent_ses', label: 'Tencent SES' },
+    ],
+  ],
+]);
+
+/** The dropdown for a setting with named choices, keeping its saved value; else `null`. */
+export function namedOptions(key: string, saved: string): SettingOption[] | null {
+  const options = NAMED_OPTIONS.get(key);
+  if (!options) return null;
+  if (options.some((option) => option.value === saved)) return options;
+  return [...options, { value: saved, label: `${saved || '(empty)'} (current value)` }];
+}
+
+/** How a saved value reads: its named choice where it has one. */
+export function valueLabel(key: string, value: AdminSettingValue): string {
+  const named = NAMED_OPTIONS.get(key)?.find((option) => option.value === value);
+  return named?.label ?? displayValue(value);
+}
+
 export function parseValue(definition: AdminSettingDefinition, draft: string): ParsedValue {
   if (definition.kind === 'boolean') return { value: draft === 'true' };
   if (definition.kind === 'string') {
