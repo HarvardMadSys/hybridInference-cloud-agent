@@ -26,7 +26,9 @@ from cloud_agent.domain.execution import (
     job_state_change_allowed,
 )
 
-COMMANDS = "repositories/attempt_commands.py"
+CLAIMS = "repositories/attempt_commands/claims.py"
+LIFECYCLE = "repositories/attempt_commands/lifecycle.py"
+REAPER = "repositories/attempt_commands/reaper.py"
 TERMINAL = frozenset(TERMINAL_STATES)
 #: The reaper's job writes test no state; it skips a terminal job first.
 UNFINISHED = frozenset({QUEUED, RUNNING})
@@ -42,22 +44,22 @@ SITES = (
     ("repositories/goals.py", "sweep_goal_scheduling", {QUEUED}, {CANCELLED}),
     ("repositories/owner_work.py", "end_owner_work", {QUEUED}, {CANCELLED}),
     # ``request_cancel`` cancels a queued turn; a running one is only flagged.
-    (COMMANDS, "request_cancel", {QUEUED}, {CANCELLED}),
+    (LIFECYCLE, "request_cancel", {QUEUED}, {CANCELLED}),
     # The claim selects a claimable, that is queued, turn.
-    (COMMANDS, "claim_job", {QUEUED}, {RUNNING}),
+    (CLAIMS, "claim_job", {QUEUED}, {RUNNING}),
     # ``WHERE ... state = 'running'``: back to the queue, or cancelled.
-    (COMMANDS, "release_claim", {RUNNING}, {QUEUED, CANCELLED}),
+    (CLAIMS, "release_claim", {RUNNING}, {QUEUED, CANCELLED}),
     # Every caller passes ``from_states=(RUNNING,)``; the worker's finish
     # refuses a state that is not terminal, and the others fail the turn.
-    (COMMANDS, "_transition_job", {RUNNING}, TERMINAL),
+    (LIFECYCLE, "_transition_job", {RUNNING}, TERMINAL),
     # The reaper: an indeterminate or settled-but-unfinished turn (two
     # statements), a restore out of attempts, a cancel, a spent budget, a retry.
-    (COMMANDS, "_reap_attempt", UNFINISHED, {CANCELLED, FAILED}),
-    (COMMANDS, "_reap_attempt", UNFINISHED, {CANCELLED, FAILED}),
-    (COMMANDS, "_reap_attempt", UNFINISHED, {FAILED}),
-    (COMMANDS, "_reap_attempt", UNFINISHED, {CANCELLED}),
-    (COMMANDS, "_reap_attempt", UNFINISHED, {FAILED}),
-    (COMMANDS, "_reap_attempt", UNFINISHED, {QUEUED}),
+    (REAPER, "_reap_attempt", UNFINISHED, {CANCELLED, FAILED}),
+    (REAPER, "_reap_attempt", UNFINISHED, {CANCELLED, FAILED}),
+    (REAPER, "_reap_attempt", UNFINISHED, {FAILED}),
+    (REAPER, "_reap_attempt", UNFINISHED, {CANCELLED}),
+    (REAPER, "_reap_attempt", UNFINISHED, {FAILED}),
+    (REAPER, "_reap_attempt", UNFINISHED, {QUEUED}),
 )
 
 #: The statements that create a turn: ``(module, anchor, the states it may

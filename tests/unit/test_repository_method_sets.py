@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
+from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 
 
@@ -64,4 +65,28 @@ def test_the_host_pool_repository_keeps_its_methods() -> None:
         "set_runner_host_settings",
         "set_runtime_version",
         "set_sandbox_archive_settings",
+    }
+
+
+def test_the_attempt_commands_keep_their_methods() -> None:
+    assert _methods(PostgresAttemptCommands) == {
+        "__init__",
+        "_append_events",
+        "_attempts_spent",
+        "_lock_live_attempt",
+        "_reap_attempt",
+        "_transition_job",
+        "_turn_summary_decision",
+        "append_event",
+        "append_events",
+        "claim_job",
+        "heartbeat",
+        "reap_expired",
+        "record_attempt_resources",
+        "record_attempt_turn_summary",
+        "record_continuity_mode",
+        "release_claim",
+        "request_cancel",
+        "sweep_queued_follow_ups",
+        "transition",
     }
