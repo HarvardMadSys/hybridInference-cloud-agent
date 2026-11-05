@@ -16,13 +16,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.grant_usage import (
+from cloud_agent.runtime_usage import RuntimeJobUsage, summarize_runtime_job
+from cloud_agent.usage.sums import (
     DERIVED_AMOUNT_CHARS,
     USAGE_METRICS,
     UsageSums,
     UsageUnknownRows,
 )
-from cloud_agent.runtime_usage import RuntimeJobUsage, summarize_runtime_job
 
 #: Longest selectable window, in whole days.
 MAX_USAGE_WINDOW_DAYS = 90

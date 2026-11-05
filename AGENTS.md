@@ -54,7 +54,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
 | `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, queue and goal recovery, sandbox deletion, notifications and maintenance |
 | `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, pull-request records |
-| `apps/backend/cloud_agent/runtime_usage.py`, `ledger.py`, `admin_usage.py`, `grant_usage.py` | What agents reported about their model calls, per job and summed for the Usage pages; no cost or quota ([usage](docs/developer/operations.md#usage)) |
+| `apps/backend/cloud_agent/runtime_usage.py`, `ledger.py`, `admin_usage.py`, `usage/sums.py` | What agents reported about their model calls, per job and summed for the Usage pages; no cost or quota ([usage](docs/developer/operations.md#usage)) |
 | `apps/backend/cloud_agent/agent_access.py` | The admission decision (`agent.use`, `agent.admin`) every protected request reads |
 | `apps/backend/cloud_agent/identity_namespace.py` | Binds an empty database to the account system once, and refuses a Gateway-era one (`--check` reads it without writing) |
 | `apps/backend/cloud_agent/accounts/`, `application/owner_termination.py` | The account system: sign-in, sessions, the waiting list, the account directory, retired-configuration refusal, and stopping a revoked account's work ([guide](docs/developer/local-accounts.md)) |
@@ -182,10 +182,15 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
 
 ## 6. Key concepts
 
-- **Job / attempt / lease.** A job is the user's task; an attempt is one
-  execution of it on one host. Attempts carry a lease with a fencing
-  generation — a superseded attempt's writes are rejected by the store, which
-  is what makes retries safe and stops duplicate pull requests.
+- **Conversation / job / attempt / lease.** A conversation (`thread_id` in
+  code, a chat or task in the UI) is made of turns, and a job is one turn of
+  it: one user message and the agent's work on it (`turn_no`; every turn
+  after the first names its `parent_job_id`). An attempt is one execution of
+  a turn on one host. Attempts carry a lease with a fencing generation — a
+  superseded attempt's writes are rejected by the store, which is what makes
+  retries safe and stops duplicate pull requests. [Code
+  structure](docs/developer/code-structure.md#vocabulary) has the full
+  glossary.
 - **Model connection.** Every turn runs on one of its owner's model
   connections: a provider Base URL, the owner's own API key and verified
   model ids (FreeInference is one such provider, used with the owner's key).

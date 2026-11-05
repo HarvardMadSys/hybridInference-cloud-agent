@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from cloud_agent.grant_usage import USAGE_METRICS, UsageSums, UsageUnknownRows
+from cloud_agent.usage.sums import USAGE_METRICS, UsageSums, UsageUnknownRows
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
