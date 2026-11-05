@@ -83,16 +83,16 @@ vi.mock('@/lib/api/questions', () => ({
   answerThreadQuestion: vi.fn(),
 }));
 
-import { installSideChatLocks } from './sideChatTestSupport';
+import { installSideChatLocks } from './conversation/sideChatTestSupport';
 import { FirstRunProvider } from './firstRun';
 import { receiveHint } from './agentPush';
-import { sideChatKeys } from './sideChatStorage';
+import { sideChatKeys } from './conversation/sideChatStorage';
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
-import { IDLE_QUEUE_POLL_MS } from './usePendingMessages';
-import { watchPullRequestPrompt } from './watchPullRequest';
+import { IDLE_QUEUE_POLL_MS } from './composer/usePendingMessages';
+import { watchPullRequestPrompt } from './conversation/watchPullRequest';
 import type { AgentJob } from './types';
 import { toDisplayEvent } from './adapt';
-import { projectProtocolEvents } from './trajectoryProtocol';
+import { projectProtocolEvents } from './trajectory/trajectoryProtocol';
 
 const renderingWork = vi.hoisted(() => ({
   trajectory: vi.fn(),
@@ -101,8 +101,8 @@ const renderingWork = vi.hoisted(() => ({
   storedTurn: vi.fn(),
 }));
 
-vi.mock('./ChatMessages', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./ChatMessages')>();
+vi.mock('./conversation/ChatMessages', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./conversation/ChatMessages')>();
   return {
     ...original,
     HistoryTurn: (props: Parameters<typeof original.HistoryTurn>[0]) => {
@@ -112,8 +112,8 @@ vi.mock('./ChatMessages', async (importOriginal) => {
   };
 });
 
-vi.mock('./trajectorySteps', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./trajectorySteps')>();
+vi.mock('./trajectory/trajectorySteps', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./trajectory/trajectorySteps')>();
   return {
     ...original,
     buildTrajectorySteps: (...args: Parameters<typeof original.buildTrajectorySteps>) => {
@@ -123,8 +123,8 @@ vi.mock('./trajectorySteps', async (importOriginal) => {
   };
 });
 
-vi.mock('./conversationTurnNavigation', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./conversationTurnNavigation')>();
+vi.mock(import('./conversation/conversationTurnNavigation'), async (importOriginal) => {
+  const original = await importOriginal();
   return {
     ...original,
     describeHistoryTurns: (...args: Parameters<typeof original.describeHistoryTurns>) => {

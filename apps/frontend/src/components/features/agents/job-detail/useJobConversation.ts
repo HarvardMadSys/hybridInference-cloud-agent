@@ -9,9 +9,9 @@ import {
   sameNavigationEntries,
   toNavigationEntry,
   type ConversationTurnNavigationEntry,
-} from '../conversationTurnNavigation';
+} from '../conversation/conversationTurnNavigation';
 import type { AgentJob } from '../types';
-import { shouldHoldReading, useConversationScroll } from '../useConversationScroll';
+import { shouldHoldReading, useConversationScroll } from '../conversation/useConversationScroll';
 import type { JobDetailPanels } from './useJobDetailPanels';
 
 /** Shared turn descriptions, navigation announcements, and reader-controlled scrolling. */

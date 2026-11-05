@@ -21,7 +21,7 @@
       "rules": { "max-lines": ["error", { "max": 6056 }] }
     },
     {
-      "files": ["src/components/features/agents/TaskComposer.test.tsx"],
+      "files": ["src/components/features/agents/composer/TaskComposer.test.tsx"],
       "rules": { "max-lines": ["error", { "max": 2974 }] }
     },
     {
@@ -41,7 +41,7 @@
       "rules": { "max-lines": ["error", { "max": 1868 }] }
     },
     {
-      "files": ["src/components/features/agents/ChatMessages.test.tsx"],
+      "files": ["src/components/features/agents/conversation/ChatMessages.test.tsx"],
       "rules": { "max-lines": ["error", { "max": 1613 }] }
     },
     {
@@ -61,7 +61,7 @@
       "rules": { "max-lines": ["error", { "max": 1252 }] }
     },
     {
-      "files": ["src/components/features/agents/SidebarNavigation.test.tsx"],
+      "files": ["src/components/features/agents/sidebar/SidebarNavigation.test.tsx"],
       "rules": { "max-lines": ["error", { "max": 1356 }] }
     },
     {

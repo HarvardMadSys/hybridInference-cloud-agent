@@ -5,7 +5,7 @@ import { clearAgentGoal, pauseAgentGoal, resumeAgentGoal } from '@/lib/api/agent
 import type { AgentGoal } from '../types';
 import { useT } from '@/components/providers';
 import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
-import { GoalIcon } from '../ComposerPlusMenu';
+import { GoalIcon } from '../composer/ComposerPlusMenu';
 import { writeGoal } from './goalApi';
 import { useGoalWrite } from './useGoalWrite';
 import { GoalActionsMenu } from './GoalActionsMenu';

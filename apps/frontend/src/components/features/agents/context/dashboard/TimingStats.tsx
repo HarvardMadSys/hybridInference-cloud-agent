@@ -14,7 +14,7 @@ import { useMemo, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { ThreadTimingApi, TimingKind } from '@/lib/api/agents';
 import type { TranslationKey } from '@/lib/i18n/translate';
-import { formatDuration } from '../../TurnFooter';
+import { formatDuration } from '../../conversation/TurnFooter';
 import { DashCard, shareText } from './DashCard';
 import { Donut } from './Donut';
 import { SliceList, type SliceRow } from './SliceList';

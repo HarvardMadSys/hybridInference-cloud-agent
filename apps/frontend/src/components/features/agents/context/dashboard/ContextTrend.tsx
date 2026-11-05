@@ -19,7 +19,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerE
 import { useLocale } from '@/components/providers';
 import type { ContextPointApi } from '@/lib/api/agents';
 import { compactCount } from '@/components/features/settings/usagePresent';
-import { formatDuration } from '../../TurnFooter';
+import { formatDuration } from '../../conversation/TurnFooter';
 import { signedTokens } from '../contextPresent';
 import { DashCard, Toggle } from './DashCard';
 import { labelOf, swatchOf } from './palette';

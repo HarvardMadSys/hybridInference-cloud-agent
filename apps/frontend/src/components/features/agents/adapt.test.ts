@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
-import { getConversationState, toConversationState } from './conversationState';
+import { getConversationState, toConversationState } from './sidebar/conversationState';
 
 import {
   createDisplayJobAdapter,

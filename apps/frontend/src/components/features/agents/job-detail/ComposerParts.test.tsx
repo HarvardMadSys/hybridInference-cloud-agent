@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { ActivityOverview } from '../activityOverview';
+import type { ActivityOverview } from '../conversation/activityOverview';
 import { ComposerOptionsButton, ComposerOptionsPanel, useComposerOptions } from './ComposerOptions';
 import { ComposerTodos } from './ComposerTodos';
 
