@@ -34,7 +34,7 @@ from cloud_agent.domain.compute import (
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.schemas_compute import CloudLabAutoscalingPolicy, CloudLabDefaults, RenewalPolicy
+from cloud_agent.schemas.compute import CloudLabAutoscalingPolicy, CloudLabDefaults, RenewalPolicy
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_setup import AutomaticComputeSetup
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
     from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
-    from cloud_agent.schemas_compute import (
+    from cloud_agent.schemas.compute import (
         AddComputeConnection,
         AddDeploymentProfile,
         AddServerRequest,

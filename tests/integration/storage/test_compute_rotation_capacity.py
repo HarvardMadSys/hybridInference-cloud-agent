@@ -43,7 +43,7 @@ from cloud_agent.ports.external.compute_provider import (
     SshConnection,
 )
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
-from cloud_agent.schemas_compute import RenewalPolicy, RotateComputeRequest, UpdateComputePolicy
+from cloud_agent.schemas.compute import RenewalPolicy, RotateComputeRequest, UpdateComputePolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

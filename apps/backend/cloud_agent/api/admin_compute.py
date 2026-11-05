@@ -21,7 +21,7 @@ from cloud_agent.application.compute_resources import (
 )
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.ports.errors import ConflictCode
-from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request models.
+from cloud_agent.schemas.compute import (  # noqa: TC001 - FastAPI request models.
     AddComputeConnection,
     AddDeploymentProfile,
     AddServerRequest,

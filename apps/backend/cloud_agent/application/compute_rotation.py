@@ -44,7 +44,7 @@ from cloud_agent.ports.external.host_bootstrap import (
 )
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
-from cloud_agent.schemas_compute import RenewalPolicy, RetireComputeRequest
+from cloud_agent.schemas.compute import RenewalPolicy, RetireComputeRequest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
