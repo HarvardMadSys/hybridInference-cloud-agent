@@ -18,7 +18,7 @@ from cloud_agent.application.compute_rotation import (
 )
 from cloud_agent.domain.compute import refused_for_capacity
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas.compute import RenewalPolicy
 
 NOW = datetime.now(UTC)
 EXPIRES = NOW + timedelta(hours=2)

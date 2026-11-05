@@ -38,7 +38,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     HostInventory,
     TransferResult,
 )
-from cloud_agent.schemas_compute import RenewalPolicy, RotateComputeRequest, UpdateComputePolicy
+from cloud_agent.schemas.compute import RenewalPolicy, RotateComputeRequest, UpdateComputePolicy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 

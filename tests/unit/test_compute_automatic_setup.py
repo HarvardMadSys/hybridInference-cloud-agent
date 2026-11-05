@@ -26,7 +26,7 @@ from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import ProviderError, SshConnection
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.providers.compute.setup_tunnels import ControlPlaneEndpoint, generate_tunnel_key
-from cloud_agent.schemas_compute import AutomaticDeploymentSetup
+from cloud_agent.schemas.compute import AutomaticDeploymentSetup
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

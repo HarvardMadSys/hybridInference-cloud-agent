@@ -40,7 +40,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     PreflightResult,
 )
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas.compute import RenewalPolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 from cloud_agent_shared.shared_protocol import shared_deployment_capability
 

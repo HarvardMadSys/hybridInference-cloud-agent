@@ -18,7 +18,7 @@ from tests.integration.storage.test_host_pool_store import db as db, hosts as ho
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import ProviderError
-from cloud_agent.schemas_compute import RotateComputeRequest
+from cloud_agent.schemas.compute import RotateComputeRequest
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

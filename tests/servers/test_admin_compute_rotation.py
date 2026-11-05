@@ -8,7 +8,7 @@ import pytest
 from tests.servers.test_admin_compute import ADMIN, allocation, compute_api as compute_api
 
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas.compute import RenewalPolicy
 
 POLICY = RenewalPolicy(
     enabled=True,

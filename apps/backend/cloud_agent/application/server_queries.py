@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.ports.external.compute_provider import UNCHECKED_CLOUDLAB_HOST_KEY_REF
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas.compute import RenewalPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -31,7 +31,7 @@ from cloud_agent.ports.external.compute_provider import (
     ProviderCapabilities,
 )
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.schemas_compute import AutomaticDeploymentSetup, RenewalPolicy
+from cloud_agent.schemas.compute import AutomaticDeploymentSetup, RenewalPolicy
 from cloud_agent_shared.egress import network_from_env
 
 ADMIN = {"Authorization": "Bearer test-compute-admin"}

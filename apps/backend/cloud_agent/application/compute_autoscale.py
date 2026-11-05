@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.compute import fingerprint
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
-from cloud_agent.schemas_compute import CloudLabDefaults
+from cloud_agent.schemas.compute import CloudLabDefaults
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
