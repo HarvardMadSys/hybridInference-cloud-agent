@@ -367,7 +367,39 @@ jobs:
           fi
           uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest" "${paths[@]}"
 
-      # The external checks below run once per commit, in the first shard.
+  # The checks that need a real Docker, systemd or the sandbox's own CLI.
+  # They ran after pytest in the first `test` shard and were most of its time
+  # (pytest 2.5 min, these 3.5 min), so the whole of CI waited on them in series.
+  # A job of their own runs them beside pytest. Like `test`, it runs whatever
+  # changed, and once per commit: it has no shards.
+  test-docker:
+    name: Real Docker checks
+    needs: changes
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Isolate uv and npm cache dirs
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+          echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
       # Each test skips when what this job hands it is missing, and pytest
       # calls a run that only skipped a success, so every external step in this
       # workflow keeps a junit report and `scripts/ci_tests_ran.py` fails the
@@ -376,7 +408,6 @@ jobs:
       # A single OS user cannot reproduce a sibling CLI's 0700 process registry.
       # Check the real normalizer across Linux UIDs before allowing deployment.
       - name: Shared member permissions survive a sibling CLI restart
-        if: matrix.shard == 1
         timeout-minutes: 5
         env:
           AGENT_PERMISSION_TEST_IMAGE: python:3.12-slim
@@ -398,12 +429,10 @@ jobs:
       # mirror needs, a broken build fails under this step's name, and the
       # test's own build then takes every layer from the cache.
       - name: Build the node image for the Host move
-        if: matrix.shard == 1
         timeout-minutes: 15
         run: docker build -t cloud-agent-test-compute-node:local tests/external/compute_node
 
       - name: A Host moves between two nodes over SSH
-        if: matrix.shard == 1
         timeout-minutes: 10
         env:
           AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
@@ -418,7 +447,6 @@ jobs:
       # markers included. Unit doubles never do, so a restore that every unit
       # test passed failed on staging. Commit, load and start one for real.
       - name: A restored chat starts from its checkpoint
-        if: matrix.shard == 1
         timeout-minutes: 5
         env:
           AGENT_RESTORE_TEST_IMAGE: python:3.12-slim
@@ -433,15 +461,20 @@ jobs:
       # runner and removes containers while they are read. Unit doubles do
       # neither, so release passed them all and refused on staging. Run the
       # same scripts on a Docker-in-Docker node of their own.
+      #
+      # Every test starts its own node and loads the base image into it, about
+      # twenty seconds before the test begins; one after another the eight took
+      # 173s. Nodes share nothing but the image they are built from, so `-n 4
+      # --dist load` hands the tests to four workers (loadfile would keep each
+      # file on one).
       - name: A released node stops its runner and inventories clean
-        if: matrix.shard == 1
         timeout-minutes: 8
         env:
           AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
         run: |
           set -euo pipefail
           docker pull "${AGENT_HOST_NODE_TEST_IMAGE}"
-          uv run pytest -q -m external tests/external/test_host_release_real_docker.py \
+          uv run pytest -q -n 4 --dist load -m external tests/external/test_host_release_real_docker.py \
             tests/external/test_stopped_network_release.py \
             --junitxml="${RUNNER_TEMP}/host-release.xml"
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/host-release.xml"
@@ -450,13 +483,11 @@ jobs:
       # cannot catch that race; exercise the shipped pin before CI can deploy.
       # Inference is a loopback protocol fixture, with no API key or model cost.
       - name: Set up Node for native CLI regression
-        if: matrix.shard == 1
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install the sandbox's pinned Claude CLI
-        if: matrix.shard == 1
         run: |
           set -euo pipefail
           version=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' deploy/sandbox/Dockerfile.agent-sandbox)
@@ -466,7 +497,6 @@ jobs:
           echo "CLOUD_AGENT_TEST_CLAUDE_BINARY=${RUNNER_TEMP}/claude-context/node_modules/.bin/claude" >> "${GITHUB_ENV}"
 
       - name: Install the sandbox's pinned Claude SDK
-        if: matrix.shard == 1
         run: |
           set -euo pipefail
           version=$(sed -n 's/^[[:space:]]*org\.freeinference\.helper\.claude-agent-sdk\.version="\([^"]*\)".*/\1/p' deploy/sandbox/Dockerfile.agent-sandbox)
@@ -482,7 +512,6 @@ jobs:
       # port — `FakeAnthropicGateway` binds port 0 — so there is nothing for
       # parallel workers to collide over.
       - name: Native history survives close, restore and failed-turn retry
-        if: matrix.shard == 1
         timeout-minutes: 10
         env:
           PYTHONPATH: ${{ runner.temp }}/claude-context-sdk
@@ -1886,6 +1915,7 @@ jobs:
       - changes
       - lint
       - test
+      - test-docker
       - test-db
       - check
       - web-build
@@ -1907,6 +1937,7 @@ jobs:
             changes=${{ needs.changes.result }}
             lint=${{ needs.lint.result }}
             test=${{ needs.test.result }}
+            test-docker=${{ needs.test-docker.result }}
             test-db=${{ needs.test-db.result }}
             web=${{ needs.check.result }}
             web-build=${{ needs.web-build.result }}

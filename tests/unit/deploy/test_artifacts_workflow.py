@@ -481,9 +481,10 @@ def test_the_default_test_tier_runs_whatever_changed() -> None:
     gate, and left the failure to the next backend change.
     """
     jobs = workflow()["jobs"]
-    assert "if" not in jobs["test"], jobs["test"]["if"]
-    assert jobs["test"]["needs"] == "changes"
-    assert "test" in jobs["ci-gate"]["needs"]
+    for name in ("test", "test-docker"):
+        assert "if" not in jobs[name], jobs[name]["if"]
+        assert jobs[name]["needs"] == "changes"
+        assert name in jobs["ci-gate"]["needs"]
 
 
 def _git(repository: Path, *args: str) -> str:
