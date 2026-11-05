@@ -23,8 +23,8 @@ from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, defau
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from cloud_agent_host.sandbox import SandboxBackend
-    from cloud_agent_shared.environment import BoundEnvironment
+    from cloud_agent_host.sandbox import SandboxBackend, TerminalProcess
+    from cloud_agent_shared.environment import BoundEnvironment, EnvironmentAction
 
 # The sandbox manager's own logger: its terminal events keep their name.
 logger = get_logger("cloud_agent_host.sandbox_manager")
@@ -162,7 +162,7 @@ class _TerminalManager:
                 if holders > 1:
                     self._workspace_locks[workspace_id] = (lock, holders - 1)
 
-    def create(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def create(
         self,
         workspace_id: str,
         workdir: Path | str,
@@ -203,22 +203,7 @@ class _TerminalManager:
                         if on_closed is not None:
                             on_closed(now)
                         return group[terminal_id].descriptor()
-                    global_active = self._spawning + sum(
-                        session.holds_process
-                        for sessions in self._sessions.values()
-                        for session in sessions.values()
-                    )
-                    if global_active >= self._max_sessions:
-                        if not group:
-                            self._sessions.pop(workspace_id, None)
-                        raise HTTPException(
-                            status_code=503, detail="sandbox manager terminal limit reached"
-                        )
-                    active = sum(session.holds_process for session in group.values())
-                    if active >= self._max_sessions_per_workspace:
-                        raise HTTPException(
-                            status_code=409, detail="workspace terminal limit reached"
-                        )
+                    self._refuse_over_limit_locked(workspace_id, group)
                     action = (
                         next((a for a in environment.actions if a.id == action_id), None)
                         if environment and action_id
@@ -231,20 +216,7 @@ class _TerminalManager:
                 spawning = True
                 try:
                     if action is not None:
-                        workdir = "/workspace/" + action.cwd
-                        if isinstance(backend, RetainedChatBackend):
-                            resolved = backend.manager.exec_capture(
-                                backend.spec,
-                                ["realpath", "-e", "--", str(workdir)],
-                                workdir="/workspace",
-                                timeout_s=10,
-                            )
-                            normalized = resolved.stdout.decode().strip()
-                            if resolved.returncode or not (
-                                normalized == "/workspace" or normalized.startswith("/workspace/")
-                            ):
-                                raise HTTPException(422, "Action directory escapes workspace")
-                            workdir = normalized
+                        workdir = self._action_workdir(backend, action)
                     spec = SandboxSpec(
                         argv=["/bin/sh", "-lc", action.command] if action else ["/bin/sh"],
                         workdir=str(workdir),
@@ -268,28 +240,17 @@ class _TerminalManager:
                             ),
                         },
                     )
-                    if action is not None and environment is not None:
-                        previous = self._action_receipts.reserve(
-                            workspace_id, terminal_id, environment.binding_id, action.id
-                        )
-                        if previous is not None:
-                            if on_closed is not None:
-                                on_closed(now)
-                            return previous
-                    try:
-                        process = backend.spawn_terminal(spec, rows=rows, cols=cols)
-                    except TerminalNotSupportedError as exc:
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(
-                                "Interactive terminals require the container or kata "
-                                "sandbox backend."
-                            ),
-                        ) from exc
-                    except (OSError, SandboxError) as exc:
-                        raise HTTPException(
-                            status_code=502, detail="terminal could not be started"
-                        ) from exc
+                    previous = self._reserve_action_run(
+                        workspace_id,
+                        terminal_id,
+                        environment,
+                        action,
+                        on_closed=on_closed,
+                        now=now,
+                    )
+                    if previous is not None:
+                        return previous
+                    process = self._spawn_terminal_process(backend, spec, rows=rows, cols=cols)
                     session = _TerminalSession(
                         terminal_id=terminal_id,
                         process=process,
@@ -333,6 +294,87 @@ class _TerminalManager:
                 except (SandboxError, OSError):
                     logger.exception("workspace_terminal_eviction_cleanup_failed")
         return session.descriptor()
+
+    def _refuse_over_limit_locked(
+        self, workspace_id: str, group: dict[str, _TerminalSession]
+    ) -> None:
+        """Refuse a terminal over the sandbox manager's or the workspace's limit.
+
+        The caller holds ``_lock``.
+        """
+        global_active = self._spawning + sum(
+            session.holds_process
+            for sessions in self._sessions.values()
+            for session in sessions.values()
+        )
+        if global_active >= self._max_sessions:
+            if not group:
+                self._sessions.pop(workspace_id, None)
+            raise HTTPException(status_code=503, detail="sandbox manager terminal limit reached")
+        active = sum(session.holds_process for session in group.values())
+        if active >= self._max_sessions_per_workspace:
+            raise HTTPException(status_code=409, detail="workspace terminal limit reached")
+
+    @staticmethod
+    def _action_workdir(backend: SandboxBackend, action: EnvironmentAction) -> str:
+        """Resolve an action's directory, refusing one that escapes the workspace.
+
+        The caller holds the workspace's own lock.
+        """
+        workdir = "/workspace/" + action.cwd
+        if isinstance(backend, RetainedChatBackend):
+            resolved = backend.manager.exec_capture(
+                backend.spec,
+                ["realpath", "-e", "--", str(workdir)],
+                workdir="/workspace",
+                timeout_s=10,
+            )
+            normalized = resolved.stdout.decode().strip()
+            if resolved.returncode or not (
+                normalized == "/workspace" or normalized.startswith("/workspace/")
+            ):
+                raise HTTPException(422, "Action directory escapes workspace")
+            workdir = normalized
+        return workdir
+
+    def _reserve_action_run(
+        self,
+        workspace_id: str,
+        terminal_id: str,
+        environment: BoundEnvironment | None,
+        action: EnvironmentAction | None,
+        *,
+        on_closed: Callable[[float], None] | None,
+        now: float,
+    ) -> dict[str, Any] | None:
+        """Persist an action run's identity, or return the receipt of the run it repeats.
+
+        The caller holds the workspace's own lock.
+        """
+        if action is not None and environment is not None:
+            previous = self._action_receipts.reserve(
+                workspace_id, terminal_id, environment.binding_id, action.id
+            )
+            if previous is not None:
+                if on_closed is not None:
+                    on_closed(now)
+                return previous
+        return None
+
+    @staticmethod
+    def _spawn_terminal_process(
+        backend: SandboxBackend, spec: SandboxSpec, *, rows: int, cols: int
+    ) -> TerminalProcess:
+        """Spawn the PTY, reporting why the backend could not."""
+        try:
+            return backend.spawn_terminal(spec, rows=rows, cols=cols)
+        except TerminalNotSupportedError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=("Interactive terminals require the container or kata sandbox backend."),
+            ) from exc
+        except (OSError, SandboxError) as exc:
+            raise HTTPException(status_code=502, detail="terminal could not be started") from exc
 
     def _unlist_exited_locked(self, workspace_id: str) -> list[_TerminalSession]:
         """Unlist the oldest exited shells so one more terminal fits both limits.
