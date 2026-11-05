@@ -35,6 +35,7 @@ from cloud_agent.domain.compute import (
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.operational_health import deliver_event
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import NodeObservation, ProviderError
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapIntent,
@@ -267,7 +268,9 @@ class ComputeRotation:
                 "compute_rotation_not_started",
                 extra={"allocation_id": row["id"], "reason": str(exc)},
             )
-            return str(exc) == "rotation_in_progress"
+            return (
+                isinstance(exc, StorageConflict) and exc.code is ConflictCode.ROTATION_IN_PROGRESS
+            )
         if operation.get("state") in {"succeeded", "failed", "cancelled"}:
             # The store returned this lease's earlier, finished move.
             return False
@@ -343,7 +346,7 @@ class ComputeRotation:
         try:
             await self._resume(operation, allocation)
         except (ProviderError, ComputeRefusal, ComputeSecretError, ValueError) as exc:
-            if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+            if isinstance(exc, StorageConflict) and exc.code is ConflictCode.OPERATION_LEASE_LOST:
                 raise
             await self._stop_for_attention(operation, exc)
 
@@ -638,8 +641,8 @@ class ComputeRotation:
                 parameters=parameters,
                 **self.reconciler._fence(operation),
             )
-        except ValueError as exc:
-            if str(exc) != "deployment_profile_in_use":
+        except StorageConflict as exc:
+            if exc.code is not ConflictCode.DEPLOYMENT_PROFILE_IN_USE:
                 raise
             await self.reconciler._finish(
                 operation,
@@ -1062,7 +1065,10 @@ class ComputeRotation:
                     operation, "cleaning_up", {"retire_requested": True}
                 )
             except (ProviderError, ComputeRefusal, ValueError) as exc:
-                if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+                if (
+                    isinstance(exc, StorageConflict)
+                    and exc.code is ConflictCode.OPERATION_LEASE_LOST
+                ):
                     raise
                 # The new Host is serving already; keep retrying the old copy's
                 # cleanup without repeating a handover or claiming it succeeded.

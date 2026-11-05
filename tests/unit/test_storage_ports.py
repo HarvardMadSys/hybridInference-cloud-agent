@@ -47,8 +47,12 @@ def _method_names(path: Path, *, protocols: bool = False) -> set[str]:
     }
 
 
+#: Shared vocabulary beside the ports, with no protocol of its own.
+NOT_PORTS = {"__init__.py", "errors.py"}
+
+
 def _port_files() -> list[Path]:
-    files = sorted(p for p in PORTS_DIR.glob("*.py") if p.name != "__init__.py")
+    files = sorted(p for p in PORTS_DIR.glob("*.py") if p.name not in NOT_PORTS)
     assert files, f"no capability ports found under {PORTS_DIR}"
     return files
 
