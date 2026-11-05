@@ -366,7 +366,7 @@ class GroupLifecycleController:
         # releases the bridge and clears the fences.
         return self.persist_stopped_archive(group, current, members)
 
-    def start_group(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def start_group(
         self,
         group: _Group,
         *,
@@ -385,10 +385,7 @@ class GroupLifecycleController:
         """
         with self._state.lock:
             self._state.wait_for_start_locked(group, retry_failed=True)
-            group.lifecycle.admit(Operation.START)
-            group.starting = True
-            members = self._state.archive_members_locked(group)
-            expected_container_id = group.inspection.container_id
+            members, expected_container_id = self._admit_start_locked(group)
         start_fence_prepared = False
         start_completed = False
         refused = False
@@ -408,23 +405,10 @@ class GroupLifecycleController:
                 start_fence_prepared = True
 
         try:
-            with self._state.lock:
-                completion_pending = group.start_archive_completion_pending
-            if completion_pending:
-                current = self._state.require_current_inspection(group)
-                if current.running:
-                    # ``start_archive_completion_pending`` is set only after
-                    # ``manager.start`` returned a fully network-verified
-                    # running container and the durable marker completion hook
-                    # failed. Retry that idempotent completion in place. A cold
-                    # stop here would introduce a markerless crash window after
-                    # the completion hook had already cleared the marker.
-                    self._archive.started(group.spec, current)
-                    with self._state.lock:
-                        self._state.accept_inspection_locked(group, current)
-                        group.start_archive_completion_pending = False
-                    start_completed = True
-                    return current, False
+            retried = self._retry_start_completion(group)
+            if retried is not None:
+                start_completed = True
+                return retried, False
             inspection = self._manager.start(
                 group.spec,
                 facts=facts,
@@ -442,40 +426,15 @@ class GroupLifecycleController:
                 self._state.mark_container_lost_locked(group)
             raise
         except RetainedChatFailStopped as exc:
-            with self._state.lock:
-                self._state.accept_inspection_locked(group, exc.inspection)
-            self.persist_stopped_archive(group, exc.inspection, members)
+            self._archive_fail_stopped_start(group, exc.inspection, members)
             raise
         except BaseException:
             if not start_fence_prepared:
                 raise
-            # Once the durable start fence exists, any untyped manager error
-            # is ambiguous: Docker may have started the container before guest
-            # network synchronization or proof failed. Never admit reuse from
-            # that state. Exact-stop it with the bridge retained and complete
-            # the same fail-stop archive path; if stopping itself fails, the
-            # pending barrier remains for reconcile/shutdown to retry.
-            with self._state.lock:
-                group.stop_archive_pending = self._archives_finals
-                group.stop_archive_members = members if self._archives_finals else None
-            uncertain = self._state.require_current_inspection(group)
-            if uncertain.running:
-                uncertain = self._manager.stop(
-                    group.spec,
-                    expected_container_id=expected_container_id,
-                    release_networks=not self._archives_finals,
-                )
-            self.persist_stopped_archive(group, uncertain, members)
+            self._fail_stop_uncertain_start(group, members, expected_container_id)
             raise
         else:
-            with self._state.lock:
-                completion_pending = group.start_archive_completion_pending
-            if start_fence_prepared or completion_pending:
-                self._archive.started(group.spec, inspection)
-            with self._state.lock:
-                self._state.accept_inspection_locked(group, inspection)
-                if start_fence_prepared or completion_pending:
-                    group.start_archive_completion_pending = False
+            self._complete_start(group, inspection, start_fence_prepared=start_fence_prepared)
             start_completed = True
             return inspection, True
         finally:
@@ -484,6 +443,92 @@ class GroupLifecycleController:
                     group.start_failed = not start_completed
                 group.starting = False
                 self._state.condition.notify_all()
+
+    def _admit_start_locked(self, group: _Group) -> tuple[tuple[SharedMemberManifest, ...], str]:
+        """Admit a start and mark the group starting.
+
+        The caller holds the lock. Returns the final-archive membership and the
+        container the start is for.
+        """
+        group.lifecycle.admit(Operation.START)
+        group.starting = True
+        members = self._state.archive_members_locked(group)
+        return members, group.inspection.container_id
+
+    def _retry_start_completion(self, group: _Group) -> ChatSandboxInspection | None:
+        """Finish a running group's pending start archive completion, if it has one.
+
+        Returns the running inspection it completed, or None when the group
+        needs an ordinary start.
+        """
+        with self._state.lock:
+            completion_pending = group.start_archive_completion_pending
+        if completion_pending:
+            current = self._state.require_current_inspection(group)
+            if current.running:
+                # ``start_archive_completion_pending`` is set only after
+                # ``manager.start`` returned a fully network-verified running
+                # container and the durable marker completion hook failed.
+                # Retry that idempotent completion in place. A cold stop here
+                # would introduce a markerless crash window after the
+                # completion hook had already cleared the marker.
+                self._archive.started(group.spec, current)
+                with self._state.lock:
+                    self._state.accept_inspection_locked(group, current)
+                    group.start_archive_completion_pending = False
+                return current
+        return None
+
+    def _archive_fail_stopped_start(
+        self,
+        group: _Group,
+        inspection: ChatSandboxInspection,
+        members: tuple[SharedMemberManifest, ...],
+    ) -> None:
+        """Accept the stopped inspection a guest-network fail-stop left, then archive it."""
+        with self._state.lock:
+            self._state.accept_inspection_locked(group, inspection)
+        self.persist_stopped_archive(group, inspection, members)
+
+    def _fail_stop_uncertain_start(
+        self,
+        group: _Group,
+        members: tuple[SharedMemberManifest, ...],
+        expected_container_id: str,
+    ) -> None:
+        """Exact-stop a start that failed after its durable fence, then archive it.
+
+        Once the durable start fence exists, any untyped manager error is
+        ambiguous: Docker may have started the container before guest network
+        synchronization or proof failed. Never admit reuse from that state.
+        Exact-stop it with the bridge retained and complete the same fail-stop
+        archive path; if stopping itself fails, the pending barrier remains for
+        reconcile/shutdown to retry.
+        """
+        with self._state.lock:
+            group.stop_archive_pending = self._archives_finals
+            group.stop_archive_members = members if self._archives_finals else None
+        uncertain = self._state.require_current_inspection(group)
+        if uncertain.running:
+            uncertain = self._manager.stop(
+                group.spec,
+                expected_container_id=expected_container_id,
+                release_networks=not self._archives_finals,
+            )
+        self.persist_stopped_archive(group, uncertain, members)
+
+    def _complete_start(
+        self, group: _Group, inspection: ChatSandboxInspection, *, start_fence_prepared: bool
+    ) -> None:
+        """Clear the start archive fence of a proven start and accept its inspection."""
+        with self._state.lock:
+            completion_pending = group.start_archive_completion_pending
+        if start_fence_prepared or completion_pending:
+            self._archive.started(group.spec, inspection)
+        with self._state.lock:
+            self._state.accept_inspection_locked(group, inspection)
+            if start_fence_prepared or completion_pending:
+                group.start_archive_completion_pending = False
 
     @staticmethod
     def _begin_run_locked(group: _Group, start_seq: int | None) -> None:
@@ -943,25 +988,13 @@ class GroupLifecycleController:
                 self._state.arm_idle_if_quiescent(group)
                 self._state.condition.notify_all()
 
-    def commit_archive(self, spec: ChatSandboxSpec, *, request_id: str, container_id: str) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def commit_archive(self, spec: ChatSandboxSpec, *, request_id: str, container_id: str) -> None:
         """Remove a stopped group after durable authorization; cleanup is replayable."""
         with self._state.lock:
             group = self._state.groups.get(spec.sandbox_id)
-            if group is not None:
-                if group.spec != spec or group.inspection.container_id != container_id:
-                    raise SessionLeaseLost("sandbox archive identity changed")
-                if group.archive_request_id not in (None, request_id):
-                    raise SessionLeaseLost("sandbox archive request is stale")
-                if group.archive_request_id is None and not group.container_lost:
-                    # Refusing a busy deletion must not invalidate an active
-                    # native fork merely by advancing the lifecycle clock.
-                    group.lifecycle.admit(Operation.IDLE_DELETION)
-                check = self._state.begin_lifecycle_check_locked(group)
-            else:
-                if spec.sandbox_id in self._state.creating:
-                    raise SessionBusy("shared workspace creation is in progress")
-                self._state.creating.add(spec.sandbox_id)
-                check = None
+            check = self._begin_commit_locked(
+                spec, group, request_id=request_id, container_id=container_id
+            )
         try:
             current = self._manager.inspect(spec.container_name)
             with self._state.lock:
@@ -999,11 +1032,7 @@ class GroupLifecycleController:
                 if check is not None:
                     self._state.require_lifecycle_check_locked(check)
                 if group is not None:
-                    for member in group.members.values():
-                        member.context_status = "lost"
-                        member.resident_state = "lost"
-                        self._state.members.pop(member.thread_id, None)
-                    self._state.groups.pop(spec.sandbox_id, None)
+                    self._forget_deleted_group_locked(spec, group)
                 self._state.condition.notify_all()
         finally:
             with self._state.lock:
@@ -1012,6 +1041,44 @@ class GroupLifecycleController:
                 else:
                     self._state.creating.discard(spec.sandbox_id)
                     self._state.condition.notify_all()
+
+    def _begin_commit_locked(
+        self,
+        spec: ChatSandboxSpec,
+        group: _Group | None,
+        *,
+        request_id: str,
+        container_id: str,
+    ) -> _LifecycleCheck | None:
+        """Fence an archive commit to its group, or reserve the sandbox id without one.
+
+        The caller holds the lock.
+        """
+        if group is not None:
+            if group.spec != spec or group.inspection.container_id != container_id:
+                raise SessionLeaseLost("sandbox archive identity changed")
+            if group.archive_request_id not in (None, request_id):
+                raise SessionLeaseLost("sandbox archive request is stale")
+            if group.archive_request_id is None and not group.container_lost:
+                # Refusing a busy deletion must not invalidate an active
+                # native fork merely by advancing the lifecycle clock.
+                group.lifecycle.admit(Operation.IDLE_DELETION)
+            return self._state.begin_lifecycle_check_locked(group)
+        if spec.sandbox_id in self._state.creating:
+            raise SessionBusy("shared workspace creation is in progress")
+        self._state.creating.add(spec.sandbox_id)
+        return None
+
+    def _forget_deleted_group_locked(self, spec: ChatSandboxSpec, group: _Group) -> None:
+        """Mark a deleted group's members lost and drop it from the registry.
+
+        The caller holds the lock.
+        """
+        for member in group.members.values():
+            member.context_status = "lost"
+            member.resident_state = "lost"
+            self._state.members.pop(member.thread_id, None)
+        self._state.groups.pop(spec.sandbox_id, None)
 
     def start_and_prove(
         self,
