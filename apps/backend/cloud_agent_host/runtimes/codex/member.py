@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, override
 
 from cloud_agent_host.chat_sandbox import CHAT_STATE_DIR, MEMBER_UID_BASE
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.member_homes import (
+from cloud_agent_host.member_setup.member_homes import (
     PRIVATE_MEMBER_HOME_PROLOGUE,
     legacy_member_state_dir,
     member_state_dir,

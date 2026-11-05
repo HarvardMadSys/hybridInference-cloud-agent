@@ -19,13 +19,14 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import runtime_downloads, runtime_images, runtime_install, tree_copy
+from cloud_agent_host import runtime_downloads, runtime_images
 from cloud_agent_host.archive.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_RUNTIME_LABEL,
     CHAT_RUNTIME_VERSION_LABEL,
 )
+from cloud_agent_host.member_setup import runtime_install, tree_copy
 from cloud_agent_host.runtime_downloads import RuntimeDownloads, _Job
 from cloud_agent_host.runtime_images import (
     by_runtime,

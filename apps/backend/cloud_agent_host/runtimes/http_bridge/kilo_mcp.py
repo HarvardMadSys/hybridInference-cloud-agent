@@ -6,8 +6,8 @@ import secrets
 from typing import TYPE_CHECKING
 
 from cloud_agent_host.chat_sandbox_exec import install_once
+from cloud_agent_host.member_setup.tree_copy import has_root_marker, staged_tree
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.tree_copy import has_root_marker, staged_tree
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec

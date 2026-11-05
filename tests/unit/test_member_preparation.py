@@ -3,7 +3,7 @@
 The reap of its slot, the removal of stale pidfiles and credentials, the
 provider home's preparation and Claude's hook merge were one ``docker exec``
 each. They now run, in the order they ran, as processes of one host-supplied
-runner (``cloud_agent_host.member_preparation``). The runner tests below run
+runner (``cloud_agent_host.member_setup.member_preparation``). The runner tests below run
 it for real on this host, as the exec would run it in the guest; the launch
 tests read the queue each exec carries.
 """
@@ -33,7 +33,7 @@ from cloud_agent_host.chat_sandbox import (
 from cloud_agent_host.chat_sandbox_inspect import container_inspection
 from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.member_preparation import (
+from cloud_agent_host.member_setup.member_preparation import (
     RUNNER,
     TOOL_HOOKS_SCRIPT,
     MemberPreparation,

@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.install_locks import install_lock
-from cloud_agent_host.trusted_files import install_trusted_file
+from cloud_agent_host.member_setup.install_locks import install_lock
+from cloud_agent_host.member_setup.trusted_files import install_trusted_file
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
@@ -45,9 +45,9 @@ def _helpers(runtime: str) -> list[_Helper]:
     source_root = Path("/usr/local/libexec/mcp-runtime")
     if not source_root.is_dir():
         # Source checkouts run the same tests as the packaged host.
-        # `parents[3]`: this file, `cloud_agent_host/`, `backend/`, `apps/` —
-        # the package sits two levels deeper than it did at the root.
-        source_root = Path(__file__).resolve().parents[3] / "deploy/sandbox"
+        # `parents[4]`: this file's `member_setup/`, `cloud_agent_host/`,
+        # `backend/`, `apps/` — three levels deeper than the package was at the root.
+        source_root = Path(__file__).resolve().parents[4] / "deploy/sandbox"
     helpers = []
     for name in _HELPERS.get(runtime, ()):
         directory = "/usr/local/libexec" if name.endswith(".ts") else "/usr/local/bin"

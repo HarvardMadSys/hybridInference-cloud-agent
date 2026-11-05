@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import tree_copy
+from cloud_agent_host.member_setup import tree_copy
 from cloud_agent_host.runtime_images import SOURCE_LABEL, WORK_LABEL
 from cloud_agent_host.runtimes.http_bridge.kilo_mcp import (
     KILO_MCP_PATCH_SHA256,

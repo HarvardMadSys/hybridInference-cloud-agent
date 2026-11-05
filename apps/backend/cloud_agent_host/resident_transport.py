@@ -39,13 +39,17 @@ from cloud_agent_host.launch.facet import PrepareContext
 from cloud_agent_host.launch.facets import PREPARE_ORDER, facet_differences, launch_facets
 from cloud_agent_host.launch.github_relay import GitHubRelayFacet
 from cloud_agent_host.launch.inference import InferenceFacet
-from cloud_agent_host.member_homes import (
+from cloud_agent_host.member_setup.member_homes import (
     NEW_PRIVATE_MEMBER_HOME_PROLOGUE,
     PRIVATE_MEMBER_STATE_ROOTS,
     UNTRUSTED_COLLECTION_EXIT,
     member_state_dir,
 )
-from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
+from cloud_agent_host.member_setup.member_preparation import (
+    MemberPreparation,
+    MemberStep,
+    run_member_steps,
+)
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
@@ -394,7 +398,7 @@ class ResidentTransportFactory:
     ) -> tuple[MemberPreparation, bool]:
         """Queue what the member's own UID does before its CLI starts, in that order.
 
-        The queue runs in one exec (:mod:`cloud_agent_host.member_preparation`):
+        The queue runs in one exec (:mod:`cloud_agent_host.member_setup.member_preparation`):
         before the first plugin installer, or otherwise at the spawn, with
         Claude's hook merge. Returns it, and whether it holds the slot's reap.
         """
@@ -611,7 +615,7 @@ class ResidentTransportFactory:
                 if inference_script:
                     # An exec of its own, after the reap has run: a process an
                     # earlier launch left as this UID could read it from the
-                    # exec that reaps (cloud_agent_host.member_preparation).
+                    # exec that reaps (cloud_agent_host.member_setup.member_preparation).
                     self._manager.write_member_inference_env(
                         spec,
                         inference_script,

@@ -20,7 +20,7 @@ from cloud_agent_host.chat_sandbox import (
     claude_member_config_dir,
 )
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.member_preparation import MemberStep, run_member_steps
+from cloud_agent_host.member_setup.member_preparation import MemberStep, run_member_steps
 from cloud_agent_host.platform_instructions import platform_instructions
 from cloud_agent_host.runtimes.claude.plugins import install_claude_plugins
 from cloud_agent_host.runtimes.member_launch import MemberLaunch, append_system_prompt
@@ -28,7 +28,7 @@ from cloud_agent_host.sandbox import SANDBOX_PATH
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
-    from cloud_agent_host.member_preparation import MemberPreparation
+    from cloud_agent_host.member_setup.member_preparation import MemberPreparation
     from cloud_agent_host.resident_transport import ResidentLaunch
 
 

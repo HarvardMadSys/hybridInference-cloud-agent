@@ -48,7 +48,7 @@ from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
 from cloud_agent_host.docker_engine import run_docker
 from cloud_agent_host.drivers import LaunchContext, TurnInput
 from cloud_agent_host.exact_container import ExactContainer
-from cloud_agent_host.mcp_helpers import install_mcp_helpers
+from cloud_agent_host.member_setup.mcp_helpers import install_mcp_helpers
 from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime
 from cloud_agent_host.runtimes.codex.mcp import install_policy_argv
 from cloud_agent_host.runtimes.http_bridge.kilo_mcp import KILO_MCP_VERSION, ensure_kilo_runtime

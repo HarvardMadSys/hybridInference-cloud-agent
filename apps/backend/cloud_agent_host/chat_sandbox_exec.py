@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 from cloud_agent_host.chat_sandbox_models import ChatSandboxStatus, RetainedChatLost
 from cloud_agent_host.exact_container import NOT_RUNNING
 from cloud_agent_host.github_relay_trust import ensure_github_relay_trust
-from cloud_agent_host.install_locks import install_lock
+from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:

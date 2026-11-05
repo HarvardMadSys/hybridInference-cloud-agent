@@ -3,7 +3,7 @@
 The bounded runner and the locked installer preamble every CLI's installer
 shares: Claude's (:mod:`cloud_agent_host.runtimes.claude.plugins`), Codex's
 (:mod:`cloud_agent_host.runtimes.codex.plugins`), and the npm installer pi,
-OpenCode and Kilo share (:mod:`cloud_agent_host.other_plugins`).
+OpenCode and Kilo share (:mod:`cloud_agent_host.member_setup.other_plugins`).
 """
 
 from __future__ import annotations

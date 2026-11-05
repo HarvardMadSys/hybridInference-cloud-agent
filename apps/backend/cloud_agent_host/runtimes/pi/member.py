@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, override
 
-from cloud_agent_host.other_plugins import install_other_runtime_plugins
+from cloud_agent_host.member_setup.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.runtimes.member_launch import MemberLaunch, append_system_prompt
 
 if TYPE_CHECKING:

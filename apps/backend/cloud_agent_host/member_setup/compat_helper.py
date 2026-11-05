@@ -22,9 +22,9 @@ import cloud_agent_host
 import cloud_agent_host.protocol_translator as protocol_translator
 import cloud_agent_shared
 import cloud_agent_shared.protocol_compat as protocol_compat
-from cloud_agent_host.install_locks import install_lock
+from cloud_agent_host.member_setup.install_locks import install_lock
+from cloud_agent_host.member_setup.trusted_files import install_trusted_file
 from cloud_agent_host.runtimes.base import COMPAT_LAUNCHER
-from cloud_agent_host.trusted_files import install_trusted_file
 from cloud_agent_shared.protocol_compat import ENV_TOKEN
 
 if TYPE_CHECKING:

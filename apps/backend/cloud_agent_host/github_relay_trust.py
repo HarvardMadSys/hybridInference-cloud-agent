@@ -24,7 +24,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cloud_agent_host.github_relay_env import relay_ca_pem
-from cloud_agent_host.install_locks import install_lock
+from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:

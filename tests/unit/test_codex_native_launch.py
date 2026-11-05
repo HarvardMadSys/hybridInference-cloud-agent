@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent_host.compat_helper import helper_archive
+from cloud_agent_host.member_setup.compat_helper import helper_archive
 from cloud_agent_host.runtimes import CodexRuntime, ResponsesViaChatUrl
 from cloud_agent_host.runtimes.base import COMPAT_LAUNCHER
 from cloud_agent_host.runtimes.codex.adapter import (

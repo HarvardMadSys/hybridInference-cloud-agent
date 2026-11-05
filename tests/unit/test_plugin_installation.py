@@ -25,7 +25,7 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.plugins import run_plugin_command
+from cloud_agent_host.member_setup.plugins import run_plugin_command
 from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.runtimes.claude import member as claude_member
