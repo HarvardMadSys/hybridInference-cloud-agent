@@ -13,6 +13,7 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from cloud_agent_host.chat_sandbox import (
@@ -26,10 +27,8 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
-    member_inference_env_path,
 )
 from cloud_agent_host.codex_plugins import install_codex_plugins
-from cloud_agent_host.compat_helper import compat_token_env, install_compat_helper
 from cloud_agent_host.drivers import (
     DialectRuntime,
     DriverError,
@@ -41,8 +40,12 @@ from cloud_agent_host.drivers import (
     TurnResult,
     get_driver,
 )
-from cloud_agent_host.github_relay_env import github_relay_env
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
+from cloud_agent_host.launch.environment import EnvironmentFacet
+from cloud_agent_host.launch.facet import PrepareContext
+from cloud_agent_host.launch.facets import PREPARE_ORDER, facet_differences, launch_facets
+from cloud_agent_host.launch.github_relay import GitHubRelayFacet
+from cloud_agent_host.launch.inference import InferenceFacet
 from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.platform_instructions import (
@@ -53,18 +56,12 @@ from cloud_agent_host.platform_instructions import (
 from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
-from cloud_agent_host.sandbox_browser import ensure_browser_service
-from cloud_agent_host.sandbox_mcp import admit_sandbox_mcp
-from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
-from cloud_agent_shared.shared_protocol import (
-    is_residency_github_credential,
-    is_residency_mcp_credential,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from cloud_agent_host.launch.facet import LaunchFacet
     from cloud_agent_shared.environment import BoundEnvironment
     from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 
@@ -75,6 +72,11 @@ _RuntimeT_co = TypeVar("_RuntimeT_co", bound=DialectRuntime, covariant=True)
 #: The session contract itself is stated invariantly: a session hands back the
 #: turn type of exactly the runtime it was opened for.
 _SessionRuntimeT = TypeVar("_SessionRuntimeT", bound=DialectRuntime)
+_FacetT = TypeVar("_FacetT", bound="LaunchFacet")
+#: The launch's own process-fixed identity, compared before its facets and
+#: after them, in the order a refused reuse reports them.
+_IDENTITY_FIELDS = ("thread_id", "runtime_id", "runtime_version", "model", "reasoning_effort")
+_SLOT_FIELDS = ("slot_id",)
 
 
 # Provider homes contain files on which the owning CLI performs owner-only
@@ -178,7 +180,13 @@ PLATFORM_STATE_DIR = "/home/agent/.freeinference-platform"
 
 @dataclass(frozen=True)
 class ResidentLaunch:
-    """Everything needed to open one member process, excluding its prompt."""
+    """Everything needed to open one member process, excluding its prompt.
+
+    The flat record the runner sends the sandbox manager (``asdict``) and
+    amends with ``replace``. Each platform capability reads its fields as one
+    facet (:mod:`cloud_agent_host.launch`), which states what the capability
+    fixes at process start, prepares, and adds to the CLI's environment.
+    """
 
     thread_id: str
     runtime_id: str
@@ -245,6 +253,15 @@ class ResidentLaunch:
             "plugins",
             tuple(validate_sandbox_plugins(self.runtime_id, self.plugins)),
         )
+
+    @cached_property
+    def facets(self) -> tuple[LaunchFacet, ...]:
+        """Every capability this launch carries, one facet each, in comparison order."""
+        return launch_facets(self)
+
+    def facet(self, kind: type[_FacetT]) -> _FacetT:
+        """This launch's facet of ``kind``."""
+        return next(facet for facet in self.facets if isinstance(facet, kind))
 
 
 class ResidentTurn(Generic[_RuntimeT_co]):
@@ -385,54 +402,17 @@ class ResidentTransport(Generic[_RuntimeT_co]):
         live process could not take another turn.
         """
         held = self.launch
-        held_mcp = held.mcp_credential
-        same_mcp = (
-            held.mcp_server_ids == launch.mcp_server_ids
-            and held.sandbox_mcp_servers == launch.sandbox_mcp_servers
-        ) and (
-            not launch.mcp_server_ids
-            or (
-                held.mcp_base_url == launch.mcp_base_url
-                and (
-                    held_mcp == launch.mcp_credential
-                    or (not launch.mcp_credential and is_residency_mcp_credential(held_mcp))
-                )
-            )
+
+        def differing(names: tuple[str, ...]) -> tuple[str, ...]:
+            return tuple(name for name in names if getattr(held, name) != getattr(launch, name))
+
+        # Each capability names what it fixes at process start
+        # (cloud_agent_host.launch); the slot is compared last.
+        return (
+            *differing(_IDENTITY_FIELDS),
+            *facet_differences(held.facets, launch.facets),
+            *differing(_SLOT_FIELDS),
         )
-        # A probe names no credential or identity: those arrive with the
-        # residency, and a live process keeps its own.
-        same_github = (
-            held.github_credential == launch.github_credential
-            and (held.git_author_name, held.git_author_email, held.git_coauthor)
-            == (launch.git_author_name, launch.git_author_email, launch.git_coauthor)
-        ) or (
-            not launch.github_credential
-            and (
-                not held.github_credential or is_residency_github_credential(held.github_credential)
-            )
-        )
-        checks = (
-            ("thread_id", held.thread_id == launch.thread_id),
-            ("runtime_id", held.runtime_id == launch.runtime_id),
-            ("runtime_version", held.runtime_version == launch.runtime_version),
-            ("model", held.model == launch.model),
-            ("reasoning_effort", held.reasoning_effort == launch.reasoning_effort),
-            ("plugins", held.plugins == launch.plugins),
-            ("inference_source", held.inference_source == launch.inference_source),
-            ("inference_base_url", held.inference_base_url == launch.inference_base_url),
-            ("inference_protocol", held.inference_protocol == launch.inference_protocol),
-            (
-                "inference_client_protocol",
-                held.inference_client_protocol == launch.inference_client_protocol,
-            ),
-            ("inference_local_token", held.inference_local_token == launch.inference_local_token),
-            ("mcp", same_mcp),
-            ("github", same_github),
-            ("github_repo", held.github_repo == launch.github_repo),
-            ("environment", held.environment == launch.environment),
-            ("slot_id", held.slot_id == launch.slot_id),
-        )
-        return tuple(name for name, same in checks if not same)
 
     def start_turn(
         self,
@@ -835,22 +815,22 @@ class ResidentTransportFactory:
             )
 
     def _prepare_runtime_helpers(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
-        """Install the selected runtime and trusted adapters before its first spawn."""
+        """Run each facet's trusted step, and the runtime's own, before the first spawn.
+
+        In :data:`~cloud_agent_host.launch.facets.PREPARE_ORDER`: the browser
+        service, sandbox MCP admission, the runtime's helpers, then the
+        compatibility helper.
+        """
+        context = PrepareContext(self._manager, spec, launch.slot_id)
+        for kind in PREPARE_ORDER:
+            if kind is None:
+                self._install_runtime_helpers(spec, launch)
+            else:
+                launch.facet(kind).prepare(context)
+
+    def _install_runtime_helpers(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
+        """Install the selected runtime and its trusted adapters."""
         runtime_id = launch.runtime_id
-        # Every runtime: a member's tools reach the sandbox's shared browser
-        # through its service, which no member's own exec may start.
-        ensure_browser_service(self._manager, spec)
-        # Its sandbox MCP servers, or the removal of an earlier launch's.
-        admit_sandbox_mcp(
-            self._manager,
-            spec,
-            slot_id=launch.slot_id,
-            credential=launch.mcp_credential,
-            servers=launch.sandbox_mcp_servers,
-            # The chat's environment, for the servers' ${NAME} references.
-            environment=launch.environment.values("runtime") if launch.environment else {},
-            mcp_base_url=launch.mcp_base_url,
-        )
         # HTTP dialects always use the trusted live bridge, and pi its
         # wrapper and MCP bridge, including turns without MCP. Refresh
         # them from the host when resuming a retained container so new
@@ -866,9 +846,6 @@ class ResidentTransportFactory:
             self._manager.ensure_kilo_mcp_runtime(spec, launch.runtime_version or KILO_MCP_VERSION)
         if runtime_id == "codex" and launch.mcp_server_ids:
             self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
-        if launch.inference_client_protocol:
-            # A retained container gets this host's helper, not its image's.
-            install_compat_helper(self._manager, spec)
 
     def _member_env(self, launch: ResidentLaunch) -> tuple[dict[str, str], str]:
         """The environment one member's CLI starts with, and its inference script.
@@ -881,20 +858,8 @@ class ResidentTransportFactory:
         runtime_id = launch.runtime_id
         home = f"/home/agent-member-{launch.slot_id}"
         base_env = dict(self._manager.backend.base_env())
-        inference_script = ""
-        if launch.environment is not None:
-            from cloud_agent_host.environment_process import tool_environment
-
-            base_env.update(tool_environment())
-            # The CLI reads its platform credential under the same names as the
-            # owner's inference credentials, so those reach only the commands
-            # it runs: every bash it starts sources them from BASH_ENV.
-            runtime_values, inference_script = inference_handoff(
-                launch.environment.values("runtime")
-            )
-            base_env.update(runtime_values)
-            if inference_script:
-                base_env["BASH_ENV"] = member_inference_env_path(launch.slot_id)
+        environment = launch.facet(EnvironmentFacet)
+        base_env.update(environment.env())
         base_env.update(
             {
                 "HOME": home,
@@ -904,18 +869,18 @@ class ResidentTransportFactory:
                 "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
             }
         )
-        base_env.update(compat_token_env(launch.inference_local_token))
+        base_env.update(launch.facet(InferenceFacet).env())
         # Only the residency's GitHub relay placeholder may authenticate gh and
         # git. Do not fall back to a credential inherited from a custom host
         # backend.
         base_env.pop("GH_TOKEN", None)
         base_env.pop("GITHUB_TOKEN", None)
-        base_env.update(github_relay_env(launch))
+        base_env.update(launch.facet(GitHubRelayFacet).env())
         if launch.runtime_version:
             base_env["PATH"] = (
                 f"{runtime_bin_dir(runtime_id, launch.runtime_version)}:{base_env['PATH']}"
             )
-        return base_env, inference_script
+        return base_env, environment.inference_script
 
     def _launch_context(
         self,
