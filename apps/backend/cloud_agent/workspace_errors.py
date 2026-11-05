@@ -5,10 +5,10 @@ it into what an owner may see — one message, one error type, a status chosen
 from a small set — and recognize the shared-only sandbox manager's way of saying a chat
 has no retained workspace yet.
 
-They lived in `api/_workspace_access.py`. `application/session_fork.py` needs
-them, and a flow reaching into the adapter layer would invert the direction
-those two packages are given, so they belong to neither: this module imports
-only FastAPI and the sandbox manager client, and both sides import it.
+They lived in `api/_workspace_access.py`, and moved here when
+`application/session_fork.py` used them. That flow now hands the host's failure
+back as `ForkHostFailed` and the Fork route maps it here, so only the API
+imports this module; it imports only FastAPI and the sandbox manager client.
 """
 
 from __future__ import annotations

@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 
 from cloud_agent.api._parameters import refuse_unstorable_parameters
 from cloud_agent.api._sensitive_routes import no_store
+from cloud_agent.api.errors import install_domain_errors
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
 from cloud_agent_shared.storable_text import encodable_json
@@ -343,6 +344,8 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         ),
     )
     install_repository_access_errors(app)
+    # What application flows refuse, answered as the HTTPException it maps to.
+    install_domain_errors(app)
     # The session's own reads (``/me``, sign-out). Mounted alongside the
     # others rather than inside ``routes.py`` because sign-out authenticates
     # nothing on entry.

@@ -37,10 +37,7 @@ from cloud_agent.api._body_limits import (
 )
 from cloud_agent.api._claim_credentials import mint_clone_token
 from cloud_agent.api._sensitive_routes import no_store, no_store_exception
-from cloud_agent.api._workspace_access import (
-    _workspace_id,
-    _workspace_not_ready,
-)
+from cloud_agent.api._workspace_access import _workspace_id, _workspace_not_ready
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_owner_directory,
@@ -60,6 +57,7 @@ from cloud_agent.application.ssh_servers import (
 )
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
@@ -631,7 +629,7 @@ async def worker_claim(
             attestation=body.attestation,
             host=claiming_host["host"],
         )
-    except HTTPException:
+    except (HTTPException, Refused, Unavailable):
         # Every refusal below has already released or ended its claim.
         raise
     except Exception as exc:

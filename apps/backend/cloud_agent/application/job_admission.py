@@ -16,14 +16,13 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Protocol
 
-from fastapi import HTTPException
-
 from cloud_agent.application.model_connections import (
     model_connections_enabled,
     resolve_turn_connection,
 )
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.attachments.selection import resolve_attachments
+from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.domain.model_connections import ModelConnectionUnusable
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.domain.ssh_servers import SshServerUnavailable
@@ -81,42 +80,27 @@ class _JobCreationStorage(Protocol):
     source_control: SourceControlPort
 
 
-def model_connection_required() -> HTTPException:
+def model_connection_required() -> Refused:
     """409 for a turn that names no model connection: there is no other source.
 
     A verdict, not an outage, so a waiting message is held with this sentence
     rather than retried.
     """
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "model_connection_required",
-                "message": (
-                    "Choose a model from one of your own model connections, or add one in Settings."
-                ),
-            }
-        },
+    return Refused(
+        "conflict",
+        "model_connection_required",
+        ("Choose a model from one of your own model connections, or add one in Settings."),
     )
 
 
-def model_connection_unusable(exc: ModelConnectionUnusable) -> HTTPException:
+def model_connection_unusable(exc: ModelConnectionUnusable) -> Refused:
     """400 for a turn its owner's connection cannot run, naming the reason.
 
     A 400 rather than a 503: nothing about it improves by waiting, and a
     waiting message's check holds the message with this sentence until its
     owner changes the connection or the model.
     """
-    return HTTPException(
-        status_code=400,
-        detail={
-            "error": {
-                "type": "model_connection_unusable",
-                "reason": exc.reason,
-                "message": str(exc),
-            }
-        },
-    )
+    return Refused("invalid", "model_connection_unusable", str(exc), details={"reason": exc.reason})
 
 
 async def require_connection_source(
@@ -194,17 +178,13 @@ async def _resolve_mcp_bindings(
         return []
     if runtime not in runtimes_supporting_mcp():
         supported = ", ".join(runtimes_supporting_mcp()) or "none"
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": (
-                        f"the {runtime!r} runtime cannot be given MCP connections on this "
-                        f"deployment. Runtimes that can: {supported}."
-                    ),
-                }
-            },
+        raise Refused(
+            "invalid",
+            "invalid_request",
+            (
+                f"the {runtime!r} runtime cannot be given MCP connections on this "
+                f"deployment. Runtimes that can: {supported}."
+            ),
         )
     prepared: list[dict[str, Any]] = []
     aliases: list[tuple[int, str | None, str]] = []
@@ -212,28 +192,20 @@ async def _resolve_mcp_bindings(
         connection_id = int(getattr(entry, "connection_id", 0) or 0)
         row = await store.get_mcp_connection(connection_id=connection_id, user_id=user_id)
         if row is None:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": f"you have no MCP connection with id {connection_id}.",
-                    }
-                },
+            raise Refused(
+                "invalid",
+                "invalid_request",
+                f"you have no MCP connection with id {connection_id}.",
             )
         resolved = await resolve_connection(store, row=row)
         if not resolved.usable:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"the {resolved.connection.label!r} MCP connection cannot be "
-                            f"used: {resolved.error}"
-                        ),
-                    }
-                },
+            raise Refused(
+                "invalid",
+                "invalid_request",
+                (
+                    f"the {resolved.connection.label!r} MCP connection cannot be "
+                    f"used: {resolved.error}"
+                ),
             )
         snapshot = resolved.snapshot
         available = {capability.name for capability in (snapshot.tools if snapshot else ())}
@@ -242,34 +214,24 @@ async def _resolve_mcp_bindings(
         }
         unknown = sorted(set(selected) - available)
         if unknown:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"{resolved.connection.label!r} does not offer: "
-                            f"{', '.join(unknown)}. Run a connection test to refresh what "
-                            "it advertises."
-                        ),
-                    }
-                },
+            raise Refused(
+                "invalid",
+                "invalid_request",
+                (
+                    f"{resolved.connection.label!r} does not offer: "
+                    f"{', '.join(unknown)}. Run a connection test to refresh what "
+                    "it advertises."
+                ),
             )
         rules: dict[str, Any] = {}
         for name, policy in selected.items():
             try:
                 parsed = ToolPolicy(policy)
             except ValueError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": {
-                            "type": "invalid_request",
-                            "message": (
-                                f"unknown tool policy {policy!r}; use deny, confirm or allow."
-                            ),
-                        }
-                    },
+                raise Refused(
+                    "invalid",
+                    "invalid_request",
+                    (f"unknown tool policy {policy!r}; use deny, confirm or allow."),
                 ) from exc
             capability = next(
                 (item for item in (snapshot.tools if snapshot else ()) if item.name == name),
@@ -288,14 +250,10 @@ async def _resolve_mcp_bindings(
                 for kind in ("resources", "prompts")
             }
         except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": "Unknown MCP capability policy; use deny, confirm or allow.",
-                    }
-                },
+            raise Refused(
+                "invalid",
+                "invalid_request",
+                "Unknown MCP capability policy; use deny, confirm or allow.",
             ) from exc
         has_selection = any(rule["policy"] != "deny" for rule in rules.values()) or any(
             policy != "deny" for policies in other_rules.values() for policy in policies.values()
@@ -319,10 +277,7 @@ async def _resolve_mcp_bindings(
         for binding, alias in zip(prepared, binding_aliases(aliases), strict=True):
             binding["alias"] = alias
     except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_request", "message": str(exc)}},
-        ) from exc
+        raise Refused("invalid", "invalid_request", str(exc)) from exc
     return prepared
 
 
@@ -348,17 +303,10 @@ def require_registered_runtime(runtime: str) -> None:
     """
     known = registered_runtimes()
     if runtime not in known:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": (
-                        f"unknown runtime {runtime!r}; this deployment registers: "
-                        + ", ".join(known)
-                    ),
-                }
-            },
+        raise Refused(
+            "invalid",
+            "invalid_request",
+            (f"unknown runtime {runtime!r}; this deployment registers: " + ", ".join(known)),
         )
 
 
@@ -369,18 +317,12 @@ async def resolve_skill_selection(
     try:
         return await resolve_skills(store, user_id=user_id, skill_ids=skill_ids)
     except SkillError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_skill_selection", "message": str(exc)}},
-        ) from exc
+        raise Refused("invalid", "invalid_skill_selection", str(exc)) from exc
 
 
-def _attachment_selection_error(exc: AttachmentError) -> HTTPException:
+def _attachment_selection_error(exc: AttachmentError) -> Refused:
     """The owner-facing refusal for uploads a submission cannot carry."""
-    return HTTPException(
-        status_code=400,
-        detail={"error": {"type": "invalid_attachment_selection", "message": str(exc)}},
-    )
+    return Refused("invalid", "invalid_attachment_selection", str(exc))
 
 
 async def resolve_attachment_selection(
@@ -406,28 +348,20 @@ async def _require_base_on_branch(
     try:
         await app_credentials.require_commit_on_branch(repo, base_sha, branch=base_ref)
     except CommitNotOnBranch as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": (
-                        f"{exc}. A job can only start from a commit in one of the "
-                        "repository's branches: name the branch as base_ref, alone to "
-                        "start from its tip or with a base_sha it contains."
-                    ),
-                }
-            },
+        raise Refused(
+            "invalid",
+            "invalid_request",
+            (
+                f"{exc}. A job can only start from a commit in one of the "
+                "repository's branches: name the branch as base_ref, alone to "
+                "start from its tip or with a base_sha it contains."
+            ),
         ) from exc
     except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": f"could not verify base commit {base_sha[:12]} in {repo}: {exc}",
-                }
-            },
+        raise Refused(
+            "invalid",
+            "invalid_request",
+            f"could not verify base commit {base_sha[:12]} in {repo}: {exc}",
         ) from exc
 
 
@@ -452,10 +386,7 @@ async def _admit_repository(
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
+        raise Refused("forbidden", "repo_not_allowed", str(exc)) from exc
     # A branch is resolved to the commit it points at *now*. The job stores the
     # sha: a branch moves, so a job that recorded "dev" would silently mean a
     # different tree by the time it ran.
@@ -464,14 +395,10 @@ async def _admit_repository(
         try:
             base_sha = await app_credentials.resolve_ref(repo, body.base_ref)
         except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": f"could not resolve {body.base_ref!r} in {repo}: {exc}",
-                    }
-                },
+            raise Refused(
+                "invalid",
+                "invalid_request",
+                f"could not resolve {body.base_ref!r} in {repo}: {exc}",
             ) from exc
     # The runner fetches the base by hash. GitHub serves any object of the
     # repository's network by hash, a fork's
@@ -538,14 +465,10 @@ async def create_job_as(
     try:
         plugins = validate_sandbox_plugins(body.runtime, body.plugins or [])
     except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_plugin_selection",
-                    "message": str(exc),
-                }
-            },
+        raise Refused(
+            "invalid",
+            "invalid_plugin_selection",
+            str(exc),
         ) from exc
     model, reasoning_effort = await _admit_model(
         body, user, connections=job_store.model_connections
@@ -587,10 +510,7 @@ async def create_job_as(
     try:
         execution_profile = default_execution_profile().value
     except ValueError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": {"type": "invalid_configuration", "message": str(exc)}},
-        ) from exc
+        raise Unavailable("invalid_configuration", str(exc)) from exc
     skills = await resolve_skill_selection(
         job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
     )
@@ -637,17 +557,13 @@ async def create_job_as(
             ssh_server_ids=body.ssh_server_ids,
         )
     except SshServerUnavailable as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": (
-                        "Only your SSH servers that passed their check can be selected: "
-                        f"{', '.join(exc.server_ids)}."
-                    ),
-                }
-            },
+        raise Refused(
+            "invalid",
+            "invalid_request",
+            (
+                "Only your SSH servers that passed their check can be selected: "
+                f"{', '.join(exc.server_ids)}."
+            ),
         ) from exc
     except AttachmentError as exc:
         # The claim inside the store's transaction is the authoritative check:
@@ -664,14 +580,10 @@ async def create_job_as(
     return job
 
 
-def idempotency_conflict() -> HTTPException:
+def idempotency_conflict() -> Refused:
     """The 409 for an Idempotency-Key reused with a different submission."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "idempotency_conflict",
-                "message": "This Idempotency-Key was already used for a different submission.",
-            }
-        },
+    return Refused(
+        "conflict",
+        "idempotency_conflict",
+        "This Idempotency-Key was already used for a different submission.",
     )

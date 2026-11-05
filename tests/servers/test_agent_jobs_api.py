@@ -51,6 +51,7 @@ from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
+from cloud_agent.api.errors import install_domain_errors
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
@@ -2180,13 +2181,11 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     ``claim_auth`` controls whether an enrolled-host identity is supplied to
     ``/worker/claim``, so a test can assert that an ordinary caller is refused.
     """
-    from cloud_agent.api.deps import (
-        get_agent_app_credentials,
-        get_owner_directory,
-    )
+    from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
+    install_domain_errors(app)
     app.dependency_overrides[get_storage] = lambda: store
     # Every owner request and claim is admitted on the account's permissions.
     app.dependency_overrides[get_owner_directory] = _FakeOwners
