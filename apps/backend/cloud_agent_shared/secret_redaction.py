@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,25 @@ if TYPE_CHECKING:
 
 
 MIN_SECRET_CHARS = 8
+
+
+@dataclass(frozen=True)
+class Masked:
+    """Marks a model field as a credential a claim puts into a sandbox.
+
+    Used as ``Annotated[str, MASKED]``: the string, or each value of a marked
+    mapping, must never appear in durable output, so the model that holds it
+    names it in its ``secrets()``, and its field keeps it out of ``repr``. A
+    test walks every model a claim carries and fails on a marked value its
+    ``secrets()`` leaves out. ``when`` names a boolean field of the same model
+    that must be true for the value to be one.
+    """
+
+    when: str | None = None
+
+
+#: The unconditional marker.
+MASKED = Masked()
 
 # A stream's tail that may still grow into a marker or a pattern is found by
 # this many leading characters; a shorter tail is looked up whole.
